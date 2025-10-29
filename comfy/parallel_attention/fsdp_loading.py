@@ -222,14 +222,37 @@ def fsdp_load_diffusion_model_state_dict(
     
     logging.info(f"{LOG_PREFIX} [FSDPLoading] FSDPModelPatcher created (FSDP wrapping and shard loading deferred)")
     
-    # Step 6: Check for leftover keys (EXACTLY like ComfyUI)
-    # From comfy/sd.py:
-    #   left_over = sd.keys()
-    #   if len(left_over) > 0:
-    #       logging.info("left over keys in diffusion model: {}".format(left_over))
-    left_over = sd.keys()
-    if len(left_over) > 0:
-        logging.info(f"{LOG_PREFIX} [FSDPLoading] left over keys in diffusion model: {left_over}")
+    # Step 6: Check for leftover keys by comparing against loaded model parameters
+    # Get actual parameter names from the wrapped FSDP model
+    # FSDP adds _fsdp_wrapped_module prefixes, but we can get the original names
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    
+    # Get all parameter keys that were actually loaded into the model
+    # We need to check against new_sd (the stripped version we tried to load)
+    loaded_keys = set()
+    for name, param in patcher.model.named_parameters():
+        # Strip FSDP wrapper prefixes to get original key name
+        clean_name = name.replace('_fsdp_wrapped_module.', '')
+        loaded_keys.add(clean_name)
+    
+    # Also check buffers (like normalization stats)
+    for name, buffer in patcher.model.named_buffers():
+        clean_name = name.replace('_fsdp_wrapped_module.', '')
+        loaded_keys.add(clean_name)
+    
+    # Find keys from new_sd that didn't match any model parameters
+    state_dict_keys = set(new_sd.keys())
+    leftover_keys = state_dict_keys - loaded_keys
+    
+    if len(leftover_keys) > 0:
+        logging.warning(
+            f"{LOG_PREFIX} [FSDPLoading] {len(leftover_keys)} keys from checkpoint "
+            f"not loaded into model (may be non-shardable components)"
+        )
+        # Show sample of leftover keys for debugging
+        leftover_sample = sorted(list(leftover_keys))[:20]
+        for key in leftover_sample:
+            logging.warning(f"{LOG_PREFIX} [FSDPLoading]   Unused key: {key}")
     
     # Log memory stats
     if torch.cuda.is_available():
