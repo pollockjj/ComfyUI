@@ -209,74 +209,65 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             # FSDP adds _fsdp_wrapped_module prefixes when loading
             # With use_orig_params=True, we can load directly without state_dict_type context
             # This allows loading standard checkpoint format and FSDP handles sharding
-            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Loading state dict directly (FSDP will shard automatically)")
+            if rank == 0:
+                logging.info(f"{LOG_PREFIX} [FSDPPatcher] Loading state dict (FSDP will shard automatically)")
+            
             missing, unexpected = self.model.load_state_dict(processed_sd, strict=False)
             
-            # Check if weights actually loaded by counting non-zero parameters
-            loaded_params = sum(1 for p in self.model.parameters() if p.numel() > 0)
-            total_params = sum(p.numel() for p in self.model.parameters())
-            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Rank {rank} has {loaded_params} parameters, {total_params/1e9:.2f}B total elements")
+            # Report loading results (rank 0 only)
+            if rank == 0:
+                matched_keys = len(processed_sd) - len(unexpected)
+                total_params = sum(p.numel() for p in self.model.parameters())
+                logging.info(
+                    f"{LOG_PREFIX} [FSDPPatcher] Loaded {matched_keys}/{len(processed_sd)} keys, "
+                    f"{total_params/1e9:.2f}B params"
+                )
             
-            # Report actual missing/unexpected keys
-            if len(missing) > 0:
-                # Filter out expected missing keys that are created by ComfyUI, not from checkpoint
-                expected_missing = {'model_sampling.sigmas'}  # Created by model_sampling() in BaseModel
+            # Report errors only (rank 0 only to avoid duplication)
+            if rank == 0:
+                # Filter out expected missing keys
+                expected_missing = {'model_sampling.sigmas'}
                 actual_missing = set(missing) - expected_missing
                 
                 if len(actual_missing) > 0:
-                    # These are model parameters that didn't get weights from checkpoint
-                    logging.error(f"{LOG_PREFIX} [FSDPPatcher] MISSING {len(actual_missing)} model parameters - these won't be sharded!")
-                    if rank == 0:
-                        missing_sample = sorted(list(actual_missing))[:20]
-                        for key in missing_sample:
-                            logging.error(f"{LOG_PREFIX} [FSDPPatcher]   Missing: {key}")
-                        if len(actual_missing) > 20:
-                            logging.error(f"{LOG_PREFIX} [FSDPPatcher]   ... and {len(actual_missing)-20} more")
+                    logging.error(f"{LOG_PREFIX} [FSDPPatcher] MISSING {len(actual_missing)} model parameters")
+                    missing_sample = sorted(list(actual_missing))[:10]
+                    for key in missing_sample:
+                        logging.error(f"{LOG_PREFIX} [FSDPPatcher]   {key}")
+                    if len(actual_missing) > 10:
+                        logging.error(f"{LOG_PREFIX} [FSDPPatcher]   ... and {len(actual_missing)-10} more")
                 
-                # Log expected missing as debug info
-                expected_found = set(missing) & expected_missing
-                if len(expected_found) > 0 and rank == 0:
-                    logging.debug(f"{LOG_PREFIX} [FSDPPatcher] Skipped {len(expected_found)} expected missing keys (created by ComfyUI): {expected_found}")
-            
-            if len(unexpected) > 0:
-                # These are checkpoint keys that don't match any model parameter
-                # This can happen if checkpoint has extra keys or FSDP naming mismatch
-                if rank == 0:
-                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] {len(unexpected)} checkpoint keys didn't match model structure")
+                if len(unexpected) > 0:
+                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] {len(unexpected)} unexpected checkpoint keys")
                     unexpected_sample = sorted(list(unexpected))[:10]
                     for key in unexpected_sample:
-                        logging.warning(f"{LOG_PREFIX} [FSDPPatcher]   Unexpected: {key}")
+                        logging.warning(f"{LOG_PREFIX} [FSDPPatcher]   {key}")
                     if len(unexpected) > 10:
                         logging.warning(f"{LOG_PREFIX} [FSDPPatcher]   ... and {len(unexpected)-10} more")
+                
+                allocated = torch.cuda.memory_allocated(self.load_device) / 1024**3
+                logging.info(f"{LOG_PREFIX} [FSDPPatcher] Loaded shard: {allocated:.2f}GB VRAM")
             
-            allocated = torch.cuda.memory_allocated(self.load_device) / 1024**3
-            logging.info(
-                f"{LOG_PREFIX} [FSDPPatcher] Rank {rank} loaded shard: {allocated:.2f}GB VRAM"
-            )
-            
-            # Verify critical buffers are replicated across ranks
+            # Verify critical buffers (rank 0 only)
             if rank == 0:
                 try:
                     sigmas = self.model.model_sampling.sigmas
-                    if sigmas is not None:
-                        logging.info(f"{LOG_PREFIX} [FSDPPatcher] model_sampling.sigmas properly initialized: shape={sigmas.shape}, device={sigmas.device}")
-                    else:
-                        logging.warning(f"{LOG_PREFIX} [FSDPPatcher] model_sampling.sigmas is None - may cause issues")
+                    if sigmas is None:
+                        logging.warning(f"{LOG_PREFIX} [FSDPPatcher] model_sampling.sigmas is None")
                 except AttributeError as e:
                     logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Could not verify model_sampling.sigmas: {e}")
         
         # Set comfy_cast_weights=True on all modules to prevent ComfyUI interference
-        # This is critical - prevents ComfyUI's lowvram system from interfering with FSDP
         for module in self.model.modules():
             if hasattr(module, 'comfy_cast_weights'):
                 module.prev_comfy_cast_weights = module.comfy_cast_weights
             module.comfy_cast_weights = True
         
-        logging.info(
-            f"{LOG_PREFIX} [FSDPPatcher] FSDP initialization complete: "
-            f"strategy={sharding_strategy}, cpu_offload={cpu_offload}, "
-            f"shard_factor={self.shard_factor:.2f}"
-        )
+        if rank == 0:
+            logging.info(
+                f"{LOG_PREFIX} [FSDPPatcher] FSDP wrapping complete: "
+                f"strategy={sharding_strategy}, shard_factor={self.shard_factor:.2f}"
+            )
     
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
         """Override load() to wrap with FSDP on first load.

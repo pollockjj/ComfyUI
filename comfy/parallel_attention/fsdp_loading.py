@@ -220,49 +220,61 @@ def fsdp_load_diffusion_model_state_dict(
         fsdp_config=fsdp_config
     )
     
-    logging.info(f"{LOG_PREFIX} [FSDPLoading] FSDPModelPatcher created (FSDP wrapping and shard loading deferred)")
+    rank = dist.get_rank()
     
-    # Step 6: Check for leftover keys by comparing against loaded model parameters
-    # Get actual parameter names from the wrapped FSDP model
-    # FSDP adds _fsdp_wrapped_module prefixes, but we can get the original names
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-    
-    # Get all parameter keys that were actually loaded into the model
-    # We need to check against new_sd (the stripped version we tried to load)
+    # Validate checkpoint coverage (detect non-shardable components)
+    # Get model parameter/buffer names and normalize them
     loaded_keys = set()
     for name, param in patcher.model.named_parameters():
-        # Strip FSDP wrapper prefixes to get original key name
         clean_name = name.replace('_fsdp_wrapped_module.', '')
         loaded_keys.add(clean_name)
     
-    # Also check buffers (like normalization stats)
     for name, buffer in patcher.model.named_buffers():
         clean_name = name.replace('_fsdp_wrapped_module.', '')
         loaded_keys.add(clean_name)
     
-    # Find keys from new_sd that didn't match any model parameters
-    state_dict_keys = set(new_sd.keys())
-    leftover_keys = state_dict_keys - loaded_keys
+    # Transform checkpoint keys to match what we passed to load_state_dict
+    checkpoint_keys_transformed = set(f'diffusion_model.{k}' for k in new_sd.keys())
     
-    if len(leftover_keys) > 0:
-        logging.warning(
-            f"{LOG_PREFIX} [FSDPLoading] {len(leftover_keys)} keys from checkpoint "
-            f"not loaded into model (may be non-shardable components)"
-        )
-        # Show sample of leftover keys for debugging
-        leftover_sample = sorted(list(leftover_keys))[:20]
-        for key in leftover_sample:
-            logging.warning(f"{LOG_PREFIX} [FSDPLoading]   Unused key: {key}")
+    # Compare: which checkpoint keys didn't match any model component?
+    unmatched_checkpoint_keys = checkpoint_keys_transformed - loaded_keys
+    unmatched_model_keys = loaded_keys - checkpoint_keys_transformed
     
-    # Log memory stats
-    if torch.cuda.is_available():
-        rank = dist.get_rank()
+    # Report only on rank 0 to avoid duplication
+    if rank == 0:
+        if len(unmatched_checkpoint_keys) > 0:
+            logging.warning(
+                f"{LOG_PREFIX} [FSDPLoading] {len(unmatched_checkpoint_keys)} non-shardable/unused checkpoint keys"
+            )
+            unmatched_sample = sorted(list(unmatched_checkpoint_keys))[:10]
+            for key in unmatched_sample:
+                logging.warning(f"{LOG_PREFIX} [FSDPLoading]   {key}")
+            if len(unmatched_checkpoint_keys) > 10:
+                logging.warning(f"{LOG_PREFIX} [FSDPLoading]   ... and {len(unmatched_checkpoint_keys)-10} more")
+        else:
+            logging.info(f"{LOG_PREFIX} [FSDPLoading] All {len(checkpoint_keys_transformed)} checkpoint keys matched (full coverage)")
+        
+        # Check for missing weights
+        expected_model_only = {'model_sampling.sigmas', 'diffusion_model.model_sampling.sigmas'}
+        actual_unmatched = unmatched_model_keys - expected_model_only
+        
+        if len(actual_unmatched) > 0:
+            logging.error(
+                f"{LOG_PREFIX} [FSDPLoading] {len(actual_unmatched)} model parameters missing checkpoint weights"
+            )
+            unmatched_sample = sorted(list(actual_unmatched))[:10]
+            for key in unmatched_sample:
+                logging.error(f"{LOG_PREFIX} [FSDPLoading]   {key}")
+            if len(actual_unmatched) > 10:
+                logging.error(f"{LOG_PREFIX} [FSDPLoading]   ... and {len(actual_unmatched)-10} more")
+    
+    # Log memory stats (rank 0 only to avoid duplication)
+    if rank == 0 and torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated(load_device) / 1024**3
+        world_size = dist.get_world_size()
         logging.info(
-            f"{LOG_PREFIX} [FSDPLoading] Rank {rank} VRAM: {allocated:.2f}GB allocated"
+            f"{LOG_PREFIX} [FSDPLoading] FSDP loading complete: {world_size} GPUs, {allocated:.2f}GB/GPU"
         )
-    
-    logging.info(f"{LOG_PREFIX} [FSDPLoading] FSDP model loading complete!")
     
     return patcher
 
