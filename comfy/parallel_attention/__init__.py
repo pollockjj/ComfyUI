@@ -12,6 +12,11 @@ __all__ = [
     'get_sp_size',
     'get_dp_size',
     'FSDPPolicyRegistry',
+    'FSDPModelPatcher',
+    'get_fsdp_strategy',
+    'detect_model_type',
+    'fsdp_load_diffusion_model_state_dict',
+    'fsdp_load_diffusion_model',
 ]
 
 from .executor import MultiprocExecutor
@@ -26,3 +31,6 @@ from .parallel_state import (
     get_dp_size,
 )
 from .fsdp_policies import FSDPPolicyRegistry
+from .fsdp_model_patcher import FSDPModelPatcher
+from .fsdp_registry import get_fsdp_strategy, detect_model_type
+from .fsdp_loading import fsdp_load_diffusion_model_state_dict, fsdp_load_diffusion_model

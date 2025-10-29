@@ -109,7 +109,7 @@ class MultiprocExecutor:
     
     def _spawn_workers(self):
         """Spawn worker processes with pipes."""
-        from comfy.distributed.worker import worker_main
+        from comfy.parallel_attention.worker import worker_main
         
         logger.info(f"{LOG_PREFIX} [Executor] Spawning {self.world_size} workers")
         

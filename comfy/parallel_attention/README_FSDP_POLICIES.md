@@ -10,7 +10,7 @@ Each wrapped unit becomes an independent sharding boundary.
 Use `FSDPPolicyRegistry` to register and retrieve model-specific policies:
 
 ```python
-from comfy.distributed import FSDPPolicyRegistry
+from comfy.parallel_attention import FSDPPolicyRegistry
 
 # Get policy
 policy_fn = FSDPPolicyRegistry.get_policy("flux")

@@ -1272,6 +1272,11 @@ def load_diffusion_model_state_dict(sd, model_options={}):
             - dtype: Override model data type
             - custom_operations: Custom model operations
             - fp8_optimizations: Enable FP8 optimizations
+            - fsdp: FSDP configuration dict with keys:
+                - enabled: Whether to use FSDP loading (default: False)
+                - device_mesh: Optional DeviceMesh for topology-aware sharding
+                - model_type: Optional explicit model type (auto-detected if None)
+                - cpu_offload: Whether to offload FSDP parameters to CPU (default: False)
 
     Returns:
         ModelPatcher: A wrapped model instance that handles device management and weight loading.
@@ -1284,6 +1289,14 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     4. Manages model optimization settings
     5. Loads weights and returns a device-managed model instance
     """
+    # FSDP opt-in hook: Check if FSDP loading is requested
+    if 'fsdp' in model_options and model_options['fsdp'].get('enabled', False):
+        from comfy.parallel_attention.fsdp_loading import fsdp_load_diffusion_model_state_dict
+        device_mesh = model_options['fsdp'].get('device_mesh', None)
+        model_type = model_options['fsdp'].get('model_type', None)
+        cpu_offload = model_options['fsdp'].get('cpu_offload', False)
+        return fsdp_load_diffusion_model_state_dict(sd, model_options, device_mesh, model_type, cpu_offload)
+    
     dtype = model_options.get("dtype", None)
 
     #Allow loading unets from checkpoint files
