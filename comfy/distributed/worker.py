@@ -44,6 +44,17 @@ def worker_main(rank: int,
         
         logging.info(f"{LOG_PREFIX} [Worker-{rank}] torch.distributed initialized: world_size={dist.get_world_size()}, rank={dist.get_rank()}")
         
+        # Initialize DeviceMesh for parallel state
+        from comfy.distributed.parallel_state import initialize_parallel_state
+        
+        # Default: SP=world_size, DP=1 (pure sequence parallel)
+        # Can be configured via environment or kwargs in future
+        sp_size = world_size
+        dp_size = 1
+        initialize_parallel_state(sp_size=sp_size, dp_size=dp_size)
+        
+        logging.info(f"{LOG_PREFIX} [Worker-{rank}] DeviceMesh initialized")
+        
         # Signal ready to main process
         pipe.send({"status": "ready"})
         
@@ -67,6 +78,41 @@ def worker_main(rank: int,
                 tensor = torch.tensor([rank], dtype=torch.float32, device=device)
                 dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
                 result = tensor.item()
+                pipe.send({"status": "success", "result": result})
+            
+            elif method == "devicemesh_test":
+                from comfy.distributed.parallel_state import (
+                    get_device_mesh, get_sp_group, get_sp_rank, get_sp_size,
+                    get_dp_rank, get_dp_size
+                )
+                
+                # Get mesh info
+                mesh = get_device_mesh()
+                sp_rank = get_sp_rank()
+                sp_size = get_sp_size()
+                dp_rank = get_dp_rank()
+                dp_size = get_dp_size()
+                sp_group = get_sp_group()
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] DeviceMesh test: mesh={mesh}, sp_rank={sp_rank}/{sp_size}, dp_rank={dp_rank}/{dp_size}")
+                
+                # Test all_gather on SP group
+                tensor = torch.tensor([float(sp_rank)], dtype=torch.float32, device=device)
+                gathered = [torch.zeros_like(tensor) for _ in range(sp_size)]
+                dist.all_gather(gathered, tensor, group=sp_group)
+                gathered_list = [t.item() for t in gathered]
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] SP all_gather result: {gathered_list}")
+                
+                result = {
+                    "rank": rank,
+                    "sp_rank": sp_rank,
+                    "sp_size": sp_size,
+                    "dp_rank": dp_rank,
+                    "dp_size": dp_size,
+                    "mesh_shape": list(mesh.mesh.shape),
+                    "gathered": gathered_list
+                }
                 pipe.send({"status": "success", "result": result})
             
             else:
