@@ -10,6 +10,17 @@ import logging
 import os
 import time
 
+# Force spawn method for multiprocessing BEFORE any CUDA initialization
+# This is required because ComfyUI may have already initialized CUDA in main process
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    # Already set, but verify it's spawn
+    if mp.get_start_method() != 'spawn':
+        raise RuntimeError(
+            f"Multiprocessing start method is '{mp.get_start_method()}', must be 'spawn' for CUDA multiprocessing"
+        )
+
 logger = logging.getLogger(__name__)
 
 # Logging prefix for visibility in ComfyUI logs
@@ -108,20 +119,23 @@ class MultiprocExecutor:
         return init_method
     
     def _spawn_workers(self):
-        """Spawn worker processes with pipes."""
+        """Spawn worker processes with pipes using spawn context."""
         from comfy.parallel_attention.worker import worker_main
         
         logger.info(f"{LOG_PREFIX} [Executor] Spawning {self.world_size} workers")
         
+        # Use explicit spawn context to ensure workers use spawn method
+        ctx = mp.get_context('spawn')
+        
         for rank in range(self.world_size):
-            pipe_main, pipe_worker = mp.Pipe()
+            pipe_main, pipe_worker = ctx.Pipe()
             
             if torch.cuda.is_available():
                 device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
             else:
                 device = torch.device("cpu")
             
-            proc = mp.Process(
+            proc = ctx.Process(
                 target=worker_main,
                 args=(rank, self.world_size, self.init_method, self.backend, pipe_worker),
                 daemon=False,

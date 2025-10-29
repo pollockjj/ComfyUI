@@ -144,6 +144,24 @@ if __name__ == "__main__":
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
+# Initialize multiprocessing for parallel attention if enabled
+if args.use_parallel_attention:
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+        logging.info("Parallel attention enabled: multiprocessing start method set to 'spawn'")
+    except RuntimeError as e:
+        if mp.get_start_method() != 'spawn':
+            logging.error(f"Failed to set multiprocessing start method to 'spawn': {e}")
+        else:
+            logging.info("Parallel attention enabled: multiprocessing already using 'spawn' method")
+    
+    # Initialize parallel attention schema (FSDP policies, etc.)
+    # This must happen after spawn method is set but before torch is imported
+    logging.info("Parallel attention enabled: initializing FSDP policy registry")
+    import comfy.parallel_attention.fsdp_policies
+    logging.info(f"Parallel attention enabled: registered FSDP policies: {comfy.parallel_attention.fsdp_policies.FSDPPolicyRegistry.list_registered()}")
+
 import comfy.utils
 
 import execution

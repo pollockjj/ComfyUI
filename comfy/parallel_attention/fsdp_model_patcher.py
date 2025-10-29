@@ -115,6 +115,12 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             f"shard_factor={self.shard_factor:.2f}, "
             f"cpu_offload={self.fsdp_config.get('cpu_offload', False)}"
         )
+        
+        # WRAP IMMEDIATELY if state_dict provided
+        # Don't wait for load() - that may never be called in workers
+        if self.fsdp_config.get('state_dict') is not None:
+            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Wrapping with FSDP immediately (state dict provided)")
+            self._wrap_with_fsdp()
     
     def _wrap_with_fsdp(self):
         """Wrap model with FSDP on first load() and load sharded weights.
@@ -170,51 +176,35 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
         if device_mesh is not None:
             fsdp_kwargs['device_mesh'] = device_mesh
         
-        # Wrap with FSDP
-        # Check for dtype consistency before wrapping
-        ref_dtype = None
-        dtype_mismatch_found = False
-        for param in self.model.parameters():
-            if ref_dtype is None:
-                ref_dtype = param.dtype
-            elif param.dtype != ref_dtype:
-                dtype_mismatch_found = True
-                logging.error(
-                    f"{LOG_PREFIX} [FSDPPatcher] Dtype mismatch detected: "
-                    f"ref_dtype={ref_dtype}, found={param.dtype}. "
-                    f"FSDP requires consistent parameter dtypes."
-                )
-                break
-        
-        if dtype_mismatch_found:
-            raise ValueError(
-                f"FSDP cannot wrap model with mixed parameter dtypes. "
-                f"Found {ref_dtype} and other dtypes in model parameters."
-            )
-        
+        # Wrap with FSDP FIRST (with empty model on CPU)
+        # FSDP will handle moving shards to GPU during load_state_dict
+        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Wrapping empty model with FSDP...")
         self.model = FSDP(self.model, **fsdp_kwargs)
         self.is_fsdp_wrapped = True
         
-        logging.info(
-            f"{LOG_PREFIX} [FSDPPatcher] FSDP wrapping complete: "
-            f"strategy={sharding_strategy}, cpu_offload={cpu_offload}"
-        )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Rank {rank} FSDP wrapper created (model still empty)")
         
-        # Load sharded weights using FSDP's distributed state dict loading
+        # NOW load state dict - FSDP will scatter shards across ranks
+        # Each rank only receives its shard (~11GB for 2 GPUs)
         if state_dict is not None:
-            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Loading sharded weights via FSDP...")
+            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Loading sharded weights via FSDP scatter...")
             
             # Process state dict to remove 'diffusion_model.' prefix if present
+            # KEEP TENSORS ON CPU - FSDP will move and shard them
             processed_sd = {}
             for k, v in state_dict.items():
-                # Get the actual parameter path in the model
                 key = k
                 if k.startswith('diffusion_model.'):
                     key = k[len('diffusion_model.'):]
+                # Keep on CPU! FSDP will scatter to GPUs
                 processed_sd[key] = v
             
-            # Use FSDP's load_state_dict with distributed loading
-            # This will shard the weights across ranks automatically
+            # Use FSDP's scatter-based loading
+            # FSDP will:
+            # 1. Take each parameter from CPU state dict
+            # 2. Shard it across ranks
+            # 3. Each rank only gets its shard on GPU
             with FSDP.state_dict_type(
                 self.model,
                 StateDictType.FULL_STATE_DICT,
@@ -223,13 +213,13 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
                 missing, unexpected = self.model.load_state_dict(processed_sd, strict=False)
                 
                 if len(missing) > 0:
-                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Missing keys in state dict: {missing}")
+                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Missing keys: {len(missing)} keys")
                 if len(unexpected) > 0:
-                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Unexpected keys in state dict: {unexpected}")
+                    logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Unexpected keys: {len(unexpected)} keys")
             
-            rank = dist.get_rank() if dist.is_initialized() else 0
+            allocated = torch.cuda.memory_allocated(self.load_device) / 1024**3
             logging.info(
-                f"{LOG_PREFIX} [FSDPPatcher] Rank {rank} loaded sharded weights successfully"
+                f"{LOG_PREFIX} [FSDPPatcher] Rank {rank} loaded shard: {allocated:.2f}GB VRAM"
             )
         
         # Set comfy_cast_weights=True on all modules to prevent ComfyUI interference
@@ -240,8 +230,9 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             module.comfy_cast_weights = True
         
         logging.info(
-            f"{LOG_PREFIX} [FSDPPatcher] FSDP wrapping complete: "
-            f"strategy={sharding_strategy}, cpu_offload={cpu_offload}"
+            f"{LOG_PREFIX} [FSDPPatcher] FSDP initialization complete: "
+            f"strategy={sharding_strategy}, cpu_offload={cpu_offload}, "
+            f"shard_factor={self.shard_factor:.2f}"
         )
     
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
