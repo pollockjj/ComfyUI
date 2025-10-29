@@ -15,7 +15,7 @@ class TestDistributedRuntime:
             "required": {
                 "world_size": ("INT", {"default": 2, "min": 1, "max": 8}),
                 "backend": (["auto", "nccl", "gloo"],),
-                "test_type": (["basic", "devicemesh", "all"],),
+                "test_type": (["basic", "devicemesh", "fsdp_policy", "all"],),
             }
         }
     
@@ -110,6 +110,39 @@ class TestDistributedRuntime:
                     logging.info(f"{LOG_PREFIX} [Test]   SP all_gather result: {gathered}")
                 else:
                     logging.info(f"{LOG_PREFIX} [Test] Test 4: Skipped (CUDA not available or not using NCCL)")
+            
+            # Test 5: FSDP Policy Registry (if fsdp_policy or all)
+            if test_type in ["fsdp_policy", "all"]:
+                logging.info(f"{LOG_PREFIX} [Test] Test 5: FSDP Policy Registry")
+                logging.info(f"{LOG_PREFIX} [Test] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                result = executor.execute_collective("test_fsdp_policy", {"model_name": "flux"})
+                logging.info(f"{LOG_PREFIX} [Test] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                
+                # Validate flux policy registered
+                if not result.get("is_registered", False):
+                    executor.shutdown()
+                    return (f"FAIL: Flux policy not registered. Available: {result.get('available_policies', [])}",)
+                
+                # Validate policy is callable
+                if not result.get("policy_callable", False):
+                    executor.shutdown()
+                    return (f"FAIL: Flux policy not callable. Type: {result.get('policy_type')}",)
+                
+                # Check expected policies registered
+                available = result.get("available_policies", [])
+                expected_policies = ["flux", "qwen_image", "wan"]
+                
+                missing = [p for p in expected_policies if p not in available]
+                if missing:
+                    executor.shutdown()
+                    return (f"FAIL: Missing policies: {missing}. Available: {available}",)
+                
+                logging.info(f"{LOG_PREFIX} [Test] FSDP Policy test passed:")
+                logging.info(f"{LOG_PREFIX} [Test]   Model: {result['model_name']}")
+                logging.info(f"{LOG_PREFIX} [Test]   Registered: {result['is_registered']}")
+                logging.info(f"{LOG_PREFIX} [Test]   Available policies: {available}")
+                logging.info(f"{LOG_PREFIX} [Test]   Policy type: {result['policy_type']}")
+                logging.info(f"{LOG_PREFIX} [Test]   Policy callable: {result['policy_callable']}")
             
             # Shutdown
             logging.info(f"{LOG_PREFIX} [Test] Shutting down executor")

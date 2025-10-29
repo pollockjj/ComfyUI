@@ -11,6 +11,7 @@ __all__ = [
     'get_dp_rank',
     'get_sp_size',
     'get_dp_size',
+    'FSDPPolicyRegistry',
 ]
 
 from .executor import MultiprocExecutor
@@ -24,3 +25,4 @@ from .parallel_state import (
     get_sp_size,
     get_dp_size,
 )
+from .fsdp_policies import FSDPPolicyRegistry

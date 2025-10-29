@@ -115,6 +115,49 @@ def worker_main(rank: int,
                 }
                 pipe.send({"status": "success", "result": result})
             
+            elif method == "test_fsdp_policy":
+                from comfy.distributed.fsdp_policies import FSDPPolicyRegistry
+                
+                # Get policy name from kwargs
+                model_name = request["kwargs"].get("model_name", "flux")
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Testing FSDP policy: {model_name}")
+                
+                # Test registry operations
+                is_registered = FSDPPolicyRegistry.is_registered(model_name)
+                available_policies = FSDPPolicyRegistry.list_registered()
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Policy registered: {is_registered}")
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Available policies: {available_policies}")
+                
+                if is_registered:
+                    # Get and instantiate policy
+                    policy_fn = FSDPPolicyRegistry.get_policy(model_name)
+                    policy = policy_fn()
+                    
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] Policy retrieved successfully")
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] Policy type: {type(policy).__name__}")
+                    
+                    result = {
+                        "rank": rank,
+                        "model_name": model_name,
+                        "is_registered": is_registered,
+                        "available_policies": available_policies,
+                        "policy_callable": callable(policy),
+                        "policy_type": type(policy).__name__
+                    }
+                else:
+                    result = {
+                        "rank": rank,
+                        "model_name": model_name,
+                        "is_registered": is_registered,
+                        "available_policies": available_policies,
+                        "policy_callable": False,
+                        "policy_type": None
+                    }
+                
+                pipe.send({"status": "success", "result": result})
+            
             else:
                 error_msg = f"Unknown method: {method}"
                 logging.error(f"{LOG_PREFIX} [Worker-{rank}] {error_msg}")
