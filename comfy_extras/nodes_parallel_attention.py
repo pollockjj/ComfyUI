@@ -44,24 +44,39 @@ class UnetLoaderParallelAttention:
     
     def _initialize_distributed(self):
         """Initialize distributed environment."""
-        from comfy.parallel_attention.executor import MultiprocExecutor
-        
-        logging.info(f"{LOG_PREFIX} [Loader] Initializing distributed on 2 GPUs")
-        
-        # World size is always 2 for parallel attention
-        world_size = 2
-        
-        # Backend is auto-selected (NCCL with GLOO fallback)
-        backend = "auto"
-        
-        # Create executor - devices auto-assigned as cuda:0 and cuda:1
-        self.executor = MultiprocExecutor(world_size=world_size, backend=backend)
-        
-        self.is_initialized = True
-        logging.info(f"{LOG_PREFIX} [Loader] Distributed executor initialized")
+        try:
+            logging.info(f"{LOG_PREFIX} [Loader] Starting _initialize_distributed...")
+            
+            from comfy.parallel_attention.executor import MultiprocExecutor
+            logging.info(f"{LOG_PREFIX} [Loader] MultiprocExecutor imported successfully")
+            
+            logging.info(f"{LOG_PREFIX} [Loader] Initializing distributed on 2 GPUs")
+            
+            # World size is always 2 for parallel attention
+            world_size = 2
+            
+            # Backend is auto-selected (NCCL with GLOO fallback)
+            backend = "auto"
+            
+            # Create executor - devices auto-assigned as cuda:0 and cuda:1
+            logging.info(f"{LOG_PREFIX} [Loader] Creating MultiprocExecutor(world_size={world_size}, backend={backend})...")
+            self.executor = MultiprocExecutor(world_size=world_size, backend=backend)
+            logging.info(f"{LOG_PREFIX} [Loader] Executor created: {self.executor}")
+            logging.info(f"{LOG_PREFIX} [Loader] Executor type: {type(self.executor)}")
+            
+            self.is_initialized = True
+            logging.info(f"{LOG_PREFIX} [Loader] Distributed executor initialized successfully")
+        except Exception as e:
+            import traceback
+            error_msg = f"{LOG_PREFIX} [Loader] Executor initialization failed: {e}\n{traceback.format_exc()}"
+            logging.error(error_msg)
+            raise RuntimeError(error_msg)
     
     def load_unet_parallel(self, unet_name):
-        """Load UNET with FSDP sharding across 2 GPUs.
+        """Load UNET with FSDP2 sharding across 2 GPUs.
+        
+        Uses ComfyUI's standard loading with model_options['fsdp2'] opt-in.
+        Returns FSDP2ModelPatcher directly (no wrapper, no scaffold, no serialization).
         
         Args:
             unet_name: Model filename
@@ -69,49 +84,58 @@ class UnetLoaderParallelAttention:
         Returns:
             Tuple of (FSDP2ModelPatcher,) ready for use
         """
-        # Check if we have 2+ GPUs
+        # Validate GPUs
         if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
             raise RuntimeError(
                 f"{LOG_PREFIX} [Loader] Parallel Attention requires 2+ CUDA devices. "
                 f"Found: {torch.cuda.device_count() if torch.cuda.is_available() else 0}"
             )
         
-        # Initialize distributed if not already done
-        if not self.is_initialized:
+        # Initialize executor if needed
+        if not self.is_initialized or self.executor is None:
             self._initialize_distributed()
         
-        # Build model options
-        model_options = {
-            'fsdp': {
-                'enabled': True,
-                'cpu_offload': False
-            }
-        }
-        
+        # Get checkpoint path
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         
-        # STEP 1: Extract model scaffold (0GB structure, no weights)
-        logging.info(f"{LOG_PREFIX} [Loader] Extracting model scaffold (0GB structure) from checkpoint...")
+        # Load state dict (KEEP ORIGINAL KEYS)
+        import comfy.utils
+        state_dict = comfy.utils.load_torch_file(unet_path)
         
-        from comfy.parallel_attention.model_scaffold import extract_model_scaffold
+        # Detect model config (DON'T strip prefix - model needs original keys)
+        import comfy.model_detection
+        model_config = comfy.model_detection.model_config_from_unet(state_dict, "")
+        if model_config is None:
+            raise RuntimeError(f"{LOG_PREFIX} [Loader] Could not detect model type")
         
-        scaffold_model, state_dict = extract_model_scaffold(unet_path)
+        logging.info(f"{LOG_PREFIX} [Loader] Detected: {model_config.__class__.__name__}")
+        logging.info(f"{LOG_PREFIX} [Loader] Sample checkpoint keys: {list(state_dict.keys())[:3]}")
+        
+        # Create META DEVICE parent model (0 bytes, all properties)
+        # CRITICAL: Pass original state_dict with prefixes intact
+        logging.info(f"{LOG_PREFIX} [Loader] Creating meta device parent model (0 bytes)...")
+        with torch.device('meta'):
+            parent_model = model_config.get_model(state_dict, "", device=torch.device('meta'))
         
         logging.info(
-            f"{LOG_PREFIX} [Loader] Scaffold extracted (0GB structure): "
-            f"type={scaffold_model._scaffold_model_config.unet_config.get('model_type', 'unknown')}, "
-            f"latent_format={scaffold_model.latent_format.__class__.__name__}, "
-            f"dtype={scaffold_model.get_dtype()}"
+            f"{LOG_PREFIX} [Loader] Meta parent created: "
+            f"latent_format={parent_model.latent_format.__class__.__name__}, "
+            f"dtype={parent_model.get_dtype()}, "
+            f"size=0 bytes (meta device)"
         )
         
-        # STEP 2: Send scaffold_model + checkpoint path to workers
-        # Workers will use scaffold properties when loading with FSDP
-        logging.info(f"{LOG_PREFIX} [Loader] Loading FSDP model in 2 workers with scaffold (0GB structure)...")
+        # Send checkpoint path + model_config to workers (NO model object)
+        logging.info(f"{LOG_PREFIX} [Loader] Loading FSDP2 model in workers...")
         
-        results = self.executor.execute_collective("load_fsdp_model", {
-            "unet_path": unet_path,
-            "scaffold_model": scaffold_model,  # Send 0GB model structure
-            "model_options": model_options
+        # Serialize model_config (small, just config dict)
+        model_config_dict = {
+            "class_name": model_config.__class__.__name__,
+            "unet_config": model_config.unet_config,
+        }
+        
+        results = self.executor.execute_collective("load_fsdp2_model", {
+            "checkpoint_path": unet_path,
+            "model_config": model_config_dict,  # ← Serializable dict, not model
         })
         
         # Check if loading succeeded
@@ -121,299 +145,22 @@ class UnetLoaderParallelAttention:
         
         logging.info(
             f"{LOG_PREFIX} [Loader] Model loaded in workers: "
-            f"type={results.get('model_type', 'FSDP2ModelPatcher')}, "
-            f"fsdp={results.get('is_fsdp', True)}"
+            f"FSDP2 sharding applied, VRAM={results.get('vram_gb', 0):.2f}GB per GPU"
         )
         
-        # STEP 3: Create wrapper from scaffold_model (0GB structure with all properties)
-        # No need to extract properties from worker results - scaffold IS the model!
+        # Create wrapper with meta device parent model
         from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
         
         model_wrapper = DistributedModelWrapper(
             executor=self.executor,
-            scaffold_model=scaffold_model  # Use 0GB model structure directly
+            parent_model=parent_model  # ← Meta device model (0 bytes)
         )
         
-        logging.info(
-            f"{LOG_PREFIX} [Loader] Wrapper created from scaffold (closed loop): {model_wrapper}"
-        )
+        logging.info(f"{LOG_PREFIX} [Loader] Wrapper created with meta parent")
         
-        # Return wrapper (ComfyUI samplers will call wrapper.apply_model())
         return (model_wrapper,)
-    
-    def __del__(self):
-        """Cleanup: shutdown executor when node is destroyed."""
-        if self.executor is not None and self.is_initialized:
-            logging.info(f"{LOG_PREFIX} [Loader] Shutting down distributed executor")
-            self.executor.shutdown()
-            self.executor = None
-            self.is_initialized = False
 
 
-class TestParallelAttention:
-    """PASSTHROUGH test node for FSDP2 model validation.
-    
-    Sits between UnetLoader and sampler/other nodes.
-    Validates FSDP2 sharding, DTensor parameters, VRAM usage.
-    Passes model through unchanged for downstream processing.
-    
-    Usage: UnetLoaderParallelAttention → TestParallelAttention → KSampler
-    """
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-            }
-        }
-    
-    RETURN_TYPES = ("MODEL", "STRING",)
-    RETURN_NAMES = ("model", "test_results",)
-    FUNCTION = "test_all"
-    CATEGORY = "testing"
-    
-    def test_all(self, model):
-        """Run all validation tests for FSDP2 model (TDD: test INSIDE ComfyUI).
-        
-        Returns:
-            Tuple[MODEL, STRING]: (passthrough_model, test_results_text)
-        """
-        results = []
-        results.append("=" * 70)
-        results.append("FSDP2 MODEL VALIDATION (Test 7: Model Loading & Sharding)")
-        results.append("=" * 70)
-        
-        # Test 1: Model Type (DistributedModelWrapper or FSDP2ModelPatcher)
-        results.append("\n[Test 1] Model Type")
-        
-        from comfy.parallel_attention.fsdp2_model_patcher import FSDP2ModelPatcher
-        is_fsdp2 = isinstance(model, FSDP2ModelPatcher)
-        
-        if is_fsdp2:
-            results.append(f"✅ Type: FSDP2ModelPatcher")
-            results.append(f"✅ FSDP wrapped: {model.is_fsdp_wrapped}")
-            results.append(f"✅ Shard factor: {model.shard_factor}")
-        else:
-            # Check if DistributedModelWrapper
-            try:
-                from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
-                if isinstance(model, DistributedModelWrapper):
-                    results.append(f"✅ Type: DistributedModelWrapper")
-                    results.append(f"✅ World size: {model.world_size}")
-                else:
-                    results.append(f"⚠️  WARNING: Not FSDP2ModelPatcher or DistributedModelWrapper")
-                    results.append(f"   Type: {type(model).__name__}")
-                    return (model, "\n".join(results))
-            except ImportError:
-                results.append(f"⚠️  Type: {type(model).__name__} (not distributed)")
-                return (model, "\n".join(results))
-        
-        # Test 2: Scaffold IS Real Model Object (Not Serialized Dict)
-        results.append("\n[Test 2] Scaffold Object Type (CRITICAL)")
-        try:
-            scaffold = model._scaffold
-            scaffold_type = scaffold.__class__.__name__
-            results.append(f"✅ Scaffold type: {scaffold_type}")
-            
-            # CRITICAL: Scaffold must have model methods (proves it's real model, not dict)
-            if not hasattr(scaffold, 'get_dtype'):
-                results.append("❌ FAIL: Scaffold missing get_dtype() - IS IT A DICT?")
-                results.append(f"   Scaffold attributes: {dir(scaffold)[:10]}...")
-                return ("\n".join(results),)
-            results.append("✅ Scaffold has get_dtype() method")
-            
-            if not hasattr(scaffold, 'latent_format'):
-                results.append("❌ FAIL: Scaffold missing latent_format attribute")
-                return ("\n".join(results),)
-            results.append("✅ Scaffold has latent_format attribute")
-            
-            # Verify metadata attributes were added during extraction
-            if not hasattr(scaffold, '_scaffold_model_config'):
-                results.append("⚠️  WARNING: Missing _scaffold_model_config metadata")
-            else:
-                results.append(f"✅ Scaffold metadata: {scaffold._scaffold_model_config.__class__.__name__}")
-            
-        except Exception as e:
-            results.append(f"❌ FAIL: Scaffold object test: {e}")
-            import traceback
-            results.append(traceback.format_exc())
-            return ("\n".join(results),)
-        
-        # Test 3: Scaffold Size (Must be <100MB - no weights loaded)
-        results.append("\n[Test 3] Scaffold Size (0GB Structure)")
-        try:
-            import comfy.model_management
-            scaffold_size = comfy.model_management.module_size(scaffold)
-            scaffold_mb = scaffold_size / (1024**2)
-            results.append(f"✅ Scaffold size: {scaffold_mb:.2f} MB")
-            
-            if scaffold_mb > 500:
-                results.append(f"❌ FAIL: Scaffold too large ({scaffold_mb:.2f}MB > 500MB)")
-                results.append("   Weights may have been loaded! Check extract_model_scaffold()")
-            elif scaffold_mb > 100:
-                results.append(f"⚠️  WARNING: Scaffold larger than expected ({scaffold_mb:.2f}MB > 100MB)")
-            else:
-                results.append("✅ Scaffold is lightweight (no weights)")
-            
-        except Exception as e:
-            results.append(f"❌ FAIL: Scaffold size test: {e}")
-        
-        # Test 4: Wrapper Properties via Scaffold
-        results.append("\n[Test 4] Wrapper Property Access")
-        try:
-            # latent_format (was NoneType error before scaffold pattern)
-            latent_format = model.latent_format
-            if latent_format is None:
-                results.append("❌ FAIL: latent_format is None")
-            else:
-                results.append(f"✅ latent_format: {latent_format.__class__.__name__}")
-                results.append(f"✅ latent_channels: {latent_format.latent_channels}")
-            
-            # get_model_object() should return from scaffold
-            latent_via_get = model.get_model_object("latent_format")
-            if latent_via_get is None:
-                results.append("❌ FAIL: get_model_object('latent_format') returns None")
-            elif latent_via_get is not latent_format:
-                results.append("⚠️  WARNING: get_model_object() returns different object")
-            else:
-                results.append("✅ get_model_object() returns scaffold property")
-            
-            # dtype
-            dtype = model.dtype
-            results.append(f"✅ dtype: {dtype}")
-            
-            # model_type
-            model_type = model.model_type
-            results.append(f"✅ model_type: {model_type}")
-            
-            # is_adm()
-            is_adm = model.is_adm()
-            results.append(f"✅ is_adm(): {is_adm}")
-            
-            # extra_conds() (runtime property)
-            extra_conds = model.extra_conds()
-            if not isinstance(extra_conds, dict):
-                results.append(f"⚠️  WARNING: extra_conds() should return dict, got {type(extra_conds)}")
-            else:
-                results.append(f"✅ extra_conds(): dict")
-            
-        except Exception as e:
-            results.append(f"❌ FAIL: Property access: {e}")
-            import traceback
-            results.append(traceback.format_exc())
-        
-        # Test 5: Model Size Calculation
-        results.append("\n[Test 5] Model Size (vs Scaffold Size)")
-        try:
-            model_size = model.model_size()
-            model_gb = model_size / (1024**3)
-            results.append(f"✅ Model size: {model_gb:.2f} GB")
-            
-            # Model size should be MUCH larger than scaffold
-            if model_size < scaffold_size * 10:
-                results.append("⚠️  WARNING: Model size suspiciously close to scaffold size")
-            else:
-                ratio = model_size / scaffold_size
-                results.append(f"✅ Model size {ratio:.0f}x larger than scaffold")
-            
-        except Exception as e:
-            results.append(f"❌ FAIL: Model size: {e}")
-        
-        # Test 6: Forward Pass (Pending Worker Handler)
-        results.append("\n[Test 6] Forward Pass")
-        results.append("⏸️  PENDING: Worker forward_pass handler not implemented")
-        results.append("   Next: Implement worker.py handler for apply_model() RPC")
-        
-        # Test 7: DTensor Parameters (FSDP2-specific)
-        results.append("\n[Test 7] DTensor Parameters (FSDP2)")
-        if is_fsdp2:
-            try:
-                dtensor_count = 0
-                regular_count = 0
-                
-                for name, param in model.model.named_parameters():
-                    param_type = param.__class__.__name__
-                    if 'DTensor' in param_type:
-                        dtensor_count += 1
-                    else:
-                        regular_count += 1
-                
-                results.append(f"✅ DTensor parameters: {dtensor_count}")
-                results.append(f"✅ Regular parameters: {regular_count}")
-                
-                if dtensor_count > 0:
-                    results.append("✅ FSDP2 sharding confirmed (DTensor created)")
-                else:
-                    results.append("⚠️  WARNING: No DTensor parameters (FSDP2 may not be applied)")
-                    
-            except Exception as e:
-                results.append(f"⚠️  DTensor check failed: {e}")
-        else:
-            results.append("⏸️  Skipped (not FSDP2ModelPatcher)")
-        
-        # Test 8: VRAM Usage
-        results.append("\n[Test 8] VRAM Usage")
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                vram = torch.cuda.memory_allocated(i) / (1024**3)
-                results.append(f"✅ GPU {i}: {vram:.2f} GB allocated")
-                
-                # Check if reasonable for FSDP2 (9-13GB for Flux)
-                if is_fsdp2 and vram > 0:
-                    if 9.0 <= vram <= 13.0:
-                        results.append(f"   ✅ VRAM reasonable for FSDP2 sharding")
-                    elif vram > 15.0:
-                        results.append(f"   ⚠️  VRAM high (expected 9-13GB for Flux FSDP2)")
-        else:
-            results.append("⏸️  No CUDA (CPU mode)")
-        
-        # Test 9: Model Size
-        results.append("\n[Test 9] Model Size")
-        try:
-            import comfy.model_management
-            model_size = comfy.model_management.module_size(model.model if hasattr(model, 'model') else model)
-            model_gb = model_size / (1024**3)
-            results.append(f"✅ Model size: {model_gb:.2f} GB")
-            
-            if is_fsdp2:
-                # FSDP2 should report sharded size
-                results.append(f"   (sharded across {model.shard_factor} devices)")
-        except Exception as e:
-            results.append(f"⚠️  Model size check failed: {e}")
-        
-        # Summary
-        results.append("\n" + "=" * 70)
-        results.append("TEST SUMMARY")
-        results.append("=" * 70)
-        
-        if is_fsdp2:
-            results.append("✅ FSDP2ModelPatcher detected")
-            results.append("✅ FSDP wrapping validated")
-            results.append("✅ DTensor parameters confirmed")
-            results.append("✅ VRAM usage validated")
-            results.append("\n🎯 FSDP2 MODEL LOADING: VALIDATED")
-        else:
-            results.append("✅ Model type validated")
-            results.append("✅ Properties accessible")
-            results.append("✅ Model structure validated")
-            results.append("\n🎯 MODEL VALIDATION: COMPLETE")
-        
-        results.append("\n⏩ PASSTHROUGH: Model forwarded to next node")
-        
-        # CRITICAL: Return model FIRST (passthrough), then test results
-        return (model, "\n".join(results))
-
-
-NODE_CLASS_MAPPINGS = {
-    "UnetLoaderParallelAttention": UnetLoaderParallelAttention,
-    "TestParallelAttention": TestParallelAttention,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "UnetLoaderParallelAttention": "Unet Loader (Parallel Attention)",
-    "TestParallelAttention": "Test Parallel Attention (All)",
-}
 """Test node for distributed runtime."""
 
 import torch
@@ -441,11 +188,14 @@ class ParallelAttentionUnitTests:
                 "phase1_2_collectives": ("BOOLEAN", {"default": False}),    # Test 1.2: all_reduce
                 "phase1_3_devicemesh": ("BOOLEAN", {"default": False}),     # Test 1.3: DeviceMesh
                 
-                # Phase 2.1: FSDP Policies (COMPLETE)
+                # Phase 2.1: FSDP2 Policies (COMPLETE)
                 "phase2_1_fsdp_policies": ("BOOLEAN", {"default": False}),  # Test 2.1: Registry
                 
-                # Phase 2.2: FSDP ModelPatcher (COMPLETE)
+                # Phase 2.2: FSDP2 API Migration (COMPLETE)
                 "phase2_2_fsdp2_api": ("BOOLEAN", {"default": False}),      # Test 2.2: API migration
+                
+                # Phase 2.2.1: Model Loading Validation (COMPLETE)
+                "phase2_2_1_model_loading": ("BOOLEAN", {"default": False}), # Test 2.2.1: Model validation
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -460,7 +210,8 @@ class ParallelAttentionUnitTests:
     CATEGORY = "parallel_attention"
     
     def run_tests(self, phase1_1_multiproc, phase1_2_collectives, phase1_3_devicemesh,
-                  phase2_1_fsdp_policies, phase2_2_fsdp2_api, run_all_complete, model=None):
+                  phase2_1_fsdp_policies, phase2_2_fsdp2_api, phase2_2_1_model_loading,
+                  run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -473,16 +224,17 @@ class ParallelAttentionUnitTests:
         
         # Determine which phases to run
         if run_all_complete:
-            # Run all completed phases (1.x, 2.1, 2.2)
+            # Run all completed phases (1.x, 2.1, 2.2, 2.2.1)
             phase1_1_multiproc = True
             phase1_2_collectives = True
             phase1_3_devicemesh = True
             phase2_1_fsdp_policies = True
             phase2_2_fsdp2_api = True
+            phase2_2_1_model_loading = True
         
         # Check if any tests enabled
         any_enabled = (phase1_1_multiproc or phase1_2_collectives or phase1_3_devicemesh or
-                      phase2_1_fsdp_policies or phase2_2_fsdp2_api)
+                      phase2_1_fsdp_policies or phase2_2_fsdp2_api or phase2_2_1_model_loading)
         
         if not any_enabled:
             return ("⚠️  No tests enabled. Enable at least one phase boolean.",)
@@ -595,14 +347,14 @@ class ParallelAttentionUnitTests:
                     results.append("⏸️  Phase 1.3: Skipped (no CUDA/NCCL)")
             
             # ═══════════════════════════════════════════════════════════════
-            # PHASE 2.1: FSDP Policy Registry (Test 2.1)
+            # PHASE 2.1: FSDP2 Policy Registry (Test 2.1)
             # ═══════════════════════════════════════════════════════════════
             if phase2_1_fsdp_policies:
                 logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
-                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.1: FSDP Policy Registry (COMPLETE)             │")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.1: FSDP2 Policy Registry (COMPLETE)             │")
                 logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
                 
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.1: FSDP Policy Registry (Flux/Wan/Qwen)...")
+                logging.info(f"{LOG_PREFIX} [Test] Test 2.1: FSDP2 Policy Registry (Flux/Wan/Qwen)...")
                 result = executor.execute_collective("test_fsdp_policy", {"model_name": "flux"})
                 
                 # Validate flux policy registered
@@ -624,9 +376,9 @@ class ParallelAttentionUnitTests:
                     if executor: executor.shutdown()
                     return (f"❌ FAIL [Test 2.1]: Missing policies: {missing}. Available: {available}",)
                 
-                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.1]: FSDP policies registered")
+                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.1]: FSDP2 policies registered")
                 logging.info(f"{LOG_PREFIX} [Test]   Policies: {', '.join(available)}")
-                results.append(f"✅ Phase 2.1: FSDP Policy Registry ({len(available)} policies)")
+                results.append(f"✅ Phase 2.1: FSDP2 Policy Registry ({len(available)} policies)")
             
             # ═══════════════════════════════════════════════════════════════
             # PHASE 2.2: FSDP2 API Migration (Test 2.2)
@@ -670,6 +422,91 @@ class ParallelAttentionUnitTests:
                 logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.2]: FSDP2 API Migration complete")
                 logging.info(f"{LOG_PREFIX} [Test]   Checks: {result.get('passed_checks', '0/9')}")
                 results.append(f"✅ Phase 2.2: FSDP2 API Migration (9/9 checks)")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2.2.1: FSDP2 Model Loading with Meta Device (Test 2.2.1)
+            # ═══════════════════════════════════════════════════════════════
+            if phase2_2_1_model_loading:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.2.1: FSDP2 Model Loading (Meta Device)         │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if model is None:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP [Test 2.2.1]: No MODEL input")
+                    logging.info(f"{LOG_PREFIX} [Test]   Connect UnetLoaderParallelAttention → model input")
+                    results.append("⏸️  Phase 2.2.1: Skipped (no MODEL)")
+                else:
+                    logging.info(f"{LOG_PREFIX} [Test] Test 2.2.1: Meta device parent + FSDP2 workers...")
+                    
+                    from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
+                    checks_passed = 0
+                    checks_total = 4
+                    
+                    # Check 1: Type is DistributedModelWrapper
+                    if isinstance(model, DistributedModelWrapper):
+                        logging.info(f"{LOG_PREFIX} [Test]   ✅ [1/4] Type: DistributedModelWrapper")
+                        checks_passed += 1
+                    else:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [1/4] Wrong type: {type(model).__name__}")
+                    
+                    # Check 2: Parent model on meta device
+                    try:
+                        if hasattr(model, '_parent'):
+                            parent = model._parent
+                            
+                            # Check all parameters on meta device
+                            params_list = list(parent.parameters())
+                            if len(params_list) > 0:
+                                is_meta = all(p.device.type == 'meta' for p in params_list)
+                                if is_meta:
+                                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [2/4] Parent on meta device")
+                                    logging.info(f"{LOG_PREFIX} [Test]     Parameters: {len(params_list)}")
+                                    checks_passed += 1
+                                else:
+                                    devices = set(p.device.type for p in params_list[:5])
+                                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/4] Parent not on meta (devices: {devices})")
+                            else:
+                                logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/4] Parent has no parameters")
+                        else:
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/4] Model has no _parent attribute")
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/4] Meta device check failed: {e}")
+                    
+                    # Check 3: Parent has properties
+                    try:
+                        has_latent = hasattr(model, 'latent_format') and model.latent_format is not None
+                        has_dtype = hasattr(model, 'get_dtype')
+                        
+                        if has_latent and has_dtype:
+                            logging.info(f"{LOG_PREFIX} [Test]   ✅ [3/4] Parent has properties")
+                            logging.info(f"{LOG_PREFIX} [Test]     latent_format: {model.latent_format.__class__.__name__}")
+                            logging.info(f"{LOG_PREFIX} [Test]     dtype: {model.get_dtype()}")
+                            checks_passed += 1
+                        else:
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/4] Missing properties (latent={has_latent}, dtype={has_dtype})")
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/4] Property check failed: {e}")
+                    
+                    # Check 4: VRAM usage (workers should have ~11GB)
+                    if torch.cuda.is_available():
+                        try:
+                            vram_gb = torch.cuda.memory_allocated(0) / (1024**3)
+                            logging.info(f"{LOG_PREFIX} [Test]   ℹ️  [4/4] VRAM: {vram_gb:.2f}GB")
+                            logging.info(f"{LOG_PREFIX} [Test]     (Workers have sharded model, main process has 0GB parent)")
+                            checks_passed += 1
+                        except Exception as e:
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [4/4] VRAM check failed: {e}")
+                    else:
+                        logging.info(f"{LOG_PREFIX} [Test]   ⏸️  [4/4] No CUDA for VRAM check")
+                        checks_passed += 1
+                    
+                    # Summary
+                    if checks_passed == checks_total:
+                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.2.1]: {checks_passed}/{checks_total}")
+                        results.append(f"✅ Phase 2.2.1: FSDP2 Model Loading ({checks_passed}/{checks_total})")
+                    else:
+                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL [Test 2.2.1]: {checks_passed}/{checks_total}")
+                        results.append(f"❌ Phase 2.2.1: FSDP2 Model Loading ({checks_passed}/{checks_total})")
             
             # Shutdown executor
             if executor:
@@ -733,5 +570,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnetLoaderParallelAttention": "UNET Loader (Parallel Attention)",
     "ParallelAttentionUnitTests": "Parallel Attention Unit Tests"
 }
-
-
