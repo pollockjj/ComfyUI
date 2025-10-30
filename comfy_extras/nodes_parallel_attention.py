@@ -90,11 +90,27 @@ class UnetLoaderParallelAttention:
         
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         
-        logging.info(f"{LOG_PREFIX} [Loader] Loading {unet_name} with FSDP across 2 GPUs")
+        # STEP 1: Extract model scaffold (perfect information)
+        logging.info(f"{LOG_PREFIX} [Loader] Extracting model scaffold from checkpoint...")
         
-        # Load model in workers (where torch.distributed is initialized)
+        from comfy.parallel_attention.model_scaffold import extract_model_scaffold
+        
+        scaffold, state_dict = extract_model_scaffold(unet_path)
+        
+        logging.info(
+            f"{LOG_PREFIX} [Loader] Scaffold extracted: "
+            f"type={scaffold['model_type']}, "
+            f"latent_format={scaffold['latent_format']['class_name']}, "
+            f"size={scaffold['model_size'] / (1024**3):.2f}GB"
+        )
+        
+        # STEP 2: Send scaffold + checkpoint path to workers
+        # Workers will reconstruct exact model structure from scaffold
+        logging.info(f"{LOG_PREFIX} [Loader] Loading FSDP model in 2 workers with scaffold...")
+        
         results = self.executor.execute_collective("load_fsdp_model", {
             "unet_path": unet_path,
+            "scaffold": scaffold,  # Send complete scaffold
             "model_options": model_options
         })
         
@@ -104,27 +120,26 @@ class UnetLoaderParallelAttention:
             raise RuntimeError(f"{LOG_PREFIX} [Loader] Model loading failed: {error}")
         
         logging.info(
-            f"{LOG_PREFIX} [Loader] Model loaded successfully: "
-            f"type={results.get('model_type', 'Unknown')}, "
-            f"fsdp={results.get('is_fsdp', False)}"
+            f"{LOG_PREFIX} [Loader] Model loaded in workers: "
+            f"type={results.get('model_type', 'FSDPModelPatcher')}, "
+            f"fsdp={results.get('is_fsdp', True)}"
         )
         
-        # For now, we can't return the actual model object from workers
-        # This is a limitation - the model lives in worker processes
-        # We need to design a different pattern for this
+        # STEP 3: Create wrapper from scaffold (already have all info)
+        # No need to extract properties from worker results - closed loop!
+        from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
         
-        # TODO: Design pattern for accessing worker-resident models
-        # Options:
-        # 1. Model proxy object that forwards calls to workers
-        # 2. Pull model back to main process (defeats purpose of FSDP)
-        # 3. Run entire sampling in workers (requires bigger refactor)
-        
-        raise NotImplementedError(
-            f"{LOG_PREFIX} [Loader] Model loading successful in workers, but "
-            "ComfyUI execution model requires models in main process. "
-            "This loader demonstrates FSDP loading works - full integration requires "
-            "architectural changes to run sampling in worker processes."
+        model_wrapper = DistributedModelWrapper(
+            executor=self.executor,
+            scaffold=scaffold  # Use scaffold directly
         )
+        
+        logging.info(
+            f"{LOG_PREFIX} [Loader] Wrapper created from scaffold (closed loop): {model_wrapper}"
+        )
+        
+        # Return wrapper (ComfyUI samplers will call wrapper.apply_model())
+        return (model_wrapper,)
     
     def __del__(self):
         """Cleanup: shutdown executor when node is destroyed."""
@@ -135,12 +150,93 @@ class UnetLoaderParallelAttention:
             self.is_initialized = False
 
 
+class TestParallelAttention:
+    """Test all parallel attention functionality with scaffold pattern validation.
+    
+    TDD test node for Phase 2.3 Model Scaffold Pattern.
+    Tests the "Copy at Perfect Information" architecture.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "test_all"
+    CATEGORY = "testing"
+    
+    def test_all(self, model):
+        """Run all validation tests for scaffold pattern."""
+        results = []
+        
+        # Test 1: Wrapper validation
+        from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
+        if isinstance(model, DistributedModelWrapper):
+            results.append("✅ DistributedModelWrapper created")
+            results.append(f"✅ World size: {model.world_size}")
+            results.append(f"✅ Model size: {model.model_size() / (1024**3):.2f} GB")
+        else:
+            results.append(f"❌ Not DistributedModelWrapper: {type(model)}")
+            return ("\n".join(results),)
+        
+        # Test 2: Scaffold properties (THE KEY FIX)
+        try:
+            # Test latent_format (was causing NoneType error)
+            latent_format = model.get_model_object("latent_format")
+            if latent_format is None:
+                results.append("❌ latent_format is None (scaffold pattern FAILED)")
+            else:
+                results.append(f"✅ latent_format: {latent_format.__class__.__name__}")
+                results.append(f"✅ latent_channels: {latent_format.latent_channels}")
+                results.append(f"✅ latent_dimensions: {latent_format.latent_dimensions}")
+            
+            # Test other scaffold properties
+            results.append(f"✅ dtype: {model.dtype}")
+            results.append(f"✅ model_type: {model.model_type}")
+            results.append(f"✅ is_adm: {model.is_adm()}")
+            
+            # Test extra_conds
+            extra_conds = model.extra_conds()
+            results.append(f"✅ extra_conds: {type(extra_conds).__name__}")
+            
+        except Exception as e:
+            results.append(f"❌ Scaffold property test failed: {e}")
+            import traceback
+            results.append(f"   {traceback.format_exc()}")
+        
+        # Test 3: Forward pass (PENDING - handler not implemented yet)
+        try:
+            results.append("⏸️  Forward pass: PENDING (handler implementation)")
+            # TODO: Enable when forward_pass handler complete
+            # import torch
+            # x = torch.randn(1, 16, 64, 64)
+            # timestep = torch.tensor([999.0])
+            # output = model.apply_model(x, timestep)
+            # results.append(f"✅ Forward pass successful: {tuple(output.shape)}")
+        except Exception as e:
+            results.append(f"⏸️  Forward pass: {e}")
+        
+        # Test 4: VRAM
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                vram = torch.cuda.memory_allocated(i) / (1024**3)
+                results.append(f"✅ GPU {i}: {vram:.2f} GB")
+        
+        return ("\n".join(results),)
+
+
 NODE_CLASS_MAPPINGS = {
-    "UnetLoaderParallelAttention": UnetLoaderParallelAttention
+    "UnetLoaderParallelAttention": UnetLoaderParallelAttention,
+    "TestParallelAttention": TestParallelAttention,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "UnetLoaderParallelAttention": "UNET Loader (Parallel Attention)"
+    "UnetLoaderParallelAttention": "Unet Loader (Parallel Attention)",
+    "TestParallelAttention": "Test Parallel Attention (All)",
 }
 """Test node for distributed runtime."""
 

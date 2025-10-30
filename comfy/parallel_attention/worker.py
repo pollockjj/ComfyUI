@@ -5,6 +5,7 @@ import torch.distributed as dist
 import logging
 import datetime
 import os
+from comfy.parallel_attention.worker_context import WorkerContext
 
 # Logging prefix for visibility
 LOG_PREFIX = "⚡ [Parallel-Attention]"
@@ -231,12 +232,20 @@ def worker_main(rank: int,
             
             elif method == "load_fsdp_model":
                 # Load FSDP model from file path
-                # Args: unet_path, model_options
+                # Args: unet_path, model_options, scaffold
                 logging.info(f"{LOG_PREFIX} [Worker-{rank}] Loading FSDP model...")
                 
                 try:
                     unet_path = request["kwargs"].get("unet_path")
                     model_options = request["kwargs"].get("model_options", {})
+                    scaffold = request["kwargs"].get("scaffold")
+                    
+                    if scaffold:
+                        logging.info(
+                            f"{LOG_PREFIX} [Worker-{rank}] Received scaffold: "
+                            f"type={scaffold.get('model_type')}, "
+                            f"latent_format={scaffold.get('latent_format', {}).get('class_name')}"
+                        )
                     
                     if not unet_path:
                         raise ValueError("unet_path required for load_fsdp_model")
@@ -247,16 +256,28 @@ def worker_main(rank: int,
                     # Load model - this will use FSDP loading if fsdp.enabled=True
                     model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
                     
+                    # Store in worker context for forward_pass calls
+                    WorkerContext.model_patcher = model
+                    WorkerContext.rank = rank
+                    WorkerContext.world_size = world_size
+                    
+                    # Get dtype from model
+                    if hasattr(model, 'model') and hasattr(model.model, 'get_dtype'):
+                        dtype = str(model.model.get_dtype()).split('.')[-1]  # 'torch.bfloat16' -> 'bfloat16'
+                    else:
+                        dtype = 'bfloat16'  # Default for Flux
+                    
                     # Return model info (can't send actual model object via pipe)
                     result = {
                         "success": True,
                         "model_type": type(model).__name__,
                         "is_fsdp": hasattr(model, 'is_fsdp_wrapped') and model.is_fsdp_wrapped,
+                        "dtype": dtype,
                     }
                     
                     logging.info(
-                        f"{LOG_PREFIX} [Worker-{rank}] Model loaded: "
-                        f"type={result['model_type']}, fsdp={result['is_fsdp']}"
+                        f"{LOG_PREFIX} [Worker-{rank}] Model loaded and stored: "
+                        f"type={result['model_type']}, fsdp={result['is_fsdp']}, dtype={dtype}"
                     )
                     
                     pipe.send({"status": "success", "result": result})
@@ -268,6 +289,72 @@ def worker_main(rank: int,
                     
                     pipe.send({"status": "success", "result": {
                         "success": False,
+                        "error": error_msg
+                    }})
+            
+            elif method == "forward_pass":
+                # Execute forward pass with FSDP model
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Executing forward pass...")
+                
+                try:
+                    # Get inputs
+                    inputs = request["kwargs"]
+                    x = inputs["x"]
+                    t = inputs["t"]
+                    c_concat = inputs.get("c_concat")
+                    c_crossattn = inputs.get("c_crossattn")
+                    control = inputs.get("control")
+                    transformer_options = inputs.get("transformer_options", {})
+                    
+                    # Get model from worker context
+                    if not hasattr(WorkerContext, 'model_patcher') or WorkerContext.model_patcher is None:
+                        raise RuntimeError("Model not loaded in worker")
+                    
+                    model_patcher = WorkerContext.model_patcher
+                    
+                    # Move inputs to device
+                    device = model_patcher.load_device
+                    x = x.to(device)
+                    t = t.to(device) if torch.is_tensor(t) else t
+                    
+                    if c_crossattn is not None:
+                        c_crossattn = c_crossattn.to(device)
+                    if c_concat is not None:
+                        c_concat = c_concat.to(device)
+                    
+                    # Execute forward pass
+                    # model_patcher.model is BaseModel which has apply_model()
+                    with torch.no_grad():
+                        output = model_patcher.model.apply_model(
+                            x, t,
+                            c_concat=c_concat,
+                            c_crossattn=c_crossattn,
+                            control=control,
+                            transformer_options=transformer_options
+                        )
+                    
+                    # Move output back to CPU for pipe serialization
+                    output_cpu = output.cpu()
+                    
+                    if rank == 0:
+                        logging.info(
+                            f"{LOG_PREFIX} [Worker-{rank}] Forward pass complete: "
+                            f"input={tuple(x.shape)}, output={tuple(output.shape)}"
+                        )
+                    
+                    # Only rank 0 returns result (all ranks compute identical output)
+                    if rank == 0:
+                        pipe.send({"status": "success", "result": {"output": output_cpu}})
+                    else:
+                        # Other ranks signal completion but don't send output
+                        pipe.send({"status": "success", "result": {}})
+                    
+                except Exception as e:
+                    import traceback
+                    error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] Forward pass failed: {error_msg}")
+                    
+                    pipe.send({"status": "success", "result": {
                         "error": error_msg
                     }})
             
