@@ -1351,11 +1351,30 @@ def load_diffusion_model_state_dict(sd, model_options={}):
 
     model = model_config.get_model(new_sd, "")
     model = model.to(offload_device)
+    
+    # FSDP2 Integration: Create meta device copy if parallel attention enabled
+    meta_model = None
+    if model_management.is_parallel_attention_enabled():
+        import copy
+        logging.info("[Parallel-Attention] Creating meta device model copy for ground truth")
+        # Deep copy model structure to meta device (0 bytes VRAM)
+        meta_model = copy.deepcopy(model)
+        meta_model = meta_model.to('meta')
+        logging.info(f"[Parallel-Attention] Meta model created: {type(meta_model).__name__} on device 'meta'")
+    
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: {}".format(left_over))
-    return comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    
+    model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    
+    # Attach meta model if created
+    if meta_model is not None:
+        model_patcher.meta_model = meta_model
+        logging.info("[Parallel-Attention] Meta model attached to ModelPatcher")
+    
+    return model_patcher
 
 
 def load_diffusion_model(unet_path, model_options={}):

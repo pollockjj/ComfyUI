@@ -22,6 +22,11 @@ from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
 import torch
 import sys
+
+def is_parallel_attention_enabled():
+    """Check if --use-parallel-attention CLI flag is set."""
+    import comfy.cli_args
+    return getattr(comfy.cli_args.args, 'use_parallel_attention', False)
 import importlib
 import platform
 import weakref
