@@ -117,23 +117,23 @@ def worker_main(rank: int,
                 pipe.send({"status": "success", "result": result})
             
             elif method == "test_fsdp_policy":
-                from comfy.parallel_attention.fsdp_policies import FSDPPolicyRegistry
+                from comfy.parallel_attention.fsdp2_policies import FSDP2PolicyRegistry
                 
                 # Get policy name from kwargs
                 model_name = request["kwargs"].get("model_name", "flux")
                 
-                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Testing FSDP policy: {model_name}")
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] Testing FSDP2 policy: {model_name}")
                 
                 # Test registry operations
-                is_registered = FSDPPolicyRegistry.is_registered(model_name)
-                available_policies = FSDPPolicyRegistry.list_registered()
+                is_registered = FSDP2PolicyRegistry.is_registered(model_name)
+                available_policies = FSDP2PolicyRegistry.list_registered()
                 
                 logging.info(f"{LOG_PREFIX} [Worker-{rank}] Policy registered: {is_registered}")
                 logging.info(f"{LOG_PREFIX} [Worker-{rank}] Available policies: {available_policies}")
                 
                 if is_registered:
                     # Get and instantiate policy
-                    policy_fn = FSDPPolicyRegistry.get_policy(model_name)
+                    policy_fn = FSDP2PolicyRegistry.get_policy(model_name)
                     policy = policy_fn()
                     
                     logging.info(f"{LOG_PREFIX} [Worker-{rank}] Policy retrieved successfully")
@@ -159,9 +159,119 @@ def worker_main(rank: int,
                 
                 pipe.send({"status": "success", "result": result})
             
+            elif method == "test_fsdp2_api":
+                # NEW TEST: Validate FSDP2 API migration
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] ╔══════════════════════════════════════════════════════════╗")
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] ║         FSDP2 API MIGRATION VALIDATION TEST              ║")
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] ╚══════════════════════════════════════════════════════════╝")
+                
+                validation_results = {}
+                
+                # Test 1: Check FSDP2ModelPatcher has FSDP2 imports
+                try:
+                    from comfy.parallel_attention.fsdp2_model_patcher import FSDP2ModelPatcher
+                    import inspect
+                    
+                    # Check imports in module
+                    import comfy.parallel_attention.fsdp2_model_patcher as patcher_module
+                    source = inspect.getsource(patcher_module)
+                    
+                    has_fully_shard_import = 'from torch.distributed.fsdp import fully_shard' in source
+                    has_old_fsdp_import = 'from torch.distributed.fsdp import FullyShardedDataParallel as FSDP' in source
+                    
+                    validation_results["fsdp2_import"] = has_fully_shard_import
+                    validation_results["no_fsdp1_import"] = not has_old_fsdp_import
+                    
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✓ Import check: fully_shard={has_fully_shard_import}, no_FSDP1={not has_old_fsdp_import}")
+                except Exception as e:
+                    validation_results["fsdp2_import"] = False
+                    validation_results["no_fsdp1_import"] = False
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ✗ Import check failed: {e}")
+                
+                # Test 2: Check _get_modules_for_policy method exists
+                try:
+                    has_helper_method = hasattr(FSDP2ModelPatcher, '_get_modules_for_policy')
+                    validation_results["has_helper_method"] = has_helper_method
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✓ Helper method exists: {has_helper_method}")
+                except Exception as e:
+                    validation_results["has_helper_method"] = False
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ✗ Helper method check failed: {e}")
+                
+                # Test 3: Check _wrap_with_fsdp uses fully_shard (not FSDP wrapper)
+                try:
+                    method_source = inspect.getsource(FSDP2ModelPatcher._wrap_with_fsdp)
+                    uses_fully_shard = 'fully_shard(' in method_source
+                    uses_old_fsdp = 'FSDP(' in method_source and 'self.model = FSDP' in method_source
+                    
+                    validation_results["uses_fully_shard"] = uses_fully_shard
+                    validation_results["no_fsdp_wrapper"] = not uses_old_fsdp
+                    
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✓ Wrapping check: fully_shard={uses_fully_shard}, no_FSDP_wrapper={not uses_old_fsdp}")
+                except Exception as e:
+                    validation_results["uses_fully_shard"] = False
+                    validation_results["no_fsdp_wrapper"] = False
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ✗ Wrapping check failed: {e}")
+                
+                # Test 4: Check DTensor detection (not isinstance FSDP check)
+                try:
+                    method_source = inspect.getsource(FSDP2ModelPatcher._wrap_with_fsdp)
+                    has_dtensor_check = 'DTensor' in method_source
+                    has_old_isinstance = 'isinstance(module, FSDP)' in method_source
+                    
+                    validation_results["has_dtensor_check"] = has_dtensor_check
+                    validation_results["no_isinstance_fsdp"] = not has_old_isinstance
+                    
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✓ Verification check: DTensor={has_dtensor_check}, no_isinstance_FSDP={not has_old_isinstance}")
+                except Exception as e:
+                    validation_results["has_dtensor_check"] = False
+                    validation_results["no_isinstance_fsdp"] = False
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ✗ Verification check failed: {e}")
+                
+                # Test 5: Check reshard_after_forward (not ShardingStrategy enum)
+                try:
+                    method_source = inspect.getsource(FSDP2ModelPatcher._wrap_with_fsdp)
+                    has_reshard_after_forward = 'reshard_after_forward' in method_source
+                    uses_sharding_strategy = 'ShardingStrategy.FULL_SHARD' in method_source
+                    
+                    validation_results["has_reshard_after_forward"] = has_reshard_after_forward
+                    validation_results["no_sharding_strategy_enum"] = not uses_sharding_strategy
+                    
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✓ Config check: reshard_after_forward={has_reshard_after_forward}, no_ShardingStrategy={not uses_sharding_strategy}")
+                except Exception as e:
+                    validation_results["has_reshard_after_forward"] = False
+                    validation_results["no_sharding_strategy_enum"] = False
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ✗ Config check failed: {e}")
+                
+                # Summary
+                all_checks = [
+                    validation_results.get("fsdp2_import", False),
+                    validation_results.get("no_fsdp1_import", False),
+                    validation_results.get("has_helper_method", False),
+                    validation_results.get("uses_fully_shard", False),
+                    validation_results.get("no_fsdp_wrapper", False),
+                    validation_results.get("has_dtensor_check", False),
+                    validation_results.get("no_isinstance_fsdp", False),
+                    validation_results.get("has_reshard_after_forward", False),
+                    validation_results.get("no_sharding_strategy_enum", False),
+                ]
+                
+                passed = sum(all_checks)
+                total = len(all_checks)
+                validation_results["passed_checks"] = f"{passed}/{total}"
+                validation_results["all_passed"] = passed == total
+                
+                if validation_results["all_passed"]:
+                    logging.info(f"{LOG_PREFIX} [Worker-{rank}] ✅ FSDP2 API MIGRATION: ALL CHECKS PASSED ({passed}/{total})")
+                else:
+                    logging.error(f"{LOG_PREFIX} [Worker-{rank}] ❌ FSDP2 API MIGRATION: FAILED ({passed}/{total})")
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{rank}] ╚══════════════════════════════════════════════════════════╝")
+                
+                pipe.send({"status": "success", "result": validation_results})
+            
             elif method == "test_fsdp_load":
-                from comfy.parallel_attention.fsdp_registry import detect_model_type, get_fsdp_strategy
-                from comfy.parallel_attention.fsdp_model_patcher import FSDPModelPatcher
+                from comfy.parallel_attention.fsdp2_registry import detect_model_type, get_fsdp2_strategy
+                from comfy.parallel_attention.fsdp2_model_patcher import FSDP2ModelPatcher
                 import comfy.utils
                 
                 # Get state dict from kwargs (passed from rank 0)
@@ -180,10 +290,10 @@ def worker_main(rank: int,
                     detected_type = detect_model_type(state_dict_sample)
                     logging.info(f"{LOG_PREFIX} [Worker-{rank}] Detected model type: {detected_type}")
                 
-                # Test 2: Get FSDP strategy
+                # Test 2: Get FSDP2 strategy
                 try:
                     if detected_type:
-                        policy_fn = get_fsdp_strategy(model_type=detected_type)
+                        policy_fn = get_fsdp2_strategy(model_type=detected_type)
                         policy = policy_fn()
                         policy_retrieved = True
                         logging.info(f"{LOG_PREFIX} [Worker-{rank}] FSDP policy retrieved: {type(policy).__name__}")

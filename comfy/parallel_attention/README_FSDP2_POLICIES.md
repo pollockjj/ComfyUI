@@ -1,24 +1,24 @@
-# FSDP Wrapping Policies
+# FSDP2 Wrapping Policies
 
 ## Overview
 
-FSDP policies determine how PyTorch shards model parameters across GPUs.
+FSDP2 policies determine how PyTorch shards model parameters across GPUs.
 Each wrapped unit becomes an independent sharding boundary.
 
 ## Policy Registry
 
-Use `FSDPPolicyRegistry` to register and retrieve model-specific policies:
+Use `FSDP2PolicyRegistry` to register and retrieve model-specific policies:
 
 ```python
-from comfy.parallel_attention import FSDPPolicyRegistry
+from comfy.parallel_attention import FSDP2PolicyRegistry
 
 # Get policy
-policy_fn = FSDPPolicyRegistry.get_policy("flux")
+policy_fn = FSDP2PolicyRegistry.get_policy("flux")
 policy = policy_fn()
 
-# Use with FSDP
-from torch.distributed.fsdp import FSDP
-fsdp_model = FSDP(model, auto_wrap_policy=policy, ...)
+# Use with FSDP2
+from torch.distributed.fsdp import fully_shard
+# FSDPModelPatcher applies fully_shard() to each matching module
 ```
 
 ## Flux Policy
@@ -57,8 +57,8 @@ fsdp_model = FSDP(model, auto_wrap_policy=policy, ...)
 ## Adding New Policies
 
 ```python
-@FSDPPolicyRegistry.register("my_model")
-def my_model_fsdp_policy():
+@FSDP2PolicyRegistry.register("my_model")
+def my_model_fsdp2_policy():
     from my_model import TransformerBlock
     
     return partial(
@@ -76,8 +76,8 @@ Run tests in ComfyUI:
 
 Expected output:
 ```
-⚡ [Parallel-Attention] [Test] Test 5: FSDP Policy Registry
-⚡ [Parallel-Attention] [Test] FSDP Policy test passed:
+⚡ [Parallel-Attention] [Test] Test 5: FSDP2 Policy Registry
+⚡ [Parallel-Attention] [Test] FSDP2 Policy test passed:
 ⚡ [Parallel-Attention] [Test]   Model: flux
 ⚡ [Parallel-Attention] [Test]   Registered: True
 ⚡ [Parallel-Attention] [Test]   Available policies: ['flux', 'qwen_image', 'wan']

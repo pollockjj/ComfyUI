@@ -14,12 +14,12 @@ Based on Raylight patterns, adapted to ComfyUI model structure.
 
 Usage:
     # Register a policy
-    @FSDPPolicyRegistry.register("flux")
+    @FSDP2PolicyRegistry.register("flux")
     def flux_fsdp_policy():
         return partial(transformer_auto_wrap_policy, ...)
     
     # Get a policy
-    policy_fn = FSDPPolicyRegistry.get_policy("flux")
+    policy_fn = FSDP2PolicyRegistry.get_policy("flux")
     policy = policy_fn()
     
     # Use with FSDP
@@ -34,20 +34,20 @@ import logging
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
-class FSDPPolicyRegistry:
-    """Registry for model-specific FSDP wrapping policies.
+class FSDP2PolicyRegistry:
+    """Registry for model-specific FSDP2 wrapping policies.
     
     Provides decorator pattern for registering policies and retrieving
     them by model name. Ensures clean separation between policy definitions
-    and FSDP loader logic.
+    and FSDP2 loader logic.
     
     Example:
-        @FSDPPolicyRegistry.register("my_model")
+        @FSDP2PolicyRegistry.register("my_model")
         def my_model_policy():
             return partial(transformer_auto_wrap_policy, ...)
         
         # Later, in loader
-        policy_fn = FSDPPolicyRegistry.get_policy("my_model")
+        policy_fn = FSDP2PolicyRegistry.get_policy("my_model")
         policy = policy_fn()
     """
     
@@ -64,7 +64,7 @@ class FSDPPolicyRegistry:
             Decorator function
             
         Example:
-            @FSDPPolicyRegistry.register("flux")
+            @FSDP2PolicyRegistry.register("flux")
             def flux_fsdp_policy():
                 return partial(...)
         """
@@ -94,7 +94,7 @@ class FSDPPolicyRegistry:
             ValueError: If model_name not registered
             
         Example:
-            policy_fn = FSDPPolicyRegistry.get_policy("flux")
+            policy_fn = FSDP2PolicyRegistry.get_policy("flux")
             policy = policy_fn()  # Call to get actual policy
         """
         if model_name not in cls._policies:
@@ -129,7 +129,7 @@ class FSDPPolicyRegistry:
         return model_name in cls._policies
 
 
-@FSDPPolicyRegistry.register("flux")
+@FSDP2PolicyRegistry.register("flux")
 def flux_fsdp_policy() -> Callable:
     """Return FSDP auto-wrap policy for Flux-Dev model.
     
@@ -179,7 +179,7 @@ def flux_fsdp_policy() -> Callable:
     )
 
 
-@FSDPPolicyRegistry.register("qwen_image")
+@FSDP2PolicyRegistry.register("qwen_image")
 def qwen_image_fsdp_policy() -> Callable:
     """Return FSDP auto-wrap policy for Qwen VL Image model.
     
@@ -222,7 +222,7 @@ def qwen_image_fsdp_policy() -> Callable:
     )
 
 
-@FSDPPolicyRegistry.register("wan")
+@FSDP2PolicyRegistry.register("wan")
 def wan_fsdp_policy() -> Callable:
     """Return FSDP auto-wrap policy for Wan2.2 video model.
     

@@ -1289,13 +1289,13 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     4. Manages model optimization settings
     5. Loads weights and returns a device-managed model instance
     """
-    # FSDP opt-in hook: Check if FSDP loading is requested
+    # FSDP2 opt-in hook: Check if FSDP2 loading is requested
     if 'fsdp' in model_options and model_options['fsdp'].get('enabled', False):
-        from comfy.parallel_attention.fsdp_loading import fsdp_load_diffusion_model_state_dict
+        from comfy.parallel_attention.fsdp2_loading import fsdp2_load_diffusion_model_state_dict
         device_mesh = model_options['fsdp'].get('device_mesh', None)
         model_type = model_options['fsdp'].get('model_type', None)
         cpu_offload = model_options['fsdp'].get('cpu_offload', False)
-        return fsdp_load_diffusion_model_state_dict(sd, model_options, device_mesh, model_type, cpu_offload)
+        return fsdp2_load_diffusion_model_state_dict(sd, model_options, device_mesh, model_type, cpu_offload)
     
     dtype = model_options.get("dtype", None)
 

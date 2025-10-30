@@ -1,21 +1,27 @@
-"""FSDP-aware ModelPatcher extension for distributed model loading.
+"""FSDP2-aware ModelPatcher extension for distributed model loading.
 
-Extends ComfyUI's ModelPatcher to handle FSDP-wrapped models with
+Extends ComfyUI's ModelPatcher to handle FSDP2-wrapped models with
 correct memory reporting, lazy wrapping, and distributed state dict loading.
 
 Design Philosophy: EXTEND, Don't Bypass
 - Inherits all ComfyUI ModelPatcher functionality
-- Overrides only what's needed for FSDP compatibility
+- Overrides only what's needed for FSDP2 compatibility
 - Maintains LoRA, hooks, callbacks, injection system
 - Transparent to existing ComfyUI code
 
 Key Differences from Base ModelPatcher:
-1. Lazy FSDP wrapping on first load()
+1. Lazy FSDP2 wrapping on first load() (via fully_shard)
 2. Sharded memory reporting in model_memory_required()
 3. Disabled clone() (FSDP incompatible with deepcopy)
 4. Sets comfy_cast_weights=True to prevent interference
 
-Based on Raylight's FSDPModelPatcher pattern, adapted to ComfyUI.
+FSDP2 vs FSDP1:
+- Uses fully_shard() function (not FSDP class wrapper)
+- Per-parameter DTensor (not FlatParameter buffer)
+- Bottom-up application (not top-down wrapper)
+- reshard_after_forward boolean (not ShardingStrategy enum)
+
+Based on Raylight's FSDPModelPatcher pattern, migrated to FSDP2 API.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import logging
 from typing import Optional
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.fsdp import ShardingStrategy, MixedPrecision
 from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
 
@@ -33,21 +39,21 @@ import comfy.model_management
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
-class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
-    """FSDP-aware extension of ComfyUI's ModelPatcher.
+class FSDP2ModelPatcher(comfy.model_patcher.ModelPatcher):
+    """FSDP2-aware extension of ComfyUI's ModelPatcher.
     
-    Handles FSDP wrapping, sharded memory calculations, and distributed
-    state dict loading while maintaining full compatibility with ComfyUI's
-    model management system.
+    Handles FSDP2 sharding (via fully_shard), sharded memory calculations,
+    and distributed state dict loading while maintaining full compatibility
+    with ComfyUI's model management system.
     
     Attributes:
-        fsdp_config (dict): FSDP configuration (policy, cpu_offload, etc.)
-        is_fsdp_wrapped (bool): Whether model has been wrapped with FSDP
+        fsdp_config (dict): FSDP2 configuration (policy, cpu_offload, etc.)
+        is_fsdp_wrapped (bool): Whether model has been sharded with fully_shard
         shard_factor (float): Memory reduction factor from sharding (e.g., 0.5 for 2 GPUs)
     
     Example:
-        # Create FSDP patcher instead of regular patcher
-        patcher = FSDPModelPatcher(
+        # Create FSDP2 patcher instead of regular patcher
+        patcher = FSDP2ModelPatcher(
             model=unet,
             load_device=device,
             offload_device=offload_device,
@@ -123,18 +129,21 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
             self._wrap_with_fsdp()
     
     def _wrap_with_fsdp(self):
-        """Wrap model with FSDP on first load() and load sharded weights.
+        """Apply FSDP2 sharding strategy to model.
         
-        Applies FSDP wrapping using the configured auto_wrap_policy, then
-        loads state dict using FSDP's distributed loading if provided.
-        This is done lazily on first load() to ensure model is on correct
-        device and properly initialized.
+        Called lazily on first load() to allow:
+        - LoRA patches to be registered first
+        - Model to be on correct device
+        - State dict to be fully loaded
         
-        Side Effects:
-            - Wraps self.model with FSDP
-            - Loads sharded weights if state_dict in fsdp_config
-            - Sets self.is_fsdp_wrapped = True
-            - Sets comfy_cast_weights flag on all modules
+        FSDP2 Migration Notes:
+        - Uses fully_shard() function instead of FSDP class wrapper
+        - Applies bottom-up (children first, root last)
+        - Parameters become DTensor instead of FlatParameter
+        - No wrapper instance created (in-place modification)
+        
+        Sets comfy_cast_weights = True on FSDP modules so ComfyUI
+        doesn't interfere with FSDP's device management.
         """
         if self.is_fsdp_wrapped:
             return
@@ -143,47 +152,61 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
         import warnings
         warnings.filterwarnings('ignore', message='Called record_stream on tensor')
         
-        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Wrapping model with FSDP...")
+        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Applying FSDP2 sharding...")
         
-        # Get FSDP configuration
+        # Get FSDP2 configuration
         auto_wrap_policy = self.fsdp_config.get('auto_wrap_policy', None)
         cpu_offload = self.fsdp_config.get('cpu_offload', False)
-        sharding_strategy = self.fsdp_config.get(
-            'sharding_strategy',
-            ShardingStrategy.FULL_SHARD
-        )
         mixed_precision = self.fsdp_config.get('mixed_precision', None)
         device_mesh = self.fsdp_config.get('device_mesh', None)
         state_dict = self.fsdp_config.get('state_dict', None)
         
         if auto_wrap_policy is None:
             logging.error(f"{LOG_PREFIX} [FSDPPatcher] No auto_wrap_policy provided!")
-            raise ValueError("FSDP requires auto_wrap_policy in fsdp_config")
+            raise ValueError("FSDP2 requires auto_wrap_policy in fsdp_config")
         
-        # Configure CPU offload
-        from torch.distributed.fsdp import CPUOffload
-        cpu_offload_config = CPUOffload(offload_params=True) if cpu_offload else None
-        
-        # Build FSDP kwargs
-        fsdp_kwargs = {
-            'auto_wrap_policy': auto_wrap_policy,
-            'sharding_strategy': sharding_strategy,
-            'cpu_offload': cpu_offload_config,
-            'device_id': self.load_device if self.load_device.type == 'cuda' else None,
-            'sync_module_states': True,  # Sync params across ranks
-            'use_orig_params': True,  # Maintain original parameter names
+        # Build FSDP2 kwargs
+        # Key differences from FSDP1:
+        # 1. 'mesh' instead of 'device_mesh'
+        # 2. 'reshard_after_forward' instead of 'sharding_strategy'
+        # 3. No 'sync_module_states' (automatic in FSDP2)
+        # 4. No 'use_orig_params' (always True in FSDP2)
+        # 5. No 'device_id' (inferred from mesh)
+        fsdp2_kwargs = {
+            'reshard_after_forward': True,  # Equivalent to FULL_SHARD
         }
         
         if mixed_precision is not None:
-            fsdp_kwargs['mixed_precision'] = mixed_precision
+            fsdp2_kwargs['mp_policy'] = mixed_precision
         
         if device_mesh is not None:
-            fsdp_kwargs['device_mesh'] = device_mesh
+            fsdp2_kwargs['mesh'] = device_mesh
         
-        # Wrap with FSDP FIRST (with empty model on CPU)
-        # FSDP will handle moving shards to GPU during load_state_dict
-        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Wrapping empty model with FSDP...")
-        self.model = FSDP(self.model, **fsdp_kwargs)
+        # Apply fully_shard BOTTOM-UP
+        # FSDP2 requires child modules wrapped before parent
+        logging.info(f"{LOG_PREFIX} [FSDPPatcher] Applying fully_shard bottom-up...")
+        
+        # Step 1: Apply policy to wrap child modules first
+        # auto_wrap_policy identifies which modules to wrap
+        # For Flux: DoubleStreamBlock, SingleStreamBlock
+        policy_fn = auto_wrap_policy
+        modules_to_wrap = self._get_modules_for_policy(policy_fn)
+        
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if rank == 0:
+            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Found {len(modules_to_wrap)} modules to shard")
+        
+        # Wrap identified modules (children first)
+        for module_name, module in modules_to_wrap:
+            if rank == 0:
+                logging.debug(f"{LOG_PREFIX} [FSDPPatcher] Sharding {module_name}")
+            fully_shard(module, **fsdp2_kwargs)
+        
+        # Step 2: Wrap root (parent) last
+        # This ensures bottom-up application
+        if rank == 0:
+            logging.info(f"{LOG_PREFIX} [FSDPPatcher] Sharding root module...")
+        fully_shard(self.model, **fsdp2_kwargs)
         self.is_fsdp_wrapped = True
         
         rank = dist.get_rank() if dist.is_initialized() else 0
@@ -257,17 +280,75 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
                 except AttributeError as e:
                     logging.warning(f"{LOG_PREFIX} [FSDPPatcher] Could not verify model_sampling.sigmas: {e}")
         
-        # Set comfy_cast_weights=True on all modules to prevent ComfyUI interference
-        for module in self.model.modules():
-            if hasattr(module, 'comfy_cast_weights'):
-                module.prev_comfy_cast_weights = module.comfy_cast_weights
-            module.comfy_cast_weights = True
+        # Mark FSDP2 modules so ComfyUI doesn't interfere
+        # In FSDP2, modules aren't wrapped instances - they're modified in-place
+        # Check for DTensor parameters as indication of FSDP2 application
+        wrapped_count = 0
+        for name, module in self.model.named_modules():
+            # Check if module has DTensor parameters (FSDP2 indicator)
+            has_dtensor = any(
+                hasattr(p, '__class__') and 'DTensor' in p.__class__.__name__
+                for p in module.parameters(recurse=False)
+            )
+            
+            if has_dtensor:
+                if hasattr(module, 'comfy_cast_weights'):
+                    module.prev_comfy_cast_weights = module.comfy_cast_weights
+                module.comfy_cast_weights = True
+                module.comfy_patched_weights = True
+                wrapped_count += 1
         
         if rank == 0:
             logging.info(
-                f"{LOG_PREFIX} [FSDPPatcher] FSDP wrapping complete: "
-                f"strategy={sharding_strategy}, shard_factor={self.shard_factor:.2f}"
+                f"{LOG_PREFIX} [FSDPPatcher] FSDP2 sharding complete: "
+                f"modules={wrapped_count}, shard_factor={self.shard_factor:.2f}"
             )
+    
+    def _get_modules_for_policy(self, policy_fn):
+        """Get modules to wrap based on auto_wrap_policy.
+        
+        FSDP2 requires explicit bottom-up application.
+        This helper identifies modules that match the policy.
+        
+        Args:
+            policy_fn: Auto-wrap policy function (returns module classes to wrap)
+        
+        Returns:
+            List of (module_name, module) tuples in bottom-up order
+        
+        Example:
+            For Flux policy (DoubleStreamBlock, SingleStreamBlock):
+            Returns: [
+                ("double_blocks.0", <DoubleStreamBlock>),
+                ("double_blocks.1", <DoubleStreamBlock>),
+                ...,
+                ("single_blocks.0", <SingleStreamBlock>),
+                ...
+            ]
+        """
+        # Policy function returns partial with transformer_layer_cls keyword
+        # For transformer_auto_wrap_policy: partial(..., transformer_layer_cls={Class1, Class2})
+        
+        # Extract target classes from policy keywords
+        if hasattr(policy_fn, 'keywords'):
+            target_classes = policy_fn.keywords.get('transformer_layer_cls', set())
+        else:
+            # Fallback: execute policy and inspect result
+            policy_result = policy_fn()
+            if hasattr(policy_result, 'transformer_layer_cls'):
+                target_classes = policy_result.transformer_layer_cls
+            else:
+                target_classes = set()
+        
+        # Traverse model and collect modules matching target classes
+        modules_to_wrap = []
+        for name, module in self.model.named_modules():
+            if type(module) in target_classes:
+                modules_to_wrap.append((name, module))
+        
+        # Return in bottom-up order (children before parents)
+        # named_modules() already returns depth-first traversal
+        return modules_to_wrap
     
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
         """Override load() to wrap with FSDP on first load.
@@ -375,7 +456,7 @@ class FSDPModelPatcher(comfy.model_patcher.ModelPatcher):
         raise RuntimeError(
             f"{LOG_PREFIX} [FSDPPatcher] clone() is not supported for FSDP models. "
             "FSDP models cannot be deep-copied due to distributed state. "
-            "Create a new FSDPModelPatcher instance instead."
+            "Create a new FSDP2ModelPatcher instance instead."
         )
     
     def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):

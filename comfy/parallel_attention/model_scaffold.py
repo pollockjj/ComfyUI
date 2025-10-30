@@ -1,66 +1,70 @@
 """Model scaffold extraction for distributed loading.
 
-Creates complete model structure on meta device (zero memory),
-extracts ALL ComfyUI properties, then sends to workers for
-FSDP weight loading.
+Creates model STRUCTURE (0GB - no weights loaded), deepcopies it as scaffold.
+The scaffold IS a real model object with all properties, just no weights.
 
 Design Philosophy: "Copy at Perfect Information, Don't Reconstruct from Imperfect"
-- Extract once at perfect information point (CPU/meta load)
-- Send complete scaffold to workers for exact reconstruction
-- No piecemeal property discovery via RPC errors
-- Closed loop: all properties captured upfront
+- Create model structure WITHOUT loading 22GB weights
+- Deepcopy the structure - that IS the scaffold
+- No manual property serialization (brittle, incomplete)
+- Workers load their own weights with FSDP
 
 Based on WorkSplit deepclone pattern (ComfyUI core architect).
 Reference: reference_worksplit_multigpu/comfy/model_patcher.py:351-374
+ComfyUI pattern: comfy/sd.py:1351-1352 (get_model creates structure, load_model_weights loads tensors)
 """
 
 from __future__ import annotations
 import torch
 import logging
-from typing import Dict, Any, Optional
+import copy
+from typing import Dict, Any
 
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
-def extract_model_scaffold(checkpoint_path: str) -> tuple[Dict[str, Any], Dict]:
-    """Extract complete model scaffold from checkpoint.
+def extract_model_scaffold(checkpoint_path: str) -> tuple[Any, Dict]:
+    """Extract model scaffold WITHOUT loading 22GB weights.
     
-    This is the "perfect information" extraction point. We load the
-    model once on CPU/meta device and capture EVERYTHING ComfyUI needs.
-    Workers will reconstruct exact replicas from this scaffold.
+    Creates model STRUCTURE only (0GB - architecture, no tensors),
+    deepcopies it. That deepcopy IS the scaffold - has ALL properties.
     
     Args:
         checkpoint_path: Path to .safetensors checkpoint
     
     Returns:
-        (scaffold, state_dict):
-            scaffold: Complete model metadata (latent_format, dtype, etc.)
-            state_dict: Model weights for FSDP loading
+        (scaffold_model, state_dict):
+            scaffold_model: Deepcopy of model structure (0GB, all properties)
+            state_dict: Model weights for FSDP loading in workers
     
     Design Philosophy:
-        - Extract once at perfect information (CPU load)
-        - Don't reconstruct from imperfect information (RPC)
-        - Workers get exact scaffold, not partial properties
-        - Eliminates "discover via error" anti-pattern
+        - ComfyUI's get_model() creates structure (small)
+        - ComfyUI's load_model_weights() loads tensors (22GB)
+        - We call get_model() but NOT load_model_weights()
+        - Deepcopy the 0GB structure - that's the scaffold
+        - No serialization, no manual property lists, not brittle
     """
     import comfy.model_detection
     import comfy.utils
+    import comfy.model_management
     
-    logging.info(f"{LOG_PREFIX} [Scaffold] Extracting model scaffold from {checkpoint_path}")
+    logging.info(f"{LOG_PREFIX} [Scaffold] Extracting model scaffold (0GB structure) from {checkpoint_path}")
     
-    # Load checkpoint (ComfyUI standard method - USE existing infrastructure)
+    # Load state dict
     state_dict = comfy.utils.load_torch_file(checkpoint_path)
     
-    # CRITICAL: Follow ComfyUI's exact pattern from sd.py:1309-1313
+    # CRITICAL: Follow ComfyUI's exact pattern from sd.py:1303-1313
     # 1. Get the prefix (e.g., "model.diffusion_model.")
     diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(state_dict)
     
-    # 2. STRIP the prefix from state dict keys (sd.py:1309)
+    # 2. STRIP the prefix from state dict keys
     temp_sd = comfy.utils.state_dict_prefix_replace(state_dict, {diffusion_model_prefix: ""}, filter_keys=True)
     if len(temp_sd) > 0:
         state_dict = temp_sd
     
-    # 3. Detect with EMPTY prefix (sd.py:1313)
+    # 3. Detect model config with EMPTY prefix
+    load_device = comfy.model_management.get_torch_device()
+    offload_device = comfy.model_management.unet_offload_device()
     model_config = comfy.model_detection.model_config_from_unet(state_dict, "")
     
     if model_config is None:
@@ -69,52 +73,35 @@ def extract_model_scaffold(checkpoint_path: str) -> tuple[Dict[str, Any], Dict]:
             f"Prefix used: '{diffusion_model_prefix}', keys after strip: {len(state_dict)}"
         )
     
-    # Create model on meta device (zero memory allocation)
-    # This gives us the complete structure without loading weights
-    with torch.device('meta'):
-        model = model_config.get_model(state_dict, "")
+    # Create model STRUCTURE (0GB - no weights loaded!)
+    # This is ComfyUI's pattern from sd.py:1351
+    # get_model() creates nn.Module architecture without loading tensors
+    model = model_config.get_model(state_dict, "")
+    model = model.to(offload_device)
     
-    # Extract ALL model properties (closed loop - perfect information)
-    scaffold = {
-        # Core properties
-        "model_config_class": model_config.__class__.__name__,
-        "model_config_dict": _serialize_model_config(model_config),
-        
-        # Model metadata
-        "dtype": str(model.get_dtype()).split('.')[-1],  # 'torch.bfloat16' -> 'bfloat16'
-        "model_type": model_config.unet_config.get("model_type", "unknown"),
-        
-        # Latent format (THE MISSING PIECE that caused the error)
-        "latent_format": _serialize_latent_format(model.latent_format),
-        
-        # Conditioning (structure only, not runtime values)
-        "is_adm": hasattr(model, 'is_adm') and callable(getattr(model, 'is_adm')) and model.is_adm(),
-        # Don't call extra_conds() - requires actual conditioning data (pooled_output, etc.)
-        # that we don't have on meta device. ComfyUI populates this at runtime during sampling.
-        "extra_conds": {},
-        
-        # Device config
-        "load_device": str(model.load_device),
-        "offload_device": str(model.offload_device) if hasattr(model, 'offload_device') else 'cpu',
-        
-        # Model options
-        "model_options": getattr(model, 'model_options', {}),
-        
-        # Memory estimates
-        "model_size": _estimate_model_size(state_dict),
-    }
+    # DO NOT call model.load_model_weights(state_dict, "") - that's 22GB!
+    # We only want the STRUCTURE, not the weights
+    
+    # Deepcopy the structure - THIS IS THE SCAFFOLD
+    # Has ALL properties: latent_format, load_device, dtype, is_adm(), etc.
+    # No manual serialization required - it's a real model object
+    scaffold_model = copy.deepcopy(model)
+    
+    # Store additional metadata on scaffold for convenience
+    scaffold_model._scaffold_checkpoint_path = checkpoint_path
+    scaffold_model._scaffold_model_config = model_config
+    scaffold_model._scaffold_load_device = load_device
+    scaffold_model._scaffold_offload_device = offload_device
     
     logging.info(
-        f"{LOG_PREFIX} [Scaffold] Extracted complete scaffold: "
-        f"type={scaffold['model_type']}, dtype={scaffold['dtype']}, "
-        f"latent_format={scaffold['latent_format']['class_name']}, "
-        f"size={scaffold['model_size'] / (1024**3):.2f}GB"
+        f"{LOG_PREFIX} [Scaffold] Scaffold extracted (0GB structure): "
+        f"type={model_config.unet_config.get('model_type', 'unknown')}, "
+        f"dtype={scaffold_model.get_dtype()}, "
+        f"latent_format={scaffold_model.latent_format.__class__.__name__}"
     )
     
-    return scaffold, state_dict
+    return scaffold_model, state_dict
 
-
-def _serialize_model_config(model_config) -> Dict[str, Any]:
     """Serialize model_config for reconstruction.
     
     Args:

@@ -156,11 +156,11 @@ if args.use_parallel_attention:
         else:
             logging.info("Parallel attention enabled: multiprocessing already using 'spawn' method")
     
-    # Initialize parallel attention schema (FSDP policies, etc.)
+    # Initialize parallel attention schema (FSDP2 policies, etc.)
     # This must happen after spawn method is set but before torch is imported
-    logging.info("Parallel attention enabled: initializing FSDP policy registry")
-    import comfy.parallel_attention.fsdp_policies
-    logging.info(f"Parallel attention enabled: registered FSDP policies: {comfy.parallel_attention.fsdp_policies.FSDPPolicyRegistry.list_registered()}")
+    logging.info("Parallel attention enabled: initializing FSDP2 policy registry")
+    import comfy.parallel_attention.fsdp2_policies
+    logging.info(f"Parallel attention enabled: registered FSDP2 policies: {comfy.parallel_attention.fsdp2_policies.FSDP2PolicyRegistry.list_registered()}")
 
 import comfy.utils
 

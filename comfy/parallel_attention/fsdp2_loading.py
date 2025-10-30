@@ -1,19 +1,19 @@
-"""FSDP loading functions using ComfyUI model detection.
+"""FSDP2 loading functions using ComfyUI model detection.
 
 Provides distributed model loading that:
 1. Uses ComfyUI's model_detection to identify model type
-2. Retrieves appropriate FSDP wrapping policy from registry
-3. Loads state dict using FSDP's distributed loading
-4. Returns FSDPModelPatcher instead of ModelPatcher
+2. Retrieves appropriate FSDP2 wrapping policy from registry
+3. Loads state dict using distributed loading
+4. Returns FSDP2ModelPatcher instead of ModelPatcher
 
 Design: Minimal, surgical integration
 - Wraps ComfyUI's load_diffusion_model_state_dict() logic
 - Reuses all ComfyUI detection and configuration
-- Returns FSDP-aware patcher for transparent integration
+- Returns FSDP2-aware patcher for transparent integration
 
 Usage:
     # Instead of load_diffusion_model_state_dict()
-    patcher = fsdp_load_diffusion_model_state_dict(
+    patcher = fsdp2_load_diffusion_model_state_dict(
         sd=state_dict,
         model_options={'fsdp': {'enabled': True}},
         device_mesh=mesh
@@ -32,33 +32,33 @@ import comfy.utils
 import comfy.model_management
 import comfy.model_detection
 
-from .fsdp_model_patcher import FSDPModelPatcher
-from .fsdp_registry import get_fsdp_strategy, detect_model_type
+from .fsdp2_model_patcher import FSDP2ModelPatcher
+from .fsdp2_registry import get_fsdp2_strategy, detect_model_type
 
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
-def fsdp_load_diffusion_model_state_dict(
+def fsdp2_load_diffusion_model_state_dict(
     sd: dict,
     model_options: dict = {},
     device_mesh = None,
     model_type: Optional[str] = None,
     cpu_offload: bool = False
 ):
-    """Load diffusion model with FSDP sharding from state dict.
+    """Load diffusion model with FSDP2 sharding from state dict.
     
     Drop-in replacement for comfy.sd.load_diffusion_model_state_dict()
-    that returns FSDPModelPatcher instead of ModelPatcher.
+    that returns FSDP2ModelPatcher instead of ModelPatcher.
     
     Args:
         sd: Model state dictionary
         model_options: ComfyUI model options dict (dtype, custom_operations, etc.)
         device_mesh: Optional DeviceMesh for topology-aware sharding
         model_type: Optional explicit model type (auto-detected if None)
-        cpu_offload: Whether to offload FSDP parameters to CPU
+        cpu_offload: Whether to offload FSDP2 parameters to CPU
     
     Returns:
-        FSDPModelPatcher: FSDP-wrapped model patcher
+        FSDP2ModelPatcher: FSDP2-wrapped model patcher
         None: If model config cannot be detected
         
     Process:
@@ -66,9 +66,9 @@ def fsdp_load_diffusion_model_state_dict(
         2. Detect model type (Flux, Qwen, Wan, etc.)
         3. Get FSDP wrapping policy from registry
         4. Create model instance (no weights loaded yet)
-        5. Wrap with FSDP (using policy)
-        6. Load state dict using FSDP's distributed loading
-        7. Return FSDPModelPatcher
+        5. Wrap with FSDP2 (using policy)
+        6. Load state dict using distributed loading
+        7. Return FSDP2ModelPatcher
         
     Example:
         # In comfy/sd.py hook:
@@ -174,12 +174,12 @@ def fsdp_load_diffusion_model_state_dict(
     logging.info(f"{LOG_PREFIX} [FSDPLoading] Detected model type: {model_type}")
     
     try:
-        policy_fn = get_fsdp_strategy(model_type=model_type)
+        policy_fn = get_fsdp2_strategy(model_type=model_type)
         auto_wrap_policy = policy_fn()
-        logging.info(f"{LOG_PREFIX} [FSDPLoading] Retrieved FSDP policy for {model_type}")
+        logging.info(f"{LOG_PREFIX} [FSDP2Loading] Retrieved FSDP2 policy for {model_type}")
     except ValueError as e:
         logging.error(
-            f"{LOG_PREFIX} [FSDPLoading] No FSDP policy registered for model type '{model_type}'. "
+            f"{LOG_PREFIX} [FSDP2Loading] No FSDP2 policy registered for model type '{model_type}'. "
             f"Supported models: flux, qwen_image, wan. Error: {e}"
         )
         return None
@@ -194,7 +194,7 @@ def fsdp_load_diffusion_model_state_dict(
     
     logging.info(f"{LOG_PREFIX} [FSDPLoading] Model structure created on device={inital_load_device} (weights NOT loaded yet)")
     
-    # Step 5: Create FSDPModelPatcher with FSDP config and state dict for distributed loading
+    # Step 5: Create FSDP2ModelPatcher with FSDP config and state dict for distributed loading
     fsdp_config = {
         'auto_wrap_policy': auto_wrap_policy,
         'cpu_offload': cpu_offload,
@@ -212,8 +212,8 @@ def fsdp_load_diffusion_model_state_dict(
             buffer_dtype=torch.float32,
         )
     
-    # Create FSDPModelPatcher (will wrap with FSDP and load shards on first load())
-    patcher = FSDPModelPatcher(
+    # Create FSDP2ModelPatcher (will wrap with FSDP2 and load shards on first load())
+    patcher = FSDP2ModelPatcher(
         model=model,
         load_device=load_device,
         offload_device=offload_device,
@@ -279,33 +279,33 @@ def fsdp_load_diffusion_model_state_dict(
     return patcher
 
 
-def fsdp_load_diffusion_model(
+def fsdp2_load_diffusion_model(
     unet_path: str,
     model_options: dict = {},
     device_mesh = None,
     model_type: Optional[str] = None,
     cpu_offload: bool = False
 ):
-    """Load diffusion model with FSDP sharding from file path.
+    """Load diffusion model with FSDP2 sharding from file path.
     
     Drop-in replacement for comfy.sd.load_diffusion_model() that
-    returns FSDPModelPatcher instead of ModelPatcher.
+    returns FSDP2ModelPatcher instead of ModelPatcher.
     
     Args:
         unet_path: Path to model checkpoint file
         model_options: ComfyUI model options dict
         device_mesh: Optional DeviceMesh for topology-aware sharding
         model_type: Optional explicit model type (auto-detected if None)
-        cpu_offload: Whether to offload FSDP parameters to CPU
+        cpu_offload: Whether to offload FSDP2 parameters to CPU
     
     Returns:
-        FSDPModelPatcher: FSDP-wrapped model patcher
+        FSDP2ModelPatcher: FSDP2-wrapped model patcher
         
     Raises:
         RuntimeError: If model type cannot be detected
         
     Example:
-        patcher = fsdp_load_diffusion_model(
+        patcher = fsdp2_load_diffusion_model(
             unet_path="models/unet/flux_dev.safetensors",
             model_options={'fsdp': {'enabled': True}},
             device_mesh=mesh
@@ -313,7 +313,7 @@ def fsdp_load_diffusion_model(
     """
     sd = comfy.utils.load_torch_file(unet_path)
     
-    model = fsdp_load_diffusion_model_state_dict(
+    model = fsdp2_load_diffusion_model_state_dict(
         sd=sd,
         model_options=model_options,
         device_mesh=device_mesh,

@@ -11,12 +11,12 @@ __all__ = [
     'get_dp_rank',
     'get_sp_size',
     'get_dp_size',
-    'FSDPPolicyRegistry',
-    'FSDPModelPatcher',
-    'get_fsdp_strategy',
+    'FSDP2PolicyRegistry',
+    'FSDP2ModelPatcher',
+    'get_fsdp2_strategy',
     'detect_model_type',
-    'fsdp_load_diffusion_model_state_dict',
-    'fsdp_load_diffusion_model',
+    'fsdp2_load_diffusion_model_state_dict',
+    'fsdp2_load_diffusion_model',
 ]
 
 from .executor import MultiprocExecutor
@@ -30,7 +30,7 @@ from .parallel_state import (
     get_sp_size,
     get_dp_size,
 )
-from .fsdp_policies import FSDPPolicyRegistry
-from .fsdp_model_patcher import FSDPModelPatcher
-from .fsdp_registry import get_fsdp_strategy, detect_model_type
-from .fsdp_loading import fsdp_load_diffusion_model_state_dict, fsdp_load_diffusion_model
+from .fsdp2_policies import FSDP2PolicyRegistry
+from .fsdp2_model_patcher import FSDP2ModelPatcher
+from .fsdp2_registry import get_fsdp2_strategy, detect_model_type
+from .fsdp2_loading import fsdp2_load_diffusion_model_state_dict, fsdp2_load_diffusion_model

@@ -10,17 +10,17 @@ Design:
 
 Usage:
     # Auto-detect model type and get policy
-    policy_fn = get_fsdp_strategy(state_dict=sd)
+    policy_fn = get_fsdp2_strategy(state_dict=sd)
     policy = policy_fn()
     
     # Or specify model type explicitly
-    policy_fn = get_fsdp_strategy(model_type="flux")
+    policy_fn = get_fsdp2_strategy(model_type="flux")
     policy = policy_fn()
 """
 
 import logging
 from typing import Callable, Optional, Dict
-from .fsdp_policies import FSDPPolicyRegistry
+from .fsdp2_policies import FSDP2PolicyRegistry
 
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
@@ -104,20 +104,20 @@ def detect_model_type(state_dict: dict, model_config=None) -> Optional[str]:
     
     # Could not detect
     logging.warning(
-        f"{LOG_PREFIX} [FSDPRegistry] Could not detect model type. "
-        f"Available policies: {FSDPPolicyRegistry.list_registered()}"
+        f"{LOG_PREFIX} [FSDP2Registry] Could not detect model type. "
+        f"Available policies: {FSDP2PolicyRegistry.list_registered()}"
     )
     return None
 
 
-def get_fsdp_strategy(
+def get_fsdp2_strategy(
     state_dict: Optional[dict] = None,
     model_type: Optional[str] = None,
     model_config = None
 ) -> Callable:
-    """Get FSDP wrapping strategy for a model.
+    """Get FSDP2 wrapping strategy for a model.
     
-    Retrieves the appropriate FSDP auto_wrap_policy function for a given
+    Retrieves the appropriate FSDP2 auto_wrap_policy function for a given
     model. Can auto-detect model type from state dict, or use explicit type.
     
     Args:
@@ -133,15 +133,15 @@ def get_fsdp_strategy(
         
     Example:
         # Auto-detect
-        policy_fn = get_fsdp_strategy(state_dict=sd)
+        policy_fn = get_fsdp2_strategy(state_dict=sd)
         policy = policy_fn()
         
         # Explicit
-        policy_fn = get_fsdp_strategy(model_type="flux")
+        policy_fn = get_fsdp2_strategy(model_type="flux")
         policy = policy_fn()
         
-        # Use with FSDP
-        fsdp_model = FSDP(model, auto_wrap_policy=policy, ...)
+        # Use with FSDP2
+        # FSDP2ModelPatcher uses with fully_shard()
     """
     # Determine model type
     if model_type is None:
@@ -152,7 +152,7 @@ def get_fsdp_strategy(
         model_type = detect_model_type(state_dict, model_config=model_config)
         
         if model_type is None:
-            available = FSDPPolicyRegistry.list_registered()
+            available = FSDP2PolicyRegistry.list_registered()
             raise ValueError(
                 f"Could not detect model type from state dict. "
                 f"Available policies: {available}. "
@@ -160,22 +160,22 @@ def get_fsdp_strategy(
             )
     
     # Get policy from registry
-    logging.info(f"{LOG_PREFIX} [FSDPRegistry] Retrieving FSDP strategy for: {model_type}")
+    logging.info(f"{LOG_PREFIX} [FSDP2Registry] Retrieving FSDP2 strategy for: {model_type}")
     
     try:
-        policy_fn = FSDPPolicyRegistry.get_policy(model_type)
+        policy_fn = FSDP2PolicyRegistry.get_policy(model_type)
         return policy_fn
     except ValueError as e:
         # Re-raise with more context
-        available = FSDPPolicyRegistry.list_registered()
+        available = FSDP2PolicyRegistry.list_registered()
         raise ValueError(
-            f"No FSDP policy for model type '{model_type}'. "
+            f"No FSDP2 policy for model type '{model_type}'. "
             f"Available: {available}"
         ) from e
 
 
 def list_available_strategies() -> list:
-    """List all registered FSDP strategies.
+    """List all registered FSDP2 strategies.
     
     Returns:
         list: List of model type strings with registered strategies
@@ -185,7 +185,7 @@ def list_available_strategies() -> list:
         print(f"Available: {strategies}")
         # Output: ["flux", "qwen_image", "wan"]
     """
-    return FSDPPolicyRegistry.list_registered()
+    return FSDP2PolicyRegistry.list_registered()
 
 
 def is_strategy_available(model_type: str) -> bool:
@@ -199,6 +199,6 @@ def is_strategy_available(model_type: str) -> bool:
         
     Example:
         if is_strategy_available("flux"):
-            policy_fn = get_fsdp_strategy(model_type="flux")
+            policy_fn = get_fsdp2_strategy(model_type="flux")
     """
-    return FSDPPolicyRegistry.is_registered(model_type)
+    return FSDP2PolicyRegistry.is_registered(model_type)

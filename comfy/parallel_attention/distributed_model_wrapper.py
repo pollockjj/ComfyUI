@@ -206,11 +206,11 @@ class DistributedModelWrapper:
             Requested object from scaffold or None
         """
         if name == "latent_format":
-            # Return cached latent_format from scaffold
-            return self._latent_format
+            # Return from scaffold model directly
+            return self._scaffold.latent_format
         elif name in ("model", "diffusion_model", ""):
             return self
-        return None
+        return getattr(self._scaffold, name, None)
     
     def model_dtype(self) -> torch.dtype:
         """Alias for get_dtype() for ComfyUI compatibility.
@@ -228,7 +228,7 @@ class DistributedModelWrapper:
         Returns:
             bool: Whether model uses ADM (Stable Diffusion style)
         """
-        return self._is_adm
+        return self._scaffold.is_adm() if hasattr(self._scaffold, 'is_adm') else False
     
     def encode_adm(self, **kwargs):
         """Encode ADM conditioning (if supported).
@@ -254,7 +254,8 @@ class DistributedModelWrapper:
         Returns:
             dict: Extra conditioning configuration
         """
-        return self.extra_conds_dict
+        # Runtime property - ComfyUI populates during sampling
+        return {}
     
     def model_size(self):
         """Return total model size for memory scheduler.
@@ -265,8 +266,9 @@ class DistributedModelWrapper:
         Returns:
             int: Model size in bytes (unsharded)
         """
-        # Already extracted from scaffold in __init__ (line 88)
-        return self._model_size
+        # Calculate from scaffold structure
+        import comfy.model_management
+        return comfy.model_management.module_size(self._scaffold)
     
     def loaded_size(self):
         """Return wrapper's memory footprint.
