@@ -1,4 +1,4 @@
-"""Parallel state management with DeviceMesh for FSDP and sequence parallel."""
+"""Parallel state management with DeviceMesh for FSDP2 and sequence parallel."""
 
 import torch
 import torch.distributed as dist
