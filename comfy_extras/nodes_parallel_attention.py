@@ -88,8 +88,11 @@ class ParallelAttentionUnitTests:
                 # Phase 2.7: FSDP2 Sharding
                 "phase2_7_fsdp2_sharding": ("BOOLEAN", {"default": False}),
                 
-                # Phase 2.7.2: Deep Validation (ACTIVE)
+                # Phase 2.7.2: Deep Validation
                 "phase2_7_2_deep_validation": ("BOOLEAN", {"default": False}),
+                
+                # Phase 2.8: Forward Pass Execution (ACTIVE)
+                "phase2_8_forward_pass": ("BOOLEAN", {"default": False}),
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -105,7 +108,7 @@ class ParallelAttentionUnitTests:
     
     def run_tests(self, phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader,
                   phase2_5_worker_spawn, phase2_6_checkpoint_path, phase2_7_fsdp2_sharding,
-                  phase2_7_2_deep_validation, run_all_complete, model=None):
+                  phase2_7_2_deep_validation, phase2_8_forward_pass, run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -705,6 +708,86 @@ class ParallelAttentionUnitTests:
                     else:
                         logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
                         results.append(f"❌ Phase 2.7.2: Deep Validation ({checks_passed}/{checks_total})")
+            
+            # Phase 2.8: Forward Pass Execution
+            if phase2_8_forward_pass:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.8: Forward Pass Execution                      │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if model is None:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP: No MODEL input")
+                    results.append("⏸️  Phase 2.8: Skipped (no MODEL)")
+                else:
+                    checks_passed = 0
+                    checks_total = 3
+                    
+                    # Test 1: Forward pass executes
+                    try:
+                        # Create dummy input matching Flux shape
+                        dummy_img = torch.randn(1, 16, 64, 64)
+                        dummy_txt = torch.randn(1, 512, 4096)
+                        dummy_timesteps = torch.tensor([1.0])
+                        dummy_y = torch.randn(1, 768)
+                        dummy_guidance = torch.tensor([3.5])
+                        
+                        result = model.parallel_executor.execute_collective(
+                            "forward",
+                            {
+                                "args": (dummy_img, dummy_txt, dummy_timesteps, dummy_y, dummy_guidance),
+                                "kwargs": {}
+                            }
+                        )
+                        
+                        forward_success = result.get("status") == "success"
+                        has_output = result.get("output") is not None
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if forward_success and has_output else '❌'} [1/3] Forward pass executed")
+                        if forward_success and has_output: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [1/3] Forward pass failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Test 2: Output shape correct
+                    try:
+                        output = result.get("output")
+                        if output is not None:
+                            output_shape = tuple(output.shape) if isinstance(output, torch.Tensor) else None
+                            shape_correct = output_shape is not None and len(output_shape) == 4
+                            
+                            logging.info(f"{LOG_PREFIX} [Test]   {'✅' if shape_correct else '❌'} [2/3] Output shape: {output_shape}")
+                            if shape_correct: checks_passed += 1
+                        else:
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/3] No output returned")
+                            
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/3] Output shape check failed: {e}")
+                    
+                    # Test 3: VRAM stable
+                    try:
+                        vram_result = model.parallel_executor.execute_collective(
+                            "get_model_size",
+                            {}
+                        )
+                        
+                        vram_after = vram_result.get("vram_gb", 0)
+                        vram_stable = vram_after <= 12.0
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if vram_stable else '❌'} [3/3] VRAM stable: {vram_after:.2f}GB (no leak)")
+                        if vram_stable: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/3] VRAM check failed: {e}")
+                    
+                    # Summary
+                    if checks_passed == checks_total:
+                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS: {checks_passed}/{checks_total}")
+                        results.append(f"✅ Phase 2.8: Forward Pass ({checks_passed}/{checks_total})")
+                    else:
+                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
+                        results.append(f"❌ Phase 2.8: Forward Pass ({checks_passed}/{checks_total})")
             
             # Shutdown executor ONLY if we created it (not from model)
             if executor and not (model is not None and hasattr(model, 'parallel_executor') and model.parallel_executor is executor):

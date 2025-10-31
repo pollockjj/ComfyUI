@@ -1,159 +1,123 @@
-"""FSDP2ModelPatcher - Distributed inference via meta device interface.
+"""FSDP2ModelPatcher - Relay forward calls to distributed workers.
 
-Extends ModelPatcher to support FSDP2 distributed inference while maintaining
-100% compatibility with ComfyUI's existing workflow system.
+Extends ModelPatcher to relay apply_model() calls to FSDP2 workers.
+Maintains 100% compatibility with ComfyUI's existing workflow system.
 
-Architecture:
-- Meta device model stays as self.model permanently (never replaced)
-- FSDP2 workers hold sharded model for actual computation
-- Forward pass intercepted via PyTorch hook, relayed to workers
-- ComfyUI sees standard ModelPatcher API, unaware of distribution
-
-Based on Raylight meta interface pattern + FastVideo multiprocess.
+Based on Raylight FSDPModelPatcher pattern, adapted for multiprocessing.
 """
 
 from comfy.model_patcher import ModelPatcher
 import torch
 import logging
 
-LOG_PREFIX = "⚡ [FSDP2]"
+LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
 class FSDP2ModelPatcher(ModelPatcher):
-    """ModelPatcher with FSDP2 distributed inference support.
+    """ModelPatcher that relays forward calls to FSDP2 workers.
     
-    Meta device model stays as self.model permanently.
-    Workers hold FSDP2 sharded model for actual computation.
-    Forward pass intercepted via PyTorch hook and relayed to workers.
+    Extends ModelPatcher to support distributed inference while maintaining
+    full compatibility with ComfyUI's sampling and node system.
     
-    Based on Raylight meta interface pattern.
+    Pattern: Raylight FSDPModelPatcher + multiprocessing executor
     """
     
     def __init__(self, model, load_device, offload_device, size=0, 
-                 weight_inplace_update=False):
-        # CRITICAL: Initialize FSDP2 attributes BEFORE calling super().__init__()
-        # because ModelPatcher.__init__() calls self.model_size() at line 234
-        # which is overridden by this class and accesses these attributes
-        self._fsdp_initialized = False
-        self._executor = None
-        self._forward_hook = None
-        self._original_model_size = size  # Full model size
-        self._checkpoint_path = None  # Will be set by sd.py
+                 weight_inplace_update=False, executor=None):
+        """Initialize FSDP2ModelPatcher.
         
-        # Now safe to call parent init (which will call our overridden model_size())
-        super().__init__(model, load_device, offload_device, size, 
-                        weight_inplace_update)
-        
-        logging.info(f"{LOG_PREFIX} Created FSDP2ModelPatcher (meta device interface)")
-    
-    def load(self, device, lowvram_model_memory=0, force_patch_weights=False, 
-             full_load=False):
-        """Override load() to initialize FSDP2 workers on first call.
-        
-        Flow:
-        1. Check if model is on meta device
-        2. If yes and not initialized, spawn FSDP2 workers
-        3. Register forward hook for interception
-        4. Continue normal ModelPatcher load flow
+        Args:
+            model: Model instance (on parent process)
+            load_device: Device to load to
+            offload_device: Device to offload to
+            size: Model size in bytes
+            weight_inplace_update: Whether to update weights in place
+            executor: MultiprocExecutor with workers
         """
-        if not self._fsdp_initialized and self._is_meta_device():
-            logging.info(f"{LOG_PREFIX} Initializing FSDP2 workers...")
-            self._initialize_fsdp2(device)
-            self._register_forward_hook()
-            self._fsdp_initialized = True
-        
-        # Call parent load (handles device management)
-        return super().load(device, lowvram_model_memory, force_patch_weights, full_load)
-    
-    def model_size(self, include_patches=False):
-        """Report sharded model size after FSDP2 initialization.
-        
-        Before init: 0 bytes (meta device)
-        After init: Per-GPU sharded size (e.g., 11GB/GPU)
-        """
-        if not self._fsdp_initialized:
-            return 0  # Meta device has no memory
-        
-        # Get sharded size from workers
-        if self._executor:
-            try:
-                result = self._executor.execute_collective("get_model_size", {})
-                return result.get("size_bytes", self._original_model_size)
-            except Exception as e:
-                logging.error(f"{LOG_PREFIX} Failed to get model size from workers: {e}")
-                return self._original_model_size
-        
-        return self._original_model_size
-    
-    def _is_meta_device(self):
-        """Check if model is on meta device."""
-        try:
-            first_param = next(self.model.parameters())
-            return first_param.device.type == 'meta'
-        except StopIteration:
-            return False
-    
-    def _initialize_fsdp2(self, device):
-        """Spawn workers and initialize FSDP2 sharded model."""
-        from comfy.parallel_attention.fsdp2_executor import FSDP2Executor
-        
-        world_size = 2  # TODO: Make configurable
-        self._executor = FSDP2Executor(world_size=world_size)
-        
-        # Workers load checkpoint with FSDP2 sharding
-        result = self._executor.execute_collective("initialize_fsdp2", {
-            "model_structure": self._serialize_model_structure(),
-            "checkpoint_path": self._checkpoint_path,
-            "device": str(device),
-        })
-        
-        if not result.get("success"):
-            raise RuntimeError(f"FSDP2 initialization failed: {result.get('error')}")
-        
-        logging.info(f"{LOG_PREFIX} FSDP2 workers ready: {result.get('vram_gb', 0)}GB/GPU")
-    
-    def _register_forward_hook(self):
-        """Register PyTorch hook to intercept forward pass."""
-        def fsdp_forward_hook(module, args, kwargs):
-            """Intercept forward pass and relay to FSDP2 workers."""
-            if not self._fsdp_initialized:
-                return None  # Let normal forward proceed
-            
-            # Send inputs to workers
-            result = self._executor.execute_collective("forward", {
-                "args": args,
-                "kwargs": kwargs,
-            })
-            
-            # Return output (hook will pass this through)
-            return result.get("output")
-        
-        self._forward_hook = self.model.register_forward_pre_hook(
-            fsdp_forward_hook, 
-            with_kwargs=True
+        super().__init__(
+            model=model,
+            load_device=load_device,
+            offload_device=offload_device,
+            size=size,
+            weight_inplace_update=weight_inplace_update
         )
-        logging.info(f"{LOG_PREFIX} Forward hook registered")
+        self.executor = executor
+        self.is_fsdp2 = executor is not None
+        
+        logging.info(f"{LOG_PREFIX} [FSDP2ModelPatcher] Created with executor: {self.is_fsdp2}")
     
-    def _serialize_model_structure(self):
-        """Serialize meta model structure for worker initialization."""
-        # Extract module names and structure
-        module_names = [name for name, _ in self.model.named_modules() if name]
+    def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, 
+                   transformer_options={}, **kwargs):
+        """Apply model forward pass.
         
-        return {
-            "module_names": module_names[:10],  # First 10 for debugging
-            "model_class": self.model.__class__.__name__,
-            "num_modules": len(module_names),
-        }
+        If FSDP2 executor attached, relay to workers.
+        Otherwise, call parent implementation.
+        
+        Args:
+            x: Latent input
+            t: Timestep
+            c_concat: Concat conditioning
+            c_crossattn: Cross-attention conditioning
+            control: ControlNet conditioning
+            transformer_options: Additional options
+            **kwargs: Additional arguments
+            
+        Returns:
+            Model output (denoised latent)
+        """
+        if self.is_fsdp2 and self.executor is not None:
+            # Relay to FSDP2 workers
+            logging.debug(f"{LOG_PREFIX} [FSDP2ModelPatcher] Relaying apply_model to workers")
+            
+            # Prepare arguments for worker forward
+            # Workers expect: (x, timestep, context, y, guidance, ...)
+            context = c_crossattn.get("c_crossattn", None) if isinstance(c_crossattn, dict) else c_crossattn
+            y = c_concat.get("y", None) if isinstance(c_concat, dict) else None
+            guidance = kwargs.get("guidance", None)
+            
+            result = self.executor.execute_collective(
+                "forward",
+                {
+                    "args": (x, t, context, y, guidance),
+                    "kwargs": {}
+                }
+            )
+            
+            if result.get("status") == "success":
+                output = result.get("output")
+                logging.debug(f"{LOG_PREFIX} [FSDP2ModelPatcher] Received output from workers")
+                return output
+            else:
+                error = result.get("error", "Unknown error")
+                raise RuntimeError(f"Worker forward failed: {error}")
+        else:
+            # No FSDP2, use parent implementation
+            return super().apply_model(x, t, c_concat, c_crossattn, control, 
+                                      transformer_options, **kwargs)
     
-    def unpatch_model(self, device_to=None, unpatch_weights=True):
-        """Override to handle FSDP2 cleanup."""
-        if self._forward_hook:
-            self._forward_hook.remove()
-            self._forward_hook = None
+    def clone(self, *args, **kwargs):
+        """Clone the model patcher.
         
-        if self._executor:
-            self._executor.shutdown()
-            self._executor = None
-            self._fsdp_initialized = False
+        Maintains executor reference in cloned instance.
+        """
+        n = super().clone(*args, **kwargs)
+        n.__class__ = FSDP2ModelPatcher
+        n.executor = self.executor
+        n.is_fsdp2 = self.is_fsdp2
+        return n
+    
+    def model_memory_required(self, device):
+        """Report sharded memory size to ComfyUI scheduler.
         
-        return super().unpatch_model(device_to, unpatch_weights)
+        Returns:
+            Memory required per GPU (sharded size, not full size)
+        """
+        if self.is_fsdp2 and self.executor is not None:
+            # Return sharded size (full size / world_size)
+            world_size = self.executor.world_size
+            full_size = super().model_memory_required(device)
+            sharded_size = full_size // world_size
+            logging.debug(f"{LOG_PREFIX} [FSDP2ModelPatcher] Memory required: {sharded_size / (1024**3):.2f}GB (sharded)")
+            return sharded_size
+        else:
+            return super().model_memory_required(device)

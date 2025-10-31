@@ -192,27 +192,96 @@ class FSDP2Worker:
         return object_list[0]
     
     def _forward(self, args: dict):
-        """Execute forward pass on sharded model.
+        """Execute forward pass on FSDP2-sharded model.
         
-        Phase 2.3: Placeholder - returns None to test infrastructure works.
-        Phase 2.4: Will implement actual forward pass relay.
+        Generic implementation - works for FSDP-only and future FSDP+USP.
+        FSDP2 handles all-gather/reshard automatically via reshard_after_forward=True.
+        
+        Args:
+            args: {
+                "args": tuple - Positional arguments for model.forward()
+                "kwargs": dict - Keyword arguments for model.forward()
+            }
+        
+        Returns:
+            {
+                "status": "success"|"error",
+                "output": tensor|dict (only from rank 0),
+                "rank": int
+            }
+        
+        Pattern: FastVideo gpu_worker.py line 75 + Raylight automatic communication
         """
+        if self.model is None:
+            return {"status": "error", "error": "Model not loaded"}
+        
         forward_args = args.get("args", ())
         forward_kwargs = args.get("kwargs", {})
         
-        logging.info(f"{LOG_PREFIX} Worker-{self.rank} forward pass (placeholder)")
+        logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Executing forward pass...")
         
-        with torch.no_grad():
-            # TODO Phase 2.4: Implement actual forward pass
-            # Move inputs to device
-            # output = self.model(*forward_args, **forward_kwargs)
-            pass
+        try:
+            with torch.no_grad():
+                # Move inputs to device
+                forward_args = tuple(
+                    arg.to(self.device) if isinstance(arg, torch.Tensor) else arg
+                    for arg in forward_args
+                )
+                forward_kwargs = {
+                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in forward_kwargs.items()
+                }
+                
+                # Execute forward pass on diffusion_model (ComfyUI structure)
+                # FSDP2 automatically:
+                # 1. All-gathers parameters (each rank has full params temporarily)
+                # 2. Executes forward computation
+                # 3. Reshards parameters (back to 11GB per GPU)
+                if hasattr(self.model, 'diffusion_model'):
+                    # ComfyUI models: wrapper.diffusion_model has forward()
+                    output = self.model.diffusion_model(*forward_args, **forward_kwargs)
+                else:
+                    # Direct model (FastVideo pattern)
+                    output = self.model(*forward_args, **forward_kwargs)
+                
+                logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Forward pass complete")
+                
+                # Move output to CPU for return (avoid GPU memory buildup)
+                if isinstance(output, torch.Tensor):
+                    output = output.cpu()
+                elif isinstance(output, dict):
+                    output = {
+                        k: v.cpu() if isinstance(v, torch.Tensor) else v
+                        for k, v in output.items()
+                    }
+                elif isinstance(output, (list, tuple)):
+                    output = type(output)(
+                        v.cpu() if isinstance(v, torch.Tensor) else v
+                        for v in output
+                    )
+            
+            # Only rank 0 returns output (data parallel - all ranks compute same thing)
+            if self.rank == 0:
+                return {
+                    "status": "success",
+                    "output": output,
+                    "rank": self.rank
+                }
+            else:
+                return {
+                    "status": "success",
+                    "rank": self.rank
+                }
         
-        # Only rank 0 returns result
-        if self.rank == 0:
-            return {"success": True, "output": None}
-        
-        return {"success": True}
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} [Worker-{self.rank}] Forward pass failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "error": str(e),
+                "rank": self.rank
+            }
     
     def _get_model_size(self, args: dict):
         """Return VRAM usage of sharded model."""

@@ -1374,17 +1374,62 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: {}".format(left_over))
     
-    model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    # Use FSDP2ModelPatcher if executor created (enables forward relay to workers)
+    if executor is not None:
+        from comfy.model_patcher_fsdp2 import FSDP2ModelPatcher
+        model_patcher = FSDP2ModelPatcher(
+            model, 
+            load_device=load_device, 
+            offload_device=offload_device,
+            executor=executor
+        )
+        logging.info("⚡ [Parallel-Attention] Created FSDP2ModelPatcher with executor")
+    else:
+        model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     
     # Attach meta model if created
     if meta_model is not None:
         model_patcher.meta_model = meta_model
         logging.info("⚡ [Parallel-Attention] Meta model attached to ModelPatcher")
     
-    # Attach executor if created
-    if executor is not None:
-        model_patcher.parallel_executor = executor
-        logging.info("⚡ [Parallel-Attention] Executor attached to ModelPatcher")
+    # Initialize workers with sharded model if executor present (FastVideo eager pattern)
+    if executor is not None and meta_model is not None:
+        logging.info("⚡ [Parallel-Attention] Initializing workers with sharded model...")
+        
+        # Clean meta_model for pickling
+        import copy
+        clean_meta = copy.deepcopy(meta_model)
+        if hasattr(clean_meta, 'model_sampling'):
+            delattr(clean_meta, 'model_sampling')
+        if hasattr(clean_meta, 'latent_format'):
+            delattr(clean_meta, 'latent_format')
+        
+        # Detect model type
+        model_class_name = model.__class__.__name__
+        if "Flux" in model_class_name:
+            model_type = "flux"
+        elif "Wan" in model_class_name or "WAN" in model_class_name:
+            model_type = "wan"
+        elif "Qwen" in model_class_name:
+            model_type = "qwen_image"
+        else:
+            model_type = "flux"  # Default
+        
+        # Initialize workers with sharded model
+        result = executor.execute_collective(
+            "initialize_fsdp2_from_checkpoint",
+            {
+                "checkpoint_path": model_options.get('_checkpoint_path'),
+                "model_type": model_type,
+                "meta_model": clean_meta
+            }
+        )
+        
+        if result.get("status") == "success":
+            vram_gb = result.get("vram_gb", 0)
+            logging.info(f"⚡ [Parallel-Attention] Workers initialized: {vram_gb:.2f}GB per GPU")
+        else:
+            logging.error(f"⚡ [Parallel-Attention] Worker initialization failed: {result.get('error')}")
     
     return model_patcher
 
