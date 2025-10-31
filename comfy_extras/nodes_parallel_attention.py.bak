@@ -82,11 +82,8 @@ class ParallelAttentionUnitTests:
                 # Phase 2.5: Worker Spawn at Flag Detection
                 "phase2_5_worker_spawn": ("BOOLEAN", {"default": False}),
                 
-                # Phase 2.6: Checkpoint Path to Workers
+                # Phase 2.6: Checkpoint Path to Workers (ACTIVE)
                 "phase2_6_checkpoint_path": ("BOOLEAN", {"default": False}),
-                
-                # Phase 2.7: FSDP2 Sharding (ACTIVE)
-                "phase2_7_fsdp2_sharding": ("BOOLEAN", {"default": False}),
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -101,8 +98,7 @@ class ParallelAttentionUnitTests:
     CATEGORY = "parallel_attention"
     
     def run_tests(self, phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader,
-                  phase2_5_worker_spawn, phase2_6_checkpoint_path, phase2_7_fsdp2_sharding,
-                  run_all_complete, model=None):
+                  phase2_5_worker_spawn, phase2_6_checkpoint_path, run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -119,11 +115,10 @@ class ParallelAttentionUnitTests:
             phase2_2_1_1_meta_ground_truth = True
             phase2_2_1_1_copy_exact_loader = True
             phase2_5_worker_spawn = True
-            phase2_6_checkpoint_path = True
         
         # Check if any tests enabled
         any_enabled = (phase2_2_1_1_meta_ground_truth or phase2_2_1_1_copy_exact_loader or
-                      phase2_5_worker_spawn or phase2_6_checkpoint_path or phase2_7_fsdp2_sharding)
+                      phase2_5_worker_spawn or phase2_6_checkpoint_path)
         
         if not any_enabled:
             return ("⚠️  No tests enabled. Enable at least one phase boolean.",)
@@ -149,6 +144,167 @@ class ParallelAttentionUnitTests:
             if phase2_2_1_1_meta_ground_truth:
                 logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
                 logging.info(f"{LOG_PREFIX} [Test] │ PHASE 1.1: Multiprocess Foundation (COMPLETE)          │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                # Test 1.1.1: Worker spawn and echo RPC
+                logging.info(f"{LOG_PREFIX} [Test] Test 1.1.1: Worker spawn + echo RPC...")
+                test_message = "hello from comfy"
+                result = executor.execute_collective("echo", {"message": test_message})
+                
+                if result != test_message:
+                    if executor: executor.shutdown()
+                    return (f"❌ FAIL [Test 1.1.1]: Echo failed. Expected '{test_message}', got '{result}'",)
+                
+                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 1.1.1]: Echo RPC working")
+                results.append("✅ Phase 1.1.1: Worker spawn + echo RPC")
+                
+                # Test 1.1.2: Multiple sequential RPCs (stability)
+                logging.info(f"{LOG_PREFIX} [Test] Test 1.1.2: Multiple sequential RPCs (stability)...")
+                for i in range(5):
+                    message = f"message_{i}"
+                    result = executor.execute_collective("echo", {"message": message})
+                    if result != message:
+                        if executor: executor.shutdown()
+                        return (f"❌ FAIL [Test 1.1.2]: RPC {i} failed",)
+                
+                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 1.1.2]: Multiple RPCs stable")
+                results.append("✅ Phase 1.1.2: Multiple sequential RPCs")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1.2: NCCL/GLOO Collectives (Test 1.2)
+            # ═══════════════════════════════════════════════════════════════
+            if phase1_2_collectives:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 1.2: NCCL/GLOO Collectives (COMPLETE)            │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if torch.cuda.is_available() and executor.backend == "nccl":
+                    logging.info(f"{LOG_PREFIX} [Test] Test 1.2: torch.distributed all_reduce...")
+                    result = executor.execute_collective("allreduce_test", {})
+                    expected = sum(range(world_size))
+                    
+                    if result != expected:
+                        if executor: executor.shutdown()
+                        return (f"❌ FAIL [Test 1.2]: all_reduce failed. Expected {expected}, got {result}",)
+                    
+                    logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 1.2]: all_reduce collective working (result={result})")
+                    results.append(f"✅ Phase 1.2: NCCL all_reduce (result={result})")
+                else:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP [Test 1.2]: CUDA not available or backend={executor.backend if executor else 'none'}")
+                    results.append("⏸️  Phase 1.2: Skipped (no CUDA/NCCL)")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1.3: DeviceMesh Topology (Test 1.3)
+            # ═══════════════════════════════════════════════════════════════
+            if phase1_3_devicemesh:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 1.3: DeviceMesh Topology (COMPLETE)              │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if torch.cuda.is_available() and executor.backend == "nccl":
+                    logging.info(f"{LOG_PREFIX} [Test] Test 1.3: DeviceMesh topology + SP collective...")
+                    result = executor.execute_collective("devicemesh_test", {})
+                    
+                    # Validate mesh structure
+                    mesh_shape = result.get("mesh_shape", [])
+                    expected_shape = [1, world_size]  # [dp_size=1, sp_size=world_size]
+                    
+                    if mesh_shape != expected_shape:
+                        if executor: executor.shutdown()
+                        return (f"❌ FAIL [Test 1.3]: Mesh shape mismatch. Expected {expected_shape}, got {mesh_shape}",)
+                    
+                    # Validate all_gather result
+                    gathered = result.get("gathered", [])
+                    expected_gathered = [float(i) for i in range(world_size)]
+                    
+                    if gathered != expected_gathered:
+                        if executor: executor.shutdown()
+                        return (f"❌ FAIL [Test 1.3]: SP all_gather mismatch. Expected {expected_gathered}, got {gathered}",)
+                    
+                    logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 1.3]: DeviceMesh topology correct")
+                    logging.info(f"{LOG_PREFIX} [Test]   Mesh: {mesh_shape} (dp=1, sp={world_size})")
+                    logging.info(f"{LOG_PREFIX} [Test]   SP rank {result['sp_rank']}/{result['sp_size']}, all_gather: {gathered}")
+                    results.append(f"✅ Phase 1.3: DeviceMesh topology (sp_size={world_size})")
+                else:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP [Test 1.3]: CUDA not available or backend={executor.backend if executor else 'none'}")
+                    results.append("⏸️  Phase 1.3: Skipped (no CUDA/NCCL)")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2.1: FSDP2 Policy Registry (Test 2.1)
+            # ═══════════════════════════════════════════════════════════════
+            if phase2_1_fsdp_policies:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.1: FSDP2 Policy Registry (COMPLETE)             │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                logging.info(f"{LOG_PREFIX} [Test] Test 2.1: FSDP2 Policy Registry (Flux/Wan/Qwen)...")
+                result = executor.execute_collective("test_fsdp_policy", {"model_name": "flux"})
+                
+                # Validate flux policy registered
+                if not result.get("is_registered", False):
+                    if executor: executor.shutdown()
+                    return (f"❌ FAIL [Test 2.1]: Flux policy not registered. Available: {result.get('available_policies', [])}",)
+                
+                # Validate policy is callable
+                if not result.get("policy_callable", False):
+                    if executor: executor.shutdown()
+                    return (f"❌ FAIL [Test 2.1]: Flux policy not callable. Type: {result.get('policy_type')}",)
+                
+                # Check expected policies registered
+                available = result.get("available_policies", [])
+                expected_policies = ["flux", "qwen_image", "wan"]
+                
+                missing = [p for p in expected_policies if p not in available]
+                if missing:
+                    if executor: executor.shutdown()
+                    return (f"❌ FAIL [Test 2.1]: Missing policies: {missing}. Available: {available}",)
+                
+                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.1]: FSDP2 policies registered")
+                logging.info(f"{LOG_PREFIX} [Test]   Policies: {', '.join(available)}")
+                results.append(f"✅ Phase 2.1: FSDP2 Policy Registry ({len(available)} policies)")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2.2: FSDP2 API Migration (Test 2.2)
+            # ═══════════════════════════════════════════════════════════════
+            if phase2_2_fsdp2_api:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.2: FSDP2ModelPatcher Functionality (COMPLETE)  │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                logging.info(f"{LOG_PREFIX} [Test] Test 2.2: FSDP2ModelPatcher functionality...")
+                result = executor.execute_collective("test_fsdp2_modelpatcher", {})
+                
+                # Check all validations passed
+                if not result.get("all_passed", False):
+                    failed_checks = []
+                    if not result.get("extends_modelpatcher", False):
+                        failed_checks.append("Doesn't extend ModelPatcher")
+                    if not result.get("has_original_size", False):
+                        failed_checks.append("Missing original_model_size attribute")
+                    if not result.get("correct_size", False):
+                        failed_checks.append("Original size not tracked correctly")
+                    if not result.get("correct_sharded_size", False):
+                        failed_checks.append("Sharded size calculation wrong")
+                    if not result.get("has_model_type", False):
+                        failed_checks.append("Missing model_type attribute")
+                    if not result.get("has_rank", False):
+                        failed_checks.append("Missing/wrong rank attribute")
+                    if not result.get("has_world_size", False):
+                        failed_checks.append("Missing/wrong world_size attribute")
+                    if not result.get("has_is_wrapped_flag", False):
+                        failed_checks.append("Missing is_fsdp2_wrapped flag")
+                    
+                    if executor: executor.shutdown()
+                    failure_msg = f"❌ FAIL [Test 2.2]: FSDP2ModelPatcher incomplete ({result.get('passed_checks', '0/8')})\n"
+                    for check in failed_checks:
+                        failure_msg += f"  ❌ {check}\n"
+                    return (failure_msg,)
+                
+                logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.2]: FSDP2ModelPatcher functional")
+                logging.info(f"{LOG_PREFIX} [Test]   Checks: {result.get('passed_checks', '0/8')}")
+                results.append(f"✅ Phase 2.2: FSDP2ModelPatcher ({result.get('passed_checks', '0/8')} checks)")
+            
+            # ═══════════════════════════════════════════════════════════════
             # PHASE 2.2.1.1: Meta Device Ground Truth (Test 2.2.1.1)
             # ═══════════════════════════════════════════════════════════════
             if phase2_2_1_1_meta_ground_truth:
@@ -509,89 +665,6 @@ class ParallelAttentionUnitTests:
                             else:
                                 logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
                                 results.append(f"❌ Phase 2.6: Checkpoint Path ({checks_passed}/{checks_total})")
-            
-            # ═══════════════════════════════════════════════════════════════
-            # PHASE 2.7: FSDP2 Sharding (Test 2.7)
-            # ═══════════════════════════════════════════════════════════════
-            if phase2_7_fsdp2_sharding:
-                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
-                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.7: FSDP2 Sharding                              │")
-                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
-                
-                if model is None:
-                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP: No MODEL input")
-                    results.append("⏸️  Phase 2.7: Skipped (no MODEL)")
-                else:
-                    checks_passed = 0
-                    checks_total = 5
-                    
-                    # Check 1: Has meta_model
-                    has_meta = hasattr(model, 'meta_model') and model.meta_model is not None
-                    logging.info(f"{LOG_PREFIX} [Test]   {'✅' if has_meta else '❌'} [1/5] Has meta_model")
-                    if has_meta: checks_passed += 1
-                    
-                    # Check 2: Has checkpoint_path
-                    has_checkpoint = hasattr(model, 'checkpoint_path') and model.checkpoint_path is not None
-                    logging.info(f"{LOG_PREFIX} [Test]   {'✅' if has_checkpoint else '❌'} [2/5] Has checkpoint_path")
-                    if has_checkpoint: checks_passed += 1
-                    
-                    # Check 3: Has executor
-                    has_executor = hasattr(model, 'parallel_executor') and model.parallel_executor is not None
-                    logging.info(f"{LOG_PREFIX} [Test]   {'✅' if has_executor else '❌'} [3/5] Has executor")
-                    if has_executor: checks_passed += 1
-                    
-                    if has_meta and has_checkpoint and has_executor:
-                        # Check 4: Workers apply FSDP2 sharding
-                        try:
-                            # Detect model type from class name
-                            model_class_name = model.model.__class__.__name__
-                            if "Flux" in model_class_name:
-                                model_type = "flux"
-                            elif "Wan" in model_class_name or "WAN" in model_class_name:
-                                model_type = "wan"
-                            elif "Qwen" in model_class_name:
-                                model_type = "qwen_image"
-                            else:
-                                raise ValueError(f"Unknown model type: {model_class_name}")
-                            
-                            logging.info(f"{LOG_PREFIX} [Test]   Detected model type: {model_type} (from {model_class_name})")
-                            
-                            result = model.parallel_executor.execute_collective(
-                                "initialize_fsdp2_from_checkpoint",
-                                {
-                                    "state_dict": model.loaded_state_dict,
-                                    "checkpoint_path": model.checkpoint_path,
-                                    "model_type": model_type
-                                }
-                            )
-                            
-                            sharding_success = result.get("status") == "success"
-                            vram_gb = result.get("vram_gb", 0)
-                            
-                            logging.info(f"{LOG_PREFIX} [Test]   {'✅' if sharding_success else '❌'} [4/5] FSDP2 sharding applied: {vram_gb:.2f}GB VRAM")
-                            if sharding_success: checks_passed += 1
-                            
-                        except Exception as e:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [4/5] FSDP2 sharding failed: {e}")
-                            import traceback
-                            traceback.print_exc()
-                        
-                        # Check 5: VRAM reduced (≤12GB per worker)
-                        try:
-                            vram_target = 12.0  # GB
-                            vram_reduced = vram_gb <= vram_target
-                            logging.info(f"{LOG_PREFIX} [Test]   {'✅' if vram_reduced else '❌'} [5/5] VRAM ≤ {vram_target}GB: {vram_gb:.2f}GB")
-                            if vram_reduced: checks_passed += 1
-                        except Exception as e:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [5/5] VRAM check failed: {e}")
-                    
-                    # Summary
-                    if checks_passed == checks_total:
-                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS: {checks_passed}/{checks_total}")
-                        results.append(f"✅ Phase 2.7: FSDP2 Sharding ({checks_passed}/{checks_total})")
-                    else:
-                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
-                        results.append(f"❌ Phase 2.7: FSDP2 Sharding ({checks_passed}/{checks_total})")
             
             # Shutdown executor ONLY if we created it (not from model)
             if executor and not (model is not None and hasattr(model, 'parallel_executor') and model.parallel_executor is executor):

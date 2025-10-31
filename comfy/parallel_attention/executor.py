@@ -82,14 +82,12 @@ def worker_process(rank: int, world_size: int, master_addr: str, master_port: st
             args = msg.get("args", {})
             
             try:
-                # Import worker module and execute method
-                from comfy.parallel_attention import worker
+                # Create worker instance once and reuse
+                if not hasattr(worker_process, '_worker_instance'):
+                    from comfy.parallel_attention.fsdp2_worker import FSDP2Worker
+                    worker_process._worker_instance = FSDP2Worker(rank=rank, world_size=world_size)
                 
-                if not hasattr(worker, method):
-                    raise AttributeError(f"Worker has no method '{method}'")
-                
-                method_fn = getattr(worker, method)
-                result = method_fn(**args)
+                result = worker_process._worker_instance.execute(method, args)
                 
                 # Send result back to main process
                 pipe_conn.send({"status": "success", "result": result})

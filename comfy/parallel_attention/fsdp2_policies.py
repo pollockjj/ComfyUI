@@ -1,43 +1,26 @@
 """FSDP2 wrapping policies for model-specific sharding strategies.
 
 Registry pattern for model-specific FSDP2 parameter sharding.
-Each policy defines how to shard a particular model architecture.
+Each policy returns configuration that defines how to shard a model.
 
-Based on Raylight diffusion_models/{flux,wan,qwen_image}/fsdp.py
+Refactored in Phase 2.7 for core code reuse and extensibility.
 """
 
-from torch.distributed.fsdp import fully_shard
-from torch.distributed.fsdp.api import MixedPrecision
 from typing import Callable, Dict
 import logging
+
+from comfy.parallel_attention.fsdp2_config import ShardingConfig, BlockConfig
 
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
-def detect_dtype_mismatch(module, ref_dtype):
-    """Detect parameters with dtype mismatch (e.g., FP8 weights).
-    
-    From Raylight: raylight/distributed_modules/utils.py
-    
-    Args:
-        module: PyTorch module to check
-        ref_dtype: Reference dtype (e.g., torch.float16)
-        
-    Returns:
-        Set of parameters with mismatched dtype
-    """
-    ignored_param = set()
-    for name, param in module.named_parameters(recurse=True):
-        if param.dtype != ref_dtype:
-            ignored_param.add(param)
-    return ignored_param
-
-
 class FSDP2PolicyRegistry:
-    """Registry for model-specific FSDP2 wrapping policies.
+    """Registry for model-specific FSDP2 sharding policies.
     
-    Stores and retrieves sharding strategies for different model architectures.
-    Each policy is a function that applies fully_shard() to model components.
+    Stores and retrieves sharding configuration for different model architectures.
+    Policies return ShardingConfig (config) not executables (functions).
+    
+    Refactored in Phase 2.7 for separation of concerns.
     """
     
     _policies: Dict[str, Callable] = {}
@@ -54,11 +37,8 @@ class FSDP2PolicyRegistry:
             
         Example:
             @FSDP2PolicyRegistry.register("flux")
-            def flux_fsdp2_policy():
-                def shard_flux(model, state_dict):
-                    # Apply sharding
-                    pass
-                return shard_flux
+            def flux_fsdp2_policy() -> ShardingConfig:
+                return ShardingConfig(...)
         """
         def decorator(policy_fn: Callable) -> Callable:
             cls._policies[model_name] = policy_fn
@@ -67,14 +47,14 @@ class FSDP2PolicyRegistry:
         return decorator
     
     @classmethod
-    def get_policy(cls, model_name: str) -> Callable:
-        """Retrieve a registered FSDP2 policy function.
+    def get_policy(cls, model_name: str) -> ShardingConfig:
+        """Retrieve FSDP2 sharding configuration for a model.
         
         Args:
             model_name: Model identifier
             
         Returns:
-            Policy function that returns sharding callable
+            ShardingConfig instance
             
         Raises:
             ValueError: If model_name not registered
@@ -85,7 +65,8 @@ class FSDP2PolicyRegistry:
                 f"No FSDP2 policy registered for '{model_name}'. "
                 f"Available policies: {available}"
             )
-        return cls._policies[model_name]
+        policy_fn = cls._policies[model_name]
+        return policy_fn()  # Execute function, return ShardingConfig
     
     @classmethod
     def is_registered(cls, model_name: str) -> bool:
@@ -110,233 +91,100 @@ class FSDP2PolicyRegistry:
 
 
 @FSDP2PolicyRegistry.register("flux")
-def flux_fsdp2_policy() -> Callable:
-    """Return FSDP2 sharding function for Flux model.
+def flux_fsdp2_policy() -> ShardingConfig:
+    """Return FSDP2 sharding configuration for Flux model.
     
     Flux architecture:
-    - double_blocks: List of DoubleStreamBlock (19 blocks)
-    - single_blocks: List of SingleStreamBlock (38 blocks)
-    - Other components: img_in, txt_in, time_in, final_layer, etc.
+    - double_blocks: 19 DoubleStreamBlock
+    - single_blocks: 38 SingleStreamBlock
+    - Other components: img_in, txt_in, time_in, vector_in, guidance_in, pe_embedder, final_layer
     
     Sharding strategy:
-    - Shard each double_block independently
-    - Shard each single_block independently
-    - Ignore non-transformer components (embeddings, projections)
-    
-    Based on: raylight/diffusion_models/flux/fsdp.py
+    - Shard each single_block independently (38 blocks)
+    - Shard each double_block independently (19 blocks)
+    - Ignore embeddings and projections (no sharding)
     
     Returns:
-        Callable that takes (model, state_dict) and applies FSDP2 sharding
+        ShardingConfig with block paths and ignore patterns
     """
-    def shard_flux(model, state_dict):
-        """Apply FSDP2 sharding to Flux model.
-        
-        Args:
-            model: Flux model instance
-            state_dict: Model state dict (for dtype detection)
-            
-        Returns:
-            Model with FSDP2 sharding applied
-        """
-        diffusion_model = model.diffusion_model
-        
-        # Collect params to ignore (everything except single_blocks + double_blocks)
-        ignored_params = set()
-        for name, param in diffusion_model.named_parameters():
-            if (not name.startswith("single_blocks.")) and (not name.startswith("double_blocks.")):
-                ignored_params.add(param)
-        
-        logging.info(
-            f"{LOG_PREFIX} [FSDP2-Flux] Ignoring {len(ignored_params)} non-transformer params "
-            f"(img_in, txt_in, time_in, etc.)"
-        )
-        
-        # Get reference dtype for mismatch detection (handles FP8 scaled models)
-        ref_dtype = diffusion_model.double_blocks[0].img_attn.qkv.weight.dtype
-        logging.info(f"{LOG_PREFIX} [FSDP2-Flux] Reference dtype: {ref_dtype}")
-        
-        # Shard single_blocks (38 blocks)
-        logging.info(f"{LOG_PREFIX} [FSDP2-Flux] Sharding {len(diffusion_model.single_blocks)} single_blocks...")
-        for i, block in enumerate(diffusion_model.single_blocks):
-            # Detect dtype mismatches (e.g., FP8 weights in FP16 model)
-            ignored_block_params = detect_dtype_mismatch(block, ref_dtype)
-            
-            diffusion_model.single_blocks[i] = fully_shard(
-                module=block,
-                mp_policy=MixedPrecision(),
-                reshard_after_forward=True,
-                ignored_params=ignored_block_params,
-            )
-        
-        # Shard double_blocks (19 blocks)
-        logging.info(f"{LOG_PREFIX} [FSDP2-Flux] Sharding {len(diffusion_model.double_blocks)} double_blocks...")
-        for i, block in enumerate(diffusion_model.double_blocks):
-            ignored_block_params = detect_dtype_mismatch(block, ref_dtype)
-            
-            diffusion_model.double_blocks[i] = fully_shard(
-                module=block,
-                mp_policy=MixedPrecision(),
-                reshard_after_forward=True,
-                ignored_params=ignored_block_params,
-            )
-        
-        # Root wrap with ignored params
-        logging.info(f"{LOG_PREFIX} [FSDP2-Flux] Applying root wrap with {len(ignored_params)} ignored params...")
-        fully_shard(
-            diffusion_model,
-            ignored_params=ignored_params,
-            mp_policy=MixedPrecision(),
-            reshard_after_forward=True
-        )
-        
-        model.diffusion_model = diffusion_model
-        logging.info(f"{LOG_PREFIX} [FSDP2-Flux] Sharding complete (57 blocks wrapped)")
-        
-        return model
-    
-    return shard_flux
+    return ShardingConfig(
+        model_name="flux",
+        blocks=[
+            BlockConfig(
+                module_path="diffusion_model.single_blocks",
+                block_count=38,
+                shard_each=True
+            ),
+            BlockConfig(
+                module_path="diffusion_model.double_blocks",
+                block_count=19,
+                shard_each=True
+            ),
+        ],
+        ignored_param_patterns=[
+            "single_blocks.", "double_blocks."  # EXCLUSIVE: Only these get sharded
+        ],
+        root_wrap=True
+    )
 
 
 @FSDP2PolicyRegistry.register("wan")
-def wan_fsdp2_policy() -> Callable:
-    """Return FSDP2 sharding function for Wan model.
+def wan_fsdp2_policy() -> ShardingConfig:
+    """Return FSDP2 sharding configuration for Wan model.
     
     Wan architecture:
-    - blocks: List of transformer blocks (30 blocks for Wan2.2)
-    - Other components: patch_embed, pos_embed, final_layer, etc.
+    - blocks: 30 transformer blocks (Wan2.2)
+    - Other components: patch_embed, pos_embed, final_layer
     
     Sharding strategy:
-    - Shard each transformer block independently
-    - Ignore embeddings and final layer
-    
-    Based on: raylight/diffusion_models/wan/fsdp.py
+    - Shard each transformer block independently (30 blocks)
+    - Ignore embeddings and final layer (no sharding)
     
     Returns:
-        Callable that takes (model, state_dict) and applies FSDP2 sharding
+        ShardingConfig with block paths and ignore patterns
     """
-    def shard_wan(model, state_dict):
-        """Apply FSDP2 sharding to Wan model.
-        
-        Args:
-            model: Wan model instance
-            state_dict: Model state dict (for dtype detection)
-            
-        Returns:
-            Model with FSDP2 sharding applied
-        """
-        diffusion_model = model.diffusion_model
-        
-        # Collect ignored params (everything except blocks)
-        ignored_params = set()
-        for name, param in diffusion_model.named_parameters():
-            if not name.startswith("blocks."):
-                ignored_params.add(param)
-        
-        logging.info(
-            f"{LOG_PREFIX} [FSDP2-Wan] Ignoring {len(ignored_params)} non-transformer params "
-            f"(patch_embed, pos_embed, final_layer)"
-        )
-        
-        # Get reference dtype
-        ref_dtype = diffusion_model.blocks[0].self_attn.v.weight.dtype
-        logging.info(f"{LOG_PREFIX} [FSDP2-Wan] Reference dtype: {ref_dtype}")
-        
-        # Shard blocks
-        logging.info(f"{LOG_PREFIX} [FSDP2-Wan] Sharding {len(diffusion_model.blocks)} blocks...")
-        for i, block in enumerate(diffusion_model.blocks):
-            ignored_block_params = detect_dtype_mismatch(block, ref_dtype)
-            
-            diffusion_model.blocks[i] = fully_shard(
-                module=block,
-                mp_policy=MixedPrecision(),
-                reshard_after_forward=True,
-                ignored_params=ignored_block_params,
-            )
-        
-        # Root wrap
-        logging.info(f"{LOG_PREFIX} [FSDP2-Wan] Applying root wrap with {len(ignored_params)} ignored params...")
-        fully_shard(
-            diffusion_model,
-            ignored_params=ignored_params,
-            mp_policy=MixedPrecision(),
-            reshard_after_forward=True
-        )
-        
-        model.diffusion_model = diffusion_model
-        logging.info(f"{LOG_PREFIX} [FSDP2-Wan] Sharding complete ({len(diffusion_model.blocks)} blocks wrapped)")
-        
-        return model
-    
-    return shard_wan
+    return ShardingConfig(
+        model_name="wan",
+        blocks=[
+            BlockConfig(
+                module_path="diffusion_model.blocks",
+                block_count=30,
+                shard_each=True
+            ),
+        ],
+        ignored_param_patterns=[
+            "blocks."  # EXCLUSIVE: Only these get sharded
+        ],
+        root_wrap=True
+    )
 
 
 @FSDP2PolicyRegistry.register("qwen_image")
-def qwen_image_fsdp2_policy() -> Callable:
-    """Return FSDP2 sharding function for Qwen Image model.
+def qwen_image_fsdp2_policy() -> ShardingConfig:
+    """Return FSDP2 sharding configuration for Qwen Image model.
     
     Qwen Image architecture:
-    - transformer_blocks: List of QwenImageTransformerBlock (60 blocks default)
-    - Other components: embeddings, final layer, etc.
+    - transformer_blocks: 60 blocks (default)
+    - Other components: embeddings, final_layer
     
     Sharding strategy:
-    - Shard each transformer block independently
-    - Ignore embeddings and final layer
-    
-    Based on: raylight/diffusion_models/qwen_image/fsdp.py
+    - Shard each transformer block independently (60 blocks)
+    - Ignore embeddings and final layer (no sharding)
     
     Returns:
-        Callable that takes (model, state_dict) and applies FSDP2 sharding
+        ShardingConfig with block paths and ignore patterns
     """
-    def shard_qwen(model, state_dict):
-        """Apply FSDP2 sharding to Qwen Image model.
-        
-        Args:
-            model: Qwen Image model instance
-            state_dict: Model state dict (for dtype detection)
-            
-        Returns:
-            Model with FSDP2 sharding applied
-        """
-        diffusion_model = model.diffusion_model
-        
-        # Collect ignored params (everything except transformer_blocks)
-        ignored_params = set()
-        for name, param in diffusion_model.named_parameters():
-            if not name.startswith("transformer_blocks."):
-                ignored_params.add(param)
-        
-        logging.info(
-            f"{LOG_PREFIX} [FSDP2-Qwen] Ignoring {len(ignored_params)} non-transformer params"
-        )
-        
-        # Get reference dtype
-        ref_dtype = diffusion_model.transformer_blocks[0].attn.to_q.weight.dtype
-        logging.info(f"{LOG_PREFIX} [FSDP2-Qwen] Reference dtype: {ref_dtype}")
-        
-        # Shard transformer blocks
-        logging.info(f"{LOG_PREFIX} [FSDP2-Qwen] Sharding {len(diffusion_model.transformer_blocks)} transformer_blocks...")
-        for i, block in enumerate(diffusion_model.transformer_blocks):
-            ignored_block_params = detect_dtype_mismatch(block, ref_dtype)
-            
-            diffusion_model.transformer_blocks[i] = fully_shard(
-                module=block,
-                mp_policy=MixedPrecision(),
-                reshard_after_forward=True,
-                ignored_params=ignored_block_params,
-            )
-        
-        # Root wrap
-        logging.info(f"{LOG_PREFIX} [FSDP2-Qwen] Applying root wrap with {len(ignored_params)} ignored params...")
-        fully_shard(
-            diffusion_model,
-            ignored_params=ignored_params,
-            mp_policy=MixedPrecision(),
-            reshard_after_forward=True
-        )
-        
-        model.diffusion_model = diffusion_model
-        logging.info(f"{LOG_PREFIX} [FSDP2-Qwen] Sharding complete ({len(diffusion_model.transformer_blocks)} blocks wrapped)")
-        
-        return model
-    
-    return shard_qwen
+    return ShardingConfig(
+        model_name="qwen_image",
+        blocks=[
+            BlockConfig(
+                module_path="diffusion_model.transformer_blocks",
+                block_count=60,
+                shard_each=True
+            ),
+        ],
+        ignored_param_patterns=[
+            "transformer_blocks."  # EXCLUSIVE: Only these get sharded
+        ],
+        root_wrap=True
+    )
