@@ -1358,16 +1358,16 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     if model_management.is_parallel_attention_enabled():
         # Step 1: Spawn workers FIRST
         from comfy.parallel_attention import MultiprocExecutor
-        logging.info("[Parallel-Attention] Spawning FSDP2 workers (world_size=2)")
+        logging.info("⚡ [Parallel-Attention] Spawning FSDP2 workers (world_size=2)")
         executor = MultiprocExecutor(world_size=2, backend="auto")
-        logging.info(f"[Parallel-Attention] Workers ready (backend={executor.backend})")
+        logging.info(f"⚡ [Parallel-Attention] Workers ready (backend={executor.backend})")
         
         # Step 2: Create meta model
         import copy
-        logging.info("[Parallel-Attention] Creating meta device model copy")
+        logging.info("⚡ [Parallel-Attention] Creating meta device model copy")
         meta_model = copy.deepcopy(model)
         meta_model = meta_model.to('meta')
-        logging.info(f"[Parallel-Attention] Meta model created: {type(meta_model).__name__}")
+        logging.info(f"⚡ [Parallel-Attention] Meta model created: {type(meta_model).__name__}")
     
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
@@ -1379,12 +1379,12 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     # Attach meta model if created
     if meta_model is not None:
         model_patcher.meta_model = meta_model
-        logging.info("[Parallel-Attention] Meta model attached to ModelPatcher")
+        logging.info("⚡ [Parallel-Attention] Meta model attached to ModelPatcher")
     
     # Attach executor if created
     if executor is not None:
         model_patcher.parallel_executor = executor
-        logging.info("[Parallel-Attention] Executor attached to ModelPatcher")
+        logging.info("⚡ [Parallel-Attention] Executor attached to ModelPatcher")
     
     return model_patcher
 
@@ -1405,8 +1405,10 @@ def load_diffusion_model(unet_path, model_options={}):
     if hasattr(model, 'parallel_executor') and model.parallel_executor is not None:
         model.checkpoint_path = unet_path
         model.loaded_state_dict = model.model.state_dict()
-        logging.info(f"[Parallel-Attention] Extracted state_dict: {len(model.loaded_state_dict)} keys")
-        logging.info(f"[Parallel-Attention] Checkpoint path and state_dict stored")
+        sample_keys = list(model.loaded_state_dict.keys())[:3]
+        logging.info(f"⚡ [Parallel-Attention] Extracted state_dict: {len(model.loaded_state_dict)} keys")
+        logging.info(f"⚡ [Parallel-Attention] Sample keys: {sample_keys}")
+        logging.info(f"⚡ [Parallel-Attention] Checkpoint path and state_dict stored")
     
     return model
 

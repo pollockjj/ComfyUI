@@ -26,9 +26,18 @@ class FSDP2Worker:
         self.world_size = world_size
         self.model = None
         self.device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else torch.device("cpu")
-        self.device_mesh = None  # Will be set during initialize_fsdp2
+        
+        # Create DeviceMesh for FSDP2 sharding (ARCHITECTURE.md requirement)
+        from torch.distributed.device_mesh import init_device_mesh
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device_mesh = init_device_mesh(
+            device_type,
+            (world_size,),
+            mesh_dim_names=["dp"]
+        )
         
         logging.info(f"{LOG_PREFIX} Worker-{rank} initialized on {self.device}")
+        logging.info(f"{LOG_PREFIX} Worker-{rank} DeviceMesh: {device_type} mesh_shape=({world_size},)")
     
     def execute(self, command: str, args: dict):
         """Execute command and return result."""
@@ -37,6 +46,8 @@ class FSDP2Worker:
             return args.get("message", "")
         elif command == "load_checkpoint":
             return self._load_checkpoint(args)
+        elif command == "initialize_fsdp2_from_state_dict":
+            return self._initialize_fsdp2_from_state_dict(args)
         elif command == "initialize_fsdp2_from_checkpoint":
             return self._initialize_fsdp2_from_checkpoint(args)
         elif command == "initialize_fsdp2_from_meta":
@@ -284,62 +295,155 @@ class FSDP2Worker:
             }
     
     def _initialize_fsdp2_from_checkpoint(self, args: dict):
-        """Initialize FSDP2 from state_dict (Raylight pattern).
+        """Initialize FSDP2 using FastVideo iterator pattern.
         
-        Receives state_dict from parent, reconstructs model on meta, wraps with FSDP2.
+        Streams tensors one at a time from safetensors file.
+        Never loads full 22GB state_dict into memory.
         
         Args:
             args: {
-                "state_dict": dict (extracted from parent model),
-                "checkpoint_path": str (for reference),
+                "checkpoint_path": str (path to .safetensors file),
                 "model_type": str ("flux", "wan", "qwen_image")
             }
         
         Returns:
             {"status": "success", "vram_gb": float, "rank": int}
         """
+        from safetensors.torch import safe_open
+        from torch.distributed.tensor import distribute_tensor
         from comfy.parallel_attention.fsdp2_policies import FSDP2PolicyRegistry
-        from comfy.parallel_attention.fsdp2_engine import apply_fsdp2_sharding
+        from comfy.parallel_attention.fsdp2_engine import apply_fsdp2_sharding_structure_only
         import comfy.model_detection
+        import comfy.supported_models
         
-        state_dict = args.get("state_dict")
         checkpoint_path = args.get("checkpoint_path")
         model_type = args.get("model_type")
         
-        logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Initializing FSDP2 from state_dict...")
+        if not checkpoint_path:
+            return {"status": "error", "error": "No checkpoint_path provided"}
+        
+        logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Initializing FSDP2 (FastVideo iterator pattern)...")
         logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Model type: {model_type}")
+        logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Checkpoint: {checkpoint_path}")
         
         try:
-            # DEBUG: Log what we received
-            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Received state_dict with {len(state_dict)} keys")
-            sample_keys = list(state_dict.keys())[:5]
-            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Sample keys: {sample_keys}")
+            # Step 1: Receive meta_model from parent (EXTEND ComfyUI)
+            # Parent already created meta model with correct config
+            meta_model = args.get("meta_model")
+            if meta_model is None:
+                raise ValueError("No meta_model provided from parent")
             
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Received meta_model from parent: {type(meta_model).__name__}")
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Meta model on device: {next(meta_model.parameters()).device}")
+            
+            # Step 3: Apply FSDP2 wrapping (structure only, no weights yet)
+            config = FSDP2PolicyRegistry.get_policy(model_type)
+            self.model = apply_fsdp2_sharding_structure_only(
+                meta_model, 
+                config,
+                self.device_mesh
+            )
+            
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 wrapping applied with DeviceMesh")
+            
+            # Step 4: Load weights using iterator (FastVideo pattern)
+            meta_sd = self.model.state_dict()
+            sharded_sd = {}
+            
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Streaming weights from file...")
+            
+            with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+                tensor_count = 0
+                for param_name in f.keys():
+                    # Load ONE tensor at a time
+                    full_tensor = f.get_tensor(param_name)
+                    
+                    # Get corresponding meta param
+                    meta_param = meta_sd.get(param_name)
+                    if meta_param is None:
+                        # Try with diffusion_model. prefix
+                        prefixed_name = f"diffusion_model.{param_name}"
+                        meta_param = meta_sd.get(prefixed_name)
+                        if meta_param is not None:
+                            param_name = prefixed_name
+                    
+                    if meta_param is None:
+                        continue
+                    
+                    # Move to GPU
+                    full_tensor = full_tensor.to(device=self.device)
+                    
+                    # Distribute if FSDP-wrapped (has device_mesh)
+                    if hasattr(meta_param, "device_mesh"):
+                        sharded_tensor = distribute_tensor(
+                            full_tensor,
+                            meta_param.device_mesh,
+                            meta_param.placements,
+                        )
+                    else:
+                        sharded_tensor = full_tensor
+                    
+                    sharded_sd[param_name] = torch.nn.Parameter(sharded_tensor)
+                    tensor_count += 1
+                    
+                    # full_tensor goes out of scope, memory freed
+            
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Loaded {tensor_count} tensors via iterator")
+            
+            # Step 5: Load sharded dict into model
+            self.model.load_state_dict(sharded_sd, assign=True, strict=False)
+            
+            # Measure VRAM
+            vram_gb = torch.cuda.memory_allocated(self.device) / (1024**3) if torch.cuda.is_available() else 0
+            
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 initialization complete: {vram_gb:.2f}GB VRAM")
+            
+            return {
+                "status": "success",
+                "vram_gb": vram_gb,
+                "rank": self.rank
+            }
+            
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 init failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    def _initialize_fsdp2_from_state_dict(self, args: dict):
+        """DEPRECATED: Causes 'too many open files' error.
+        
+        Use _initialize_fsdp2_from_checkpoint with iterator pattern instead.
+        """
+        logging.warning(f"{LOG_PREFIX} [Worker-{self.rank}] initialize_fsdp2_from_state_dict is deprecated")
+        return {"status": "error", "error": "Deprecated: Use initialize_fsdp2_from_checkpoint"}
+        
+        try:
             # Ensure ComfyUI model registry is loaded
             import comfy.supported_models
             
-            # Detect prefix and model config
+            # Detect model config from state_dict
             unet_prefix = comfy.model_detection.unet_prefix_from_state_dict(state_dict)
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Detected prefix: '{unet_prefix}'")
             
-            # Try detected prefix first
             model_config = comfy.model_detection.model_config_from_unet(state_dict, unet_prefix)
             
-            # Fallback: Try common prefixes if detection failed
             if model_config is None:
                 for fallback_prefix in ['diffusion_model.', '', 'model.diffusion_model.']:
-                    logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   Trying fallback prefix: '{fallback_prefix}'")
                     model_config = comfy.model_detection.model_config_from_unet(state_dict, fallback_prefix)
                     if model_config is not None:
                         unet_prefix = fallback_prefix
                         break
             
             if model_config is None:
-                raise RuntimeError(f"Failed to detect model config. Tried prefixes: {unet_prefix}, 'diffusion_model.', '', 'model.diffusion_model.'")
+                raise RuntimeError(f"Failed to detect model config")
             
-            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   model_config: {model_config.__class__.__name__} (prefix: '{unet_prefix}')")
+            logging.info(f"{LOG_PREFIX} [Worker-{self.rank}]   model_config: {model_config.__class__.__name__}")
             
-            # Create model on meta device
+            # Create meta model (structure only, no weights)
             with torch.device('meta'):
                 meta_model = model_config.get_model(state_dict, unet_prefix)
             
@@ -351,7 +455,7 @@ class FSDP2Worker:
             # Apply FSDP2 sharding + load state_dict
             self.model = apply_fsdp2_sharding(meta_model, config, state_dict)
             
-            # Step 6: Measure VRAM
+            # Measure VRAM
             vram_gb = torch.cuda.memory_allocated(self.device) / (1024**3) if torch.cuda.is_available() else 0
             
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 initialization complete: {vram_gb:.2f}GB VRAM")

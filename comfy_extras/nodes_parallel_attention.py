@@ -556,12 +556,21 @@ class ParallelAttentionUnitTests:
                             
                             logging.info(f"{LOG_PREFIX} [Test]   Detected model type: {model_type} (from {model_class_name})")
                             
+                            # Clean meta_model for pickling (remove unpicklable attributes)
+                            import copy
+                            clean_meta = copy.deepcopy(model.meta_model)
+                            if hasattr(clean_meta, 'model_sampling'):
+                                delattr(clean_meta, 'model_sampling')
+                            if hasattr(clean_meta, 'latent_format'):
+                                delattr(clean_meta, 'latent_format')
+                            
+                            # Workers use FastVideo iterator pattern (stream from file)
                             result = model.parallel_executor.execute_collective(
                                 "initialize_fsdp2_from_checkpoint",
                                 {
-                                    "state_dict": model.loaded_state_dict,
                                     "checkpoint_path": model.checkpoint_path,
-                                    "model_type": model_type
+                                    "model_type": model_type,
+                                    "meta_model": clean_meta
                                 }
                             )
                             

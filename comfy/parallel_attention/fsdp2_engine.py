@@ -43,7 +43,8 @@ def get_module_by_path(model: nn.Module, path: str) -> nn.Module:
 def apply_fsdp2_sharding(
     meta_model: nn.Module,
     config: ShardingConfig,
-    state_dict: dict = None
+    state_dict: dict = None,
+    device_mesh = None
 ) -> nn.Module:
     """Apply FSDP2 sharding to meta model and optionally load state_dict.
     
@@ -59,6 +60,7 @@ def apply_fsdp2_sharding(
         meta_model: Model on meta device (0 bytes, structure only)
         config: Sharding configuration from policy
         state_dict: Optional state dict to load (extracted from parent model)
+        device_mesh: DeviceMesh for FSDP2 sharding (REQUIRED for multi-GPU)
         
     Returns:
         Model with FSDP2 sharding applied and weights loaded (if checkpoint provided)
@@ -66,7 +68,7 @@ def apply_fsdp2_sharding(
     Example:
         from comfy.parallel_attention.fsdp2_policies import FSDP2PolicyRegistry
         config = FSDP2PolicyRegistry.get_policy("flux")
-        model = apply_fsdp2_sharding(meta_model, config, checkpoint_path)
+        model = apply_fsdp2_sharding(meta_model, config, device_mesh=device_mesh)
     """
     logging.info(f"{LOG_PREFIX} [FSDP2Engine] Applying sharding for: {config.model_name}")
     
@@ -99,7 +101,8 @@ def apply_fsdp2_sharding(
                 block_list[i] = fully_shard(
                     module=block_list[i],
                     mp_policy=MixedPrecisionPolicy(),
-                    reshard_after_forward=True
+                    reshard_after_forward=True,
+                    mesh=device_mesh
                 )
             total_blocks_sharded += len(block_list)
         else:
@@ -115,7 +118,8 @@ def apply_fsdp2_sharding(
                 fully_shard(
                     module=block_list,
                     mp_policy=MixedPrecisionPolicy(),
-                    reshard_after_forward=True
+                    reshard_after_forward=True,
+                    mesh=device_mesh
                 )
             )
             total_blocks_sharded += 1
@@ -133,7 +137,8 @@ def apply_fsdp2_sharding(
             diffusion_model,
             ignored_params=ignored_params,
             mp_policy=MixedPrecisionPolicy(),
-            reshard_after_forward=True
+            reshard_after_forward=True,
+            mesh=device_mesh
         )
         meta_model.diffusion_model = diffusion_model
     
@@ -159,3 +164,24 @@ def apply_fsdp2_sharding(
     
     logging.info(f"{LOG_PREFIX} [FSDP2Engine] Sharding complete for {config.model_name}")
     return meta_model
+
+
+def apply_fsdp2_sharding_structure_only(
+    meta_model: nn.Module,
+    config: ShardingConfig,
+    device_mesh
+) -> nn.Module:
+    """Apply FSDP2 sharding to meta model structure (no weight loading).
+    
+    Used with FastVideo iterator pattern where weights are loaded
+    one tensor at a time after FSDP wrapping is applied.
+    
+    Args:
+        meta_model: Model on meta device (0 bytes, structure only)
+        config: Sharding configuration from policy
+        device_mesh: DeviceMesh for FSDP2 sharding (REQUIRED)
+        
+    Returns:
+        Model with FSDP2 sharding applied (no weights loaded yet)
+    """
+    return apply_fsdp2_sharding(meta_model, config, state_dict=None, device_mesh=device_mesh)
