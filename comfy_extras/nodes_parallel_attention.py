@@ -87,8 +87,14 @@ class ParallelAttentionUnitTests:
                 # Phase 2.2.1.1: Meta Device Ground Truth (NEW)
                 "phase2_2_1_1_meta_ground_truth": ("BOOLEAN", {"default": False}), # Test 2.2.1.1: Meta model
                 
-                # Phase 2.2.1.1: Copy-Exact Standard Loader (ACTIVE)
+                # Phase 2.2.1.1: Copy-Exact Standard Loader (COMPLETE)
                 "phase2_2_1_1_copy_exact_loader": ("BOOLEAN", {"default": False}), # Test 2.2.1.1: Standard loader
+                
+                # Phase 2.3: FSDP2 Meta Interface (COMPLETE)
+                "phase2_3_fsdp2_forward": ("BOOLEAN", {"default": False}), # Test 2.3: FSDP2ModelPatcher
+                
+                # Phase 2.4: FSDP2 Checkpoint Loading (ACTIVE)
+                "phase2_4_fsdp2_checkpoint": ("BOOLEAN", {"default": False}), # Test 2.4: Real checkpoint loading
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -104,8 +110,8 @@ class ParallelAttentionUnitTests:
     
     def run_tests(self, phase1_1_multiproc, phase1_2_collectives, phase1_3_devicemesh,
                   phase2_1_fsdp_policies, phase2_2_fsdp2_api,
-                  phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader, 
-                  run_all_complete, model=None):
+                  phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader,
+                  phase2_3_fsdp2_forward, phase2_4_fsdp2_checkpoint, run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -128,7 +134,8 @@ class ParallelAttentionUnitTests:
         # Check if any tests enabled
         any_enabled = (phase1_1_multiproc or phase1_2_collectives or phase1_3_devicemesh or
                       phase2_1_fsdp_policies or phase2_2_fsdp2_api or
-                      phase2_2_1_1_meta_ground_truth or phase2_2_1_1_copy_exact_loader)
+                      phase2_2_1_1_meta_ground_truth or phase2_2_1_1_copy_exact_loader or
+                      phase2_3_fsdp2_forward or phase2_4_fsdp2_checkpoint)
         
         if not any_enabled:
             return ("⚠️  No tests enabled. Enable at least one phase boolean.",)
@@ -447,17 +454,33 @@ class ParallelAttentionUnitTests:
                         except Exception as e:
                             logging.error(f"{LOG_PREFIX} [Test]   ❌ [11/12] Module structure check failed: {e}")
                         
-                        # Check 12: Real model has weights, meta doesn't
+                        # Check 12: Ground truth validation (architecture-aware)
                         try:
+                            # Check if this is FSDP2ModelPatcher (Phase 2.3 architecture)
+                            from comfy.model_patcher_fsdp2 import FSDP2ModelPatcher
+                            is_fsdp2 = isinstance(model, FSDP2ModelPatcher)
+                            
                             real_first_param = next(real.parameters())
                             meta_first_param = next(meta.parameters())
-                            real_has_data = real_first_param.device.type != 'meta'
-                            meta_no_data = meta_first_param.device.type == 'meta'
-                            correct = real_has_data and meta_no_data
-                            logging.info(f"{LOG_PREFIX} [Test]   {'✅' if correct else '❌'} [12/12] Real has weights ({real_first_param.device}), meta doesn't (meta)")
+                            
+                            if is_fsdp2:
+                                # FSDP2 Architecture: Meta model IS the interface
+                                # Both model.model and model.meta_model should be on meta device
+                                # Workers hold the actual sharded weights
+                                real_is_meta = real_first_param.device.type == 'meta'
+                                meta_is_meta = meta_first_param.device.type == 'meta'
+                                correct = real_is_meta and meta_is_meta
+                                logging.info(f"{LOG_PREFIX} [Test]   {'✅' if correct else '❌'} [12/12] FSDP2: model.model on meta (interface), model.meta_model on meta (reference)")
+                            else:
+                                # Standard Architecture: Real has weights, meta doesn't
+                                real_has_data = real_first_param.device.type != 'meta'
+                                meta_no_data = meta_first_param.device.type == 'meta'
+                                correct = real_has_data and meta_no_data
+                                logging.info(f"{LOG_PREFIX} [Test]   {'✅' if correct else '❌'} [12/12] Standard: Real has weights ({real_first_param.device}), meta doesn't (meta)")
+                            
                             if correct: checks_passed += 1
                         except Exception as e:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [12/12] Weight check failed: {e}")
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [12/12] Ground truth check failed: {e}")
                         
                         # Summary
                         if checks_passed == checks_total:

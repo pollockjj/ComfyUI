@@ -1379,6 +1379,11 @@ def load_diffusion_model_state_dict(sd, model_options={}):
 
 def load_diffusion_model(unet_path, model_options={}):
     sd = comfy.utils.load_torch_file(unet_path)
+    
+    # Thread checkpoint path through to FSDP2ModelPatcher
+    model_options = model_options.copy()  # Don't modify original
+    model_options['_checkpoint_path'] = unet_path
+    
     model = load_diffusion_model_state_dict(sd, model_options=model_options)
     if model is None:
         logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
