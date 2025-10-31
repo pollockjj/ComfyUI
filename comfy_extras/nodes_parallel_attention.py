@@ -16,14 +16,11 @@ LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
 class UnetLoaderParallelAttention:
-    """UNET Loader with Parallel Attention (FSDP sharding across 2 GPUs).
+    """UNET Loader - 100% standard ComfyUI loading.
     
-    Automatically initializes distributed environment and loads model
-    with FSDP sharding if 2+ GPUs available. Otherwise falls back to
-    standard loading.
-    
-    Device selection allows choosing which 2 GPUs to use for sharding.
-    Backend is automatically selected (NCCL with GLOO fallback).
+    Identical to UNETLoader. Calls comfy.sd.load_diffusion_model()
+    with standard lifecycle. When --use-parallel-attention flag is set,
+    meta device copy is created automatically in comfy/sd.py.
     """
     
     @classmethod
@@ -39,106 +36,19 @@ class UnetLoaderParallelAttention:
     CATEGORY = "parallel_attention"
     
     def load_unet_parallel(self, unet_name):
-        """Load UNET with FSDP2 sharding across 2 GPUs.
+        """Load UNET using 100% standard ComfyUI loading pipeline.
         
-        Flow:
-        1. Initialize executor (if needed)
-        2. Load state dict (parent process)
-        3. Detect model config (parent process)
-        4. Create meta device parent model (0 bytes)
-        5. Send checkpoint path to workers
-        6. Workers load with FSDP2
-        7. Return DistributedModelWrapper
-        
-        Args:
-            unet_name: Model filename
-        
-        Returns:
-            Tuple of (DistributedModelWrapper,) ready for use
+        This is IDENTICAL to UNETLoader - calls comfy.sd.load_diffusion_model()
+        with no model_options, using the complete standard lifecycle.
         """
-        # Validate GPUs
-        if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-            raise RuntimeError(
-                f"{LOG_PREFIX} [Loader] Parallel Attention requires 2+ CUDA devices. "
-                f"Found: {torch.cuda.device_count() if torch.cuda.is_available() else 0}"
-            )
-        
-        # Initialize executor if needed
-        if not self.is_initialized or self.executor is None:
-            self._initialize_distributed()
-        
-        # Get checkpoint path
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        model = comfy.sd.load_diffusion_model(unet_path, model_options={})
         
-        # Load state dict (parent process, for detection and meta model)
-        import comfy.utils
-        import comfy.model_detection
-        state_dict = comfy.utils.load_torch_file(unet_path)
+        logging.info(f"{LOG_PREFIX} [Loader] Loaded: {type(model.model).__name__}")
+        logging.info(f"{LOG_PREFIX} [Loader] Device: {model.load_device}")
+        logging.info(f"{LOG_PREFIX} [Loader] Size: {model.model_size() / (1024**3):.2f}GB")
         
-        # Detect model config (parent process, uses ORIGINAL prefixed keys)
-        model_config = comfy.model_detection.model_config_from_unet(state_dict, "")
-        if model_config is None:
-            raise RuntimeError(f"{LOG_PREFIX} [Loader] Could not detect model type")
-        
-        logging.info(f"{LOG_PREFIX} [Loader] Detected: {model_config.__class__.__name__}")
-        
-        # CRITICAL: Strip prefix BEFORE creating meta model (Raylight pattern)
-        # Parent meta model MUST have same structure as worker FSDP2 model
-        diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(state_dict)
-        temp_sd = comfy.utils.state_dict_prefix_replace(
-            state_dict, {diffusion_model_prefix: ""}, filter_keys=True
-        )
-        if len(temp_sd) > 0:
-            state_dict = temp_sd
-            logging.info(f"{LOG_PREFIX} [Loader] Stripped prefix for meta model: {diffusion_model_prefix}")
-        
-        # Create meta device parent model using STRIPPED state_dict
-        # This ensures parent structure matches worker structure
-        logging.info(f"{LOG_PREFIX} [Loader] Creating meta device parent model...")
-        with torch.device('meta'):
-            parent_model = model_config.get_model(state_dict, "", device=torch.device('meta'))
-        
-        logging.info(
-            f"{LOG_PREFIX} [Loader] Meta parent created: "
-            f"latent_format={parent_model.latent_format.__class__.__name__}, "
-            f"dtype={parent_model.get_dtype()}"
-        )
-        
-        # Serialize model config for workers
-        model_config_dict = {
-            'class_name': model_config.__class__.__name__,
-            'unet_config': model_config.unet_config,
-        }
-        
-        # Workers load with FSDP2
-        logging.info(f"{LOG_PREFIX} [Loader] Loading FSDP2 model in workers...")
-        results = self.executor.execute_collective("load_fsdp2_model", {
-            "checkpoint_path": unet_path,
-            "model_config_dict": model_config_dict,
-        })
-        
-        # Check success
-        if not results.get("success", False):
-            error = results.get("error", "Unknown error")
-            raise RuntimeError(f"{LOG_PREFIX} [Loader] Model loading failed: {error}")
-        
-        logging.info(
-            f"{LOG_PREFIX} [Loader] Model loaded: "
-            f"VRAM={results.get('vram_allocated_gb', 0):.2f}GB per GPU, "
-            f"Keys={results.get('num_keys', 0)}"
-        )
-        
-        # Create wrapper with meta parent
-        from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
-        
-        model_wrapper = DistributedModelWrapper(
-            executor=self.executor,
-            parent_model=parent_model
-        )
-        
-        logging.info(f"{LOG_PREFIX} [Loader] Wrapper created")
-        
-        return (model_wrapper,)
+        return (model,)
 
 
 """Test node for distributed runtime."""
@@ -174,14 +84,11 @@ class ParallelAttentionUnitTests:
                 # Phase 2.2: FSDP2 API Migration (COMPLETE)
                 "phase2_2_fsdp2_api": ("BOOLEAN", {"default": False}),      # Test 2.2: API migration
                 
-                # Phase 2.2.0: Dummy Flux Testing (NEW - TDD for 2.2.1)
-                "phase2_2_0_dummy_flux": ("BOOLEAN", {"default": False}),   # Test 2.2.0: Dummy model
-                
-                # Phase 2.2.1: Model Loading Validation (COMPLETE)
-                "phase2_2_1_model_loading": ("BOOLEAN", {"default": False}), # Test 2.2.1: Model validation
-                
                 # Phase 2.2.1.1: Meta Device Ground Truth (NEW)
                 "phase2_2_1_1_meta_ground_truth": ("BOOLEAN", {"default": False}), # Test 2.2.1.1: Meta model
+                
+                # Phase 2.2.1.1: Copy-Exact Standard Loader (ACTIVE)
+                "phase2_2_1_1_copy_exact_loader": ("BOOLEAN", {"default": False}), # Test 2.2.1.1: Standard loader
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -196,8 +103,9 @@ class ParallelAttentionUnitTests:
     CATEGORY = "parallel_attention"
     
     def run_tests(self, phase1_1_multiproc, phase1_2_collectives, phase1_3_devicemesh,
-                  phase2_1_fsdp_policies, phase2_2_fsdp2_api, phase2_2_0_dummy_flux,
-                  phase2_2_1_model_loading, phase2_2_1_1_meta_ground_truth, run_all_complete, model=None):
+                  phase2_1_fsdp_policies, phase2_2_fsdp2_api,
+                  phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader, 
+                  run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -210,18 +118,17 @@ class ParallelAttentionUnitTests:
         
         # Determine which phases to run
         if run_all_complete:
-            # Run all completed phases (1.x, 2.1, 2.2, 2.2.1)
+            # Run all completed phases (1.x, 2.1, 2.2)
             phase1_1_multiproc = True
             phase1_2_collectives = True
             phase1_3_devicemesh = True
             phase2_1_fsdp_policies = True
             phase2_2_fsdp2_api = True
-            phase2_2_1_model_loading = True
         
         # Check if any tests enabled
         any_enabled = (phase1_1_multiproc or phase1_2_collectives or phase1_3_devicemesh or
-                      phase2_1_fsdp_policies or phase2_2_fsdp2_api or phase2_2_0_dummy_flux or
-                      phase2_2_1_model_loading or phase2_2_1_1_meta_ground_truth)
+                      phase2_1_fsdp_policies or phase2_2_fsdp2_api or
+                      phase2_2_1_1_meta_ground_truth or phase2_2_1_1_copy_exact_loader)
         
         if not any_enabled:
             return ("⚠️  No tests enabled. Enable at least one phase boolean.",)
@@ -235,7 +142,7 @@ class ParallelAttentionUnitTests:
         
         try:
             # Initialize executor for Phase 1+ tests
-            if phase1_1_multiproc or phase1_2_collectives or phase1_3_devicemesh or phase2_1_fsdp_policies or phase2_2_fsdp2_api or phase2_2_0_dummy_flux:
+            if phase1_1_multiproc or phase1_2_collectives or phase1_3_devicemesh or phase2_1_fsdp_policies or phase2_2_fsdp2_api:
                 logging.info(f"{LOG_PREFIX} [Test] Initializing MultiprocExecutor...")
                 executor = MultiprocExecutor(world_size=world_size, backend=backend)
                 logging.info(f"{LOG_PREFIX} [Test] ✅ Executor ready (backend={executor.backend})")
@@ -409,194 +316,6 @@ class ParallelAttentionUnitTests:
                 results.append(f"✅ Phase 2.2: FSDP2ModelPatcher ({result.get('passed_checks', '0/8')} checks)")
             
             # ═══════════════════════════════════════════════════════════════
-            # PHASE 2.2.0: Dummy Flux Testing (TDD for 2.2.1)
-            # ═══════════════════════════════════════════════════════════════
-            if phase2_2_0_dummy_flux:
-                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
-                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.2.0: Dummy Flux Testing (NEW)                  │")
-                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
-                
-                from comfy.parallel_attention.test_utils.create_dummy_flux import (
-                    create_dummy_flux_checkpoint,
-                    create_minimal_flux_state_dict
-                )
-                import comfy.utils
-                import comfy.model_detection
-                
-                checks_passed = 0
-                checks_total = 5
-                
-                # Test 2.2.0.1: Create dummy checkpoint
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.2.0.1: Create dummy Flux checkpoint...")
-                try:
-                    dummy_path = create_dummy_flux_checkpoint()
-                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [1/5] Created: {dummy_path}")
-                    checks_passed += 1
-                except Exception as e:
-                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [1/5] Failed to create: {e}")
-                
-                # Test 2.2.0.2: ComfyUI can load it
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.2.0.2: ComfyUI load_torch_file...")
-                try:
-                    state_dict = comfy.utils.load_torch_file(dummy_path)
-                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [2/5] Loaded {len(state_dict)} keys")
-                    checks_passed += 1
-                except Exception as e:
-                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/5] Failed to load: {e}")
-                
-                # Test 2.2.0.3: ComfyUI detects as Flux
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.2.0.3: ComfyUI model detection...")
-                try:
-                    model_config = comfy.model_detection.model_config_from_unet(state_dict, "")
-                    if model_config is None:
-                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/5] Detection returned None")
-                    else:
-                        detected_type = model_config.__class__.__name__
-                        if 'flux' in detected_type.lower():
-                            logging.info(f"{LOG_PREFIX} [Test]   ✅ [3/5] Detected as: {detected_type}")
-                            checks_passed += 1
-                        else:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/5] Wrong type: {detected_type}")
-                except Exception as e:
-                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/5] Detection failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Test 2.2.0.4: Create model on CPU (no CUDA required)
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.2.0.4: Create model (CPU)...")
-                try:
-                    # Get prefix
-                    diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(state_dict)
-                    
-                    # Create model on CPU
-                    model = model_config.get_model(state_dict, diffusion_model_prefix, device=torch.device('cpu'))
-                    
-                    # Count parameters
-                    total_params = sum(p.numel() for p in model.parameters())
-                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [4/5] Model created: {total_params:,} params")
-                    checks_passed += 1
-                except Exception as e:
-                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [4/5] Model creation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Test 2.2.0.5: Load weights (CPU)
-                logging.info(f"{LOG_PREFIX} [Test] Test 2.2.0.5: Load weights (CPU)...")
-                try:
-                    model.load_state_dict(state_dict, strict=True)
-                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [5/5] Weights loaded successfully")
-                    checks_passed += 1
-                except Exception as e:
-                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [5/5] Weight loading failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Summary
-                if checks_passed == checks_total:
-                    logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.2.0]: {checks_passed}/{checks_total}")
-                    results.append(f"✅ Phase 2.2.0: Dummy Flux ({checks_passed}/{checks_total})")
-                else:
-                    logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL [Test 2.2.0]: {checks_passed}/{checks_total}")
-                    results.append(f"❌ Phase 2.2.0: Dummy Flux ({checks_passed}/{checks_total})")
-            
-            # ═══════════════════════════════════════════════════════════════
-            # PHASE 2.2.1: FSDP2 Model Loading Validation (Test 2.2.1)
-            # ═══════════════════════════════════════════════════════════════
-            if phase2_2_1_model_loading:
-                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
-                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.2.1: FSDP2 Model Loading (COMPLETE)            │")
-                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
-                
-                if model is None:
-                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP [Test 2.2.1]: No MODEL input")
-                    logging.info(f"{LOG_PREFIX} [Test]   Connect UnetLoaderParallelAttention → model input")
-                    results.append("⏸️  Phase 2.2.1: Skipped (no MODEL)")
-                else:
-                    logging.info(f"{LOG_PREFIX} [Test] Test 2.2.1: Meta device parent + FSDP2 workers...")
-                    
-                    from comfy.parallel_attention.distributed_model_wrapper import DistributedModelWrapper
-                    checks_passed = 0
-                    checks_total = 5
-                    
-                    # Check 1: Type is DistributedModelWrapper
-                    if isinstance(model, DistributedModelWrapper):
-                        logging.info(f"{LOG_PREFIX} [Test]   ✅ [1/5] Type: DistributedModelWrapper")
-                        checks_passed += 1
-                    else:
-                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [1/5] Wrong type: {type(model).__name__}")
-                    
-                    # Check 2: Parent model on meta device
-                    try:
-                        if hasattr(model, '_parent'):
-                            parent = model._parent
-                            
-                            # Check all parameters on meta device
-                            params_list = list(parent.parameters())
-                            if len(params_list) > 0:
-                                is_meta = all(p.device.type == 'meta' for p in params_list)
-                                if is_meta:
-                                    logging.info(f"{LOG_PREFIX} [Test]   ✅ [2/5] Parent on meta device ({len(params_list)} params)")
-                                    checks_passed += 1
-                                else:
-                                    devices = set(p.device.type for p in params_list[:5])
-                                    logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/5] Parent not on meta (devices: {devices})")
-                            else:
-                                logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/5] Parent has no parameters")
-                        else:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/5] Model has no _parent attribute")
-                    except Exception as e:
-                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/5] Meta device check failed: {e}")
-                    
-                    # Check 3: Parent has properties
-                    try:
-                        has_latent = hasattr(model, 'latent_format') and model.latent_format is not None
-                        has_dtype = hasattr(model, 'get_dtype')
-                        
-                        if has_latent and has_dtype:
-                            logging.info(f"{LOG_PREFIX} [Test]   ✅ [3/5] Parent has properties")
-                            logging.info(f"{LOG_PREFIX} [Test]     latent_format: {model.latent_format.__class__.__name__}")
-                            logging.info(f"{LOG_PREFIX} [Test]     dtype: {model.get_dtype()}")
-                            checks_passed += 1
-                        else:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/5] Missing properties (latent={has_latent}, dtype={has_dtype})")
-                    except Exception as e:
-                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/5] Property check failed: {e}")
-                    
-                    # Check 4: VRAM usage reasonable (parent should have minimal VRAM)
-                    if torch.cuda.is_available():
-                        try:
-                            vram_gb = torch.cuda.memory_allocated(0) / (1024**3)
-                            # Parent process should have minimal VRAM (meta device)
-                            # Workers have sharded model (~11GB each for Flux)
-                            logging.info(f"{LOG_PREFIX} [Test]   ✅ [4/5] Parent VRAM: {vram_gb:.2f}GB (meta device)")
-                            logging.info(f"{LOG_PREFIX} [Test]     Workers have ~11GB each (sharded)")
-                            checks_passed += 1
-                        except Exception as e:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [4/5] VRAM check failed: {e}")
-                    else:
-                        logging.info(f"{LOG_PREFIX} [Test]   ⏸️  [4/5] No CUDA for VRAM check")
-                        checks_passed += 1
-                    
-                    # Check 5: Has executor
-                    try:
-                        has_executor = hasattr(model, '_executor') and model._executor is not None
-                        if has_executor:
-                            logging.info(f"{LOG_PREFIX} [Test]   ✅ [5/5] Has executor for RPC")
-                            checks_passed += 1
-                        else:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [5/5] Missing executor")
-                    except Exception as e:
-                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [5/5] Executor check failed: {e}")
-                    
-                    # Summary
-                    if checks_passed == checks_total:
-                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS [Test 2.2.1]: {checks_passed}/{checks_total}")
-                        results.append(f"✅ Phase 2.2.1: FSDP2 Model Loading ({checks_passed}/{checks_total})")
-                    else:
-                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL [Test 2.2.1]: {checks_passed}/{checks_total}")
-                        results.append(f"❌ Phase 2.2.1: FSDP2 Model Loading ({checks_passed}/{checks_total})")
-            
-            # ═══════════════════════════════════════════════════════════════
             # PHASE 2.2.1.1: Meta Device Ground Truth (Test 2.2.1.1)
             # ═══════════════════════════════════════════════════════════════
             if phase2_2_1_1_meta_ground_truth:
@@ -632,14 +351,22 @@ class ParallelAttentionUnitTests:
                         except Exception as e:
                             logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/12] Device check failed: {e}")
                         
-                        # Check 3: Meta model uses 0 bytes
+                        # Check 3: Meta reports same size as actual, but uses 0 memory
                         try:
-                            total_bytes = sum(p.numel() * p.element_size() for p in meta.parameters() if hasattr(p, 'untyped_storage') and p.untyped_storage().size() > 0)
-                            is_zero = total_bytes == 0
-                            logging.info(f"{LOG_PREFIX} [Test]   {'✅' if is_zero else '❌'} [3/12] Meta model uses {total_bytes} bytes")
-                            if is_zero: checks_passed += 1
+                            real_reported = sum(p.numel() * p.element_size() for p in real.parameters())
+                            meta_reported = sum(p.numel() * p.element_size() for p in meta.parameters())
+                            sizes_match = real_reported == meta_reported
+                            
+                            # Meta device = 0 actual allocation despite reported size
+                            is_meta = all(p.device.type == 'meta' for p in meta.parameters())
+                            
+                            if sizes_match and is_meta:
+                                logging.info(f"{LOG_PREFIX} [Test]   ✅ [3/12] Sizes match: {real_reported / (1024**3):.2f}GB reported, meta device uses 0 actual")
+                                checks_passed += 1
+                            else:
+                                logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/12] Size mismatch or not meta: real={real_reported / (1024**3):.2f}GB, meta={meta_reported / (1024**3):.2f}GB, is_meta={is_meta}")
                         except Exception as e:
-                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/12] Memory check failed: {e}")
+                            logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/12] Size comparison failed: {e}")
                         
                         # Check 4: Same class type
                         same_type = type(meta).__name__ == type(real).__name__
@@ -739,6 +466,51 @@ class ParallelAttentionUnitTests:
                         else:
                             logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL [Test 2.2.1.1]: {checks_passed}/{checks_total}")
                             results.append(f"❌ Phase 2.2.1.1: Meta Ground Truth ({checks_passed}/{checks_total})")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 2.2.1.1: Copy-Exact Standard Loader (Test 2.2.1.1)
+            # ═══════════════════════════════════════════════════════════════
+            if phase2_2_1_1_copy_exact_loader:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.2.1.1: Copy-Exact Standard Loader              │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if model is None:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP: No MODEL input")
+                    results.append("⏸️  Phase 2.2.1.1 Copy-Exact: Skipped (no MODEL)")
+                else:
+                    from comfy.model_patcher import ModelPatcher
+                    checks_passed = 0
+                    checks_total = 3
+                    
+                    # Check 1: Is it a ModelPatcher?
+                    is_patcher = isinstance(model, ModelPatcher)
+                    logging.info(f"{LOG_PREFIX} [Test]   {'✅' if is_patcher else '❌'} [1/3] isinstance(ModelPatcher): {is_patcher}")
+                    if is_patcher: checks_passed += 1
+                    
+                    # Check 2: Can call model_size()?
+                    try:
+                        size = model.model_size()
+                        logging.info(f"{LOG_PREFIX} [Test]   ✅ [2/3] model_size() works: {size / (1024**3):.2f}GB")
+                        checks_passed += 1
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/3] model_size() failed: {e}")
+                    
+                    # Check 3: Can call load()?
+                    try:
+                        model.load(model.load_device)
+                        logging.info(f"{LOG_PREFIX} [Test]   ✅ [3/3] load() works")
+                        checks_passed += 1
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/3] load() failed: {e}")
+                    
+                    # Summary
+                    if checks_passed == checks_total:
+                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS: {checks_passed}/{checks_total}")
+                        results.append(f"✅ Phase 2.2.1.1: Standard Loader ({checks_passed}/{checks_total})")
+                    else:
+                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
+                        results.append(f"❌ Phase 2.2.1.1: Standard Loader ({checks_passed}/{checks_total})")
             
             # Shutdown executor
             if executor:
