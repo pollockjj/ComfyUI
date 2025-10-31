@@ -60,6 +60,12 @@ class FSDP2Worker:
             return self._get_model_size(args)
         elif command == "check_model_state":
             return self._check_model_state(args)
+        elif command == "check_param_sharding":
+            return self._check_param_sharding(args)
+        elif command == "get_vram_breakdown":
+            return self._get_vram_breakdown(args)
+        elif command == "validate_sharding_strategy":
+            return self._validate_sharding_strategy(args)
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
     
@@ -242,6 +248,162 @@ class FSDP2Worker:
             "success": True,
             "has_model": has_model,
             "param_count": param_count
+        }
+    
+    def _check_param_sharding(self, args: dict):
+        """Check if a specific parameter is sharded or replicated.
+        
+        Args:
+            args: {"param_name": str}
+            
+        Returns:
+            {
+                "status": "success",
+                "rank": int,
+                "param_name": str,
+                "is_sharded": bool,
+                "shape": tuple,
+                "local_shape": tuple (if sharded),
+                "size_mb": float
+            }
+        """
+        param_name = args.get("param_name")
+        
+        if self.model is None:
+            return {"status": "error", "error": "No model loaded"}
+        
+        # Find the parameter
+        param = None
+        for name, p in self.model.named_parameters():
+            if name == param_name:
+                param = p
+                break
+        
+        if param is None:
+            return {"status": "error", "error": f"Parameter {param_name} not found"}
+        
+        # Check if it's a DTensor (sharded)
+        from torch.distributed.tensor import DTensor
+        is_sharded = isinstance(param, DTensor)
+        
+        if is_sharded:
+            # Get local shard info
+            local_tensor = param.to_local()
+            local_shape = tuple(local_tensor.shape)
+            global_shape = tuple(param.shape)
+            size_mb = local_tensor.numel() * local_tensor.element_size() / (1024**2)
+            placements = str(param.placements)
+        else:
+            # Regular tensor (replicated)
+            local_shape = tuple(param.shape)
+            global_shape = local_shape
+            size_mb = param.numel() * param.element_size() / (1024**2)
+            placements = "None (replicated)"
+        
+        return {
+            "status": "success",
+            "rank": self.rank,
+            "param_name": param_name,
+            "is_sharded": is_sharded,
+            "local_shape": local_shape,
+            "global_shape": global_shape,
+            "size_mb": size_mb,
+            "placements": placements
+        }
+    
+    def _get_vram_breakdown(self, args: dict):
+        """Get detailed VRAM breakdown by parameter type.
+        
+        Returns:
+            {
+                "status": "success",
+                "rank": int,
+                "sharded_vram_gb": float,
+                "replicated_vram_gb": float,
+                "total_vram_gb": float,
+                "sharded_count": int,
+                "replicated_count": int
+            }
+        """
+        if self.model is None:
+            return {"status": "error", "error": "No model loaded"}
+        
+        from torch.distributed.tensor import DTensor
+        
+        sharded_vram = 0
+        replicated_vram = 0
+        sharded_count = 0
+        replicated_count = 0
+        
+        for name, param in self.model.named_parameters():
+            if isinstance(param, DTensor):
+                # Local shard size
+                local_tensor = param.to_local()
+                sharded_vram += local_tensor.numel() * local_tensor.element_size()
+                sharded_count += 1
+            else:
+                # Full tensor size (replicated)
+                replicated_vram += param.numel() * param.element_size()
+                replicated_count += 1
+        
+        total_vram = torch.cuda.memory_allocated(self.device) if torch.cuda.is_available() else 0
+        
+        return {
+            "status": "success",
+            "rank": self.rank,
+            "sharded_vram_gb": sharded_vram / (1024**3),
+            "replicated_vram_gb": replicated_vram / (1024**3),
+            "total_vram_gb": total_vram / (1024**3),
+            "sharded_count": sharded_count,
+            "replicated_count": replicated_count
+        }
+    
+    def _validate_sharding_strategy(self, args: dict):
+        """Validate that sharding strategy was applied correctly.
+        
+        Returns:
+            {
+                "status": "success",
+                "rank": int,
+                "total_fsdp_modules": int,
+                "double_blocks_wrapped": int,
+                "single_blocks_wrapped": int
+            }
+        """
+        if self.model is None:
+            return {"status": "error", "error": "No model loaded"}
+        
+        from torch.distributed.fsdp import FSDPModule
+        
+        # Count FSDP-wrapped modules
+        total_fsdp = 0
+        for name, module in self.model.named_modules():
+            if isinstance(module, FSDPModule):
+                total_fsdp += 1
+        
+        # Count wrapped blocks
+        double_wrapped = 0
+        single_wrapped = 0
+        
+        if hasattr(self.model, 'diffusion_model'):
+            dm = self.model.diffusion_model
+            
+            if hasattr(dm, 'double_blocks'):
+                for block in dm.double_blocks:
+                    if isinstance(block, FSDPModule):
+                        double_wrapped += 1
+            
+            if hasattr(dm, 'single_blocks'):
+                for block in dm.single_blocks:
+                    if isinstance(block, FSDPModule):
+                        single_wrapped += 1
+        
+        return {
+            "status": "success",
+            "rank": self.rank,
+            "total_fsdp_modules": total_fsdp,
+            "double_blocks_wrapped": double_wrapped,
+            "single_blocks_wrapped": single_wrapped
         }
     
     def _load_checkpoint(self, args: dict):

@@ -85,8 +85,11 @@ class ParallelAttentionUnitTests:
                 # Phase 2.6: Checkpoint Path to Workers
                 "phase2_6_checkpoint_path": ("BOOLEAN", {"default": False}),
                 
-                # Phase 2.7: FSDP2 Sharding (ACTIVE)
+                # Phase 2.7: FSDP2 Sharding
                 "phase2_7_fsdp2_sharding": ("BOOLEAN", {"default": False}),
+                
+                # Phase 2.7.2: Deep Validation (ACTIVE)
+                "phase2_7_2_deep_validation": ("BOOLEAN", {"default": False}),
                 
                 # Convenience: Run all completed phases
                 "run_all_complete": ("BOOLEAN", {"default": False}),
@@ -102,7 +105,7 @@ class ParallelAttentionUnitTests:
     
     def run_tests(self, phase2_2_1_1_meta_ground_truth, phase2_2_1_1_copy_exact_loader,
                   phase2_5_worker_spawn, phase2_6_checkpoint_path, phase2_7_fsdp2_sharding,
-                  run_all_complete, model=None):
+                  phase2_7_2_deep_validation, run_all_complete, model=None):
         """Run phase-based unit tests for parallel attention.
         
         Hardcoded: world_size=2, backend=auto (NCCL with GLOO fallback).
@@ -601,6 +604,107 @@ class ParallelAttentionUnitTests:
                     else:
                         logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
                         results.append(f"❌ Phase 2.7: FSDP2 Sharding ({checks_passed}/{checks_total})")
+            
+            # Phase 2.7.2: Deep Validation Tests
+            if phase2_7_2_deep_validation:
+                logging.info(f"{LOG_PREFIX} [Test] ┌─────────────────────────────────────────────────────────┐")
+                logging.info(f"{LOG_PREFIX} [Test] │ PHASE 2.7.2: Deep Validation                           │")
+                logging.info(f"{LOG_PREFIX} [Test] └─────────────────────────────────────────────────────────┘")
+                
+                if model is None:
+                    logging.info(f"{LOG_PREFIX} [Test] ⏸️  SKIP: No MODEL input")
+                    results.append("⏸️  Phase 2.7.2: Skipped (no MODEL)")
+                else:
+                    checks_passed = 0
+                    checks_total = 4
+                    
+                    # Test 1: Ignored param replicated
+                    try:
+                        result = model.parallel_executor.execute_collective(
+                            "check_param_sharding",
+                            {"param_name": "diffusion_model.img_in.weight"}
+                        )
+                        
+                        is_replicated = not result.get("is_sharded", True)
+                        size_mb = result.get("size_mb", 0)
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if is_replicated else '❌'} [1/4] img_in.weight replicated: {size_mb:.1f}MB (not sharded)")
+                        if is_replicated: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [1/4] Ignored param check failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Test 2: Sharded param distributed
+                    try:
+                        result = model.parallel_executor.execute_collective(
+                            "check_param_sharding",
+                            {"param_name": "diffusion_model.double_blocks.0.img_attn.qkv.weight"}
+                        )
+                        
+                        is_sharded = result.get("is_sharded", False)
+                        local_shape = result.get("local_shape", ())
+                        global_shape = result.get("global_shape", ())
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if is_sharded else '❌'} [2/4] double_blocks.0 sharded: local={local_shape} global={global_shape}")
+                        if is_sharded: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [2/4] Sharded param check failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Test 3: VRAM breakdown
+                    try:
+                        result = model.parallel_executor.execute_collective(
+                            "get_vram_breakdown",
+                            {}
+                        )
+                        
+                        sharded_vram = result.get("sharded_vram_gb", 0)
+                        replicated_vram = result.get("replicated_vram_gb", 0)
+                        sharded_count = result.get("sharded_count", 0)
+                        replicated_count = result.get("replicated_count", 0)
+                        
+                        breakdown_ok = sharded_vram > 8 and replicated_vram < 3
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if breakdown_ok else '❌'} [3/4] VRAM: {sharded_vram:.2f}GB sharded ({sharded_count}), {replicated_vram:.2f}GB replicated ({replicated_count})")
+                        if breakdown_ok: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [3/4] VRAM breakdown failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Test 4: Sharding strategy
+                    try:
+                        result = model.parallel_executor.execute_collective(
+                            "validate_sharding_strategy",
+                            {}
+                        )
+                        
+                        double_wrapped = result.get("double_blocks_wrapped", 0)
+                        single_wrapped = result.get("single_blocks_wrapped", 0)
+                        total_fsdp = result.get("total_fsdp_modules", 0)
+                        
+                        strategy_ok = double_wrapped == 19 and single_wrapped == 38
+                        
+                        logging.info(f"{LOG_PREFIX} [Test]   {'✅' if strategy_ok else '❌'} [4/4] Strategy: {double_wrapped} double + {single_wrapped} single = {total_fsdp} FSDP modules")
+                        if strategy_ok: checks_passed += 1
+                        
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} [Test]   ❌ [4/4] Strategy validation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Summary
+                    if checks_passed == checks_total:
+                        logging.info(f"{LOG_PREFIX} [Test] ✅ PASS: {checks_passed}/{checks_total}")
+                        results.append(f"✅ Phase 2.7.2: Deep Validation ({checks_passed}/{checks_total})")
+                    else:
+                        logging.error(f"{LOG_PREFIX} [Test] ❌ FAIL: {checks_passed}/{checks_total}")
+                        results.append(f"❌ Phase 2.7.2: Deep Validation ({checks_passed}/{checks_total})")
             
             # Shutdown executor ONLY if we created it (not from model)
             if executor and not (model is not None and hasattr(model, 'parallel_executor') and model.parallel_executor is executor):
