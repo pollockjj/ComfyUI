@@ -504,12 +504,34 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Phase 0.1: Check for parallel config before loading
+        # Phase 0.2: Check for parallel config and policy
         if hasattr(self.model.model, 'parallel_config') and self.model.model.parallel_config.get('enabled'):
             logging.info("⚡ [Parallel-Attention] Injection point reached")
             logging.info(f"⚡ [Parallel-Attention] Message: {self.model.model.parallel_config.get('message', 'none')}")
             logging.info(f"⚡ [Parallel-Attention] Config: {self.model.model.parallel_config}")
-            logging.info("⚡ [Parallel-Attention] Future: FSDP2 sharding will happen here")
+            
+            # Phase 0.2: Model inspection and policy lookup
+            from comfy.parallel_attention import FSDP2PolicyRegistry
+            
+            model_class = type(self.model.model).__name__
+            model_type = model_class.lower()  # "Flux" → "flux"
+            
+            # Handle naming variations
+            if model_type == "qwenimage":
+                model_type = "qwen_image"
+            elif model_type.startswith("wan"):  # wan21, wan22 → wan
+                model_type = "wan"
+            
+            if FSDP2PolicyRegistry.is_registered(model_type):
+                config = FSDP2PolicyRegistry.get_policy(model_type)
+                logging.info(f"⚡ [Parallel-Attention] Model '{model_type}' has FSDP2 policy")
+                logging.info(f"⚡ [Parallel-Attention] Policy: {len(config.blocks)} block groups, root_wrap={config.root_wrap}")
+                for block in config.blocks:
+                    logging.info(f"⚡ [Parallel-Attention]   - {block.module_path}: {block.block_count} blocks")
+                logging.info("⚡ [Parallel-Attention] Future: FSDP2 sharding will happen here")
+            else:
+                logging.info(f"⚡ [Parallel-Attention] Model '{model_type}' not in policy registry")
+                logging.info("⚡ [Parallel-Attention] Using standard inference (passthrough)")
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory
