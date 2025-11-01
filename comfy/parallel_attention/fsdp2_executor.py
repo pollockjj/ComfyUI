@@ -117,18 +117,30 @@ class FSDP2Executor:
         # Wait for result from rank 0
         try:
             result = self.pipes[0].recv()
-            
-            # Store DeviceMesh reference if workers initialized successfully
-            if command == "initialize_fsdp2" and result.get("success"):
-                # Create a simple DeviceMesh marker for test validation
-                # Actual DeviceMesh is in workers
-                self.device_mesh = {
-                    "device_type": device_type,
-                    "mesh_shape": (self.world_size,),
-                    "initialized": True
-                }
-                logging.info(f"{LOG_PREFIX} DeviceMesh marker set (actual mesh in workers)")
-            
+
+            if isinstance(result, dict):
+                if command == "initialize_fsdp2" and result.get("success"):
+                    self.device_mesh = {
+                        "device_type": device_type,
+                        "mesh_shape": (self.world_size,),
+                        "mesh_dim_names": ["dp"],
+                        "world_size": self.world_size,
+                    }
+                    logging.info(f"{LOG_PREFIX} DeviceMesh marker set (actual mesh in workers)")
+
+                if result.get("has_mesh"):
+                    self.device_mesh = {
+                        "device_type": result.get("device_type"),
+                        "mesh_shape": tuple(result.get("mesh_shape", ())),
+                        "mesh_dim_names": list(result.get("mesh_dim_names", [])),
+                        "world_size": result.get("world_size", self.world_size),
+                        "dp_size": result.get("dp_size"),
+                    }
+                    logging.info(
+                        f"{LOG_PREFIX} DeviceMesh metadata cached: type={self.device_mesh['device_type']} "
+                        f"shape={self.device_mesh['mesh_shape']}"
+                    )
+
             return result
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Failed to receive from rank 0: {e}")

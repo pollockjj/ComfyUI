@@ -1,12 +1,15 @@
-"""Parallel Attention - Distributed inference for ComfyUI.
+"""Parallel Attention - Phase 1A: Core Salvage Only
 
-FSDP2 parameter sharding + USP sequence parallelism for large models.
+ONLY exports the 4 perfect files:
+- FSDP2Executor (DeviceMesh-based)
+- parallel_state (DeviceMesh management)
+- FSDP2PolicyRegistry (policy system)
+- ShardingConfig/BlockConfig (data structures)
 """
 
-from .executor import MultiprocExecutor
+from .fsdp2_executor import FSDP2Executor
 from .fsdp2_policies import FSDP2PolicyRegistry
-from .fsdp2_model_patcher import FSDP2ModelPatcher
-from .distributed_model_wrapper import DistributedModelWrapper
+from .fsdp2_config import ShardingConfig, BlockConfig
 from .parallel_state import (
     initialize_parallel_state,
     get_device_mesh,
@@ -20,10 +23,10 @@ from .parallel_state import (
 )
 
 __all__ = [
-    'MultiprocExecutor',
+    'FSDP2Executor',
     'FSDP2PolicyRegistry',
-    'FSDP2ModelPatcher',
-    'DistributedModelWrapper',
+    'ShardingConfig',
+    'BlockConfig',
     'initialize_parallel_state',
     'get_device_mesh',
     'get_sp_group',
@@ -32,5 +35,5 @@ __all__ = [
     'get_dp_rank',
     'get_sp_size',
     'get_dp_size',
-    'is_initialized'
+    'is_initialized',
 ]
