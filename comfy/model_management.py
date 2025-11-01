@@ -504,6 +504,13 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
+        # Phase 0.1: Check for parallel config before loading
+        if hasattr(self.model.model, 'parallel_config') and self.model.model.parallel_config.get('enabled'):
+            logging.info("⚡ [Parallel-Attention] Injection point reached")
+            logging.info(f"⚡ [Parallel-Attention] Message: {self.model.model.parallel_config.get('message', 'none')}")
+            logging.info(f"⚡ [Parallel-Attention] Config: {self.model.model.parallel_config}")
+            logging.info("⚡ [Parallel-Attention] Future: FSDP2 sharding will happen here")
+
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory
         if use_more_vram == 0:
