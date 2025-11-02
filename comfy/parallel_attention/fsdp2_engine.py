@@ -76,9 +76,12 @@ def apply_fsdp2_sharding(
     device = f"cuda:{rank}" if torch.cuda.is_available() else "cpu"
     mesh_info = f"mesh_shape={tuple(device_mesh.shape)}, mesh_dim_names={list(device_mesh.mesh_dim_names)}" if device_mesh else "None"
     
-    logging.info(f"{LOG_PREFIX} [FSDP2Engine] Applying sharding for: {config.model_name}")
-    logging.info(f"{LOG_PREFIX} [FSDP2Engine]   Rank: {rank}, Device: {device}")
-    logging.info(f"{LOG_PREFIX} [FSDP2Engine]   DeviceMesh: {mesh_info}")
+    if rank == 0:
+        logging.info(f"{LOG_PREFIX} [FSDP2Engine] Applying sharding for: {config.model_name}")
+        logging.info(f"{LOG_PREFIX} [FSDP2Engine]   Rank: {rank}, Device: {device}")
+        logging.info(f"{LOG_PREFIX} [FSDP2Engine]   DeviceMesh: {mesh_info}")
+    else:
+        logging.debug(f"{LOG_PREFIX} [FSDP2Engine] Rank {rank} applying sharding")
     
     # Step 1: Detect reference dtype for universal dtype mismatch detection
     ref_dtype = None
@@ -93,16 +96,18 @@ def apply_fsdp2_sharding(
             continue
     
     if ref_dtype:
-        logging.info(f"{LOG_PREFIX} [FSDP2Engine] Reference dtype: {ref_dtype}")
+        if rank == 0:
+            logging.info(f"{LOG_PREFIX} [FSDP2Engine] Reference dtype: {ref_dtype}")
     
-    # Step 2: Collect ignored params
-    ignored_params = config.get_ignored_params(meta_model)
-    logging.info(
-        f"{LOG_PREFIX} [FSDP2Engine] Excluding {len(ignored_params)} params from sharding "
-        f"(shardable patterns: {', '.join(config.shardable_param_patterns)})"
-    )
+    # Collect ignored params
+    ignored_params = detect_unshardable_params(meta_model, config)
+    if rank == 0:
+        logging.info(
+            f"{LOG_PREFIX} [FSDP2Engine] Excluding {len(ignored_params)} params from sharding "
+            f"(shardable patterns: {', '.join(config.shardable_param_patterns)})"
+        )
     
-    # Step 2: Shard blocks according to config
+    # Shard blocks according to config
     total_blocks_sharded = 0
     for block_config in config.blocks:
         block_list = get_module_by_path(meta_model, block_config.module_path)
@@ -113,10 +118,11 @@ def apply_fsdp2_sharding(
                 f"got {type(block_list)}"
             )
         
-        logging.info(
-            f"{LOG_PREFIX} [FSDP2Engine] Sharding {len(block_list)} blocks at {block_config.module_path} "
-            f"(mesh: {mesh_info}, device: {device})"
-        )
+        if rank == 0:
+            logging.info(
+                f"{LOG_PREFIX} [FSDP2Engine] Sharding {len(block_list)} blocks at {block_config.module_path} "
+                f"(mesh: {mesh_info}, device: {device})"
+            )
         
         if block_config.shard_each:
             # Shard each block independently
@@ -151,19 +157,21 @@ def apply_fsdp2_sharding(
             )
             total_blocks_sharded += 1
     
-    logging.info(f"{LOG_PREFIX} [FSDP2Engine] Sharded {total_blocks_sharded} blocks")
+    if rank == 0:
+        logging.info(f"{LOG_PREFIX} [FSDP2Engine] Sharded {total_blocks_sharded} blocks")
     
-    # Step 3: Root wrap if configured
+    # Root wrap if configured
     if config.root_wrap:
         # Add universal scalar detection to root ignored params
         from comfy.parallel_attention.fsdp2_utils import detect_scalar_params
         root_scalars = detect_scalar_params(meta_model)
         ignored_params.update(root_scalars)
         
-        logging.info(
-            f"{LOG_PREFIX} [FSDP2Engine] Applying root wrap with "
-            f"{len(ignored_params)} ignored params..."
-        )
+        if rank == 0:
+            logging.debug(
+                f"{LOG_PREFIX} [FSDP2Engine] Applying root wrap with "
+                f"{len(ignored_params)} ignored params"
+            )
         fully_shard(
             meta_model,
             ignored_params=ignored_params,
@@ -172,9 +180,10 @@ def apply_fsdp2_sharding(
             mesh=device_mesh
         )
     
-    # Step 4: Load state_dict if provided
+    # Load state_dict if provided
     if state_dict:
-        logging.info(f"{LOG_PREFIX} [FSDP2Engine] Loading state_dict into FSDP2 model...")
+        if rank == 0:
+            logging.debug(f"{LOG_PREFIX} [FSDP2Engine] Loading state_dict...")
         
         set_model_state_dict(
             model=meta_model,

@@ -504,18 +504,18 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Phase 0.5.2: Full validation cycle (shard → load → validate → cleanup)
+        # Parallel attention: FSDP2 validation cycle (shard → load → cleanup)
         if hasattr(self.model, 'parallel_attention') and self.model.parallel_attention.is_ready_for_sharding():
             ctx = self.model.parallel_attention
-            LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5.2]"
+            LOG_PREFIX = "⚡ [Parallel-Attention]"
             
             if not ctx.enabled:
-                logging.info(f"{LOG_PREFIX} Context disabled, skipping")
+                logging.debug(f"{LOG_PREFIX} Context disabled, skipping")
             else:
-                logging.info(f"{LOG_PREFIX} Starting full validation cycle for {ctx.model_type}")
-                logging.info(f"{LOG_PREFIX} Checkpoint: {ctx.checkpoint_path}")
+                logging.info(f"{LOG_PREFIX} Loading {ctx.model_type} with FSDP2 sharding")
+                logging.debug(f"{LOG_PREFIX} Checkpoint: {ctx.checkpoint_path}")
                 
-                # Step 1: Shard structure + load weights
+                # Shard structure + load weights
                 result = ctx.executor.execute_collective(
                     "initialize_fsdp2_from_checkpoint",
                     {
@@ -527,26 +527,22 @@ class LoadedModel:
                 
                 if result.get("status") == "success":
                     vram_gb = result.get("vram_gb", 0)
-                    total_params = result.get("total_params", 0)
-                    meta_params = result.get("meta_params", 0)
-                    loaded_params = result.get("loaded_params", 0)
-                    dtensor_params = result.get("dtensor_params", 0)
-                    replicated_params = result.get("replicated_params", 0)
+                    sharded_count = result.get("sharded_count", 0)
+                    replicated_count = result.get("replicated_count", 0)
                     
                     logging.info(f"{LOG_PREFIX} FSDP2 loading complete:")
                     logging.info(f"{LOG_PREFIX}   VRAM per GPU: {vram_gb:.2f}GB")
-                    logging.info(f"{LOG_PREFIX}   Loaded: {loaded_params} params ({dtensor_params} distributed, {replicated_params} replicated)")
-                    logging.info(f"{LOG_PREFIX}   Meta params remaining: {meta_params}")
+                    logging.info(f"{LOG_PREFIX}   Sharded params: {sharded_count}")
+                    logging.info(f"{LOG_PREFIX}   Replicated params: {replicated_count}")
                     
                     # Update context
                     ctx.vram_per_gpu = vram_gb
-                    ctx.total_params = total_params
-                    ctx.sharded_params = dtensor_params
+                    ctx.sharded_params = sharded_count
                     ctx.sharded = True
                     ctx.phase = "weights_loaded"
                     
-                    # Step 2: Cleanup to avoid OOM
-                    logging.info(f"{LOG_PREFIX} Starting cleanup to avoid OOM...")
+                    # Cleanup to avoid OOM
+                    logging.debug(f"{LOG_PREFIX} Cleanup to free VRAM...")
                     
                     cleanup_result = ctx.executor.execute_collective("cleanup_fsdp2_model", {})
                     
@@ -554,14 +550,9 @@ class LoadedModel:
                         vram_freed = cleanup_result.get("vram_freed_gb", 0)
                         vram_after = cleanup_result.get("vram_after_gb", 0)
                         
-                        logging.info(f"{LOG_PREFIX} Cleanup complete:")
-                        logging.info(f"{LOG_PREFIX}   VRAM freed: {vram_freed:.2f}GB")
-                        logging.info(f"{LOG_PREFIX}   VRAM after: {vram_after:.2f}GB")
+                        logging.debug(f"{LOG_PREFIX} Cleanup: freed {vram_freed:.2f}GB → {vram_after:.2f}GB")
                         
                         ctx.phase = "validated_and_cleaned"
-                        
-                        logging.info(f"{LOG_PREFIX} ✅ Phase 0.5.2 complete")
-                        logging.info(f"{LOG_PREFIX} Normal ComfyUI loading will now proceed...")
                     else:
                         error = cleanup_result.get("error", "Unknown")
                         logging.error(f"{LOG_PREFIX} Cleanup failed: {error}")
