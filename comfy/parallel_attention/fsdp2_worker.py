@@ -38,6 +38,25 @@ class FSDP2Worker:
         
         logging.info(f"{LOG_PREFIX} Worker-{rank} initialized on {self.device}")
         logging.info(f"{LOG_PREFIX} Worker-{rank} DeviceMesh: {device_type} mesh_shape=({world_size},)")
+        
+        # GOLDEN DATA COLLECTION - DeviceMesh (EXHAUSTIVE)
+        import json
+        import os
+        golden_mesh = {
+            "source": "version2_worker_mesh",
+            "rank": rank,
+            "device_type": device_type,
+            "mesh_shape": [world_size],
+            "mesh_dim_names": ["dp"],
+            "world_size": world_size,
+            "device": str(self.device),
+        }
+        
+        output_file = f"/home/johnj/parallel-attention/docs/reference/flux_golden_version2_worker{rank}_mesh.json"
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, 'w') as f:
+            json.dump(golden_mesh, f, indent=2)
+        logging.info(f"⚡ [GOLDEN] Worker mesh data written to {output_file}")
     
     def execute(self, command: str, args: dict):
         """Execute command and return result."""
@@ -567,6 +586,28 @@ class FSDP2Worker:
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Received meta_model from parent: {type(meta_model).__name__}")
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] Meta model on device: {next(meta_model.parameters()).device}")
             
+            # GOLDEN DATA COLLECTION - Worker received meta (EXHAUSTIVE)
+            import json
+            import os
+            
+            all_param_names = [name for name, _ in meta_model.named_parameters()]
+            meta_sd = meta_model.state_dict()
+            
+            golden_meta = {
+                "source": "version2_worker_meta",
+                "rank": self.rank,
+                "meta_model_class": type(meta_model).__name__,
+                "all_param_names": all_param_names,
+                "param_shapes": {k: list(v.shape) for k, v in meta_sd.items()},
+                "meta_device": str(next(meta_model.parameters()).device),
+            }
+            
+            output_file = f"/home/johnj/parallel-attention/docs/reference/flux_golden_version2_worker{self.rank}_meta.json"
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(golden_meta, f, indent=2)
+            logging.info(f"⚡ [GOLDEN] Worker meta data written to {output_file}")
+            
             # Step 3: Apply FSDP2 wrapping (structure only, no weights yet)
             config = FSDP2PolicyRegistry.get_policy(model_type)
             self.model = apply_fsdp2_sharding_structure_only(
@@ -576,6 +617,31 @@ class FSDP2Worker:
             )
             
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 wrapping applied with DeviceMesh")
+            
+            # GOLDEN DATA COLLECTION - After FSDP wrapping (EXHAUSTIVE)
+            wrapped_params = []
+            for n, p in self.model.named_parameters():
+                wrapped_params.append({
+                    "name": n,
+                    "type": type(p).__name__,
+                    "has_device_mesh": hasattr(p, 'device_mesh'),
+                    "shape": list(p.shape) if hasattr(p, 'shape') else None,
+                    "device": str(p.device) if hasattr(p, 'device') else None,
+                })
+            
+            golden_wrapped = {
+                "source": "version2_worker_wrapped",
+                "rank": self.rank,
+                "wrapped_params": wrapped_params,
+                "dtensor_count": sum(1 for p in wrapped_params if p['has_device_mesh']),
+                "regular_count": sum(1 for p in wrapped_params if not p['has_device_mesh']),
+            }
+            
+            output_file = f"/home/johnj/parallel-attention/docs/reference/flux_golden_version2_worker{self.rank}_wrapped.json"
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(golden_wrapped, f, indent=2)
+            logging.info(f"⚡ [GOLDEN] Worker wrapped data written to {output_file}")
             
             # Step 4: Load weights using iterator (FastVideo pattern)
             meta_sd = self.model.state_dict()
@@ -628,6 +694,39 @@ class FSDP2Worker:
             vram_gb = torch.cuda.memory_allocated(self.device) / (1024**3) if torch.cuda.is_available() else 0
             
             logging.info(f"{LOG_PREFIX} [Worker-{self.rank}] FSDP2 initialization complete: {vram_gb:.2f}GB VRAM")
+            
+            # GOLDEN DATA COLLECTION - After weight loading (EXHAUSTIVE)
+            from torch.distributed.tensor import DTensor
+            
+            all_params = []
+            for name, param in self.model.named_parameters():
+                param_data = {
+                    "name": name,
+                    "shape": list(param.shape),
+                    "dtype": str(param.dtype),
+                    "device": str(param.device),
+                }
+                if isinstance(param, DTensor):
+                    param_data["is_dtensor"] = True
+                    param_data["local_shape"] = list(param.to_local().shape)
+                    param_data["placements"] = str(param.placements)
+                else:
+                    param_data["is_dtensor"] = False
+                all_params.append(param_data)
+            
+            golden_loaded = {
+                "source": "version2_worker_loaded",
+                "rank": self.rank,
+                "vram_gb": vram_gb,
+                "tensor_count": tensor_count,
+                "all_params": all_params,
+            }
+            
+            output_file = f"/home/johnj/parallel-attention/docs/reference/flux_golden_version2_worker{self.rank}_loaded.json"
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(golden_loaded, f, indent=2)
+            logging.info(f"⚡ [GOLDEN] Worker loaded data written to {output_file}")
             
             return {
                 "status": "success",
