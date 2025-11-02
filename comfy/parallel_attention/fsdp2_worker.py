@@ -347,7 +347,10 @@ class FSDP2Worker:
         """Execute forward pass on FSDP2-sharded model.
         
         FSDP2 handles all-gather/reshard automatically via reshard_after_forward=True.
-        KSampler → FSDP2ModelPatcher.apply_model() → executor → workers → this method
+        KSampler → Node → executor → workers → this method
+        
+        Worker holds full ComfyUI model with FSDP2-wrapped diffusion_model.
+        Executes complete model.apply_model() or model.diffusion_model() path.
         
         Args:
             args: {
@@ -362,7 +365,7 @@ class FSDP2Worker:
                 "rank": int
             }
         
-        Pattern: version2 fsdp2_worker.py line 195
+        Pattern: FastVideo gpu_worker.py + ComfyUI apply_model
         """
         if self.model is None:
             return {"status": "error", "error": "Model not loaded"}
