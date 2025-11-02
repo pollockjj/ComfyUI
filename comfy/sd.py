@@ -1368,6 +1368,28 @@ def load_diffusion_model_state_dict(sd, model_options={}):
         meta_model = copy.deepcopy(model)
         meta_model = meta_model.to('meta')
         logging.info(f"⚡ [Parallel-Attention] Meta model created: {type(meta_model).__name__}")
+        
+        # GOLDEN DATA COLLECTION - Parent (EXHAUSTIVE)
+        import json
+        import os
+        
+        all_param_names = [name for name, _ in meta_model.named_parameters()]
+        meta_sd = meta_model.state_dict()
+        
+        golden_data = {
+            "source": "version2_parent",
+            "model_class": type(model).__name__,
+            "all_param_names": all_param_names,
+            "param_shapes": {k: list(v.shape) for k, v in meta_sd.items()},
+            "param_count": len(all_param_names),
+            "checkpoint_path": model_options.get('_checkpoint_path'),
+        }
+        
+        output_file = "/home/johnj/parallel-attention/docs/reference/flux_golden_version2_parent.json"
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, 'w') as f:
+            json.dump(golden_data, f, indent=2)
+        logging.info(f"⚡ [GOLDEN] Parent data written to {output_file}")
     
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
