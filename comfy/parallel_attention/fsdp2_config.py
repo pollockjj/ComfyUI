@@ -58,19 +58,20 @@ class ShardingConfig:
     shardable_param_patterns: List[str]
     root_wrap: bool = True
     
-    def get_ignored_params(self, diffusion_model: nn.Module) -> Set[nn.Parameter]:
-        """Collect parameters to exclude from sharding (EXCLUSIVE logic).
+    def get_ignored_params(self, model: nn.Module) -> Set[nn.Parameter]:
+        """Collect parameters to exclude from sharding (Raylight EXCLUSIVE logic).
         
         Iterates over diffusion_model.named_parameters() and ignores everything
         EXCEPT params matching shardable_param_patterns.
         
         Args:
-            diffusion_model: Inner model (transformer only, no wrapper)
+            model: Full model (has model.diffusion_model)
             
         Returns:
             Set of parameters to exclude from FSDP2 sharding
         """
         ignored = set()
+        diffusion_model = model.diffusion_model
         
         for name, param in diffusion_model.named_parameters():
             # If name does NOT start with any shardable pattern → ignore it

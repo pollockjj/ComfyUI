@@ -136,11 +136,9 @@ def wan_fsdp2_policy() -> ShardingConfig:
     - blocks: 30 transformer blocks (Wan2.2)
     - Other components: patch_embed, pos_embed, final_layer
     
-    Sharding strategy (FastVideo EXCLUSIVE):
-    - Shard: blocks.0, blocks.1, ..., blocks.29 (numbered blocks only)
-    - Ignore: Everything else (patch_embed, pos_embed, final_layer, any non-numbered blocks)
-    
-    FastVideo policy: lambda n, m: "blocks" in n and str.isdigit(n.split(".")[-1])
+    Sharding strategy (Raylight EXCLUSIVE):
+    - Shard: blocks.*
+    - Ignore: Everything else (patch_embed, pos_embed, final_layer)
     
     Returns:
         ShardingConfig with block paths and shardable patterns
@@ -155,12 +153,7 @@ def wan_fsdp2_policy() -> ShardingConfig:
             ),
         ],
         shardable_param_patterns=[
-            "blocks.0.", "blocks.1.", "blocks.2.", "blocks.3.", "blocks.4.",
-            "blocks.5.", "blocks.6.", "blocks.7.", "blocks.8.", "blocks.9.",
-            "blocks.10.", "blocks.11.", "blocks.12.", "blocks.13.", "blocks.14.",
-            "blocks.15.", "blocks.16.", "blocks.17.", "blocks.18.", "blocks.19.",
-            "blocks.20.", "blocks.21.", "blocks.22.", "blocks.23.", "blocks.24.",
-            "blocks.25.", "blocks.26.", "blocks.27.", "blocks.28.", "blocks.29."
+            "blocks."
         ],
         root_wrap=True
     )

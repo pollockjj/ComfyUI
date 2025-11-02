@@ -1365,53 +1365,34 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     
     model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     
-    # Parallel attention: ONE context object, populated progressively
-    if model_management.is_parallel_attention_enabled():
-        import copy
-        from comfy.parallel_attention import ParallelAttentionContext, FSDP2PolicyRegistry
-        
-        # Create context (our database)
-        ctx = ParallelAttentionContext()
-        
-        # Phase A: Structure Capture (before LoRA)
-        ctx.checkpoint_path = model_options.get('_checkpoint_path')
-        ctx.meta_model = copy.deepcopy(model).to('meta')
-        
-        # Detect model type
-        model_class = type(model).__name__
-        model_type = model_class.lower()
-        if model_type == "qwenimage":
-            model_type = "qwen_image"
-        elif model_type.startswith("wan"):
-            model_type = "wan"
-        ctx.model_type = model_type
-        
-        # Look up policy
-        if FSDP2PolicyRegistry.is_registered(model_type):
-            ctx.policy = FSDP2PolicyRegistry.get_policy(model_type)
-            ctx.phase = "structure_captured"
-            
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Context created for {model_type}")
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Policy: {len(ctx.policy.blocks)} block groups")
-        else:
-            ctx.enabled = False
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] No policy for {model_type}, disabled")
-        
-        # Attach ONE object to ModelPatcher
-        model_patcher.parallel_attention = ctx
-    
     return model_patcher
 
 
 def load_diffusion_model(unet_path, model_options={}):
     sd = comfy.utils.load_torch_file(unet_path)
-    model_options = model_options.copy()
+    
+    # Thread checkpoint path through to FSDP2ModelPatcher
+    model_options = model_options.copy()  # Don't modify original
     model_options['_checkpoint_path'] = unet_path
     
     model = load_diffusion_model_state_dict(sd, model_options=model_options)
     if model is None:
         logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
         raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
+    
+    # Phase 0.4: Attach checkpoint path if parallel attention enabled
+    logging.info(f"⚡ [Parallel-Attention][UNETLoader] load_diffusion_model called: {unet_path}")
+    logging.info(f"⚡ [Parallel-Attention][UNETLoader]   hasattr(model.model, 'parallel_config'): {hasattr(model.model, 'parallel_config')}")
+    if hasattr(model.model, 'parallel_config'):
+        logging.info(f"⚡ [Parallel-Attention][UNETLoader]   parallel_config.get('enabled'): {model.model.parallel_config.get('enabled')}")
+    
+    if hasattr(model.model, 'parallel_config') and model.model.parallel_config.get('enabled'):
+        model.checkpoint_path = unet_path
+        model.model_options['_checkpoint_path'] = unet_path
+        logging.info(f"⚡ [Parallel-Attention][UNETLoader] ✅ Checkpoint path attached to model.checkpoint_path AND model.model_options['_checkpoint_path']")
+        logging.info(f"⚡ [Parallel-Attention][UNETLoader]   Path: {unet_path}")
+    else:
+        logging.info(f"⚡ [Parallel-Attention][UNETLoader] ❌ Checkpoint path NOT attached (parallel_config not enabled)")
     
     return model
 
