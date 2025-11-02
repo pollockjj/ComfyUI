@@ -504,24 +504,33 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Parallel attention: FSDP2 validation cycle (shard → load → cleanup)
-        if hasattr(self.model, 'parallel_attention') and self.model.parallel_attention.is_ready_for_sharding():
-            ctx = self.model.parallel_attention
+        # Parallel attention: FSDP2 distributed loading (CFG-Split pattern)
+        if hasattr(self.model, 'parallel_attention'):
+            pa = self.model.parallel_attention
             LOG_PREFIX = "⚡ [Parallel-Attention]"
             
-            if not ctx.enabled:
-                logging.debug(f"{LOG_PREFIX} Context disabled, skipping")
+            # parallel_attention is always a dict (CFG-Split pattern)
+            if not isinstance(pa, dict):
+                logging.error(f"{LOG_PREFIX} parallel_attention is not a dict, skipping")
+            elif not pa.get("enabled"):
+                logging.debug(f"{LOG_PREFIX} Not enabled")
+            elif pa.get("phase") != "ready_for_sharding":
+                logging.debug(f"{LOG_PREFIX} Phase is '{pa.get('phase')}', not ready for sharding")
             else:
-                logging.info(f"{LOG_PREFIX} Loading {ctx.model_type} with FSDP2 sharding")
-                logging.debug(f"{LOG_PREFIX} Checkpoint: {ctx.checkpoint_path}")
+                # All info is in the dict - no separate context object
+                checkpoint_path = pa.get('checkpoint_path')
+                logging.info(f"{LOG_PREFIX} Loading {pa['model_type']} with FSDP2 sharding")
+                logging.info(f"{LOG_PREFIX} Checkpoint path from dict: {checkpoint_path}")
+                logging.info(f"{LOG_PREFIX} All dict keys: {list(pa.keys())}")
+                logging.info(f"{LOG_PREFIX} Dict checkpoint_path value: {repr(checkpoint_path)}")
                 
-                # Shard structure + load weights
-                result = ctx.executor.execute_collective(
+                # Shard structure + load weights via executor
+                result = pa["executor"].execute_collective(
                     "initialize_fsdp2_from_checkpoint",
                     {
-                        "checkpoint_path": ctx.checkpoint_path,
-                        "model_type": ctx.model_type,
-                        "policy": ctx.policy,
+                        "checkpoint_path": pa["checkpoint_path"],
+                        "model_type": pa["model_type"],
+                        "policy": pa["policy"],
                     }
                 )
                 
@@ -535,32 +544,23 @@ class LoadedModel:
                     logging.info(f"{LOG_PREFIX}   Sharded params: {sharded_count}")
                     logging.info(f"{LOG_PREFIX}   Replicated params: {replicated_count}")
                     
-                    # Update context
-                    ctx.vram_per_gpu = vram_gb
-                    ctx.sharded_params = sharded_count
-                    ctx.sharded = True
-                    ctx.phase = "weights_loaded"
+                    # Update dict with results
+                    pa["vram_per_gpu"] = vram_gb
+                    pa["sharded_params"] = sharded_count
+                    pa["sharded"] = True
+                    pa["phase"] = "ready_for_inference"
                     
-                    # Cleanup to avoid OOM
-                    logging.debug(f"{LOG_PREFIX} Cleanup to free VRAM...")
-                    
-                    cleanup_result = ctx.executor.execute_collective("cleanup_fsdp2_model", {})
-                    
-                    if cleanup_result.get("status") == "success":
-                        vram_freed = cleanup_result.get("vram_freed_gb", 0)
-                        vram_after = cleanup_result.get("vram_after_gb", 0)
-                        
-                        logging.debug(f"{LOG_PREFIX} Cleanup: freed {vram_freed:.2f}GB → {vram_after:.2f}GB")
-                        
-                        ctx.phase = "validated_and_cleaned"
-                    else:
-                        error = cleanup_result.get("error", "Unknown")
-                        logging.error(f"{LOG_PREFIX} Cleanup failed: {error}")
-                        ctx.phase = "cleanup_error"
+                    logging.info(f"{LOG_PREFIX} Workers ready for inference")
+                    # Skip parent weight loading - workers have sharded model
+                    logging.info(f"{LOG_PREFIX} Skipping parent weight load (workers loaded)")
+                    real_model = self.model.model
+                    self.real_model = weakref.ref(real_model)
+                    self.model_finalizer = weakref.finalize(real_model, cleanup_models)
+                    return real_model
                 else:
                     error = result.get("error", "Unknown")
                     logging.error(f"{LOG_PREFIX} Loading failed: {error}")
-                    ctx.phase = "loading_error"
+                    pa["phase"] = "loading_error"
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory

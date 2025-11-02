@@ -147,6 +147,7 @@ if 'torch' in sys.modules:
 # Initialize multiprocessing for parallel attention if enabled
 if args.use_parallel_attention:
     import torch.multiprocessing as mp
+    
     try:
         mp.set_start_method('spawn', force=True)
         logging.info("Parallel attention enabled: multiprocessing start method set to 'spawn'")

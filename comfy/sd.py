@@ -1365,40 +1365,25 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     
     model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     
-    # Parallel attention: ONE context object, populated progressively
-    if model_management.is_parallel_attention_enabled():
-        import copy
-        from comfy.parallel_attention import ParallelAttentionContext, FSDP2PolicyRegistry
-        
-        # Create context (our database)
-        ctx = ParallelAttentionContext()
-        
-        # Phase A: Structure Capture (before LoRA)
-        ctx.checkpoint_path = model_options.get('_checkpoint_path')
-        ctx.meta_model = copy.deepcopy(model).to('meta')
-        
-        # Detect model type
-        model_class = type(model).__name__
-        model_type = model_class.lower()
-        if model_type == "qwenimage":
-            model_type = "qwen_image"
-        elif model_type.startswith("wan"):
-            model_type = "wan"
-        ctx.model_type = model_type
-        
-        # Look up policy
-        if FSDP2PolicyRegistry.is_registered(model_type):
-            ctx.policy = FSDP2PolicyRegistry.get_policy(model_type)
-            ctx.phase = "structure_captured"
-            
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Context created for {model_type}")
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Policy: {len(ctx.policy.blocks)} block groups")
-        else:
-            ctx.enabled = False
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] No policy for {model_type}, disabled")
-        
-        # Attach ONE object to ModelPatcher
-        model_patcher.parallel_attention = ctx
+    # Parallel attention: Store checkpoint path from model_options into parallel_attention dict
+    checkpoint_path = model_options.get('_checkpoint_path')
+    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: checkpoint_path from model_options={checkpoint_path}")
+    
+    if not checkpoint_path:
+        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - No checkpoint_path in model_options! model_options keys: {list(model_options.keys())}")
+    
+    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: model_patcher has parallel_attention={hasattr(model_patcher, 'parallel_attention')}")
+    
+    if not hasattr(model_patcher, 'parallel_attention'):
+        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - ModelPatcher has no parallel_attention attribute!")
+    
+    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: parallel_attention is dict={isinstance(model_patcher.parallel_attention, dict)}")
+    
+    if not isinstance(model_patcher.parallel_attention, dict):
+        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - parallel_attention is not a dict, it's {type(model_patcher.parallel_attention)}")
+    
+    model_patcher.parallel_attention["checkpoint_path"] = checkpoint_path
+    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: Stored checkpoint_path in parallel_attention dict")
     
     return model_patcher
 
@@ -1407,6 +1392,7 @@ def load_diffusion_model(unet_path, model_options={}):
     sd = comfy.utils.load_torch_file(unet_path)
     model_options = model_options.copy()
     model_options['_checkpoint_path'] = unet_path
+    logging.info(f"⚡ [DEBUG] load_diffusion_model: Stored checkpoint_path={unet_path}")
     
     model = load_diffusion_model_state_dict(sd, model_options=model_options)
     if model is None:

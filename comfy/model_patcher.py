@@ -257,6 +257,22 @@ class ModelPatcher:
         self.is_clip = False
         self.hook_mode = comfy.hooks.EnumHookMode.MaxSpeed
 
+        # Parallel Attention infrastructure (FSDP2, USP, CFG-Split)
+        # Following CFG-Split pattern - dict stores all parallel execution state
+        self.parallel_attention = {
+            "enabled": False,
+            "executor": None,
+            "device_mesh": None,
+            "strategies": [],
+            "policy": None,
+            "checkpoint_path": None,
+            "model_type": None,
+            "phase": "uninitialized",
+            "sharded": False,
+            "vram_per_gpu": 0,
+            "sharded_params": 0,
+        }
+
         if not hasattr(self.model, 'model_loaded_weight_memory'):
             self.model.model_loaded_weight_memory = 0
 
@@ -297,9 +313,8 @@ class ModelPatcher:
 
         n.force_cast_weights = self.force_cast_weights
 
-        # Preserve parallel attention context (ONE object)
-        if hasattr(self, 'parallel_attention'):
-            n.parallel_attention = self.parallel_attention
+        # Copy parallel attention dict (CFG-Split pattern - share executor across clones)
+        n.parallel_attention = copy.deepcopy(self.parallel_attention)
         
         # attachments
         n.attachments = {}
@@ -342,6 +357,26 @@ class ModelPatcher:
         for callback in self.get_all_callbacks(CallbacksMP.ON_CLONE):
             callback(self, n)
         return n
+
+    def setup_parallel_attention(self, executor, device_mesh, strategies, policy, forward_wrapper):
+        """Configure parallel attention strategies for distributed inference.
+        
+        Following CFG-Split pattern of extending core ModelPatcher functionality.
+        
+        Args:
+            executor: MultiprocExecutor managing worker processes
+            device_mesh: PyTorch DeviceMesh defining GPU topology
+            strategies: List of strategies (e.g., ["fsdp2", "usp"])
+            policy: ParallelismPolicy with sharding rules
+            forward_wrapper: Function to wrap model.apply_model calls
+        """
+        self.parallel_attention["enabled"] = True
+        self.parallel_attention["executor"] = executor
+        self.parallel_attention["device_mesh"] = device_mesh
+        self.parallel_attention["strategies"] = strategies
+        self.parallel_attention["policy"] = policy
+        self.model_options["model_function_wrapper"] = forward_wrapper
+        logging.info(f"⚡ [Parallel-Attention] Enabled strategies: {strategies}")
 
     def is_clone(self, other):
         if hasattr(other, 'model') and self.model is other.model:

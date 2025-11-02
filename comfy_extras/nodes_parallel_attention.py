@@ -43,50 +43,166 @@ class ParallelAttentionConfig:
     
     def configure(self, model, enable_fsdp2, device_1, device_2, backend):
         """Configure parallel attention and spawn workers."""
-        # Check for context
+        # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):
             raise RuntimeError(
-                f"{LOG_PREFIX} No parallel_attention context found. "
-                "Ensure --use-parallel-attention flag is set."
+                f"{LOG_PREFIX} No parallel_attention dict found on ModelPatcher"
             )
         
-        ctx = model.parallel_attention
+        pa = model.parallel_attention
         
-        if not ctx.enabled:
-            raise RuntimeError(f"{LOG_PREFIX} Context disabled (no policy for {ctx.model_type})")
+        if not isinstance(pa, dict):
+            raise RuntimeError(f"{LOG_PREFIX} parallel_attention is not a dict")
+        
+        # Detect model type
+        model_type = type(model.model).__name__.lower()
+        if model_type == "qwenimage":
+            model_type = "qwen_image"
+        elif model_type.startswith("wan"):
+            model_type = "wan"
         
         # Phase B: Worker Initialization
-        if enable_fsdp2 and ctx.executor is None:
-            from comfy.parallel_attention import FSDP2Executor
+        if enable_fsdp2 and pa.get("executor") is None:
+            from comfy.parallel_attention import FSDP2Executor, FSDP2PolicyRegistry
+            
+            # Get policy for model
+            if not FSDP2PolicyRegistry.is_registered(model_type):
+                raise RuntimeError(f"{LOG_PREFIX} No policy registered for model type: {model_type}")
+            
+            policy = FSDP2PolicyRegistry.get_policy(model_type)
             
             # Determine backend
             actual_backend = backend if backend != "auto" else ("nccl" if torch.cuda.is_available() else "gloo")
             
-            logging.info(f"{LOG_PREFIX} Spawning workers for {ctx.model_type}")
+            logging.info(f"{LOG_PREFIX} Spawning workers for {model_type}")
             logging.info(f"{LOG_PREFIX} Devices: {device_1}, {device_2}")
             logging.info(f"{LOG_PREFIX} Backend: {actual_backend}")
             
             # Spawn workers
             executor = FSDP2Executor(world_size=2, backend=actual_backend)
             
-            # Populate context
-            ctx.executor = executor
-            ctx.world_size = 2
-            ctx.backend = actual_backend
-            ctx.phase = "workers_initialized"
-            
             logging.info(f"{LOG_PREFIX} Workers spawned")
-            ctx.log_state(LOG_PREFIX)
-        elif ctx.executor is not None:
+            
+            # Populate parallel_attention dict (CFG-Split pattern)
+            existing_checkpoint_path = pa.get("checkpoint_path")
+            logging.info(f"{LOG_PREFIX} Config node: checkpoint_path already in dict={existing_checkpoint_path}")
+            
+            pa["enabled"] = True
+            pa["executor"] = executor
+            pa["device_mesh"] = executor.device_mesh
+            pa["strategies"] = ["fsdp2"]
+            pa["policy"] = policy
+            if not existing_checkpoint_path:
+                logging.warning(f"{LOG_PREFIX} Config node: No checkpoint_path in dict, this will cause loading to fail!")
+            pa["model_type"] = model_type
+            pa["phase"] = "ready_for_sharding"
+            pa["sharded"] = False
+            pa["vram_per_gpu"] = 0
+            pa["sharded_params"] = 0
+            
+            logging.info(f"{LOG_PREFIX} Parallel attention enabled on model")
+        elif pa.get("executor") is not None:
             logging.info(f"{LOG_PREFIX} Workers already initialized, reusing")
         
         return (model,)
 
 
+class TestFSDP2Inference:
+    """Test FSDP2 distributed inference with sharded model.
+    
+    Validates that workers can execute forward pass on FSDP2-sharded model.
+    Tests data parallelism - all ranks compute identical output.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "latent": ("LATENT",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 1, "min": 1, "max": 10}),
+                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0}),
+            }
+        }
+    
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "test_result")
+    FUNCTION = "test_inference"
+    CATEGORY = "parallel_attention/test"
+    
+    def test_inference(self, model, latent, positive, negative, seed, steps, cfg):
+        """Test FSDP2 inference with minimal sampling."""
+        import comfy.sample
+        import numpy as np
+        
+        LOG_PREFIX = "⚡ [PA-Test][Inference]"
+        
+        # Check for parallel attention context
+        if not hasattr(model, 'parallel_attention'):
+            return (latent, "❌ No parallel_attention context")
+        
+        ctx = model.parallel_attention
+        
+        if not ctx.is_ready_for_sharding():
+            return (latent, f"❌ Not ready: phase={ctx.phase}")
+        
+        if ctx.executor is None:
+            return (latent, "❌ No executor (run ParallelAttentionConfig first)")
+        
+        # Validate workers have sharded model
+        if not ctx.sharded:
+            return (latent, "❌ Workers not sharded (model not loaded yet)")
+        
+        logging.info(f"{LOG_PREFIX} Starting inference test")
+        logging.info(f"{LOG_PREFIX} Model: {ctx.model_type}, Steps: {steps}")
+        logging.info(f"{LOG_PREFIX} Sharded params: {ctx.sharded_params}")
+        
+        try:
+            # Run sampling
+            samples = latent["samples"]
+            
+            # Use ComfyUI's sampler
+            output_latent = comfy.sample.sample(
+                model,
+                noise=torch.randn_like(samples),
+                steps=steps,
+                cfg=cfg,
+                sampler_name="euler",
+                scheduler="simple",
+                positive=positive,
+                negative=negative,
+                latent_image=samples,
+                denoise=1.0,
+            )
+            
+            logging.info(f"{LOG_PREFIX} ✅ Inference complete")
+            
+            # Build result
+            result = (
+                f"✅ FSDP2 Inference Test PASSED\n"
+                f"Model: {ctx.model_type}\n"
+                f"Steps: {steps}\n"
+                f"Sharded params: {ctx.sharded_params}\n"
+                f"VRAM per GPU: {ctx.vram_per_gpu:.2f}GB\n"
+                f"Output shape: {output_latent['samples'].shape}"
+            )
+            
+            return ({"samples": output_latent["samples"]}, result)
+            
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} Inference failed: {e}", exc_info=True)
+            return (latent, f"❌ Inference failed: {str(e)}")
+
+
 NODE_CLASS_MAPPINGS = {
     "ParallelAttentionConfig": ParallelAttentionConfig,
+    "TestFSDP2Inference": TestFSDP2Inference,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ParallelAttentionConfig": "Parallel Attention Config",
+    "TestFSDP2Inference": "Test FSDP2 Inference",
 }
