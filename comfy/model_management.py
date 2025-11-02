@@ -504,72 +504,275 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Phase 0.5.2: Full validation cycle (shard → load → validate → cleanup)
-        if hasattr(self.model, 'parallel_attention') and self.model.parallel_attention.is_ready_for_sharding():
-            ctx = self.model.parallel_attention
-            LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5.2]"
+        # Phase 0.2: Check for parallel config and policy
+        if hasattr(self.model.model, 'parallel_config') and self.model.model.parallel_config.get('enabled'):
+            logging.info("⚡ [Parallel-Attention][Partially Load] Injection point reached")
+            logging.info(f"⚡ [Parallel-Attention][Partially Load] Message: {self.model.model.parallel_config.get('message', 'none')}")
+            logging.info(f"⚡ [Parallel-Attention][Partially Load] Config: {self.model.model.parallel_config}")
             
-            if not ctx.enabled:
-                logging.info(f"{LOG_PREFIX} Context disabled, skipping")
-            else:
-                logging.info(f"{LOG_PREFIX} Starting full validation cycle for {ctx.model_type}")
-                logging.info(f"{LOG_PREFIX} Checkpoint: {ctx.checkpoint_path}")
+            # Phase 0.2: Model inspection and policy lookup
+            from comfy.parallel_attention import FSDP2PolicyRegistry
+            
+            model_class = type(self.model.model).__name__
+            model_type = model_class.lower()  # "Flux" → "flux"
+            
+            # Handle naming variations
+            if model_type == "qwenimage":
+                model_type = "qwen_image"
+            elif model_type.startswith("wan"):  # wan21, wan22 → wan
+                model_type = "wan"
+            
+            if FSDP2PolicyRegistry.is_registered(model_type):
+                config = FSDP2PolicyRegistry.get_policy(model_type)
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' has FSDP2 policy")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Policy: {len(config.blocks)} block groups, root_wrap={config.root_wrap}")
+                for block in config.blocks:
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load]   - {block.module_path}: {block.block_count} blocks")
                 
-                # Step 1: Shard structure + load weights
-                result = ctx.executor.execute_collective(
-                    "initialize_fsdp2_from_checkpoint",
-                    {
-                        "checkpoint_path": ctx.checkpoint_path,
-                        "model_type": ctx.model_type,
-                        "policy": ctx.policy,
+                # Phase 0.3: Collect all required data for FSDP2 sharding
+                import copy
+                import json
+                import os
+                
+                # Create meta model
+                meta_model = copy.deepcopy(self.model.model)
+                meta_model = meta_model.to('meta')
+                
+                # Collect exhaustive data
+                all_param_names = [name for name, _ in meta_model.named_parameters()]
+                meta_sd = meta_model.state_dict()
+                
+                phase03_data = {
+                    "model_class": model_class,
+                    "model_type": model_type,
+                    "all_param_names": all_param_names,
+                    "param_shapes": {k: list(v.shape) for k, v in meta_sd.items()},
+                    "param_count": len(all_param_names),
+                    
+                    # Policy data
+                    "policy_blocks": len(config.blocks),
+                    "block_configs": [
+                        {
+                            "module_path": b.module_path,
+                            "block_count": b.block_count,
+                            "shard_each": b.shard_each
+                        } for b in config.blocks
+                    ],
+                    "shardable_param_patterns": config.shardable_param_patterns,
+                    "root_wrap": config.root_wrap,
+                    
+                    # Hardware config
+                    "world_size": self.model.model.parallel_config.get('world_size', 2),
+                    "backend": self.model.model.parallel_config.get('backend', 'nccl'),
+                    
+                    # Expected results (from golden)
+                    "expected_dtensor_count": 760,
+                    "expected_replicated_count": 20,
+                    "expected_vram_gb": 11.14,
+                }
+                
+                # Write to file
+                output_file = "/home/johnj/parallel-attention/docs/reference/phase03_collected_data.json"
+                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                with open(output_file, 'w') as f:
+                    json.dump(phase03_data, f, indent=2)
+                
+                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data collection complete")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Collected {len(all_param_names)} params")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Policy: {len(config.blocks)} block groups")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data written to {output_file}")
+                
+                # Validate against model-specific golden dataset
+                golden_file = f"/home/johnj/parallel-attention/docs/reference/{model_type}_golden_version2_parent.json"
+                if os.path.exists(golden_file):
+                    with open(golden_file) as f:
+                        golden = json.load(f)
+                    
+                    matches = {
+                        "param_count": phase03_data["param_count"] == golden["param_count"],
+                        "param_names": phase03_data["all_param_names"] == golden["all_param_names"],
+                        "param_shapes": phase03_data["param_shapes"] == golden["param_shapes"],
                     }
-                )
-                
-                if result.get("status") == "success":
-                    vram_gb = result.get("vram_gb", 0)
-                    total_params = result.get("total_params", 0)
-                    meta_params = result.get("meta_params", 0)
-                    loaded_params = result.get("loaded_params", 0)
-                    dtensor_params = result.get("dtensor_params", 0)
-                    replicated_params = result.get("replicated_params", 0)
                     
-                    logging.info(f"{LOG_PREFIX} FSDP2 loading complete:")
-                    logging.info(f"{LOG_PREFIX}   VRAM per GPU: {vram_gb:.2f}GB")
-                    logging.info(f"{LOG_PREFIX}   Loaded: {loaded_params} params ({dtensor_params} distributed, {replicated_params} replicated)")
-                    logging.info(f"{LOG_PREFIX}   Meta params remaining: {meta_params}")
-                    
-                    # Update context
-                    ctx.vram_per_gpu = vram_gb
-                    ctx.total_params = total_params
-                    ctx.sharded_params = dtensor_params
-                    ctx.sharded = True
-                    ctx.phase = "weights_loaded"
-                    
-                    # Step 2: Cleanup to avoid OOM
-                    logging.info(f"{LOG_PREFIX} Starting cleanup to avoid OOM...")
-                    
-                    cleanup_result = ctx.executor.execute_collective("cleanup_fsdp2_model", {})
-                    
-                    if cleanup_result.get("status") == "success":
-                        vram_freed = cleanup_result.get("vram_freed_gb", 0)
-                        vram_after = cleanup_result.get("vram_after_gb", 0)
-                        
-                        logging.info(f"{LOG_PREFIX} Cleanup complete:")
-                        logging.info(f"{LOG_PREFIX}   VRAM freed: {vram_freed:.2f}GB")
-                        logging.info(f"{LOG_PREFIX}   VRAM after: {vram_after:.2f}GB")
-                        
-                        ctx.phase = "validated_and_cleaned"
-                        
-                        logging.info(f"{LOG_PREFIX} ✅ Phase 0.5.2 complete")
-                        logging.info(f"{LOG_PREFIX} Normal ComfyUI loading will now proceed...")
-                    else:
-                        error = cleanup_result.get("error", "Unknown")
-                        logging.error(f"{LOG_PREFIX} Cleanup failed: {error}")
-                        ctx.phase = "cleanup_error"
+                    all_match = all(matches.values())
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Validation against {model_type} golden: {'✅ PASS' if all_match else '⚠️  MISMATCH'}")
+                    for key, match in matches.items():
+                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4]   {key}: {'✅' if match else '⚠️ '}")
                 else:
-                    error = result.get("error", "Unknown")
-                    logging.error(f"{LOG_PREFIX} Loading failed: {error}")
-                    ctx.phase = "loading_error"
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] No golden dataset for {model_type}, skipping validation")
+                
+                # Phase 0.4.5: Validate ignored params logic
+                LOG_PREFIX_PHASE = "⚡ [Parallel-Attention][Partially Load][Phase 0.4.5]"
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Validating param classification...")
+                
+                # Get ignored params using policy
+                ignored_params = config.get_ignored_params(meta_model)
+                
+                # Classify all params
+                ignored_names = set()
+                shardable_names = set()
+                for name, param in meta_model.named_parameters():
+                    if param in ignored_params:
+                        ignored_names.add(name)
+                    else:
+                        shardable_names.add(name)
+                
+                total_params = len(list(meta_model.parameters()))
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Param classification:")
+                logging.info(f"{LOG_PREFIX_PHASE}   Total params: {total_params}")
+                logging.info(f"{LOG_PREFIX_PHASE}   Shardable params: {len(shardable_names)}")
+                logging.info(f"{LOG_PREFIX_PHASE}   Ignored params: {len(ignored_names)}")
+                
+                # Log sample params for verification
+                logging.info(f"{LOG_PREFIX_PHASE} Sample ignored params:")
+                for name in sorted(ignored_names)[:5]:
+                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Sample shardable params:")
+                for name in sorted(shardable_names)[:5]:
+                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
+                
+                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Ready for Phase 1 (FSDP2 sharding implementation)")
+                
+                # Phase 0.5: Execute FSDP2 sharding validation + cleanup
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Checking Phase 0.5 prerequisites:")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load]   hasattr(self.model, 'parallel_executor'): {hasattr(self.model, 'parallel_executor')}")
+                if hasattr(self.model, 'parallel_executor'):
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load]   self.model.parallel_executor is not None: {self.model.parallel_executor is not None}")
+                
+                if hasattr(self.model, 'parallel_executor') and self.model.parallel_executor is not None:
+                    LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5]"
+                    
+                    logging.info(f"{LOG_PREFIX} Starting FSDP2 sharding validation...")
+                    
+                    try:
+                        # Step 1: Get checkpoint path from model_options
+                        checkpoint_path = self.model.model_options.get('_checkpoint_path')
+                        
+                        if not checkpoint_path:
+                            logging.warning(f"{LOG_PREFIX} No checkpoint path in model_options, skipping Phase 0.5")
+                        else:
+                            logging.info(f"{LOG_PREFIX} Checkpoint path: {checkpoint_path}")
+                            
+                            # Step 2: Clean meta_model for pickling (remove unpicklable objects)
+                            import copy
+                            clean_meta = copy.deepcopy(meta_model)
+                            
+                            # Remove unpicklable attributes (version2 pattern)
+                            if hasattr(clean_meta, 'model_sampling'):
+                                delattr(clean_meta, 'model_sampling')
+                                logging.info(f"{LOG_PREFIX} Removed model_sampling from meta_model")
+                            if hasattr(clean_meta, 'latent_format'):
+                                delattr(clean_meta, 'latent_format')
+                                logging.info(f"{LOG_PREFIX} Removed latent_format from meta_model")
+                            
+                            logging.info(f"{LOG_PREFIX} Meta model cleaned for pickling")
+                            
+                            # Step 3: Send clean_meta + checkpoint_path to workers for sharding
+                            logging.info(f"{LOG_PREFIX} Sending meta_model to workers for FSDP2 sharding...")
+                            
+                            result = self.model.parallel_executor.execute_collective(
+                                "initialize_fsdp2_from_checkpoint",
+                                {
+                                    "checkpoint_path": checkpoint_path,
+                                    "model_type": model_type,
+                                    "meta_model": clean_meta,
+                                }
+                            )
+                            
+                            # Step 4: Validate sharding results
+                            if result.get("status") == "success":
+                                vram_gb = result.get("vram_gb", 0)
+                                sharded_count = result.get("sharded_count", 0)
+                                replicated_count = result.get("replicated_count", 0)
+                                
+                                logging.info(f"{LOG_PREFIX} FSDP2 sharding complete:")
+                                logging.info(f"{LOG_PREFIX}   VRAM per GPU: {vram_gb:.2f}GB")
+                                logging.info(f"{LOG_PREFIX}   Sharded params: {sharded_count}")
+                                logging.info(f"{LOG_PREFIX}   Replicated params: {replicated_count}")
+                                
+                                # Validate against model-specific golden dataset
+                                golden_file = f"/home/johnj/parallel-attention/docs/reference/{model_type}_golden_version2_worker0_loaded.json"
+                                if os.path.exists(golden_file):
+                                    with open(golden_file) as f:
+                                        golden = json.load(f)
+                                    
+                                    expected_vram = golden.get("vram_gb", 0)
+                                    expected_sharded = golden.get("sharded_params", 0)
+                                    expected_replicated = golden.get("replicated_params", 0)
+                                    
+                                    validation_passed = True
+                                    
+                                    if expected_vram > 0 and abs(vram_gb - expected_vram) > 0.5:
+                                        logging.warning(f"{LOG_PREFIX} VRAM mismatch: expected {expected_vram}GB, got {vram_gb}GB")
+                                        validation_passed = False
+                                    
+                                    if expected_sharded > 0 and sharded_count != expected_sharded:
+                                        logging.warning(f"{LOG_PREFIX} Sharded count mismatch: expected {expected_sharded}, got {sharded_count}")
+                                        validation_passed = False
+                                    
+                                    if expected_replicated > 0 and replicated_count != expected_replicated:
+                                        logging.warning(f"{LOG_PREFIX} Replicated count mismatch: expected {expected_replicated}, got {replicated_count}")
+                                        validation_passed = False
+                                    
+                                    if validation_passed:
+                                        logging.info(f"{LOG_PREFIX} ✅ Validation PASSED (golden: {model_type})")
+                                    else:
+                                        logging.warning(f"{LOG_PREFIX} ⚠️  Validation mismatch (golden: {model_type})")
+                                else:
+                                    logging.info(f"{LOG_PREFIX} No golden dataset for {model_type}, skipping validation")
+                                    logging.info(f"{LOG_PREFIX} ✅ Sharding complete (no validation baseline)")
+                                
+                            else:
+                                error = result.get("error", "Unknown error")
+                                logging.error(f"{LOG_PREFIX} FSDP2 sharding failed: {error}")
+                                raise RuntimeError(f"FSDP2 sharding failed: {error}")
+                            
+                            # Step 5: Cleanup sharded model to avoid OOM
+                            logging.info(f"{LOG_PREFIX} Starting cleanup to avoid OOM...")
+                            
+                            cleanup_result = self.model.parallel_executor.execute_collective(
+                                "cleanup_fsdp2_model",
+                                {}
+                            )
+                            
+                            if cleanup_result.get("status") == "success":
+                                vram_freed = cleanup_result.get("vram_freed_gb", 0)
+                                vram_after = cleanup_result.get("vram_after_gb", 0)
+                                
+                                logging.info(f"{LOG_PREFIX} Cleanup complete:")
+                                logging.info(f"{LOG_PREFIX}   VRAM freed: {vram_freed:.2f}GB")
+                                logging.info(f"{LOG_PREFIX}   VRAM after: {vram_after:.2f}GB")
+                                
+                                if vram_after < 0.5:
+                                    logging.info(f"{LOG_PREFIX} ✅ Cleanup successful")
+                                else:
+                                    logging.warning(f"{LOG_PREFIX} Cleanup incomplete: {vram_after:.2f}GB still allocated")
+                                
+                                logging.info(f"{LOG_PREFIX} ✅ Phase 0.5 complete")
+                                logging.info(f"{LOG_PREFIX} Normal ComfyUI loading will now proceed...")
+                                
+                            else:
+                                cleanup_error = cleanup_result.get("error", "Unknown error")
+                                logging.error(f"{LOG_PREFIX} Cleanup failed: {cleanup_error}")
+                                logging.warning(f"{LOG_PREFIX} Continuing anyway, may OOM...")
+                    
+                    except Exception as e:
+                        logging.error(f"{LOG_PREFIX} Exception during Phase 0.5: {e}", exc_info=True)
+                        logging.warning(f"{LOG_PREFIX} Attempting cleanup before re-raising...")
+                        
+                        # Try cleanup even on error
+                        try:
+                            self.model.parallel_executor.execute_collective("cleanup_fsdp2_model", {})
+                        except:
+                            pass
+                        
+                        raise
+            else:
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' not in policy registry")
+                logging.info("⚡ [Parallel-Attention][Partially Load] Using standard inference (passthrough)")
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory

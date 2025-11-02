@@ -297,10 +297,12 @@ class ModelPatcher:
 
         n.force_cast_weights = self.force_cast_weights
 
-        # Preserve parallel attention context (ONE object)
-        if hasattr(self, 'parallel_attention'):
-            n.parallel_attention = self.parallel_attention
-        
+        # Preserve parallel attention attributes
+        if hasattr(self, 'checkpoint_path'):
+            n.checkpoint_path = self.checkpoint_path
+        if hasattr(self, 'parallel_executor'):
+            n.parallel_executor = self.parallel_executor
+
         # attachments
         n.attachments = {}
         for k in self.attachments:
