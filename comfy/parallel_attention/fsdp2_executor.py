@@ -17,7 +17,7 @@ from multiprocessing.connection import Connection
 import logging
 import os
 
-LOG_PREFIX = "⚡ [FSDP2Executor]"
+LOG_PREFIX = "⚡ [Parallel-Attention][FSDP2Executor]"
 
 
 class FSDP2Executor:

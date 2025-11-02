@@ -1380,14 +1380,10 @@ def load_diffusion_model(unet_path, model_options={}):
         logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
         raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
     
-    # Extract and store state_dict if parallel executor attached
-    if hasattr(model, 'parallel_executor') and model.parallel_executor is not None:
+    # Phase 0.4: Attach checkpoint path if parallel attention enabled
+    if hasattr(model.model, 'parallel_config') and model.model.parallel_config.get('enabled'):
         model.checkpoint_path = unet_path
-        model.loaded_state_dict = model.model.state_dict()
-        sample_keys = list(model.loaded_state_dict.keys())[:3]
-        logging.info(f"⚡ [Parallel-Attention] Extracted state_dict: {len(model.loaded_state_dict)} keys")
-        logging.info(f"⚡ [Parallel-Attention] Sample keys: {sample_keys}")
-        logging.info(f"⚡ [Parallel-Attention] Checkpoint path and state_dict stored")
+        logging.info(f"⚡ [Parallel-Attention][UNETLoader] Checkpoint path attached: {unet_path}")
     
     return model
 

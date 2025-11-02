@@ -506,9 +506,9 @@ class LoadedModel:
 
         # Phase 0.2: Check for parallel config and policy
         if hasattr(self.model.model, 'parallel_config') and self.model.model.parallel_config.get('enabled'):
-            logging.info("⚡ [Parallel-Attention] Injection point reached")
-            logging.info(f"⚡ [Parallel-Attention] Message: {self.model.model.parallel_config.get('message', 'none')}")
-            logging.info(f"⚡ [Parallel-Attention] Config: {self.model.model.parallel_config}")
+            logging.info("⚡ [Parallel-Attention][Partially Load] Injection point reached")
+            logging.info(f"⚡ [Parallel-Attention][Partially Load] Message: {self.model.model.parallel_config.get('message', 'none')}")
+            logging.info(f"⚡ [Parallel-Attention][Partially Load] Config: {self.model.model.parallel_config}")
             
             # Phase 0.2: Model inspection and policy lookup
             from comfy.parallel_attention import FSDP2PolicyRegistry
@@ -524,14 +524,93 @@ class LoadedModel:
             
             if FSDP2PolicyRegistry.is_registered(model_type):
                 config = FSDP2PolicyRegistry.get_policy(model_type)
-                logging.info(f"⚡ [Parallel-Attention] Model '{model_type}' has FSDP2 policy")
-                logging.info(f"⚡ [Parallel-Attention] Policy: {len(config.blocks)} block groups, root_wrap={config.root_wrap}")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' has FSDP2 policy")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Policy: {len(config.blocks)} block groups, root_wrap={config.root_wrap}")
                 for block in config.blocks:
-                    logging.info(f"⚡ [Parallel-Attention]   - {block.module_path}: {block.block_count} blocks")
-                logging.info("⚡ [Parallel-Attention] Future: FSDP2 sharding will happen here")
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load]   - {block.module_path}: {block.block_count} blocks")
+                
+                # Phase 0.3: Collect all required data for FSDP2 sharding
+                import copy
+                import json
+                import os
+                
+                # Create meta model
+                meta_model = copy.deepcopy(self.model.model)
+                meta_model = meta_model.to('meta')
+                
+                # Collect exhaustive data
+                all_param_names = [name for name, _ in meta_model.named_parameters()]
+                meta_sd = meta_model.state_dict()
+                
+                phase03_data = {
+                    "model_class": model_class,
+                    "model_type": model_type,
+                    "all_param_names": all_param_names,
+                    "param_shapes": {k: list(v.shape) for k, v in meta_sd.items()},
+                    "param_count": len(all_param_names),
+                    
+                    # Policy data
+                    "policy_blocks": len(config.blocks),
+                    "block_configs": [
+                        {
+                            "module_path": b.module_path,
+                            "block_count": b.block_count,
+                            "shard_each": b.shard_each
+                        } for b in config.blocks
+                    ],
+                    "ignored_param_patterns": config.ignored_param_patterns,
+                    "root_wrap": config.root_wrap,
+                    
+                    # Hardware config
+                    "world_size": self.model.model.parallel_config.get('world_size', 2),
+                    "backend": self.model.model.parallel_config.get('backend', 'nccl'),
+                    
+                    # Expected results (from golden)
+                    "expected_dtensor_count": 760,
+                    "expected_replicated_count": 20,
+                    "expected_vram_gb": 11.14,
+                }
+                
+                # Write to file
+                output_file = "/home/johnj/parallel-attention/docs/reference/phase03_collected_data.json"
+                os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                with open(output_file, 'w') as f:
+                    json.dump(phase03_data, f, indent=2)
+                
+                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data collection complete")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Collected {len(all_param_names)} params")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Policy: {len(config.blocks)} block groups")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data written to {output_file}")
+                
+                # Validate against golden
+                golden_file = "/home/johnj/parallel-attention/docs/reference/flux_golden_version2_parent.json"
+                if os.path.exists(golden_file):
+                    with open(golden_file) as f:
+                        golden = json.load(f)
+                    
+                    matches = {
+                        "param_count": phase03_data["param_count"] == golden["param_count"],
+                        "param_names": phase03_data["all_param_names"] == golden["all_param_names"],
+                        "param_shapes": phase03_data["param_shapes"] == golden["param_shapes"],
+                    }
+                    
+                    all_match = all(matches.values())
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Validation: {'✅ PASS' if all_match else '❌ FAIL'}")
+                    for key, match in matches.items():
+                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4]   {key}: {'✅' if match else '❌'}")
+                    
+                    # Phase 0.4: Log checkpoint path if available
+                    if hasattr(self.model, 'checkpoint_path'):
+                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Checkpoint path: {self.model.checkpoint_path}")
+                    else:
+                        logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Checkpoint path: Not yet attached")
+                else:
+                    logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Golden dataset not found, skipping validation")
+                
+                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Ready for Phase 1 (FSDP2 sharding implementation)")
             else:
-                logging.info(f"⚡ [Parallel-Attention] Model '{model_type}' not in policy registry")
-                logging.info("⚡ [Parallel-Attention] Using standard inference (passthrough)")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' not in policy registry")
+                logging.info("⚡ [Parallel-Attention][Partially Load] Using standard inference (passthrough)")
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory
