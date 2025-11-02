@@ -39,7 +39,7 @@ class ShardingConfig:
     Attributes:
         model_name: Model identifier ("flux", "wan", "qwen_image")
         blocks: List of block configurations to shard
-        ignored_param_patterns: Name patterns for params NOT to shard
+        shardable_param_patterns: Param name prefixes that WILL be sharded (EXCLUSIVE logic)
         root_wrap: Whether to wrap root module after blocks
     
     Example:
@@ -49,35 +49,33 @@ class ShardingConfig:
                 BlockConfig("diffusion_model.single_blocks", 38),
                 BlockConfig("diffusion_model.double_blocks", 19),
             ],
-            ignored_param_patterns=["img_in", "txt_in", "time_in", "final_layer"],
+            shardable_param_patterns=["single_blocks.", "double_blocks."],
             root_wrap=True
         )
     """
     model_name: str
     blocks: List[BlockConfig]
-    ignored_param_patterns: List[str]
+    shardable_param_patterns: List[str]
     root_wrap: bool = True
     
-    def get_ignored_params(self, model: nn.Module) -> Set[nn.Parameter]:
-        """Collect parameters NOT in shard_prefixes (EXCLUSIVE logic).
+    def get_ignored_params(self, diffusion_model: nn.Module) -> Set[nn.Parameter]:
+        """Collect parameters to exclude from sharding (EXCLUSIVE logic).
         
-        Raylight pattern: Ignore everything EXCEPT specified block prefixes.
-        This catches model_sampling and all other non-transformer components.
+        Iterates over diffusion_model.named_parameters() and ignores everything
+        EXCEPT params matching shardable_param_patterns.
         
         Args:
-            model: Model to scan for parameters
+            diffusion_model: Inner model (transformer only, no wrapper)
             
         Returns:
-            Set of parameters to exclude from sharding
-            
-        Example:
-            # For Flux: shard_prefixes = ["single_blocks.", "double_blocks."]
-            # Returns all params NOT starting with those prefixes
+            Set of parameters to exclude from FSDP2 sharding
         """
         ignored = set()
-        for name, param in model.named_parameters():
-            # If name doesn't start with any shard prefix → ignore it
-            is_shardable = any(name.startswith(prefix) for prefix in self.ignored_param_patterns)
+        
+        for name, param in diffusion_model.named_parameters():
+            # If name does NOT start with any shardable pattern → ignore it
+            is_shardable = any(name.startswith(prefix) for prefix in self.shardable_param_patterns)
             if not is_shardable:
                 ignored.add(param)
+        
         return ignored

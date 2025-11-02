@@ -297,7 +297,17 @@ class ModelPatcher:
 
         n.force_cast_weights = self.force_cast_weights
 
-        # attachments
+        # Preserve parallel attention attributes
+        if hasattr(self, 'checkpoint_path'):
+            n.checkpoint_path = self.checkpoint_path
+        if hasattr(self, 'parallel_executor'):
+            n.parallel_executor = self.parallel_executor
+        if hasattr(self, 'meta_model'):
+            n.meta_model = self.meta_model
+        if hasattr(self, 'model_type'):
+            n.model_type = self.model_type
+        if hasattr(self, 'fsdp2_policy'):
+            n.fsdp2_policy = self.fsdp2_policy        # attachments
         n.attachments = {}
         for k in self.attachments:
             if hasattr(self.attachments[k], "on_model_patcher_clone"):

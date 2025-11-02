@@ -99,13 +99,12 @@ def flux_fsdp2_policy() -> ShardingConfig:
     - single_blocks: 38 SingleStreamBlock
     - Other components: img_in, txt_in, time_in, vector_in, guidance_in, pe_embedder, final_layer
     
-    Sharding strategy:
-    - Shard each single_block independently (38 blocks)
-    - Shard each double_block independently (19 blocks)
-    - Ignore embeddings and projections (no sharding)
+    Sharding strategy (Raylight EXCLUSIVE):
+    - Shard: single_blocks.*, double_blocks.* (760 params)
+    - Ignore: Everything else (20 params)
     
     Returns:
-        ShardingConfig with block paths and ignore patterns
+        ShardingConfig with block paths and shardable patterns
     """
     return ShardingConfig(
         model_name="flux",
@@ -121,8 +120,9 @@ def flux_fsdp2_policy() -> ShardingConfig:
                 shard_each=True
             ),
         ],
-        ignored_param_patterns=[
-            "single_blocks.", "double_blocks."  # EXCLUSIVE: Only these get sharded
+        shardable_param_patterns=[
+            "single_blocks.",
+            "double_blocks."
         ],
         root_wrap=True
     )
@@ -136,12 +136,14 @@ def wan_fsdp2_policy() -> ShardingConfig:
     - blocks: 30 transformer blocks (Wan2.2)
     - Other components: patch_embed, pos_embed, final_layer
     
-    Sharding strategy:
-    - Shard each transformer block independently (30 blocks)
-    - Ignore embeddings and final layer (no sharding)
+    Sharding strategy (FastVideo EXCLUSIVE):
+    - Shard: blocks.0, blocks.1, ..., blocks.29 (numbered blocks only)
+    - Ignore: Everything else (patch_embed, pos_embed, final_layer, any non-numbered blocks)
+    
+    FastVideo policy: lambda n, m: "blocks" in n and str.isdigit(n.split(".")[-1])
     
     Returns:
-        ShardingConfig with block paths and ignore patterns
+        ShardingConfig with block paths and shardable patterns
     """
     return ShardingConfig(
         model_name="wan",
@@ -152,8 +154,13 @@ def wan_fsdp2_policy() -> ShardingConfig:
                 shard_each=True
             ),
         ],
-        ignored_param_patterns=[
-            "blocks."  # EXCLUSIVE: Only these get sharded
+        shardable_param_patterns=[
+            "blocks.0.", "blocks.1.", "blocks.2.", "blocks.3.", "blocks.4.",
+            "blocks.5.", "blocks.6.", "blocks.7.", "blocks.8.", "blocks.9.",
+            "blocks.10.", "blocks.11.", "blocks.12.", "blocks.13.", "blocks.14.",
+            "blocks.15.", "blocks.16.", "blocks.17.", "blocks.18.", "blocks.19.",
+            "blocks.20.", "blocks.21.", "blocks.22.", "blocks.23.", "blocks.24.",
+            "blocks.25.", "blocks.26.", "blocks.27.", "blocks.28.", "blocks.29."
         ],
         root_wrap=True
     )
@@ -167,12 +174,12 @@ def qwen_image_fsdp2_policy() -> ShardingConfig:
     - transformer_blocks: 60 blocks (default)
     - Other components: embeddings, final_layer
     
-    Sharding strategy:
-    - Shard each transformer block independently (60 blocks)
-    - Ignore embeddings and final layer (no sharding)
+    Sharding strategy (Raylight EXCLUSIVE):
+    - Shard: transformer_blocks.*
+    - Ignore: Everything else (embeddings, final_layer)
     
     Returns:
-        ShardingConfig with block paths and ignore patterns
+        ShardingConfig with block paths and shardable patterns
     """
     return ShardingConfig(
         model_name="qwen_image",
@@ -183,8 +190,8 @@ def qwen_image_fsdp2_policy() -> ShardingConfig:
                 shard_each=True
             ),
         ],
-        ignored_param_patterns=[
-            "transformer_blocks."  # EXCLUSIVE: Only these get sharded
+        shardable_param_patterns=[
+            "transformer_blocks."
         ],
         root_wrap=True
     )

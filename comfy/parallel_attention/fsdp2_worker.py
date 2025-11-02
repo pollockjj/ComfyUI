@@ -64,6 +64,12 @@ class FSDP2Worker:
         elif command == "apply_structure":
             return self._apply_structure(args)
         
+        elif command == "initialize_fsdp2_from_checkpoint":
+            return self._initialize_fsdp2_from_checkpoint(args)
+        
+        elif command == "cleanup_fsdp2_model":
+            return self._cleanup_fsdp2_model(args)
+        
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
     
@@ -108,3 +114,172 @@ class FSDP2Worker:
             "config_name": config.model_name,
             "block_count": len(config.blocks),
         }
+    
+    def _initialize_fsdp2_from_checkpoint(self, args: dict):
+        """Initialize FSDP2 by creating meta model from checkpoint.
+        
+        Phase 0.5.1: Create meta model and apply FSDP2 structure (0GB).
+        
+        Steps:
+        1. Load checkpoint state_dict
+        2. Create meta model using ComfyUI infrastructure
+        3. Apply FSDP2 sharding to meta model
+        
+        Args:
+            args: {
+                "checkpoint_path": str,
+                "model_type": str
+            }
+        
+        Returns:
+            {
+                "status": "success",
+                "vram_gb": float,
+                "rank": int,
+                "total_params": int,
+                "meta_params": int
+            }
+        """
+        checkpoint_path = args.get("checkpoint_path")
+        model_type = args.get("model_type")
+        
+        if not checkpoint_path:
+            return {"status": "error", "error": "No checkpoint_path provided"}
+        
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
+        
+        try:
+            # Step 1: Load checkpoint state_dict
+            logging.info(f"{LOG_PREFIX} Step 1: Loading checkpoint state_dict...")
+            import comfy.utils
+            sd = comfy.utils.load_torch_file(checkpoint_path)
+            logging.info(f"{LOG_PREFIX} Loaded {len(sd)} keys from checkpoint")
+            
+            # Step 2: Create meta model using ComfyUI infrastructure (0GB)
+            logging.info(f"{LOG_PREFIX} Step 2: Creating meta model...")
+            import comfy.model_detection
+            
+            with torch.device("meta"):
+                model_config = comfy.model_detection.model_config_from_unet(sd)
+                if model_config is None:
+                    return {"status": "error", "error": "Could not detect model type from checkpoint"}
+                
+                model = model_config.get_model(sd, "")
+                logging.info(f"{LOG_PREFIX} Meta model created: {type(model).__name__}")
+            
+            # Free state_dict memory
+            del sd
+            import gc
+            gc.collect()
+            
+            # Measure VRAM after meta model creation
+            torch.cuda.synchronize(self.device)
+            vram_after_meta = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            logging.info(f"{LOG_PREFIX} VRAM after meta model: {vram_after_meta:.2f}GB")
+            
+            # Step 3: Apply FSDP2 sharding using parent's policy
+            from comfy.parallel_attention.fsdp2_engine import apply_fsdp2_sharding_structure_only
+            
+            policy = args["policy"]
+            logging.info(f"{LOG_PREFIX} Step 3: Applying FSDP2 sharding...")
+            
+            fsdp_model = apply_fsdp2_sharding_structure_only(
+                model.diffusion_model,
+                policy,
+                self.device_mesh
+            )
+            logging.info(f"{LOG_PREFIX} FSDP2 structure applied")
+            
+            # Measure VRAM after FSDP2 sharding
+            torch.cuda.synchronize(self.device)
+            vram_after_fsdp = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            logging.info(f"{LOG_PREFIX} VRAM after FSDP2 sharding: {vram_after_fsdp:.2f}GB")
+            
+            # Count params and verify on meta
+            total_params = 0
+            meta_params = 0
+            for name, param in fsdp_model.named_parameters():
+                total_params += 1
+                if param.device.type == 'meta':
+                    meta_params += 1
+            
+            logging.info(f"{LOG_PREFIX} Params: {total_params} total, {meta_params} on meta")
+            
+            # Verify 0GB
+            if vram_after_fsdp > 0.1:
+                logging.warning(f"{LOG_PREFIX} Unexpected VRAM: {vram_after_fsdp:.2f}GB (expected ~0GB)")
+            else:
+                logging.info(f"{LOG_PREFIX} ✅ Steps 1-3 complete (0GB)")
+            
+            # Store for Phase 0.5.2 (weight loading)
+            self.model = fsdp_model
+            
+            return {
+                "status": "success",
+                "vram_gb": vram_after_fsdp,
+                "rank": self.rank,
+                "total_params": total_params,
+                "meta_params": meta_params,
+            }
+            
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
+            return {"status": "error", "error": str(e), "rank": self.rank}
+    
+    def _cleanup_fsdp2_model(self, args: dict):
+        """Cleanup FSDP2 sharded model and free VRAM.
+        
+        Critical for Phase 0.5 to avoid OOM when returning to normal loading.
+        
+        Args:
+            args: {} (no args needed)
+        
+        Returns:
+            {
+                "status": "success",
+                "vram_freed_gb": float,
+                "vram_after_gb": float,
+                "rank": int
+            }
+        """
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}][Cleanup]"
+        
+        try:
+            # Measure VRAM before cleanup
+            torch.cuda.synchronize(self.device)
+            vram_before = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            
+            logging.info(f"{LOG_PREFIX} VRAM before cleanup: {vram_before:.2f}GB")
+            
+            # Delete sharded model
+            if hasattr(self, 'model') and self.model is not None:
+                logging.info(f"{LOG_PREFIX} Deleting sharded model...")
+                del self.model
+                self.model = None
+            else:
+                logging.info(f"{LOG_PREFIX} No model to cleanup")
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(self.device)
+            
+            # Measure VRAM after cleanup
+            vram_after = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            vram_freed = vram_before - vram_after
+            
+            logging.info(f"{LOG_PREFIX} VRAM after cleanup: {vram_after:.2f}GB (freed {vram_freed:.2f}GB)")
+            
+            return {
+                "status": "success",
+                "vram_freed_gb": vram_freed,
+                "vram_after_gb": vram_after,
+                "rank": self.rank,
+            }
+            
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} Error during cleanup: {e}", exc_info=True)
+            return {"status": "error", "error": str(e), "rank": self.rank}

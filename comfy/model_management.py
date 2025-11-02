@@ -504,43 +504,66 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Phase 0.2: Check for parallel config and policy
-        if hasattr(self.model.model, 'parallel_config') and self.model.model.parallel_config.get('enabled'):
-            logging.info("⚡ [Parallel-Attention][Partially Load] Injection point reached")
-            logging.info(f"⚡ [Parallel-Attention][Partially Load] Message: {self.model.model.parallel_config.get('message', 'none')}")
-            logging.info(f"⚡ [Parallel-Attention][Partially Load] Config: {self.model.model.parallel_config}")
+        # Phase 0.5: Check for parallel executor (node must be in workflow)
+        if hasattr(self.model, 'parallel_executor'):
+            LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5]"
             
-            # Phase 0.2: Model inspection and policy lookup
-            from comfy.parallel_attention import FSDP2PolicyRegistry
-            
-            model_class = type(self.model.model).__name__
-            model_type = model_class.lower()  # "Flux" → "flux"
-            
-            # Handle naming variations
-            if model_type == "qwenimage":
-                model_type = "qwen_image"
-            elif model_type.startswith("wan"):  # wan21, wan22 → wan
-                model_type = "wan"
-            
-            if FSDP2PolicyRegistry.is_registered(model_type):
-                config = FSDP2PolicyRegistry.get_policy(model_type)
-                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' has FSDP2 policy")
-                logging.info(f"⚡ [Parallel-Attention][Partially Load] Policy: {len(config.blocks)} block groups, root_wrap={config.root_wrap}")
-                for block in config.blocks:
-                    logging.info(f"⚡ [Parallel-Attention][Partially Load]   - {block.module_path}: {block.block_count} blocks")
+            # Check if structure was captured in sd.py
+            if not hasattr(self.model, 'meta_model'):
+                logging.warning(f"{LOG_PREFIX} No meta_model attached, skipping")
+            elif not hasattr(self.model, 'fsdp2_policy'):
+                logging.warning(f"{LOG_PREFIX} No policy attached, skipping")
+            else:
+                # Use attached structure (captured in sd.py)
+                meta_model = self.model.meta_model
+                policy = self.model.fsdp2_policy
+                model_type = self.model.model_type
+                # Read checkpoint path from inner model (ComfyUI-MultiGPU pattern)
+                checkpoint_path = getattr(self.model.model, '_checkpoint_path', None)
                 
-                # Phase 0.3: Collect all required data for FSDP2 sharding
-                import copy
+                logging.info(f"{LOG_PREFIX} Using attached structure for {model_type}")
+                logging.info(f"{LOG_PREFIX} Checkpoint: {checkpoint_path}")
+                
+                # Phase 0.5 Test: Validate checkpoint path exists
+                if checkpoint_path is None:
+                    logging.error(f"{LOG_PREFIX} ❌ TEST FAILED: checkpoint_path is None")
+                    logging.error(f"{LOG_PREFIX} This means _checkpoint_path was not preserved on inner model")
+                else:
+                    logging.info(f"{LOG_PREFIX} ✅ TEST PASSED: checkpoint_path found on inner model")
+                
+                # Send to workers
+                result = self.model.parallel_executor.execute_collective(
+                    "initialize_fsdp2_from_checkpoint",
+                    {
+                        "checkpoint_path": checkpoint_path,
+                        "model_type": model_type,
+                        "policy": policy,
+                    }
+                )
+                
+                # Validate result
+                if result.get("status") == "success":
+                    vram_gb = result.get("vram_gb", 0)
+                    total_params = result.get("total_params", 0)
+                    meta_params = result.get("meta_params", 0)
+                    
+                    logging.info(f"{LOG_PREFIX} FSDP2 structure complete:")
+                    logging.info(f"{LOG_PREFIX}   VRAM: {vram_gb:.2f}GB")
+                    logging.info(f"{LOG_PREFIX}   Params: {total_params} ({meta_params} on meta)")
+                    
+                    if vram_gb < 0.1:
+                        logging.info(f"{LOG_PREFIX} ✅ Phase 0.5.1 complete (0GB)")
+                else:
+                    error = result.get("error", "Unknown")
+                    logging.error(f"{LOG_PREFIX} Failed: {error}")
+
+                # Phase 0.4: Golden dataset validation
                 import json
                 import os
                 
-                # Create meta model
-                meta_model = copy.deepcopy(self.model.model)
-                meta_model = meta_model.to('meta')
-                
-                # Collect exhaustive data
-                all_param_names = [name for name, _ in meta_model.named_parameters()]
                 meta_sd = meta_model.state_dict()
+                all_param_names = [name for name, _ in meta_model.named_parameters()]
+                model_class = type(self.model.model).__name__
                 
                 phase03_data = {
                     "model_class": model_class,
@@ -550,16 +573,16 @@ class LoadedModel:
                     "param_count": len(all_param_names),
                     
                     # Policy data
-                    "policy_blocks": len(config.blocks),
+                    "policy_blocks": len(policy.blocks),
                     "block_configs": [
                         {
                             "module_path": b.module_path,
                             "block_count": b.block_count,
                             "shard_each": b.shard_each
-                        } for b in config.blocks
+                        } for b in policy.blocks
                     ],
-                    "ignored_param_patterns": config.ignored_param_patterns,
-                    "root_wrap": config.root_wrap,
+                    "shardable_param_patterns": policy.shardable_param_patterns,
+                    "root_wrap": policy.root_wrap,
                     
                     # Hardware config
                     "world_size": self.model.model.parallel_config.get('world_size', 2),
@@ -579,11 +602,11 @@ class LoadedModel:
                 
                 logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data collection complete")
                 logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Collected {len(all_param_names)} params")
-                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Policy: {len(config.blocks)} block groups")
+                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Policy: {len(policy.blocks)} block groups")
                 logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data written to {output_file}")
                 
-                # Validate against golden
-                golden_file = "/home/johnj/parallel-attention/docs/reference/flux_golden_version2_parent.json"
+                # Validate against model-specific golden dataset
+                golden_file = f"/home/johnj/parallel-attention/docs/reference/{model_type}_golden_version2_parent.json"
                 if os.path.exists(golden_file):
                     with open(golden_file) as f:
                         golden = json.load(f)
@@ -595,22 +618,46 @@ class LoadedModel:
                     }
                     
                     all_match = all(matches.values())
-                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Validation: {'✅ PASS' if all_match else '❌ FAIL'}")
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Validation against {model_type} golden: {'✅ PASS' if all_match else '⚠️  MISMATCH'}")
                     for key, match in matches.items():
-                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4]   {key}: {'✅' if match else '❌'}")
-                    
-                    # Phase 0.4: Log checkpoint path if available
-                    if hasattr(self.model, 'checkpoint_path'):
-                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Checkpoint path: {self.model.checkpoint_path}")
-                    else:
-                        logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Checkpoint path: Not yet attached")
+                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4]   {key}: {'✅' if match else '⚠️ '}")
                 else:
-                    logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Golden dataset not found, skipping validation")
+                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] No golden dataset for {model_type}, skipping validation")
                 
-                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Ready for Phase 1 (FSDP2 sharding implementation)")
-            else:
-                logging.info(f"⚡ [Parallel-Attention][Partially Load] Model '{model_type}' not in policy registry")
-                logging.info("⚡ [Parallel-Attention][Partially Load] Using standard inference (passthrough)")
+                # Phase 0.4.5: Validate ignored params logic
+                LOG_PREFIX_PHASE = "⚡ [Parallel-Attention][Partially Load][Phase 0.4.5]"
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Validating param classification...")
+                
+                # Get ignored params using policy (pass diffusion_model only)
+                ignored_params = policy.get_ignored_params(meta_model.diffusion_model)
+                
+                # Classify all params
+                ignored_names = set()
+                shardable_names = set()
+                for name, param in meta_model.named_parameters():
+                    if param in ignored_params:
+                        ignored_names.add(name)
+                    else:
+                        shardable_names.add(name)
+                
+                total_params = len(list(meta_model.parameters()))
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Param classification:")
+                logging.info(f"{LOG_PREFIX_PHASE}   Total params: {total_params}")
+                logging.info(f"{LOG_PREFIX_PHASE}   Shardable params: {len(shardable_names)}")
+                logging.info(f"{LOG_PREFIX_PHASE}   Ignored params: {len(ignored_names)}")
+                
+                # Log sample params for verification
+                logging.info(f"{LOG_PREFIX_PHASE} Sample ignored params:")
+                for name in sorted(ignored_names)[:5]:
+                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
+                
+                logging.info(f"{LOG_PREFIX_PHASE} Sample shardable params:")
+                for name in sorted(shardable_names)[:5]:
+                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
+                
+                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Ready for Phase 0.5")
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory
