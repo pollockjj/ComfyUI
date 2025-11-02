@@ -1365,42 +1365,40 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     
     model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     
-    # Preserve checkpoint path on inner model (survives ModelPatcher lifecycle)
-    # Following ComfyUI-MultiGPU pattern: attach to model, not model_patcher.model_options
-    if '_checkpoint_path' in model_options:
-        model._checkpoint_path = model_options['_checkpoint_path']
-    
-    # Parallel attention: Capture clean model structure (before LoRA)
+    # Parallel attention: ONE context object, populated progressively
     if model_management.is_parallel_attention_enabled():
         import copy
+        from comfy.parallel_attention import ParallelAttentionContext, FSDP2PolicyRegistry
         
-        # Create meta model (0GB) - clean structure before LoRA
-        meta_model = copy.deepcopy(model).to('meta')
+        # Create context (our database)
+        ctx = ParallelAttentionContext()
+        
+        # Phase A: Structure Capture (before LoRA)
+        ctx.checkpoint_path = model_options.get('_checkpoint_path')
+        ctx.meta_model = copy.deepcopy(model).to('meta')
         
         # Detect model type
         model_class = type(model).__name__
         model_type = model_class.lower()
-        
-        # Handle naming variations
         if model_type == "qwenimage":
             model_type = "qwen_image"
         elif model_type.startswith("wan"):
             model_type = "wan"
+        ctx.model_type = model_type
         
-        # Attach to ModelPatcher (not model - avoids .to() issues)
-        model_patcher.meta_model = meta_model
-        model_patcher.model_type = model_type
-        
-        # Look up and attach policy
-        from comfy.parallel_attention import FSDP2PolicyRegistry
+        # Look up policy
         if FSDP2PolicyRegistry.is_registered(model_type):
-            policy = FSDP2PolicyRegistry.get_policy(model_type)
-            model_patcher.fsdp2_policy = policy
+            ctx.policy = FSDP2PolicyRegistry.get_policy(model_type)
+            ctx.phase = "structure_captured"
             
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Meta model created for {model_type}")
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Policy attached: {len(policy.blocks)} block groups")
+            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Context created for {model_type}")
+            logging.info(f"⚡ [Parallel-Attention][Structure Capture] Policy: {len(ctx.policy.blocks)} block groups")
         else:
-            logging.info(f"⚡ [Parallel-Attention][Structure Capture] No policy for {model_type}, skipping")
+            ctx.enabled = False
+            logging.info(f"⚡ [Parallel-Attention][Structure Capture] No policy for {model_type}, disabled")
+        
+        # Attach ONE object to ModelPatcher
+        model_patcher.parallel_attention = ctx
     
     return model_patcher
 

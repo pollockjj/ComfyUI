@@ -13,6 +13,7 @@ from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateD
 import logging
 
 from comfy.parallel_attention.fsdp2_config import ShardingConfig, BlockConfig
+from comfy.parallel_attention.fsdp2_utils import detect_unshardable_params, get_reference_dtype
 
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
@@ -79,7 +80,22 @@ def apply_fsdp2_sharding(
     logging.info(f"{LOG_PREFIX} [FSDP2Engine]   Rank: {rank}, Device: {device}")
     logging.info(f"{LOG_PREFIX} [FSDP2Engine]   DeviceMesh: {mesh_info}")
     
-    # Step 1: Collect ignored params
+    # Step 1: Detect reference dtype for universal dtype mismatch detection
+    ref_dtype = None
+    for block_config in config.blocks:
+        try:
+            block_list = get_module_by_path(meta_model, block_config.module_path)
+            if len(block_list) > 0:
+                ref_dtype = get_reference_dtype(block_list[0])
+                if ref_dtype:
+                    break
+        except:
+            continue
+    
+    if ref_dtype:
+        logging.info(f"{LOG_PREFIX} [FSDP2Engine] Reference dtype: {ref_dtype}")
+    
+    # Step 2: Collect ignored params
     ignored_params = config.get_ignored_params(meta_model)
     logging.info(
         f"{LOG_PREFIX} [FSDP2Engine] Excluding {len(ignored_params)} params from sharding "
@@ -105,11 +121,15 @@ def apply_fsdp2_sharding(
         if block_config.shard_each:
             # Shard each block independently
             for i in range(len(block_list)):
+                # Detect unshardable params (scalars + dtype mismatches)
+                ignored_block_params = detect_unshardable_params(block_list[i], ref_dtype)
+                
                 block_list[i] = fully_shard(
                     module=block_list[i],
                     mp_policy=MixedPrecisionPolicy(),
                     reshard_after_forward=True,
-                    mesh=device_mesh
+                    mesh=device_mesh,
+                    ignored_params=ignored_block_params
                 )
             total_blocks_sharded += len(block_list)
         else:
@@ -135,6 +155,11 @@ def apply_fsdp2_sharding(
     
     # Step 3: Root wrap if configured
     if config.root_wrap:
+        # Add universal scalar detection to root ignored params
+        from comfy.parallel_attention.fsdp2_utils import detect_scalar_params
+        root_scalars = detect_scalar_params(meta_model)
+        ignored_params.update(root_scalars)
+        
         logging.info(
             f"{LOG_PREFIX} [FSDP2Engine] Applying root wrap with "
             f"{len(ignored_params)} ignored params..."

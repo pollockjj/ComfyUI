@@ -160,7 +160,7 @@ class FSDP2Worker:
             import comfy.model_detection
             
             with torch.device("meta"):
-                model_config = comfy.model_detection.model_config_from_unet(sd)
+                model_config = comfy.model_detection.model_config_from_unet(sd, "")
                 if model_config is None:
                     return {"status": "error", "error": "Could not detect model type from checkpoint"}
                 
@@ -184,7 +184,7 @@ class FSDP2Worker:
             logging.info(f"{LOG_PREFIX} Step 3: Applying FSDP2 sharding...")
             
             fsdp_model = apply_fsdp2_sharding_structure_only(
-                model.diffusion_model,
+                model,
                 policy,
                 self.device_mesh
             )
@@ -211,15 +211,88 @@ class FSDP2Worker:
             else:
                 logging.info(f"{LOG_PREFIX} ✅ Steps 1-3 complete (0GB)")
             
-            # Store for Phase 0.5.2 (weight loading)
+            # Step 4: Load weights using iterator (build sharded state_dict)
+            logging.info(f"{LOG_PREFIX} Step 4: Loading weights...")
+            
+            from safetensors.torch import safe_open
+            from torch.distributed._tensor import distribute_tensor
+            
+            # Get meta state dict (FSDP-wrapped param names)
+            meta_sd = fsdp_model.state_dict()
+            sharded_sd = {}
+            
+            loaded_params = 0
+            dtensor_params = 0
+            replicated_params = 0
+            
+            with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    # Load tensor from checkpoint
+                    full_tensor = f.get_tensor(key)
+                    
+                    # Try to find in meta state dict
+                    param_name = key
+                    meta_param = meta_sd.get(param_name)
+                    
+                    # Try with diffusion_model. prefix
+                    if meta_param is None:
+                        param_name = f"diffusion_model.{key}"
+                        meta_param = meta_sd.get(param_name)
+                    
+                    if meta_param is None:
+                        continue
+                    
+                    # Move to GPU
+                    full_tensor = full_tensor.to(device=self.device)
+                    
+                    # Distribute if FSDP-wrapped (has device_mesh)
+                    if hasattr(meta_param, 'device_mesh'):
+                        sharded_tensor = distribute_tensor(
+                            full_tensor,
+                            meta_param.device_mesh,
+                            meta_param.placements
+                        )
+                        dtensor_params += 1
+                    else:
+                        sharded_tensor = full_tensor
+                        replicated_params += 1
+                    
+                    sharded_sd[param_name] = torch.nn.Parameter(sharded_tensor)
+                    loaded_params += 1
+                    del full_tensor
+            
+            logging.info(f"{LOG_PREFIX} Loaded {loaded_params} tensors ({dtensor_params} distributed, {replicated_params} replicated)")
+            
+            # Step 5: Load sharded dict into model (assign=True for zero-copy)
+            fsdp_model.load_state_dict(sharded_sd, assign=True, strict=False)
+            
+            # Measure VRAM after loading
+            torch.cuda.synchronize(self.device)
+            vram_after_load = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            
+            # Count remaining meta params
+            meta_params_after = sum(1 for _, p in fsdp_model.named_parameters() if p.device.type == 'meta')
+            
+            logging.info(f"{LOG_PREFIX} VRAM after weight loading: {vram_after_load:.2f}GB")
+            logging.info(f"{LOG_PREFIX} Meta params remaining: {meta_params_after}")
+            
+            if meta_params_after == 0:
+                logging.info(f"{LOG_PREFIX} ✅ Steps 1-5 complete (all weights loaded)")
+            else:
+                logging.warning(f"{LOG_PREFIX} ⚠️ {meta_params_after} params still on meta")
+            
+            # Store for cleanup
             self.model = fsdp_model
             
             return {
                 "status": "success",
-                "vram_gb": vram_after_fsdp,
+                "vram_gb": vram_after_load,
                 "rank": self.rank,
                 "total_params": total_params,
-                "meta_params": meta_params,
+                "meta_params": meta_params_after,
+                "loaded_params": loaded_params,
+                "dtensor_params": dtensor_params,
+                "replicated_params": replicated_params,
             }
             
         except Exception as e:

@@ -504,160 +504,72 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Phase 0.5: Check for parallel executor (node must be in workflow)
-        if hasattr(self.model, 'parallel_executor'):
-            LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5]"
+        # Phase 0.5.2: Full validation cycle (shard → load → validate → cleanup)
+        if hasattr(self.model, 'parallel_attention') and self.model.parallel_attention.is_ready_for_sharding():
+            ctx = self.model.parallel_attention
+            LOG_PREFIX = "⚡ [Parallel-Attention][Partially Load][Phase 0.5.2]"
             
-            # Check if structure was captured in sd.py
-            if not hasattr(self.model, 'meta_model'):
-                logging.warning(f"{LOG_PREFIX} No meta_model attached, skipping")
-            elif not hasattr(self.model, 'fsdp2_policy'):
-                logging.warning(f"{LOG_PREFIX} No policy attached, skipping")
+            if not ctx.enabled:
+                logging.info(f"{LOG_PREFIX} Context disabled, skipping")
             else:
-                # Use attached structure (captured in sd.py)
-                meta_model = self.model.meta_model
-                policy = self.model.fsdp2_policy
-                model_type = self.model.model_type
-                # Read checkpoint path from inner model (ComfyUI-MultiGPU pattern)
-                checkpoint_path = getattr(self.model.model, '_checkpoint_path', None)
+                logging.info(f"{LOG_PREFIX} Starting full validation cycle for {ctx.model_type}")
+                logging.info(f"{LOG_PREFIX} Checkpoint: {ctx.checkpoint_path}")
                 
-                logging.info(f"{LOG_PREFIX} Using attached structure for {model_type}")
-                logging.info(f"{LOG_PREFIX} Checkpoint: {checkpoint_path}")
-                
-                # Phase 0.5 Test: Validate checkpoint path exists
-                if checkpoint_path is None:
-                    logging.error(f"{LOG_PREFIX} ❌ TEST FAILED: checkpoint_path is None")
-                    logging.error(f"{LOG_PREFIX} This means _checkpoint_path was not preserved on inner model")
-                else:
-                    logging.info(f"{LOG_PREFIX} ✅ TEST PASSED: checkpoint_path found on inner model")
-                
-                # Send to workers
-                result = self.model.parallel_executor.execute_collective(
+                # Step 1: Shard structure + load weights
+                result = ctx.executor.execute_collective(
                     "initialize_fsdp2_from_checkpoint",
                     {
-                        "checkpoint_path": checkpoint_path,
-                        "model_type": model_type,
-                        "policy": policy,
+                        "checkpoint_path": ctx.checkpoint_path,
+                        "model_type": ctx.model_type,
+                        "policy": ctx.policy,
                     }
                 )
                 
-                # Validate result
                 if result.get("status") == "success":
                     vram_gb = result.get("vram_gb", 0)
                     total_params = result.get("total_params", 0)
                     meta_params = result.get("meta_params", 0)
+                    loaded_params = result.get("loaded_params", 0)
+                    dtensor_params = result.get("dtensor_params", 0)
+                    replicated_params = result.get("replicated_params", 0)
                     
-                    logging.info(f"{LOG_PREFIX} FSDP2 structure complete:")
-                    logging.info(f"{LOG_PREFIX}   VRAM: {vram_gb:.2f}GB")
-                    logging.info(f"{LOG_PREFIX}   Params: {total_params} ({meta_params} on meta)")
+                    logging.info(f"{LOG_PREFIX} FSDP2 loading complete:")
+                    logging.info(f"{LOG_PREFIX}   VRAM per GPU: {vram_gb:.2f}GB")
+                    logging.info(f"{LOG_PREFIX}   Loaded: {loaded_params} params ({dtensor_params} distributed, {replicated_params} replicated)")
+                    logging.info(f"{LOG_PREFIX}   Meta params remaining: {meta_params}")
                     
-                    if vram_gb < 0.1:
-                        logging.info(f"{LOG_PREFIX} ✅ Phase 0.5.1 complete (0GB)")
+                    # Update context
+                    ctx.vram_per_gpu = vram_gb
+                    ctx.total_params = total_params
+                    ctx.sharded_params = dtensor_params
+                    ctx.sharded = True
+                    ctx.phase = "weights_loaded"
+                    
+                    # Step 2: Cleanup to avoid OOM
+                    logging.info(f"{LOG_PREFIX} Starting cleanup to avoid OOM...")
+                    
+                    cleanup_result = ctx.executor.execute_collective("cleanup_fsdp2_model", {})
+                    
+                    if cleanup_result.get("status") == "success":
+                        vram_freed = cleanup_result.get("vram_freed_gb", 0)
+                        vram_after = cleanup_result.get("vram_after_gb", 0)
+                        
+                        logging.info(f"{LOG_PREFIX} Cleanup complete:")
+                        logging.info(f"{LOG_PREFIX}   VRAM freed: {vram_freed:.2f}GB")
+                        logging.info(f"{LOG_PREFIX}   VRAM after: {vram_after:.2f}GB")
+                        
+                        ctx.phase = "validated_and_cleaned"
+                        
+                        logging.info(f"{LOG_PREFIX} ✅ Phase 0.5.2 complete")
+                        logging.info(f"{LOG_PREFIX} Normal ComfyUI loading will now proceed...")
+                    else:
+                        error = cleanup_result.get("error", "Unknown")
+                        logging.error(f"{LOG_PREFIX} Cleanup failed: {error}")
+                        ctx.phase = "cleanup_error"
                 else:
                     error = result.get("error", "Unknown")
-                    logging.error(f"{LOG_PREFIX} Failed: {error}")
-
-                # Phase 0.4: Golden dataset validation
-                import json
-                import os
-                
-                meta_sd = meta_model.state_dict()
-                all_param_names = [name for name, _ in meta_model.named_parameters()]
-                model_class = type(self.model.model).__name__
-                
-                phase03_data = {
-                    "model_class": model_class,
-                    "model_type": model_type,
-                    "all_param_names": all_param_names,
-                    "param_shapes": {k: list(v.shape) for k, v in meta_sd.items()},
-                    "param_count": len(all_param_names),
-                    
-                    # Policy data
-                    "policy_blocks": len(policy.blocks),
-                    "block_configs": [
-                        {
-                            "module_path": b.module_path,
-                            "block_count": b.block_count,
-                            "shard_each": b.shard_each
-                        } for b in policy.blocks
-                    ],
-                    "shardable_param_patterns": policy.shardable_param_patterns,
-                    "root_wrap": policy.root_wrap,
-                    
-                    # Hardware config
-                    "world_size": self.model.model.parallel_config.get('world_size', 2),
-                    "backend": self.model.model.parallel_config.get('backend', 'nccl'),
-                    
-                    # Expected results (from golden)
-                    "expected_dtensor_count": 760,
-                    "expected_replicated_count": 20,
-                    "expected_vram_gb": 11.14,
-                }
-                
-                # Write to file
-                output_file = "/home/johnj/parallel-attention/docs/reference/phase03_collected_data.json"
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                with open(output_file, 'w') as f:
-                    json.dump(phase03_data, f, indent=2)
-                
-                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data collection complete")
-                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Collected {len(all_param_names)} params")
-                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Policy: {len(policy.blocks)} block groups")
-                logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Data written to {output_file}")
-                
-                # Validate against model-specific golden dataset
-                golden_file = f"/home/johnj/parallel-attention/docs/reference/{model_type}_golden_version2_parent.json"
-                if os.path.exists(golden_file):
-                    with open(golden_file) as f:
-                        golden = json.load(f)
-                    
-                    matches = {
-                        "param_count": phase03_data["param_count"] == golden["param_count"],
-                        "param_names": phase03_data["all_param_names"] == golden["all_param_names"],
-                        "param_shapes": phase03_data["param_shapes"] == golden["param_shapes"],
-                    }
-                    
-                    all_match = all(matches.values())
-                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] Validation against {model_type} golden: {'✅ PASS' if all_match else '⚠️  MISMATCH'}")
-                    for key, match in matches.items():
-                        logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4]   {key}: {'✅' if match else '⚠️ '}")
-                else:
-                    logging.info(f"⚡ [Parallel-Attention][Partially Load][Phase 0.4] No golden dataset for {model_type}, skipping validation")
-                
-                # Phase 0.4.5: Validate ignored params logic
-                LOG_PREFIX_PHASE = "⚡ [Parallel-Attention][Partially Load][Phase 0.4.5]"
-                
-                logging.info(f"{LOG_PREFIX_PHASE} Validating param classification...")
-                
-                # Get ignored params using policy (pass diffusion_model only)
-                ignored_params = policy.get_ignored_params(meta_model.diffusion_model)
-                
-                # Classify all params
-                ignored_names = set()
-                shardable_names = set()
-                for name, param in meta_model.named_parameters():
-                    if param in ignored_params:
-                        ignored_names.add(name)
-                    else:
-                        shardable_names.add(name)
-                
-                total_params = len(list(meta_model.parameters()))
-                
-                logging.info(f"{LOG_PREFIX_PHASE} Param classification:")
-                logging.info(f"{LOG_PREFIX_PHASE}   Total params: {total_params}")
-                logging.info(f"{LOG_PREFIX_PHASE}   Shardable params: {len(shardable_names)}")
-                logging.info(f"{LOG_PREFIX_PHASE}   Ignored params: {len(ignored_names)}")
-                
-                # Log sample params for verification
-                logging.info(f"{LOG_PREFIX_PHASE} Sample ignored params:")
-                for name in sorted(ignored_names)[:5]:
-                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
-                
-                logging.info(f"{LOG_PREFIX_PHASE} Sample shardable params:")
-                for name in sorted(shardable_names)[:5]:
-                    logging.info(f"{LOG_PREFIX_PHASE}   - {name}")
-                
-                logging.info("⚡ [Parallel-Attention][Partially Load][Phase 0.4] Ready for Phase 0.5")
+                    logging.error(f"{LOG_PREFIX} Loading failed: {error}")
+                    ctx.phase = "loading_error"
 
         # if self.model.loaded_size() > 0:
         use_more_vram = lowvram_model_memory

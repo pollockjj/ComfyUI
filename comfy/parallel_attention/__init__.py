@@ -5,8 +5,10 @@ ONLY exports the 4 perfect files:
 - parallel_state (DeviceMesh management)
 - FSDP2PolicyRegistry (policy system)
 - ShardingConfig/BlockConfig (data structures)
+- ParallelAttentionContext (single source of truth)
 """
 
+from .context import ParallelAttentionContext
 from .fsdp2_executor import FSDP2Executor
 from .fsdp2_policies import FSDP2PolicyRegistry
 from .fsdp2_config import ShardingConfig, BlockConfig
@@ -23,6 +25,7 @@ from .parallel_state import (
 )
 
 __all__ = [
+    'ParallelAttentionContext',
     'FSDP2Executor',
     'FSDP2PolicyRegistry',
     'ShardingConfig',
