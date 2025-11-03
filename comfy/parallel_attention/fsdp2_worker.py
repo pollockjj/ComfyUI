@@ -44,6 +44,10 @@ class FSDP2Worker:
         self.world_size = world_size
         self.device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else torch.device("cpu")
         
+        # CRITICAL: Set CUDA device for this worker process
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.device)
+        
         # Create DeviceMesh (ARCHITECTURE.md requirement)
         from torch.distributed.device_mesh import init_device_mesh
         device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -81,8 +85,8 @@ class FSDP2Worker:
         elif command == "initialize_fsdp2_from_checkpoint":
             return self._initialize_fsdp2_from_checkpoint(args)
         
-        elif command == "cleanup_fsdp2_model":
-            return self._cleanup_fsdp2_model(args)
+        elif command == "common_ksampler":
+            return self._common_ksampler(args)
         
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
@@ -185,6 +189,13 @@ class FSDP2Worker:
             import gc
             gc.collect()
             
+            # Materialize model_sampling to device (NOT part of diffusion_model)
+            # model_sampling is created fresh (not from checkpoint) so we recreate it on device
+            import comfy.model_sampling
+            model_type = model.model_type
+            model.model_sampling = comfy.model_base.model_sampling(model.model_config, model_type)
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Recreated model_sampling on {self.device}")
+            
             # Apply FSDP2 sharding
             from comfy.parallel_attention.fsdp2_engine import apply_fsdp2_sharding_structure_only
             
@@ -196,22 +207,29 @@ class FSDP2Worker:
                 self.device_mesh
             )
             
-            # Load weights using iterator
+            # Load weights using iterator (WORKING pattern)
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} Loading weights...")
             
             from safetensors.torch import safe_open
             from torch.distributed._tensor import distribute_tensor
             
-            # Get meta state dict for key lookup (works with FSDP2 wrapping)
+            # Get meta state dict for key lookup
             meta_sd = fsdp_model.state_dict()
             sharded_sd = {}
             
+            # Get reference dtype from first sharded param for casting ALL tensors
+            ref_dtype = torch.bfloat16  # Default for Flux
+            for name, param in fsdp_model.named_parameters():
+                if hasattr(param, "device_mesh") and param.dtype != torch.float32:
+                    ref_dtype = param.dtype
+                    break
+            
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Reference dtype: {ref_dtype}")
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Streaming from safetensors...")
             
             with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
                 tensor_count = 0
                 for param_name in f.keys():
-                    # Load ONE tensor at a time
                     full_tensor = f.get_tensor(param_name)
                     
                     # Try exact match
@@ -227,8 +245,9 @@ class FSDP2Worker:
                     if meta_param is None:
                         continue
                     
-                    # Move to GPU
-                    full_tensor = full_tensor.to(device=self.device)
+                    # CRITICAL FIX: Cast to reference dtype BEFORE device move
+                    # This fixes "Float and BFloat16" dtype mismatch errors
+                    full_tensor = full_tensor.to(dtype=ref_dtype, device=self.device)
                     
                     # Distribute if FSDP-wrapped (has device_mesh)
                     if hasattr(meta_param, "device_mesh"):
@@ -238,18 +257,25 @@ class FSDP2Worker:
                             meta_param.placements,
                         )
                     else:
+                        # Replicated param - keep on device with correct dtype
                         sharded_tensor = full_tensor
                     
                     sharded_sd[param_name] = torch.nn.Parameter(sharded_tensor)
                     tensor_count += 1
-                    
-                    # full_tensor goes out of scope, memory freed
             
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Loaded {tensor_count} tensors")
             
             # Load sharded dict into model
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Applying weights to model...")
             fsdp_model.load_state_dict(sharded_sd, assign=True, strict=False)
+            
+            # CRITICAL: Enable comfy_cast_weights on ALL modules (Raylight/MultiGPU pattern)
+            # This ensures weights auto-cast to input device during forward (handles FSDP2 cross-device)
+            for module in fsdp_model.diffusion_model.modules():
+                if hasattr(module, "comfy_cast_weights"):
+                    module.comfy_cast_weights = True
+            
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Enabled comfy_cast_weights on all modules")
             
             # Measure VRAM
             torch.cuda.synchronize(self.device)
@@ -269,8 +295,24 @@ class FSDP2Worker:
             if vram_after_load < 0.1:
                 log_rank0(self.rank, 'warning', f"{LOG_PREFIX} No VRAM allocated after loading")
             
-            # Store for cleanup
-            self.model = fsdp_model
+            # Set manual_cast_dtype to match loaded weights (critical for input casting)
+            # Without this, inputs stay Float32 while weights are BFloat16
+            fsdp_model.manual_cast_dtype = ref_dtype
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Set manual_cast_dtype={ref_dtype}")
+            
+            # Wrap in ModelPatcher (Raylight FSDPModelPatcher pattern)
+            # Workers need ModelPatcher interface for ComfyUI APIs
+            from comfy.model_patcher import ModelPatcher
+            import comfy.model_management
+            
+            model_patcher = ModelPatcher(
+                fsdp_model,
+                load_device=self.device,
+                offload_device=comfy.model_management.unet_offload_device()
+            )
+            
+            # Store ModelPatcher, not raw model
+            self.model = model_patcher
             
             return {
                 "status": "success",
@@ -284,57 +326,120 @@ class FSDP2Worker:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e), "rank": self.rank}
     
-    def _cleanup_fsdp2_model(self, args: dict):
-        """Cleanup FSDP2 sharded model and free VRAM.
+    def _common_ksampler(self, args: dict):
+        """Execute sampling using standard ComfyUI APIs.
         
-        Critical for Phase 0.5 to avoid OOM when returning to normal loading.
+        Copy-exact from Raylight RayWorker.common_ksampler().
+        Workers execute full comfy.sample.sample() with FSDP2 model.
         
         Args:
-            args: {} (no args needed)
+            args: {
+                "seed": int,
+                "steps": int,
+                "cfg": float,
+                "sampler_name": str,
+                "scheduler": str,
+                "positive": conditioning,
+                "negative": conditioning,
+                "latent": {"samples": tensor},
+                "denoise": float,
+                "disable_noise": bool,
+                "start_step": int,
+                "last_step": int,
+                "force_full_denoise": bool
+            }
         
         Returns:
-            {
-                "status": "success",
-                "vram_freed_gb": float,
-                "vram_after_gb": float,
-                "rank": int
-            }
+            {"status": "success", "result": {"samples": tensor}} (rank 0 only)
         """
-        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}][Cleanup]"
+        import comfy.sample
+        import comfy.utils
+        
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}][Forward]"
+        
+        # Extract args
+        seed = args["seed"]
+        steps = args["steps"]
+        cfg = args["cfg"]
+        sampler_name = args["sampler_name"]
+        scheduler = args["scheduler"]
+        positive = args["positive"]
+        negative = args["negative"]
+        latent = args["latent"]
+        denoise = args.get("denoise", 1.0)
+        disable_noise = args.get("disable_noise", False)
+        start_step = args.get("start_step", None)
+        last_step = args.get("last_step", None)
+        force_full_denoise = args.get("force_full_denoise", False)
         
         try:
-            # Measure VRAM before cleanup
-            torch.cuda.synchronize(self.device)
-            vram_before = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
+            # Step 1: Extract and fix latent channels (Raylight pattern)
+            latent_image = latent["samples"]
+            latent_image = comfy.sample.fix_empty_latent_channels(self.model, latent_image)
             
-            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Cleanup: {vram_before:.2f}GB before")
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Latent shape: {latent_image.shape}")
             
-            # Delete sharded model
-            if hasattr(self, 'model') and self.model is not None:
-                del self.model
-                self.model = None
+            # Step 2: Prepare noise (Raylight pattern)
+            if disable_noise:
+                noise = torch.zeros(
+                    latent_image.size(),
+                    dtype=latent_image.dtype,
+                    layout=latent_image.layout,
+                    device="cpu",
+                )
+            else:
+                batch_inds = latent.get("batch_index", None)
+                noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
             
-            # Force garbage collection
-            import gc
-            gc.collect()
+            # Step 3: Get noise mask if present (Raylight pattern)
+            noise_mask = latent.get("noise_mask", None)
             
-            # Clear CUDA cache
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize(self.device)
+            # Step 4: Disable progress bar on non-rank-0 (Raylight pattern)
+            disable_pbar = True
+            if self.rank == 0:
+                disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
             
-            # Measure VRAM after cleanup
-            vram_after = torch.cuda.memory_allocated(self.device) / (1024 ** 3)
-            vram_freed = vram_before - vram_after
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Starting sampling: steps={steps}, cfg={cfg}")
             
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Cleanup complete: freed {vram_freed:.2f}GB → {vram_after:.2f}GB")
+            # Add barrier to sync all ranks before sampling
+            import torch.distributed as dist
+            if dist.is_initialized():
+                log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Syncing ranks before sampling...")
+                dist.barrier()
+                log_rank0(self.rank, 'debug', f"{LOG_PREFIX} All ranks synced")
             
-            return {
-                "status": "success",
-                "vram_freed_gb": vram_freed,
-                "vram_after_gb": vram_after,
-                "rank": self.rank,
-            }
+            # Step 5: Execute standard ComfyUI sampling (Raylight pattern)
+            with torch.no_grad():
+                samples = comfy.sample.sample(
+                    self.model,
+                    noise,
+                    steps,
+                    cfg,
+                    sampler_name,
+                    scheduler,
+                    positive,
+                    negative,
+                    latent_image,
+                    denoise=denoise,
+                    disable_noise=disable_noise,
+                    start_step=start_step,
+                    last_step=last_step,
+                    force_full_denoise=force_full_denoise,
+                    noise_mask=noise_mask,
+                    disable_pbar=disable_pbar,
+                    seed=seed,
+                )
             
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Sampling complete")
+            
+            # Step 6: Return result (rank 0 only, Raylight pattern)
+            if self.rank == 0:
+                out = latent.copy()
+                out["samples"] = samples
+                return {"status": "success", "result": out}
+            else:
+                return {"status": "success", "result": None}
+                
         except Exception as e:
-            logging.error(f"{LOG_PREFIX} Error during cleanup: {e}", exc_info=True)
+            logging.error(f"{LOG_PREFIX} Error during sampling: {e}", exc_info=True)
             return {"status": "error", "error": str(e), "rank": self.rank}

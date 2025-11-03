@@ -110,12 +110,12 @@ def flux_fsdp2_policy() -> ShardingConfig:
         model_name="flux",
         blocks=[
             BlockConfig(
-                module_path="diffusion_model.single_blocks",
+                module_path="single_blocks",
                 block_count=38,
                 shard_each=True
             ),
             BlockConfig(
-                module_path="diffusion_model.double_blocks",
+                module_path="double_blocks",
                 block_count=19,
                 shard_each=True
             ),
@@ -149,7 +149,7 @@ def wan_fsdp2_policy() -> ShardingConfig:
         model_name="wan",
         blocks=[
             BlockConfig(
-                module_path="diffusion_model.blocks",
+                module_path="blocks",
                 block_count=30,
                 shard_each=True
             ),
@@ -185,7 +185,7 @@ def qwen_image_fsdp2_policy() -> ShardingConfig:
         model_name="qwen_image",
         blocks=[
             BlockConfig(
-                module_path="diffusion_model.transformer_blocks",
+                module_path="blocks",
                 block_count=60,
                 shard_each=True
             ),

@@ -55,6 +55,33 @@ def cleanup_additional_models(models):
     logging.warning("Warning: comfy.sample.cleanup_additional_models isn't used anymore and can be removed")
 
 def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
+    # PARALLEL ATTENTION ROUTING (Comfy Core integration)
+    # Only route in parent process (workers have _fsdp2_executor = None)
+    if hasattr(model, '_fsdp2_executor') and model._fsdp2_executor is not None:
+        logging.info("⚡ [Parallel-Attention] Routing to FSDP2 distributed workers")
+        
+        result = model._fsdp2_executor.execute_collective("common_ksampler", {
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
+            "positive": positive,
+            "negative": negative,
+            "latent": {"samples": latent_image, "batch_index": None},
+            "denoise": denoise,
+            "disable_noise": disable_noise,
+            "start_step": start_step,
+            "last_step": last_step,
+            "force_full_denoise": force_full_denoise,
+        })
+        
+        if result.get("status") == "success":
+            return result["result"]["samples"]
+        else:
+            raise RuntimeError(f"FSDP2 sampling failed: {result.get('error')}")
+    
+    # STANDARD PATH (unchanged)
     sampler = comfy.samplers.KSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
     samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)

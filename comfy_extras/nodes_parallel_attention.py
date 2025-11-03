@@ -65,6 +65,12 @@ class ParallelAttentionConfig:
         if enable_fsdp2 and pa.get("executor") is None:
             from comfy.parallel_attention import FSDP2Executor, FSDP2PolicyRegistry
             
+            # Cleanup any existing executor first
+            if hasattr(model, '_fsdp2_executor') and model._fsdp2_executor is not None:
+                logging.info(f"{LOG_PREFIX} Cleaning up old executor...")
+                model._fsdp2_executor.shutdown()
+                model._fsdp2_executor = None
+            
             # Get policy for model
             if not FSDP2PolicyRegistry.is_registered(model_type):
                 raise RuntimeError(f"{LOG_PREFIX} No policy registered for model type: {model_type}")
@@ -83,20 +89,44 @@ class ParallelAttentionConfig:
             
             logging.info(f"{LOG_PREFIX} Workers spawned")
             
-            # Validate metadata exists on inner model
-            if not hasattr(model.model, '_parallel_attention'):
-                raise RuntimeError(f"{LOG_PREFIX} Missing _parallel_attention!")
-            
-            # Update inner model dict
+            # Get checkpoint path from inner model
             inner_pa = model.model._parallel_attention
-            inner_pa["model_type"] = model_type
-            inner_pa["policy"] = policy
-            inner_pa["phase"] = "ready_for_sharding"
+            checkpoint_path = inner_pa.get("checkpoint_path")
             
-            # Patcher holds ONLY executor
+            if checkpoint_path is None:
+                raise RuntimeError(
+                    f"{LOG_PREFIX} No checkpoint path set. "
+                    f"Model must be loaded with FSDP2 enabled in model options."
+                )
+            
+            logging.info(f"{LOG_PREFIX} Initializing workers with checkpoint: {checkpoint_path}")
+            
+            # Initialize workers: load and shard model
+            result = executor.execute_collective("initialize_fsdp2_from_checkpoint", {
+                "checkpoint_path": checkpoint_path,
+                "model_type": model_type,
+                "policy": policy
+            })
+            
+            if result.get("status") != "success":
+                raise RuntimeError(f"{LOG_PREFIX} Worker init failed: {result.get('error')}")
+            
+            logging.info(
+                f"{LOG_PREFIX} Workers initialized: {result['vram_gb']:.2f}GB per GPU, "
+                f"{result['sharded_count']} sharded params"
+            )
+            
+            # Set executor on ModelPatcher for sample() intercept
+            model._fsdp2_executor = executor
+            
+            # Update parallel_attention context
             pa["executor"] = executor
+            pa["sharded"] = True
+            pa["vram_per_gpu"] = result["vram_gb"]
+            pa["sharded_params"] = result["sharded_count"]
+            pa["phase"] = "ready_for_inference"
             
-            logging.info(f"{LOG_PREFIX} Parallel attention enabled on model")
+            logging.info(f"{LOG_PREFIX} ✅ Model ready for distributed inference")
         elif pa.get("executor") is not None:
             logging.info(f"{LOG_PREFIX} Workers already initialized, reusing")
         

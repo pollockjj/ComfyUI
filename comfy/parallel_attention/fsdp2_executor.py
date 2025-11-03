@@ -107,9 +107,12 @@ class FSDP2Executor:
             logging.info(f"{LOG_PREFIX} Passing DeviceMesh info: {device_type} mesh shape ({self.world_size},)")
         
         # Send command to all workers
+        logging.debug(f"{LOG_PREFIX} Sending command '{command}' to {len(self.pipes)} workers...")
         for i, pipe in enumerate(self.pipes):
             try:
+                logging.debug(f"{LOG_PREFIX} Sending to worker {i}...")
                 pipe.send({"command": command, "args": args})
+                logging.debug(f"{LOG_PREFIX} Sent to worker {i}")
             except Exception as e:
                 logging.error(f"{LOG_PREFIX} Failed to send to worker {i}: {e}")
                 raise
@@ -148,6 +151,9 @@ class FSDP2Executor:
     
     def shutdown(self):
         """Shutdown all workers gracefully."""
+        if not self.workers:
+            return
+            
         logging.info(f"{LOG_PREFIX} Shutting down workers...")
         
         for i, pipe in enumerate(self.pipes):
@@ -162,6 +168,17 @@ class FSDP2Executor:
                 logging.warning(f"{LOG_PREFIX} Worker-{i} did not terminate, forcing...")
                 worker.terminate()
                 worker.join(timeout=2)
+        
+        self.workers = []
+        self.pipes = []
+        logging.info(f"{LOG_PREFIX} Workers shut down")
+    
+    def __del__(self):
+        """Cleanup workers on garbage collection."""
+        try:
+            self.shutdown()
+        except:
+            pass
 
 
 def _worker_main(rank: int, world_size: int, backend: str, pipe: Connection, port: int):

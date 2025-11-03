@@ -99,8 +99,18 @@ def apply_fsdp2_sharding(
         if rank == 0:
             logging.info(f"{LOG_PREFIX} [FSDP2Engine] Reference dtype: {ref_dtype}")
     
-    # Collect ignored params
-    ignored_params = detect_unshardable_params(meta_model, config)
+    # Get diffusion_model (Raylight pattern: FSDP2 only touches diffusion_model)
+    # model_sampling and other BaseModel attributes are left untouched
+    diffusion_model = meta_model.diffusion_model
+    
+    # Collect ignored params using policy's EXCLUSIVE logic
+    # This gets everything NOT in shardable_param_patterns within diffusion_model
+    ignored_params = config.get_ignored_params(diffusion_model)
+    
+    # Add universal unshardable params (scalars, dtype mismatches)
+    universal_ignored = detect_unshardable_params(diffusion_model, ref_dtype)
+    ignored_params.update(universal_ignored)
+    
     if rank == 0:
         logging.info(
             f"{LOG_PREFIX} [FSDP2Engine] Excluding {len(ignored_params)} params from sharding "
@@ -110,7 +120,7 @@ def apply_fsdp2_sharding(
     # Shard blocks according to config
     total_blocks_sharded = 0
     for block_config in config.blocks:
-        block_list = get_module_by_path(meta_model, block_config.module_path)
+        block_list = get_module_by_path(diffusion_model, block_config.module_path)
         
         if not isinstance(block_list, (nn.ModuleList, list)):
             raise TypeError(
@@ -160,11 +170,11 @@ def apply_fsdp2_sharding(
     if rank == 0:
         logging.info(f"{LOG_PREFIX} [FSDP2Engine] Sharded {total_blocks_sharded} blocks")
     
-    # Root wrap if configured
+    # Root wrap diffusion_model if configured (Raylight pattern)
     if config.root_wrap:
         # Add universal scalar detection to root ignored params
         from comfy.parallel_attention.fsdp2_utils import detect_scalar_params
-        root_scalars = detect_scalar_params(meta_model)
+        root_scalars = detect_scalar_params(diffusion_model)
         ignored_params.update(root_scalars)
         
         if rank == 0:
@@ -173,12 +183,15 @@ def apply_fsdp2_sharding(
                 f"{len(ignored_params)} ignored params"
             )
         fully_shard(
-            meta_model,
+            diffusion_model,
             ignored_params=ignored_params,
             mp_policy=MixedPrecisionPolicy(),
             reshard_after_forward=True,
             mesh=device_mesh
         )
+    
+    # Update meta_model with sharded diffusion_model (Raylight pattern)
+    meta_model.diffusion_model = diffusion_model
     
     # Load state_dict if provided
     if state_dict:

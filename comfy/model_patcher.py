@@ -247,6 +247,9 @@ class ModelPatcher:
         self.is_injected = False
         self.skip_injection = False
         self.injections: dict[str, list[PatcherInjection]] = {}
+        
+        # Parallel Attention: FSDP2 executor (initialized by initialize_parallel_attention)
+        self._fsdp2_executor = None
 
         self.hook_patches: dict[comfy.hooks._HookRef] = {}
         self.hook_patches_backup: dict[comfy.hooks._HookRef] = None
@@ -673,6 +676,11 @@ class ModelPatcher:
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+        # PARALLEL ATTENTION: Skip loading if FSDP2 workers have the model
+        if hasattr(self, '_fsdp2_executor') and self._fsdp2_executor is not None:
+            logging.debug("⚡ [Parallel-Attention] Skipping model load (FSDP2 workers have model)")
+            return 0  # Return 0 memory used
+        
         with self.use_ejected():
             self.unpatch_hooks()
             mem_counter = 0
