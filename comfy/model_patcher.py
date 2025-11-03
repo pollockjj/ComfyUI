@@ -676,11 +676,6 @@ class ModelPatcher:
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
-        # PARALLEL ATTENTION: Skip loading if FSDP2 workers have the model
-        if hasattr(self, '_fsdp2_executor') and self._fsdp2_executor is not None:
-            logging.debug("⚡ [Parallel-Attention] Skipping model load (FSDP2 workers have model)")
-            return 0  # Return 0 memory used
-        
         with self.use_ejected():
             self.unpatch_hooks()
             mem_counter = 0
