@@ -84,9 +84,6 @@ class FSDP2Worker:
         elif command == "cleanup_fsdp2_model":
             return self._cleanup_fsdp2_model(args)
         
-        elif command == "forward":
-            return self._forward(args)
-        
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
     
@@ -341,87 +338,4 @@ class FSDP2Worker:
             
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Error during cleanup: {e}", exc_info=True)
-            return {"status": "error", "error": str(e), "rank": self.rank}
-    
-    def _forward(self, args: dict):
-        """Execute forward pass on FSDP2-sharded model.
-        
-        FSDP2 handles all-gather/reshard automatically via reshard_after_forward=True.
-        KSampler → Node → executor → workers → this method
-        
-        Worker holds full ComfyUI model with FSDP2-wrapped diffusion_model.
-        Executes complete model.apply_model() or model.diffusion_model() path.
-        
-        Args:
-            args: {
-                "args": tuple - (x, t, context, y, guidance)
-                "kwargs": dict - Additional arguments
-            }
-        
-        Returns:
-            {
-                "status": "success"|"error",
-                "output": tensor (only from rank 0),
-                "rank": int
-            }
-        
-        Pattern: FastVideo gpu_worker.py + ComfyUI apply_model
-        """
-        if self.model is None:
-            return {"status": "error", "error": "Model not loaded"}
-        
-        forward_args = args.get("args", ())
-        forward_kwargs = args.get("kwargs", {})
-        
-        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
-        
-        try:
-            with torch.no_grad():
-                # Move inputs to device
-                forward_args = tuple(
-                    arg.to(self.device) if isinstance(arg, torch.Tensor) else arg
-                    for arg in forward_args
-                )
-                forward_kwargs = {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in forward_kwargs.items()
-                }
-                
-                # Execute forward - FSDP2 automatically:
-                # 1. All-gathers parameters (each rank has full params temporarily)
-                # 2. Executes forward computation
-                # 3. Reshards parameters (back to 11GB per GPU)
-                if hasattr(self.model, 'diffusion_model'):
-                    output = self.model.diffusion_model(*forward_args, **forward_kwargs)
-                else:
-                    output = self.model(*forward_args, **forward_kwargs)
-                
-                log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward complete")
-                
-                # Move output to CPU for return (avoid GPU memory buildup)
-                if isinstance(output, torch.Tensor):
-                    output = output.cpu()
-                elif isinstance(output, dict):
-                    output = {
-                        k: v.cpu() if isinstance(v, torch.Tensor) else v
-                        for k, v in output.items()
-                    }
-                elif isinstance(output, (list, tuple)):
-                    output = type(output)(
-                        v.cpu() if isinstance(v, torch.Tensor) else v
-                        for v in output
-                    )
-            
-            # Only rank 0 returns output (data parallel - all ranks compute same thing)
-            if self.rank == 0:
-                return {
-                    "status": "success",
-                    "output": output,
-                    "rank": self.rank,
-                }
-            else:
-                return {"status": "success", "rank": self.rank}
-                
-        except Exception as e:
-            logging.error(f"{LOG_PREFIX} Error during forward: {e}", exc_info=True)
             return {"status": "error", "error": str(e), "rank": self.rank}
