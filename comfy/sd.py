@@ -1365,26 +1365,6 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     
     model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     
-    # Parallel attention: Store checkpoint path from model_options into parallel_attention dict
-    checkpoint_path = model_options.get('_checkpoint_path')
-    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: checkpoint_path from model_options={checkpoint_path}")
-    
-    if not checkpoint_path:
-        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - No checkpoint_path in model_options! model_options keys: {list(model_options.keys())}")
-    
-    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: model_patcher has parallel_attention={hasattr(model_patcher, 'parallel_attention')}")
-    
-    if not hasattr(model_patcher, 'parallel_attention'):
-        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - ModelPatcher has no parallel_attention attribute!")
-    
-    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: parallel_attention is dict={isinstance(model_patcher.parallel_attention, dict)}")
-    
-    if not isinstance(model_patcher.parallel_attention, dict):
-        raise RuntimeError(f"⚡ [DEBUG] load_diffusion_model_state_dict: FATAL - parallel_attention is not a dict, it's {type(model_patcher.parallel_attention)}")
-    
-    model_patcher.parallel_attention["checkpoint_path"] = checkpoint_path
-    logging.info(f"⚡ [DEBUG] load_diffusion_model_state_dict: Stored checkpoint_path in parallel_attention dict")
-    
     return model_patcher
 
 

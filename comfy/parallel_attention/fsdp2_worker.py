@@ -154,13 +154,13 @@ class FSDP2Worker:
                 "meta_params": int
             }
         """
-        checkpoint_path = args.get("checkpoint_path")
-        model_type = args.get("model_type")
-        
-        if not checkpoint_path:
-            return {"status": "error", "error": "No checkpoint_path provided"}
+        checkpoint_path = args["checkpoint_path"]
+        model_type = args["model_type"]
+        policy = args["policy"]
         
         LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
+        
+        log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker] USE checkpoint_path: {checkpoint_path}")
         
         try:
             # Load checkpoint state_dict
@@ -188,7 +188,6 @@ class FSDP2Worker:
             # Apply FSDP2 sharding
             from comfy.parallel_attention.fsdp2_engine import apply_fsdp2_sharding_structure_only
             
-            policy = args["policy"]
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Applying FSDP2 sharding...")
             
             fsdp_model = apply_fsdp2_sharding_structure_only(

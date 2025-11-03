@@ -83,22 +83,18 @@ class ParallelAttentionConfig:
             
             logging.info(f"{LOG_PREFIX} Workers spawned")
             
-            # Populate parallel_attention dict (CFG-Split pattern)
-            existing_checkpoint_path = pa.get("checkpoint_path")
-            logging.info(f"{LOG_PREFIX} Config node: checkpoint_path already in dict={existing_checkpoint_path}")
+            # Validate metadata exists on inner model
+            if not hasattr(model.model, '_parallel_attention'):
+                raise RuntimeError(f"{LOG_PREFIX} Missing _parallel_attention!")
             
-            pa["enabled"] = True
+            # Update inner model dict
+            inner_pa = model.model._parallel_attention
+            inner_pa["model_type"] = model_type
+            inner_pa["policy"] = policy
+            inner_pa["phase"] = "ready_for_sharding"
+            
+            # Patcher holds ONLY executor
             pa["executor"] = executor
-            pa["device_mesh"] = executor.device_mesh
-            pa["strategies"] = ["fsdp2"]
-            pa["policy"] = policy
-            if not existing_checkpoint_path:
-                logging.warning(f"{LOG_PREFIX} Config node: No checkpoint_path in dict, this will cause loading to fail!")
-            pa["model_type"] = model_type
-            pa["phase"] = "ready_for_sharding"
-            pa["sharded"] = False
-            pa["vram_per_gpu"] = 0
-            pa["sharded_params"] = 0
             
             logging.info(f"{LOG_PREFIX} Parallel attention enabled on model")
         elif pa.get("executor") is not None:

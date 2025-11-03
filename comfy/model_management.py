@@ -505,52 +505,28 @@ class LoadedModel:
         self.model.model_patches_to(self.model.model_dtype())
 
         # Parallel attention: FSDP2 distributed loading (measure only, then cleanup)
-        if hasattr(self.model, 'parallel_attention'):
-            pa = self.model.parallel_attention
-            LOG_PREFIX = "⚡ [Parallel-Attention]"
+        if hasattr(self.model.model, '_parallel_attention'):
+            inner_pa = self.model.model._parallel_attention
+            executor = self.model.parallel_attention["executor"]
             
-            # Phase 1: Load and shard model
-            logging.info(f"{LOG_PREFIX} Loading FSDP2 sharded model for measurement...")
-            result = pa["executor"].execute_collective(
+            result = executor.execute_collective(
                 "initialize_fsdp2_from_checkpoint",
                 {
-                    "checkpoint_path": pa["checkpoint_path"],
-                    "model_type": pa["model_type"],
-                    "policy": pa["policy"],
+                    "checkpoint_path": inner_pa["checkpoint_path"],
+                    "model_type": inner_pa["model_type"],
+                    "policy": inner_pa["policy"],
                 }
             )
-
-            vram_gb = result.get("vram_gb", 0)
-            sharded_count = result.get("sharded_count", 0)
-            replicated_count = result.get("replicated_count", 0)
             
-            logging.info(f"{LOG_PREFIX} FSDP2 measurement complete:")
-            logging.info(f"{LOG_PREFIX}   VRAM per GPU: {vram_gb:.2f}GB")
-            logging.info(f"{LOG_PREFIX}   Sharded params: {sharded_count}")
-            logging.info(f"{LOG_PREFIX}   Replicated params: {replicated_count}")
+            inner_pa["vram_per_gpu"] = result["vram_gb"]
+            inner_pa["sharded_params"] = result["sharded_count"]
+            inner_pa["replicated_params"] = result["replicated_count"]
             
-            # Phase 2: Cleanup workers
-            logging.info(f"{LOG_PREFIX} Cleaning up FSDP2 workers...")
-            cleanup_result = pa["executor"].execute_collective(
-                "cleanup_fsdp2_model",
-                {}
-            )
+            cleanup_result = executor.execute_collective("cleanup_fsdp2_model", {})
             
-            vram_freed = cleanup_result.get("vram_freed_gb", 0)
-            vram_after = cleanup_result.get("vram_after_gb", 0)
-            logging.info(f"{LOG_PREFIX} Cleanup complete: freed {vram_freed:.2f}GB → {vram_after:.2f}GB per GPU")
-            
-            # Store results for user inspection
-            pa["vram_per_gpu"] = vram_gb
-            pa["sharded_params"] = sharded_count
-            pa["replicated_params"] = replicated_count
-            pa["vram_freed"] = vram_freed
-            pa["vram_after_cleanup"] = vram_after
-            pa["phase"] = "measured_and_cleaned"
-            
-            # Phase 3: Continue to standard single-GPU loading
-            logging.info(f"{LOG_PREFIX} Proceeding to standard single-GPU inference...")
-            # Fall through to standard loading below
+            inner_pa["vram_freed"] = cleanup_result["vram_freed_gb"]
+            inner_pa["vram_after_cleanup"] = cleanup_result["vram_after_gb"]
+            inner_pa["phase"] = "measured_and_cleaned"
 
 
         # if self.model.loaded_size() > 0:

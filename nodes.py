@@ -912,6 +912,7 @@ class UNETLoader:
     CATEGORY = "advanced/loaders"
 
     def load_unet(self, unet_name, weight_dtype):
+        import comfy.model_management as model_management
         model_options = {}
         if weight_dtype == "fp8_e4m3fn":
             model_options["dtype"] = torch.float8_e4m3fn
@@ -923,6 +924,21 @@ class UNETLoader:
 
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+        
+        if model_management.is_parallel_attention_enabled():
+            model.model._parallel_attention = {
+                "checkpoint_path": unet_path,
+                "model_type": None,
+                "policy": None,
+                "vram_per_gpu": 0,
+                "sharded_params": 0,
+                "replicated_params": 0,
+                "vram_freed": 0,
+                "vram_after_cleanup": 0,
+                "phase": "initialized",
+            }
+            logging.info(f"⚡ [Parallel-Attention] SET checkpoint_path: {unet_path}")
+        
         return (model,)
 
 class CLIPLoader:
