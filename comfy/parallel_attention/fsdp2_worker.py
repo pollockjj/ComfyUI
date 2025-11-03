@@ -160,11 +160,15 @@ class FSDP2Worker:
         """
         checkpoint_path = args["checkpoint_path"]
         model_type = args["model_type"]
-        policy = args["policy"]
         
         LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
         
+        # Get policy from registry (don't pass through pipe - dataclass serialization issues)
+        from comfy.parallel_attention.fsdp2_policies import FSDP2PolicyRegistry
+        policy = FSDP2PolicyRegistry.get_policy(model_type)
+        
         log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker] USE checkpoint_path: {checkpoint_path}")
+        log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Policy: {policy.model_name}")
         
         try:
             # Load checkpoint state_dict

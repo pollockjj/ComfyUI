@@ -504,29 +504,31 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        # Parallel attention: FSDP2 distributed loading (measure only, then cleanup)
-        if hasattr(self.model.model, '_parallel_attention'):
+        # Parallel attention: FSDP2 distributed loading
+        # Workers are already initialized by ParallelAttentionConfig node
+        # This block only runs if executor exists but workers haven't loaded model yet
+        if (hasattr(self.model.model, '_parallel_attention') and 
+            self.model.parallel_attention.get("executor") is not None and
+            not self.model.parallel_attention.get("sharded", False)):
+            
             inner_pa = self.model.model._parallel_attention
             executor = self.model.parallel_attention["executor"]
             
+            # Initialize workers if not already done
             result = executor.execute_collective(
                 "initialize_fsdp2_from_checkpoint",
                 {
                     "checkpoint_path": inner_pa["checkpoint_path"],
                     "model_type": inner_pa["model_type"],
-                    "policy": inner_pa["policy"],
                 }
             )
             
-            inner_pa["vram_per_gpu"] = result["vram_gb"]
-            inner_pa["sharded_params"] = result["sharded_count"]
-            inner_pa["replicated_params"] = result["replicated_count"]
-            
-            cleanup_result = executor.execute_collective("cleanup_fsdp2_model", {})
-            
-            inner_pa["vram_freed"] = cleanup_result["vram_freed_gb"]
-            inner_pa["vram_after_cleanup"] = cleanup_result["vram_after_gb"]
-            inner_pa["phase"] = "measured_and_cleaned"
+            if result.get("status") == "success":
+                inner_pa["vram_per_gpu"] = result["vram_gb"]
+                inner_pa["sharded_params"] = result["sharded_count"]
+                inner_pa["replicated_params"] = result.get("replicated_count", 0)
+                self.model.parallel_attention["sharded"] = True
+                logging.info(f"⚡ [Parallel-Attention] Workers loaded: {result['vram_gb']:.2f}GB per GPU")
 
 
         # if self.model.loaded_size() > 0:

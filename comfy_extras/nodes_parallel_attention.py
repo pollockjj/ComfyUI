@@ -102,10 +102,10 @@ class ParallelAttentionConfig:
             logging.info(f"{LOG_PREFIX} Initializing workers with checkpoint: {checkpoint_path}")
             
             # Initialize workers: load and shard model
+            # Pass model_type only - workers will get policy from registry
             result = executor.execute_collective("initialize_fsdp2_from_checkpoint", {
                 "checkpoint_path": checkpoint_path,
                 "model_type": model_type,
-                "policy": policy
             })
             
             if result.get("status") != "success":
