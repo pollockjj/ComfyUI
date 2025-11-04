@@ -267,32 +267,30 @@ class FSDP2DistributedSampler:
         
         # Prepare noise
         latent_samples = latent_image["samples"]
-        noise = comfy.sample.prepare_noise(latent_samples, seed)
         
-        # Build sampling config for workers
-        sampling_args = {
-            "noise": noise.cpu(),
+        # Build sampling config for workers (common_ksampler signature)
+        ksampler_args = {
+            "seed": seed,
             "steps": steps,
             "cfg": cfg,
             "sampler_name": sampler_name,
             "scheduler": scheduler,
             "positive": self._prepare_conditioning_for_serialization(positive),
             "negative": self._prepare_conditioning_for_serialization(negative),
-            "latent_image": latent_samples.cpu(),
+            "latent": {"samples": latent_samples.cpu()},
             "denoise": denoise,
-            "seed": seed
         }
         
         logging.info(f"{LOG_PREFIX} Dispatching to workers: {steps} steps, seed={seed}")
         
-        # Execute on all workers
-        result = executor.execute_collective("sample", sampling_args)
+        # Execute on all workers using common_ksampler (Raylight pattern)
+        result = executor.execute_collective("common_ksampler", ksampler_args)
         
-        logging.info(f"{LOG_PREFIX} Received result: {type(result)}")
-        logging.info(f"{LOG_PREFIX} Result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
+        # common_ksampler returns {"status": "success", "result": {"samples": tensor}}
+        if result.get("status") != "success":
+            raise RuntimeError(f"Worker sampling failed: {result.get('error', 'unknown error')}")
         
-        # Result from rank 0
-        samples = result["samples"]
+        samples = result["result"]["samples"]
         
         logging.info(f"{LOG_PREFIX} Received samples: {samples.shape}")
         

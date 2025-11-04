@@ -665,9 +665,21 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             logging.info(f"{LOG_PREFIX}   has executor: {pa.get('executor') is not None}")
             logging.info(f"{LOG_PREFIX}   model_type: {pa.get('model_type', 'unknown')}")
 
+    # Separate FSDP2 models from normal models (M2: bypass implementation)
+    fsdp2_models = []
+    normal_models = []
+    
+    for x in models:
+        if hasattr(x, 'parallel_attention') and x.parallel_attention.get('executor'):
+            logging.info(f"{LOG_PREFIX} FSDP2 model detected, skipping parent load: {x.model.__class__.__name__ if hasattr(x, 'model') else type(x).__name__}")
+            fsdp2_models.append(x)
+        else:
+            normal_models.append(x)
+    
+    # Only process normal models through standard loading path
     models_to_load = []
 
-    for x in models:
+    for x in normal_models:
         loaded_model = LoadedModel(x)
         try:
             loaded_model_index = current_loaded_models.index(loaded_model)
@@ -682,6 +694,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             if hasattr(x, "model"):
                 logging.info(f"Requested to load {x.model.__class__.__name__}")
             models_to_load.append(loaded_model)
+    
+    # Mark FSDP2 models as "loaded" without actually loading them
+    # (workers already have the sharded model)
+    for fsdp2_model in fsdp2_models:
+        loaded_model = LoadedModel(fsdp2_model)
+        if loaded_model not in current_loaded_models:
+            current_loaded_models.insert(0, loaded_model)
+            logging.info(f"{LOG_PREFIX} Marked FSDP2 model as loaded (workers have it)")
 
     for loaded_model in models_to_load:
         to_unload = []

@@ -85,9 +85,6 @@ class FSDP2Worker:
         elif command == "initialize_fsdp2_from_checkpoint":
             return self._initialize_fsdp2_from_checkpoint(args)
         
-        elif command == "sample":
-            return self._sample(args)
-        
         elif command == "common_ksampler":
             return self._common_ksampler(args)
         
