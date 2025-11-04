@@ -85,6 +85,9 @@ class FSDP2Worker:
         elif command == "initialize_fsdp2_from_checkpoint":
             return self._initialize_fsdp2_from_checkpoint(args)
         
+        elif command == "apply_model_step":
+            return self._apply_model_step(args)
+        
         elif command == "common_ksampler":
             return self._common_ksampler(args)
         
@@ -462,7 +465,90 @@ class FSDP2Worker:
             
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
-            return {"status": "error", "error": str(e), "rank": self.rank}
+            return {"status": "error", "error": str(e)}
+    
+    def _apply_model_step(self, args: dict):
+        """Execute single apply_model forward pass (Phase 2 per-step pattern).
+        
+        This is the "Dumb Worker" handler for Phase 2. Workers receive
+        per-step kwargs, execute one forward pass, return output.
+        
+        This is the stateless RPC pattern - workers don't track step count,
+        session state, or sampling parameters. They just execute the forward pass.
+        
+        Args:
+            args: {
+                "x": input tensor (latent),
+                "timestep": timestep tensor,
+                "c": conditioning dict
+            }
+        
+        Returns:
+            {"output": tensor} - model output for this step (rank 0 only)
+        """
+        LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][ApplyStep]"
+        
+        # Move inputs to worker device
+        x = args["x"].to(self.device)
+        timestep = args["timestep"].to(self.device)
+        c_dict = args.get("c", {})
+        
+        # Extract conditioning (c_crossattn and y)
+        c_crossattn = c_dict.get("c_crossattn")
+        if c_crossattn is not None:
+            c_crossattn = c_crossattn.to(self.device)
+        
+        y = c_dict.get("y")
+        if y is not None:
+            y = y.to(self.device)
+        
+        # Log VRAM before forward
+        vram_before = 0.0
+        if torch.cuda.is_available():
+            vram_before = torch.cuda.memory_allocated(self.device) / 1024**3
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} VRAM before forward: {vram_before:.3f}GB")
+        
+        log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward: x.shape={x.shape}, t={timestep}")
+        
+        # Execute single forward pass with FSDP2 model
+        # self.model is ModelPatcher, self.model.model is the FSDP2-wrapped BaseModel
+        with torch.no_grad():
+            # apply_model signature: (x, timestep, c_crossattn=context, y=pooled)
+            kwargs = {}
+            if c_crossattn is not None:
+                kwargs["c_crossattn"] = c_crossattn
+            if y is not None:
+                kwargs["y"] = y
+            
+            output = self.model.model.apply_model(x, timestep, **kwargs)
+        
+        # Log VRAM after forward
+        if torch.cuda.is_available():
+            vram_after = torch.cuda.memory_allocated(self.device) / 1024**3
+            vram_delta = vram_after - vram_before
+            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} VRAM after forward: {vram_after:.3f}GB (delta: {vram_delta:+.3f}GB)")
+        
+        log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward complete: output.shape={output.shape}")
+        
+        # Rank 0 returns output, others return status
+        if self.rank == 0:
+            return {"output": output.cpu()}
+        else:
+            return {"status": "ok"}
+    
+    def _move_conditioning_to_device(self, c: dict):
+        """Recursively move conditioning tensors to worker device."""
+        result = {}
+        for key, value in c.items():
+            if isinstance(value, torch.Tensor):
+                result[key] = value.to(self.device)
+            elif isinstance(value, dict):
+                result[key] = self._move_conditioning_to_device(value)
+            elif isinstance(value, list):
+                result[key] = [v.to(self.device) if isinstance(v, torch.Tensor) else v for v in value]
+            else:
+                result[key] = value
+        return result
     
     def _common_ksampler(self, args: dict):
         """Execute sampling using standard ComfyUI APIs.

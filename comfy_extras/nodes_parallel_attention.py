@@ -120,12 +120,15 @@ class ParallelAttentionConfig:
             # No per-step wrapper - custom sampler node will call execute_collective("sample")
             model.parallel_attention = {
                 "executor": executor,
-                "model_type": model_type
+                "model_type": model_type,
+                "sharded": True,
+                "vram_per_gpu": result["vram_gb"],
+                "sharded_params": result["sharded_count"]
             }
             
             logging.info(f"{LOG_PREFIX} ✅ Executor attached for session-based sampling")
             
-            # Update parallel_attention context
+            # Update inner parallel_attention context
             pa["executor"] = executor
             pa["sharded"] = True
             pa["vram_per_gpu"] = result["vram_gb"]
@@ -313,14 +316,122 @@ class FSDP2DistributedSampler:
         return obj
 
 
+class TestApplyModelStep:
+    """Test Phase 2.1 apply_model_step handler (Milestone 2.1.1).
+    
+    Validates workers can execute single forward pass and return output.
+    This is the foundation for the per-step wrapper pattern.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "latent": ("LATENT",),
+                "positive": ("CONDITIONING",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            }
+        }
+    
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "test_apply_step"
+    CATEGORY = "parallel_attention/test"
+    
+    def test_apply_step(self, model, latent, positive, seed):
+        """Test single apply_model_step call."""
+        import comfy.sample
+        
+        LOG_PREFIX = "⚡ [PA-Test][ApplyStep]"
+        
+        logging.info(f"{LOG_PREFIX} ========================================")
+        logging.info(f"{LOG_PREFIX} NODE CALLED - Starting test")
+        logging.info(f"{LOG_PREFIX} ========================================")
+        
+        # Check for parallel attention context
+        if not hasattr(model, 'parallel_attention'):
+            logging.error(f"{LOG_PREFIX} FAILED: No parallel_attention context")
+            return (latent, "❌ No parallel_attention context")
+        
+        pa = model.parallel_attention
+        
+        logging.info(f"{LOG_PREFIX} Has executor: {pa.get('executor') is not None}")
+        logging.info(f"{LOG_PREFIX} Is sharded: {pa.get('sharded', False)}")
+        
+        if pa.get("executor") is None:
+            logging.error(f"{LOG_PREFIX} FAILED: No executor")
+            return (latent, "❌ No executor (run ParallelAttentionConfig first)")
+        
+        if not pa.get("sharded", False):
+            logging.error(f"{LOG_PREFIX} FAILED: Workers not sharded")
+            return (latent, "❌ Workers not sharded (model not loaded yet)")
+        
+        logging.info(f"{LOG_PREFIX} Validation passed - testing apply_model_step handler...")
+        
+        try:
+            # Prepare single-step inputs
+            samples = latent["samples"]
+            noise = comfy.sample.prepare_noise(samples, seed)
+            
+            # Create dummy timestep (just for testing forward pass)
+            timestep = torch.tensor([999.0])
+            
+            # Extract conditioning (Flux format)
+            # positive is list of [cond_tensor, cond_dict]
+            cond_tensor = positive[0][0]
+            cond_dict = positive[0][1]
+            
+            # Build conditioning dict for apply_model
+            # apply_model signature: c_crossattn (context), y (pooled)
+            cond = {"c_crossattn": cond_tensor}
+            if "pooled_output" in cond_dict:
+                cond["y"] = cond_dict["pooled_output"]
+            
+            # Build args for apply_model_step
+            step_args = {
+                "x": noise.cpu(),
+                "timestep": timestep.cpu(),
+                "c": cond
+            }
+            
+            logging.info(f"{LOG_PREFIX} Calling apply_model_step on workers...")
+            logging.info(f"{LOG_PREFIX}   x.shape={noise.shape}, timestep={timestep}")
+            
+            # Execute on workers
+            result = pa["executor"].execute_collective("apply_model_step", step_args)
+            
+            logging.info(f"{LOG_PREFIX} Result keys: {list(result.keys())}")
+            
+            if "output" in result:
+                output = result["output"]
+                logging.info(f"{LOG_PREFIX} ✅ TEST PASSED - Forward pass complete")
+                logging.info(f"{LOG_PREFIX} Input shape: {noise.shape}")
+                logging.info(f"{LOG_PREFIX} Output shape: {output.shape}")
+                logging.info(f"{LOG_PREFIX} VRAM per GPU: {pa.get('vram_per_gpu', 0.0):.2f}GB")
+                logging.info(f"{LOG_PREFIX} ========================================")
+                
+                return ({"samples": output},)
+            else:
+                logging.error(f"{LOG_PREFIX} ❌ TEST FAILED - No output in result: {result}")
+                return (latent,)
+                
+        except Exception as e:
+            logging.error(f"{LOG_PREFIX} ❌ TEST FAILED - Exception: {e}", exc_info=True)
+            logging.error(f"{LOG_PREFIX} ========================================")
+            return (latent,)
+
+
 NODE_CLASS_MAPPINGS = {
     "ParallelAttentionConfig": ParallelAttentionConfig,
     "TestFSDP2Inference": TestFSDP2Inference,
     "FSDP2DistributedSampler": FSDP2DistributedSampler,
+    "TestApplyModelStep": TestApplyModelStep,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ParallelAttentionConfig": "Parallel Attention Config",
     "TestFSDP2Inference": "Test FSDP2 Inference",
     "FSDP2DistributedSampler": "FSDP2 Distributed Sampler",
+    "TestApplyModelStep": "Test Apply Model Step (Phase 2.1)",
 }
