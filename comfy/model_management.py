@@ -620,6 +620,17 @@ def free_memory(memory_required, device, keep_loaded=[]):
     return unloaded_models
 
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
+    """Load models to GPU, with FSDP2 bypass for distributed models.
+    
+    For FSDP2 models (identified by parallel_attention dict), skip parent loading
+    since workers already have sharded models loaded. This is the natural integration
+    point for session-based distributed inference.
+    """
+    LOG_PREFIX = "🔧 [ModelManagement][load_models_gpu]"
+    
+    logging.info(f"{LOG_PREFIX} Called with {len(models)} models")
+    logging.info(f"{LOG_PREFIX}   memory_required={memory_required/1024**3:.2f}GB")
+    
     cleanup_models_gc()
     global vram_state
 
@@ -630,6 +641,8 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
     else:
         minimum_memory_required = max(inference_memory, minimum_memory_required + extra_reserved_memory())
 
+    logging.info(f"{LOG_PREFIX}   minimum_memory_required={minimum_memory_required/1024**3:.2f}GB")
+
     models_temp = set()
     for m in models:
         models_temp.add(m)
@@ -637,6 +650,20 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             models_temp.add(mm)
 
     models = models_temp
+
+    # Instrument: Log each model and check for parallel_attention
+    for i, model in enumerate(models):
+        model_name = model.model.__class__.__name__ if hasattr(model, 'model') else type(model).__name__
+        logging.info(f"{LOG_PREFIX} Model {i}: {model_name}")
+        
+        has_pa = hasattr(model, 'parallel_attention')
+        logging.info(f"{LOG_PREFIX}   has parallel_attention: {has_pa}")
+        
+        if has_pa:
+            pa = model.parallel_attention
+            logging.info(f"{LOG_PREFIX}   parallel_attention keys: {list(pa.keys())}")
+            logging.info(f"{LOG_PREFIX}   has executor: {pa.get('executor') is not None}")
+            logging.info(f"{LOG_PREFIX}   model_type: {pa.get('model_type', 'unknown')}")
 
     models_to_load = []
 

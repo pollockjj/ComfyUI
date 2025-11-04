@@ -85,6 +85,9 @@ class FSDP2Worker:
         elif command == "initialize_fsdp2_from_checkpoint":
             return self._initialize_fsdp2_from_checkpoint(args)
         
+        elif command == "sample":
+            return self._sample(args)
+        
         elif command == "common_ksampler":
             return self._common_ksampler(args)
         
@@ -163,6 +166,23 @@ class FSDP2Worker:
         
         LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][Sample]"
         
+        # Log model state BEFORE sampling (M3 instrumentation)
+        logging.info(f"{LOG_PREFIX} Model state check:")
+        logging.info(f"{LOG_PREFIX}   self.model type: {type(self.model).__name__}")
+        logging.info(f"{LOG_PREFIX}   self.model.model type: {type(self.model.model).__name__}")
+        logging.info(f"{LOG_PREFIX}   self.model.load_device: {self.model.load_device}")
+        
+        # Check if FSDP2 wrapped
+        from torch.distributed._composable.fsdp import FSDPModule
+        is_fsdp = isinstance(self.model.model.diffusion_model, FSDPModule)
+        logging.info(f"{LOG_PREFIX}   FSDP2 wrapped: {is_fsdp}")
+        
+        # Log VRAM BEFORE sampling
+        vram_before = 0.0
+        if torch.cuda.is_available():
+            vram_before = torch.cuda.memory_allocated(self.device) / 1024**3
+            logging.info(f"{LOG_PREFIX}   VRAM before sampling: {vram_before:.3f}GB")
+        
         # Move inputs to worker device
         noise = args["noise"].to(self.device)
         latent_image = args["latent_image"].to(self.device)
@@ -197,6 +217,14 @@ class FSDP2Worker:
                 disable_pbar=disable_pbar,
                 seed=args["seed"]
             )
+        
+        # Log VRAM AFTER sampling (M3 instrumentation)
+        vram_after = 0.0
+        if torch.cuda.is_available():
+            vram_after = torch.cuda.memory_allocated(self.device) / 1024**3
+            vram_delta = vram_after - vram_before
+            logging.info(f"{LOG_PREFIX}   VRAM after sampling: {vram_after:.3f}GB")
+            logging.info(f"{LOG_PREFIX}   VRAM delta: {vram_delta:+.3f}GB")
         
         logging.info(f"{LOG_PREFIX} Sampling complete, output shape={samples.shape}")
         

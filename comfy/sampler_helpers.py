@@ -2,6 +2,7 @@ from __future__ import annotations
 import uuid
 import math
 import collections
+import logging
 import comfy.model_management
 import comfy.conds
 import comfy.utils
@@ -130,14 +131,37 @@ def prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=None
     return executor.execute(model, noise_shape, conds, model_options=model_options)
 
 def _prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=None):
+    """Prepare sampling by loading models to GPU.
+    
+    This is called once per sampling session. For FSDP2 models, load_models_gpu
+    will detect parallel_attention dict and skip parent loading.
+    """
+    LOG_PREFIX = "🎯 [SamplerHelpers][prepare_sampling]"
+    
+    logging.info(f"{LOG_PREFIX} Called")
+    logging.info(f"{LOG_PREFIX}   Model type: {type(model).__name__}")
+    logging.info(f"{LOG_PREFIX}   Has parallel_attention: {hasattr(model, 'parallel_attention')}")
+    logging.info(f"{LOG_PREFIX}   Noise shape: {noise_shape}")
+    
     real_model: BaseModel = None
     models, inference_memory = get_additional_models(conds, model.model_dtype())
     models += get_additional_models_from_model_options(model_options)
     models += model.get_nested_additional_models()  # TODO: does this require inference_memory update?
+    
     memory_required, minimum_memory_required = estimate_memory(model, noise_shape, conds)
+    
+    logging.info(f"{LOG_PREFIX}   Memory required: {memory_required/1024**3:.2f}GB")
+    logging.info(f"{LOG_PREFIX}   Calling load_models_gpu with {len([model] + models)} models...")
+    
     comfy.model_management.load_models_gpu([model] + models, memory_required=memory_required + inference_memory, minimum_memory_required=minimum_memory_required + inference_memory)
+    
+    logging.info(f"{LOG_PREFIX}   load_models_gpu returned")
+    
     real_model = model.model
-
+    
+    logging.info(f"{LOG_PREFIX}   real_model type: {type(real_model).__name__}")
+    logging.info(f"{LOG_PREFIX}   real_model.device: {getattr(real_model, 'device', 'no device attr')}")
+    
     return real_model, conds, models
 
 def cleanup_models(conds, models):

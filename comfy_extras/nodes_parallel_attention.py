@@ -176,21 +176,19 @@ class TestFSDP2Inference:
         if not hasattr(model, 'parallel_attention'):
             return (latent, "❌ No parallel_attention context")
         
-        ctx = model.parallel_attention
+        pa = model.parallel_attention
         
-        if not ctx.is_ready_for_sharding():
-            return (latent, f"❌ Not ready: phase={ctx.phase}")
-        
-        if ctx.executor is None:
+        # Check executor exists
+        if pa.get("executor") is None:
             return (latent, "❌ No executor (run ParallelAttentionConfig first)")
         
         # Validate workers have sharded model
-        if not ctx.sharded:
+        if not pa.get("sharded", False):
             return (latent, "❌ Workers not sharded (model not loaded yet)")
         
         logging.info(f"{LOG_PREFIX} Starting inference test")
-        logging.info(f"{LOG_PREFIX} Model: {ctx.model_type}, Steps: {steps}")
-        logging.info(f"{LOG_PREFIX} Sharded params: {ctx.sharded_params}")
+        logging.info(f"{LOG_PREFIX} Model: {pa.get('model_type')}, Steps: {steps}")
+        logging.info(f"{LOG_PREFIX} Sharded params: {pa.get('sharded_params')}")
         
         try:
             # Run sampling
@@ -215,10 +213,10 @@ class TestFSDP2Inference:
             # Build result
             result = (
                 f"✅ FSDP2 Inference Test PASSED\n"
-                f"Model: {ctx.model_type}\n"
+                f"Model: {pa.get('model_type')}\n"
                 f"Steps: {steps}\n"
-                f"Sharded params: {ctx.sharded_params}\n"
-                f"VRAM per GPU: {ctx.vram_per_gpu:.2f}GB\n"
+                f"Sharded params: {pa.get('sharded_params')}\n"
+                f"VRAM per GPU: {pa.get('vram_per_gpu', 0.0):.2f}GB\n"
                 f"Output shape: {output_latent['samples'].shape}"
             )
             
@@ -289,6 +287,9 @@ class FSDP2DistributedSampler:
         
         # Execute on all workers
         result = executor.execute_collective("sample", sampling_args)
+        
+        logging.info(f"{LOG_PREFIX} Received result: {type(result)}")
+        logging.info(f"{LOG_PREFIX} Result keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
         
         # Result from rank 0
         samples = result["samples"]
