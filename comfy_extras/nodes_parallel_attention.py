@@ -116,8 +116,28 @@ class ParallelAttentionConfig:
                 f"{result['sharded_count']} sharded params"
             )
             
-            # Store executor for session-based sampling (Raylight pattern)
-            # No per-step wrapper - custom sampler node will call execute_collective("sample")
+            # Create wrapper for per-step interception (Phase 2.1)
+            from comfy.parallel_attention.unified_wrapper import UnifiedParallelWrapper
+            
+            wrapper = UnifiedParallelWrapper(
+                executor=executor,
+                model_type=model_type,
+                enable_cfg_split=False  # Phase 2.2
+            )
+            
+            # Attach to ModelPatcher using model_function_wrapper seam
+            model.set_model_unet_function_wrapper(wrapper)
+            
+            # Initialize session logger for this workflow
+            from comfy.parallel_attention.session_logger import SessionLogger
+            session_logger = SessionLogger.get_instance()
+            session_logger.start_session()
+            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
+            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
+            session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
+            session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
+            
+            # Store executor and metadata
             model.parallel_attention = {
                 "executor": executor,
                 "model_type": model_type,
@@ -126,7 +146,7 @@ class ParallelAttentionConfig:
                 "sharded_params": result["sharded_count"]
             }
             
-            logging.info(f"{LOG_PREFIX} ✅ Executor attached for session-based sampling")
+            logging.info(f"{LOG_PREFIX} ✅ Per-step wrapper attached for standard KSampler")
             
             # Update inner parallel_attention context
             pa["executor"] = executor
@@ -138,6 +158,14 @@ class ParallelAttentionConfig:
             logging.info(f"{LOG_PREFIX} ✅ Model ready for distributed inference")
         elif pa.get("executor") is not None:
             logging.info(f"{LOG_PREFIX} Workers already initialized, reusing")
+            
+            # Start new session logger for each workflow run
+            from comfy.parallel_attention.session_logger import SessionLogger
+            session_logger = SessionLogger.get_instance()
+            session_logger.start_session()
+            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers reused (already initialized)")
+            session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
+            session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
         
         return (model,)
 

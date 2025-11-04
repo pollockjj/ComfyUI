@@ -22,11 +22,6 @@ from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
 import torch
 import sys
-
-def is_parallel_attention_enabled():
-    """Check if --use-parallel-attention CLI flag is set."""
-    import comfy.cli_args
-    return getattr(comfy.cli_args.args, 'use_parallel_attention', False)
 import importlib
 import platform
 import weakref
@@ -620,13 +615,6 @@ def free_memory(memory_required, device, keep_loaded=[]):
     return unloaded_models
 
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
-    """Load models to GPU, with FSDP2 bypass for distributed models.
-    
-    For FSDP2 models (identified by parallel_attention dict), skip parent loading
-    since workers already have sharded models loaded. This is the natural integration
-    point for session-based distributed inference.
-    """
-    LOG_PREFIX = "🔧 [ModelManagement]"
     cleanup_models_gc()
     global vram_state
 
@@ -645,27 +633,9 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
     models = models_temp
 
-    # Log FSDP2 models only
-    for model in models:
-        if hasattr(model, 'parallel_attention') and model.parallel_attention.get('executor'):
-            vram_gb = model.parallel_attention.get('vram_per_gpu', 0.0)
-            model_type = model.parallel_attention.get('model_type', 'unknown')
-            logging.info(f"🔧 [ModelManagement] FSDP2: {model_type}, VRAM={vram_gb:.2f}GB/GPU")
-
-    # Separate FSDP2 models from normal models (M2: bypass implementation)
-    fsdp2_models = []
-    normal_models = []
-    
-    for x in models:
-        if hasattr(x, 'parallel_attention') and x.parallel_attention.get('executor'):
-            fsdp2_models.append(x)
-        else:
-            normal_models.append(x)
-    
-    # Only process normal models through standard loading path
     models_to_load = []
 
-    for x in normal_models:
+    for x in models:
         loaded_model = LoadedModel(x)
         try:
             loaded_model_index = current_loaded_models.index(loaded_model)
@@ -680,12 +650,6 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             if hasattr(x, "model"):
                 logging.info(f"Requested to load {x.model.__class__.__name__}")
             models_to_load.append(loaded_model)
-    
-    # FSDP2 models: Don't add to current_loaded_models
-    # Workers already have the model loaded, parent process doesn't manage it
-    if fsdp2_models:
-        pa_info = fsdp2_models[0].parallel_attention
-        logging.info(f"{LOG_PREFIX} FSDP2: {pa_info.get('model_type', 'unknown')}, {pa_info.get('vram_per_gpu', 0):.1f}GB/GPU")
 
     for loaded_model in models_to_load:
         to_unload = []

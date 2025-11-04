@@ -1627,6 +1627,12 @@ class SaveImage:
             })
             counter += 1
 
+        # Write parallel-attention session log if active
+        from comfy.parallel_attention.session_logger import SessionLogger
+        session_logger = SessionLogger.get_instance()
+        if session_logger.is_active():
+            session_logger.finalize_session(full_output_folder)
+
         return { "ui": { "images": results } }
 
 class PreviewImage(SaveImage):
