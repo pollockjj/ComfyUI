@@ -537,6 +537,12 @@ class FSDP2Worker:
             if self.rank == 0:
                 disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
             
+            # Log VRAM BEFORE sampling
+            vram_before = 0.0
+            if torch.cuda.is_available():
+                vram_before = torch.cuda.memory_allocated(self.device) / 1024**3
+                log_rank0(self.rank, 'info', f"{LOG_PREFIX} VRAM before sampling: {vram_before:.3f}GB")
+            
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} Starting sampling: steps={steps}, cfg={cfg}")
             
             # Add barrier to sync all ranks before sampling
@@ -567,6 +573,14 @@ class FSDP2Worker:
                     disable_pbar=disable_pbar,
                     seed=seed,
                 )
+            
+            # Log VRAM AFTER sampling
+            vram_after = 0.0
+            if torch.cuda.is_available():
+                vram_after = torch.cuda.memory_allocated(self.device) / 1024**3
+                vram_delta = vram_after - vram_before
+                log_rank0(self.rank, 'info', f"{LOG_PREFIX} VRAM after sampling: {vram_after:.3f}GB")
+                log_rank0(self.rank, 'info', f"{LOG_PREFIX} VRAM delta: {vram_delta:+.3f}GB")
             
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} Sampling complete")
             

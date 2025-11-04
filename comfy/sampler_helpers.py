@@ -157,6 +157,13 @@ def _prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=Non
     
     logging.info(f"{LOG_PREFIX}   load_models_gpu returned")
     
+    # Log VRAM after load_models_gpu
+    import torch
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            vram = torch.cuda.memory_allocated(i) / 1024**3
+            logging.info(f"{LOG_PREFIX}   VRAM cuda:{i} after load_models_gpu: {vram:.3f}GB")
+    
     real_model = model.model
     
     logging.info(f"{LOG_PREFIX}   real_model type: {type(real_model).__name__}")
