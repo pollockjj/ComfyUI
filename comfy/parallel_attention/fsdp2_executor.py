@@ -122,6 +122,10 @@ class FSDP2Executor:
             result = self.pipes[0].recv()
 
             if isinstance(result, dict):
+                # For sample: return dict directly (contains samples tensor)
+                if command == "sample":
+                    return result
+                
                 if command == "initialize_fsdp2" and result.get("success"):
                     self.device_mesh = {
                         "device_type": device_type,
@@ -196,11 +200,20 @@ def _worker_main(rank: int, world_size: int, backend: str, pipe: Connection, por
         os.environ['RANK'] = str(rank)
         os.environ['WORLD_SIZE'] = str(world_size)
         
+        # CRITICAL: Set device BEFORE init_process_group to avoid both ranks on cuda:0
+        if torch.cuda.is_available():
+            device_id = rank
+            torch.cuda.set_device(device_id)
+            logging.info(f"Worker-{rank} set to cuda:{device_id}")
+        else:
+            device_id = None
+        
         dist.init_process_group(
             backend=backend,
             init_method=f"tcp://localhost:{port}",
             world_size=world_size,
-            rank=rank
+            rank=rank,
+            device_id=device_id  # Pass int, not torch.device
         )
         
         worker = FSDP2Worker(rank, world_size)
@@ -217,7 +230,11 @@ def _worker_main(rank: int, world_size: int, backend: str, pipe: Connection, por
                     break
                 
                 # Execute command
-                result = worker.execute(command, args)
+                try:
+                    result = worker.execute(command, args)
+                except Exception as cmd_error:
+                    logging.error(f"Worker-{rank} error executing {command}: {cmd_error}", exc_info=True)
+                    result = {"status": "error", "error": str(cmd_error)}
                 
                 # Rank 0 sends result back
                 if rank == 0:
@@ -225,11 +242,20 @@ def _worker_main(rank: int, world_size: int, backend: str, pipe: Connection, por
             except EOFError:
                 break
             except Exception as e:
+                logging.error(f"Worker-{rank} error in command loop: {e}")
                 if rank == 0:
-                    pipe.send({"success": False, "error": str(e)})
+                    try:
+                        pipe.send({"success": False, "error": str(e)})
+                    except:
+                        pass
                 break
         
-        dist.destroy_process_group()
+        # Cleanup distributed group
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        except Exception as e:
+            logging.error(f"Worker-{rank} error destroying process group: {e}")
         
     except Exception as e:
         pipe.send(f"ERROR: {e}")

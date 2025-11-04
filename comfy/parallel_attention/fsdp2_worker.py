@@ -88,6 +88,9 @@ class FSDP2Worker:
         elif command == "common_ksampler":
             return self._common_ksampler(args)
         
+        elif command == "apply_model":
+            return self._apply_model(args)
+        
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
     
@@ -132,6 +135,106 @@ class FSDP2Worker:
             "config_name": config.model_name,
             "block_count": len(config.blocks),
         }
+    
+    def _sample(self, args: dict):
+        """Execute full sampling session (Raylight pattern).
+        
+        Workers call comfy.sample.sample() with FSDP2-sharded ModelPatcher.
+        FSDP2 handles all-gather/reshard transparently during forward passes.
+        
+        Args:
+            args: Full sampling config (tensors on CPU for serialization):
+                - noise: Noise tensor
+                - steps: Number of steps
+                - cfg: CFG scale
+                - sampler_name: Sampler type
+                - scheduler: Scheduler type
+                - positive: Positive conditioning
+                - negative: Negative conditioning
+                - latent_image: Initial latent
+                - denoise: Denoise strength
+                - seed: Random seed
+        
+        Returns:
+            dict: {"samples": tensor} on rank 0, {"status": "ok"} on others
+        """
+        import comfy.sample
+        import comfy.utils
+        
+        LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][Sample]"
+        
+        # Move inputs to worker device
+        noise = args["noise"].to(self.device)
+        latent_image = args["latent_image"].to(self.device)
+        positive = self._move_conditioning_to_device(args["positive"])
+        negative = self._move_conditioning_to_device(args["negative"])
+        
+        # Model is ALREADY loaded and sharded - DON'T call model.load()!
+        # That would load the full model to parent process
+        
+        # Disable progress bar on non-rank-0 workers
+        disable_pbar = True
+        if self.rank == 0:
+            disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+        
+        logging.info(f"{LOG_PREFIX} Starting sampling: {args['steps']} steps, seed={args['seed']}")
+        logging.info(f"{LOG_PREFIX} Model device: {self.model.model.device if hasattr(self.model.model, 'device') else 'unknown'}")
+        
+        # Execute standard ComfyUI sampling with FSDP2-sharded model
+        # FSDP2 handles all-gather/reshard automatically during forward
+        with torch.no_grad():
+            samples = comfy.sample.sample(
+                model=self.model,
+                noise=noise,
+                steps=args["steps"],
+                cfg=args["cfg"],
+                sampler_name=args["sampler_name"],
+                scheduler=args["scheduler"],
+                positive=positive,
+                negative=negative,
+                latent_image=latent_image,
+                denoise=args["denoise"],
+                disable_pbar=disable_pbar,
+                seed=args["seed"]
+            )
+        
+        logging.info(f"{LOG_PREFIX} Sampling complete, output shape={samples.shape}")
+        
+        # Rank 0 returns samples, others return status
+        if self.rank == 0:
+            return {"samples": samples.cpu()}
+        else:
+            return {"status": "ok"}
+    
+    def _move_conditioning_to_device(self, cond):
+        """Move conditioning to worker device."""
+        if isinstance(cond, list):
+            return [[self._move_tensor_to_device(c[0]), c[1]] for c in cond]
+        return cond
+    
+    def _move_tensor_to_device(self, tensor):
+        """Recursively move tensors to worker device."""
+        if isinstance(tensor, torch.Tensor):
+            return tensor.to(self.device)
+        elif isinstance(tensor, dict):
+            return {k: self._move_tensor_to_device(v) for k, v in tensor.items()}
+        elif isinstance(tensor, (list, tuple)):
+            return type(tensor)(self._move_tensor_to_device(v) for v in tensor)
+        return tensor
+    
+    def _move_tensors_to_device(self, obj, device):
+        """Recursively move all tensors in nested structure to device.
+        
+        Legacy method for compatibility.
+        """
+        if isinstance(obj, torch.Tensor):
+            return obj.to(device)
+        elif isinstance(obj, dict):
+            return {k: self._move_tensors_to_device(v, device) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(self._move_tensors_to_device(item, device) for item in obj)
+        else:
+            return obj
     
     def _initialize_fsdp2_from_checkpoint(self, args: dict):
         """Initialize FSDP2 by creating meta model from checkpoint.
@@ -214,6 +317,11 @@ class FSDP2Worker:
             # Load weights using iterator (WORKING pattern)
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} Loading weights...")
             
+            # Track VRAM before loading
+            if torch.cuda.is_available():
+                vram_before_load = torch.cuda.memory_allocated(self.device) / 1024**3
+                log_rank0(self.rank, 'info', f"{LOG_PREFIX} VRAM before weight loading: {vram_before_load:.2f}GB")
+            
             from safetensors.torch import safe_open
             from torch.distributed._tensor import distribute_tensor
             
@@ -249,9 +357,10 @@ class FSDP2Worker:
                     if meta_param is None:
                         continue
                     
-                    # CRITICAL FIX: Cast to reference dtype BEFORE device move
-                    # This fixes "Float and BFloat16" dtype mismatch errors
-                    full_tensor = full_tensor.to(dtype=ref_dtype, device=self.device)
+                    # Move to device first (cheap copy), then cast to avoid temp allocation
+                    full_tensor = full_tensor.to(device=self.device)
+                    if full_tensor.dtype != ref_dtype:
+                        full_tensor = full_tensor.to(dtype=ref_dtype)
                     
                     # Distribute if FSDP-wrapped (has device_mesh)
                     if hasattr(meta_param, "device_mesh"):

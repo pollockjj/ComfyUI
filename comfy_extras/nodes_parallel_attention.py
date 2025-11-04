@@ -116,8 +116,14 @@ class ParallelAttentionConfig:
                 f"{result['sharded_count']} sharded params"
             )
             
-            # Set executor on ModelPatcher for sample() intercept
-            model._fsdp2_executor = executor
+            # Store executor for session-based sampling (Raylight pattern)
+            # No per-step wrapper - custom sampler node will call execute_collective("sample")
+            model.parallel_attention = {
+                "executor": executor,
+                "model_type": model_type
+            }
+            
+            logging.info(f"{LOG_PREFIX} ✅ Executor attached for session-based sampling")
             
             # Update parallel_attention context
             pa["executor"] = executor
@@ -223,12 +229,99 @@ class TestFSDP2Inference:
             return (latent, f"❌ Inference failed: {str(e)}")
 
 
+class FSDP2DistributedSampler:
+    """Custom sampler for FSDP2 distributed inference (Raylight pattern).
+    
+    Replaces standard KSampler when using FSDP2.
+    Workers execute full sampling sessions via comfy.sample.sample().
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        import comfy.samplers
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent_image": ("LATENT",),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+    
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "sample"
+    CATEGORY = "sampling"
+    
+    def sample(self, model, seed, steps, cfg, sampler_name, scheduler, 
+               positive, negative, latent_image, denoise=1.0):
+        """Execute distributed sampling via workers."""
+        import comfy.sample
+        
+        # Model must have parallel_attention from ParallelAttentionConfig
+        pa_config = model.parallel_attention
+        executor = pa_config["executor"]
+        
+        # Prepare noise
+        latent_samples = latent_image["samples"]
+        noise = comfy.sample.prepare_noise(latent_samples, seed)
+        
+        # Build sampling config for workers
+        sampling_args = {
+            "noise": noise.cpu(),
+            "steps": steps,
+            "cfg": cfg,
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
+            "positive": self._prepare_conditioning_for_serialization(positive),
+            "negative": self._prepare_conditioning_for_serialization(negative),
+            "latent_image": latent_samples.cpu(),
+            "denoise": denoise,
+            "seed": seed
+        }
+        
+        logging.info(f"{LOG_PREFIX} Dispatching to workers: {steps} steps, seed={seed}")
+        
+        # Execute on all workers
+        result = executor.execute_collective("sample", sampling_args)
+        
+        # Result from rank 0
+        samples = result["samples"]
+        
+        logging.info(f"{LOG_PREFIX} Received samples: {samples.shape}")
+        
+        return ({"samples": samples},)
+    
+    def _prepare_conditioning_for_serialization(self, cond):
+        """Move conditioning tensors to CPU for serialization."""
+        if isinstance(cond, list):
+            return [[self._move_tensor_to_cpu(c[0]), c[1]] for c in cond]
+        return cond
+    
+    def _move_tensor_to_cpu(self, obj):
+        """Recursively move tensors to CPU."""
+        if isinstance(obj, torch.Tensor):
+            return obj.cpu()
+        elif isinstance(obj, dict):
+            return {k: self._move_tensor_to_cpu(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(self._move_tensor_to_cpu(v) for v in obj)
+        return obj
+
+
 NODE_CLASS_MAPPINGS = {
     "ParallelAttentionConfig": ParallelAttentionConfig,
     "TestFSDP2Inference": TestFSDP2Inference,
+    "FSDP2DistributedSampler": FSDP2DistributedSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ParallelAttentionConfig": "Parallel Attention Config",
     "TestFSDP2Inference": "Test FSDP2 Inference",
+    "FSDP2DistributedSampler": "FSDP2 Distributed Sampler",
 }
