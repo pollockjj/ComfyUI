@@ -66,11 +66,6 @@ class RingAttentionPatches:
         self.last_double_idx = depth_double - 1
         self.first_single_idx = 0
         self.last_single_idx = depth_single - 1
-        
-        logging.info(
-            f"{LOG_PREFIX} Initialized: "
-            f"double_blocks={depth_double}, single_blocks={depth_single}"
-        )
     
     # ========================================================================
     # POINT 1: Initial Split (patches_replace on double_block 0)

@@ -58,6 +58,60 @@ class FSDP2Worker:
         
         log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} initialized on {self.device}")
         log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} DeviceMesh: {device_type} mesh_shape=({world_size},)")
+        
+        # Initialize xDiT for Ring-Attention (FSDP2 first, then xDiT)
+        self._init_xdit_distributed()
+    
+    def _init_xdit_distributed(self):
+        """Initialize xDiT distributed environment for USP (Ring/Ulysses).
+        
+        Sets up yunchang process groups for sequence parallelism.
+        Called after DeviceMesh is initialized.
+        """
+        try:
+            from xfuser.core.distributed import (
+                init_distributed_environment,
+                initialize_model_parallel,
+            )
+            
+            # Initialize xDiT base environment
+            init_distributed_environment(rank=self.rank, world_size=self.world_size)
+            
+            # Configure for Ring-only (2 GPUs) with NCCL backend
+            initialize_model_parallel(
+                sequence_parallel_degree=self.world_size,
+                ring_degree=self.world_size,  # Use all GPUs for Ring
+                ulysses_degree=1,  # No head parallelism yet
+                backend="nccl",  # Force NCCL for GPU communication
+            )
+            
+            log_rank0(
+                self.rank, 'info',
+                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xDiT initialized: "
+                f"ring_degree={self.world_size}, ulysses_degree=1"
+            )
+        except ImportError as e:
+            log_rank0(
+                self.rank, 'warning',
+                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xfuser not available: {e}. "
+                f"Ring-Attention will not work."
+            )
+    
+    def _install_xfuser_attention_processors(self):
+        """Install xfuser Ring-Attention via add_object_patch (Logic Seam).
+        
+        TODO: This needs to use add_object_patch to replace attention modules
+        with ParallelAttentionModule instances that contain Ring-Attention logic.
+        
+        This is a placeholder - the actual implementation will be done via
+        the config node using add_object_patch, NOT in workers.
+        
+        Workers just need xDiT initialized (already done in __init__).
+        """
+        log_rank0(
+            self.rank, 'info',
+            f"⚡ [Worker][Rank {self.rank}] xDiT initialized, ready for Ring-Attention modules"
+        )
     
     def execute(self, command: str, args: dict):
         """Execute command and return result.
@@ -454,6 +508,20 @@ class FSDP2Worker:
             # Store ModelPatcher, not raw model
             self.model = model_patcher
             
+            # Install Ring-Attention forward methods if enabled
+            # Uses official ModelPatcher API for worker model modifications
+            enable_ring = args.get("enable_ring_attention", False)
+            if enable_ring:
+                log_rank0(self.rank, 'info', f"⚡ [Worker][Rank {self.rank}] Installing Ring-Attention forward methods")
+                model_type = args.get("model_type", "flux")
+                model_patcher.install_parallel_attention_forward_methods(model_type)
+            
+            # Apply object patches from parent (if any)
+            # This is the clean extension point for distributed model modifications
+            object_patches = args.get("object_patches", {})
+            if object_patches:
+                self._apply_object_patches_to_worker_model(object_patches)
+            
             return {
                 "status": "success",
                 "vram_gb": vram_after_load,
@@ -465,6 +533,97 @@ class FSDP2Worker:
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
+    
+    def _replace_attention_modules_with_ring(self, fsdp_model):
+        """Replace Flux attention modules with Ring-Attention versions.
+        
+        This is the CORRECT approach: modify the model graph directly in workers
+        after FSDP2 sharding. No object_patches, no serialization issues.
+        
+        Pattern: xfuser replaces attention processors, we replace attention modules.
+        """
+        from comfy.parallel_attention.ring_attention_module import RingAttentionModule
+        
+        transformer = fsdp_model.diffusion_model
+        replaced_count = 0
+        
+        # Replace double block attention modules
+        for i, block in enumerate(transformer.double_blocks):
+            # Replace img_attn
+            original_img_attn = block.img_attn
+            ring_img_attn = RingAttentionModule(original_img_attn, use_usp=True)
+            block.img_attn = ring_img_attn
+            replaced_count += 1
+            
+            # Replace txt_attn
+            original_txt_attn = block.txt_attn
+            ring_txt_attn = RingAttentionModule(original_txt_attn, use_usp=True)
+            block.txt_attn = ring_txt_attn
+            replaced_count += 1
+        
+        log_rank0(self.rank, 'info',
+            f"⚡ [Worker][Rank {self.rank}] ✅ Replaced {replaced_count} attention modules with Ring-Attention"
+        )
+    
+    def _apply_object_patches_to_worker_model(self, object_patches: dict):
+        """Apply object patches to worker's FSDP2-sharded model.
+        
+        This is the OFFICIAL extension point for distributed model modifications.
+        Solves the core problem: parent process installs patches via add_object_patch,
+        but FSDP2 sharding in workers creates new model graph. This method reapplies
+        patches AFTER sharding.
+        
+        Pattern: Clean alternative to Raylight's monkey-patching.
+        
+        Args:
+            object_patches: Dict mapping module paths to replacement modules.
+                           Serialized from parent's model.object_patches.
+        
+        Example:
+            {
+                "diffusion_model.double_blocks.0.img_attn": <RingAttentionModule>,
+                "diffusion_model.double_blocks.0.txt_attn": <RingAttentionModule>,
+                ...
+            }
+        """
+        LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}]"
+        
+        if not object_patches:
+            return
+        
+        log_rank0(self.rank, 'info', 
+            f"{LOG_PREFIX} Applying {len(object_patches)} object patches to worker model"
+        )
+        
+        applied_count = 0
+        failed_count = 0
+        
+        for path, patch_module in object_patches.items():
+            try:
+                # Navigate to parent module
+                parts = path.split(".")
+                parent = self.model.model  # Access inner BaseModel
+                
+                for part in parts[:-1]:
+                    parent = getattr(parent, part)
+                
+                # Replace target module
+                target_name = parts[-1]
+                setattr(parent, target_name, patch_module)
+                applied_count += 1
+                
+                if applied_count <= 5:  # Log first few for debugging
+                    log_rank0(self.rank, 'debug', f"{LOG_PREFIX}   ✅ {path}")
+                    
+            except AttributeError as e:
+                failed_count += 1
+                log_rank0(self.rank, 'warning', 
+                    f"{LOG_PREFIX}   ❌ Failed to patch {path}: {e}"
+                )
+        
+        log_rank0(self.rank, 'info', 
+            f"{LOG_PREFIX} Object patches applied: {applied_count} success, {failed_count} failed"
+        )
     
     def _apply_model_step(self, args: dict):
         """Execute single apply_model forward pass (Phase 2 per-step pattern).
@@ -488,22 +647,10 @@ class FSDP2Worker:
         """
         LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][ApplyStep]"
         
-        # Extract ring_context from x tensor (GGUF pattern) BEFORE moving to GPU
-        x_cpu = args["x"]
-        
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ========== APPLY_MODEL_STEP START ==========")
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} Received x_cpu.shape={x_cpu.shape}")
-        
-        attached_ring_context = getattr(x_cpu, "ring_context", None)
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} hasattr(x_cpu, 'ring_context') = {hasattr(x_cpu, 'ring_context')}")
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} attached_ring_context = {attached_ring_context}")
-        
         # Move inputs to worker device
-        x = x_cpu.to(self.device)
+        x = args["x"].to(self.device)
         timestep = args["timestep"].to(self.device)
         c_dict = args.get("c", {})
-        
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} Inputs moved to {self.device}")
         
         # Extract conditioning (c_crossattn and y) FIRST
         c_crossattn = c_dict.get("c_crossattn")
@@ -514,110 +661,24 @@ class FSDP2Worker:
         if y is not None:
             y = y.to(self.device)
         
-        # Handle Ring-Attention: Extract ring_context from args directly
-        ring_enabled = args.get("ring_enabled", False)
-        ring_context = args.get("ring_context")  # Get from args dict
         transformer_options = c_dict.get("transformer_options", {})
         
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ring_enabled from args = {ring_enabled}")
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ring_context from args = {'PRESENT' if ring_context else 'MISSING'}")
-        log_rank0(self.rank, 'info', f"{LOG_PREFIX} transformer_options keys = {list(transformer_options.keys())}")
-        
-        if ring_enabled and ring_context:
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ RING-ATTENTION PATH ACTIVE!")
-            # Populate worker-specific info
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Populating rank={self.rank}...")
-            ring_context["rank"] = self.rank
-            ring_context["sp_group"] = self.device_mesh.get_group()
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ ring_context.rank={ring_context['rank']}")
-            
-            # Inject into transformer_options so patches can access it
-            transformer_options["ring_context"] = ring_context
-            c_dict["transformer_options"] = transformer_options
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ ring_context injected into transformer_options")
-            
-            # INJECT PATCHES LOCALLY (methods can't be serialized across processes)
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Creating RingAttentionPatches...")
-            from comfy.parallel_attention.ring_patches import RingAttentionPatches
-            
-            patches = RingAttentionPatches(depth_double=19, depth_single=38)
-            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ RingAttentionPatches created")
-            
-            if "patches_replace" not in transformer_options:
-                transformer_options["patches_replace"] = {}
-            if "dit" not in transformer_options["patches_replace"]:
-                transformer_options["patches_replace"]["dit"] = {}
-            
-            # Inject all patches locally on worker
-            # CRITICAL: Patch ALL double_blocks (not just first/last) to use split pe
-            for i in range(19):  # double_blocks 0-18
-                if i == 0:
-                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_first_double_block
-                elif i == patches.last_double_idx:
-                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_last_double_block
-                else:
-                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_middle_double_block
-            
-            # Patch ALL single_blocks (0-37) to use split pe
-            for i in range(38):  # single_blocks 0-37
-                if i == patches.first_single_idx:
-                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_first_single_block
-                elif i == patches.last_single_idx:
-                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_last_single_block
-                else:
-                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_middle_single_block
-            
-            log_rank0(
-                self.rank, 'debug',
-                f"{LOG_PREFIX} Injected patches locally on worker: double_block[0,{patches.last_double_idx}], single_block[{patches.first_single_idx},{patches.last_single_idx}]"
-            )
-        
-        # Log VRAM before forward
-        vram_before = 0.0
-        if torch.cuda.is_available():
-            vram_before = torch.cuda.memory_allocated(self.device) / 1024**3
-            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} VRAM before forward: {vram_before:.3f}GB")
-        
-        log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward: x.shape={x.shape}, t={timestep}")
-        
         # Execute single forward pass with FSDP2 model
-        # self.model is ModelPatcher, self.model.model is the FSDP2-wrapped BaseModel
         with torch.no_grad():
-            # apply_model signature: (x, timestep, c_crossattn=context, y=pooled, transformer_options=dict)
             kwargs = {}
             if c_crossattn is not None:
                 kwargs["c_crossattn"] = c_crossattn
             if y is not None:
                 kwargs["y"] = y
-            
-            # CRITICAL: Pass transformer_options (with ring_context populated) to forward_orig
-            # transformer_options was already extracted and modified above
             if transformer_options:
                 kwargs["transformer_options"] = transformer_options
-                
-                if ring_enabled:
-                    log_rank0(
-                        self.rank, 'debug',
-                        f"{LOG_PREFIX} Passing transformer_options with ring_context: "
-                        f"rank={transformer_options.get('ring_context', {}).get('rank')}"
-                    )
             
             output = self.model.model.apply_model(x, timestep, **kwargs)
         
-        # Log VRAM after forward
-        if torch.cuda.is_available():
-            vram_after = torch.cuda.memory_allocated(self.device) / 1024**3
-            vram_delta = vram_after - vram_before
-            log_rank0(self.rank, 'debug', f"{LOG_PREFIX} VRAM after forward: {vram_after:.3f}GB (delta: {vram_delta:+.3f}GB)")
-        
-        log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward complete: output.shape={output.shape}")
-        
-        # ALL ranks return output dict for executor compatibility
-        # With Ring-Attention, patches handle split/gather internally
+        # Rank 0 returns output, others return dummy for executor compatibility
         if self.rank == 0:
             return {"output": output.cpu()}
         else:
-            # Non-rank-0 returns dummy output (executor expects "output" key)
             return {"output": torch.zeros_like(output).cpu()}
     
     def _move_conditioning_to_device(self, c: dict):

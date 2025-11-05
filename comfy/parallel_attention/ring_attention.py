@@ -55,11 +55,6 @@ class RingAttentionWrapper:
             depth_double=depth_double,
             depth_single=depth_single
         )
-        
-        logging.info(
-            f"{LOG_PREFIX} Initialized for {world_size} GPUs "
-            f"(double={depth_double}, single={depth_single})"
-        )
     
     def __call__(
         self, 
@@ -107,35 +102,16 @@ class RingAttentionWrapper:
         }
         
         transformer_options["ring_context"] = ring_context
-        
-        # ====================================================================
-        # PATCHES WILL BE INJECTED ON WORKER SIDE
-        # ====================================================================
-        # We don't inject patches here because method references can't be 
-        # serialized across processes. Workers will recreate and inject patches
-        # locally using their own RingAttentionPatches instance.
-        
-        logging.info(
-            f"{LOG_PREFIX} ✅ WRAPPER: ring_context prepared: rank=None (workers will populate), world_size={self.world_size}"
-        )
-        
-        # Write back to conditioning
         c["transformer_options"] = transformer_options
-        logging.info(f"{LOG_PREFIX} ✅ WRAPPER: transformer_options injected into c dict")
         
         # Serialize for multiprocess dispatch
-        # Pass ring_context DIRECTLY in args (tensor attachment doesn't survive pickle)
         worker_args = {
             "x": x.cpu(),
             "timestep": timestep.cpu(),
             "c": self._serialize_conditioning(c),
             "ring_enabled": True,
-            "ring_context": ring_context  # Pass directly - must be picklable dict
+            "ring_context": ring_context
         }
-        logging.info(f"{LOG_PREFIX} ✅ WRAPPER: ring_context passed directly in worker_args")
-        
-        logging.info(f"{LOG_PREFIX} ✅ WRAPPER: worker_args prepared with ring_enabled=True")
-        logging.info(f"{LOG_PREFIX} ✅ WRAPPER: Dispatching to workers NOW...")
         
         result = self.executor.execute_collective(
             "apply_model_step", 

@@ -119,11 +119,18 @@ class ParallelAttentionConfig:
             
             logging.info(f"{LOG_PREFIX} Initializing workers with checkpoint: {checkpoint_path}")
             
-            # Initialize workers: load and shard model
-            # Pass model_type only - workers will get policy from registry
+            # Install Ring-Attention modules on parent model FIRST
+            object_patches = {}
+            if enable_ring_attention:
+                logging.info(f"{LOG_PREFIX} Installing Ring-Attention modules on parent model")
+                object_patches = self._install_ring_attention_modules(model, enable_ring=True)
+            
+            # Initialize workers: load, shard model, and apply object patches
             result = executor.execute_collective("initialize_fsdp2_from_checkpoint", {
                 "checkpoint_path": checkpoint_path,
                 "model_type": model_type,
+                "object_patches": object_patches,  # Pass patches to workers
+                "enable_ring_attention": enable_ring_attention,  # Enable Ring forward methods in workers
             })
             
             if result.get("status") != "success":
@@ -212,6 +219,55 @@ class ParallelAttentionConfig:
             session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
         
         return (model,)
+    
+    def _install_ring_attention_modules(self, model, enable_ring: bool):
+        """Install RingAttentionModule via add_object_patch (Logic Seam).
+        
+        Per core_plan.md Section II.D: "The launcher node will use
+        add_object_patch to replace attention blocks with ParallelAttentionModule."
+        """
+        logging.info(f"{LOG_PREFIX} 🔍 DEBUG: _install_ring_attention_modules ENTRY: enable_ring={enable_ring}")
+        
+        from comfy.parallel_attention.ring_attention_module import RingAttentionModule
+        
+        transformer = model.model.diffusion_model
+        logging.info(f"{LOG_PREFIX} DEBUG: Got transformer: {type(transformer)}")
+        logging.info(f"{LOG_PREFIX} DEBUG: double_blocks: {len(transformer.double_blocks)}, single_blocks: {len(transformer.single_blocks)}")
+        
+        patches = {}  # Return patches for workers
+        num_patched = 0
+        
+        # Patch double blocks (19 blocks × 2 attention modules)
+        for i, block in enumerate(transformer.double_blocks):
+            # img_attn
+            logging.debug(f"{LOG_PREFIX} DEBUG: Patching double_block[{i}].img_attn")
+            ring_img = RingAttentionModule(block.img_attn, use_usp=enable_ring)
+            patch_path = f"diffusion_model.double_blocks.{i}.img_attn"
+            model.add_object_patch(patch_path, ring_img)
+            patches[patch_path] = ring_img
+            
+            # txt_attn
+            logging.debug(f"{LOG_PREFIX} DEBUG: Patching double_block[{i}].txt_attn")
+            ring_txt = RingAttentionModule(block.txt_attn, use_usp=enable_ring)
+            patch_path = f"diffusion_model.double_blocks.{i}.txt_attn"
+            model.add_object_patch(patch_path, ring_txt)
+            patches[patch_path] = ring_txt
+            
+            num_patched += 2
+        
+        # Skip single blocks - they use fused linear attention (no separate attn module)
+        # SingleStreamBlock has linear1/linear2 for fused QKV+MLP computation
+        logging.info(
+            f"{LOG_PREFIX} ℹ️ Skipping single_blocks (38 blocks) - fused linear attention not yet supported"
+        )
+        
+        logging.info(
+            f"{LOG_PREFIX} ✅ Installed {num_patched} RingAttentionModules on double_blocks "
+            f"({'USP enabled' if enable_ring else 'passthrough mode'})"
+        )
+        logging.info(f"{LOG_PREFIX} DEBUG: Module installation complete, returning patches dict")
+        
+        return patches
 
 
 class TestFSDP2Inference:
