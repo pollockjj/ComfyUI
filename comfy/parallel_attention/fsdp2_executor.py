@@ -216,7 +216,7 @@ def _worker_main(rank: int, world_size: int, backend: str, pipe: Connection, por
             device_id=device_id  # Pass int, not torch.device
         )
         
-        worker = FSDP2Worker(rank, world_size)
+        worker = FSDP2Worker(rank, world_size, backend)
         pipe.send("READY")
         
         # Command loop

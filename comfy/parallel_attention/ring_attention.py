@@ -120,9 +120,13 @@ class RingAttentionWrapper:
         c["transformer_options"] = transformer_options
         
         # Serialize for multiprocess dispatch
+        logging.warning(f"🚨🚨🚨 [RING] CPU TRANSFER: x.shape={x.shape}, device={x.device} → CPU")
+        x_cpu = x.cpu()
+        logging.warning(f"🚨🚨🚨 [RING] CPU TRANSFER: timestep.shape={timestep.shape}, device={timestep.device} → CPU")
+        timestep_cpu = timestep.cpu()
         worker_args = {
-            "x": x.cpu(),
-            "timestep": timestep.cpu(),
+            "x": x_cpu,
+            "timestep": timestep_cpu,
             "c": self._serialize_conditioning(c),
             "ring_enabled": True,
             "ring_context": ring_context

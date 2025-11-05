@@ -32,15 +32,17 @@ class FSDP2Worker:
     - Policy system
     """
     
-    def __init__(self, rank: int, world_size: int):
-        """Initialize worker with DeviceMesh.
+    def __init__(self, rank: int, world_size: int, backend: str = "nccl"):
+        """Initialize worker process.
         
         Args:
             rank: Worker rank (0 to world_size-1)
             world_size: Total number of workers
+            backend: Communication backend (nccl or gloo)
         """
         self.rank = rank
         self.world_size = world_size
+        self.backend = backend
         self.device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else torch.device("cpu")
         
         # CRITICAL: Set CUDA device for this worker process
@@ -49,7 +51,8 @@ class FSDP2Worker:
         
         # Create DeviceMesh (ARCHITECTURE.md requirement)
         from torch.distributed.device_mesh import init_device_mesh
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        # Use "cpu" device type for gloo backend, "cuda" for nccl
+        device_type = "cpu" if backend == "gloo" else "cuda"
         self.device_mesh = init_device_mesh(
             device_type,
             (world_size,),
@@ -537,20 +540,26 @@ class FSDP2Worker:
                 from xfuser.core.distributed import initialize_model_parallel
                 log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Import successful")
                 
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling initialize_model_parallel(sp={self.world_size}, ulysses={ulysses_degree}, ring={ring_degree})...")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling initialize_model_parallel(sp={self.world_size}, ulysses={ulysses_degree}, ring={ring_degree}, backend={self.backend})...")
+                
                 initialize_model_parallel(
                     sequence_parallel_degree=self.world_size,
                     ulysses_degree=ulysses_degree,
                     ring_degree=ring_degree,
-                    backend="nccl",
+                    backend=self.backend,
                 )
                 log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ initialize_model_parallel COMPLETED")
+                
+                # Query xfuser's ACTUAL backend after initialization
+                import torch.distributed as dist
+                from xfuser.core.distributed import get_world_group
+                actual_xfuser_backend = dist.get_backend(get_world_group().device_group)
                 
                 log_rank0(
                     self.rank, 'info',
                     f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ xDiT USP CONFIGURED SUCCESSFULLY ✅✅✅: "
                     f"ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, "
-                    f"total_sp={self.world_size}, backend=nccl"
+                    f"total_sp={self.world_size}, xfuser_backend={actual_xfuser_backend}"
                 )
                 
                 # Install Ring-Attention forward methods
@@ -730,8 +739,10 @@ class FSDP2Worker:
         
         # Rank 0 returns output, others return dummy for executor compatibility
         if self.rank == 0:
+            logging.warning(f"🚨🚨🚨 CPU TRANSFER: output.shape={output.shape}, device={output.device} → CPU (RANK 0)")
             return {"output": output.cpu()}
         else:
+            logging.warning(f"🚨🚨🚨 CPU TRANSFER: dummy output.shape={output.shape}, device={output.device} → CPU (RANK {self.rank})")
             return {"output": torch.zeros_like(output).cpu()}
     
     def _move_conditioning_to_device(self, c: dict):

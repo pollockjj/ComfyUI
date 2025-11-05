@@ -63,9 +63,13 @@ class UnifiedParallelWrapper:
         # Phase 2.2: Will split cond/uncond here using cond_or_uncond mask
         
         # Prepare args for workers (serialize tensors to CPU for multiprocess)
+        logging.warning(f"🚨🚨🚨 CPU TRANSFER: x.shape={x.shape}, device={x.device} → CPU")
+        x_cpu = x.cpu()
+        logging.warning(f"🚨🚨🚨 CPU TRANSFER: timestep.shape={timestep.shape}, device={timestep.device} → CPU")
+        timestep_cpu = timestep.cpu()
         worker_args = {
-            "x": x.cpu(),
-            "timestep": timestep.cpu(),
+            "x": x_cpu,
+            "timestep": timestep_cpu,
             "c": self._serialize_conditioning(c)
         }
         
@@ -95,6 +99,7 @@ class UnifiedParallelWrapper:
         result = {}
         for key, value in c.items():
             if isinstance(value, torch.Tensor):
+                logging.warning(f"🚨🚨🚨 CPU TRANSFER: conditioning[{key}].shape={value.shape}, device={value.device} → CPU")
                 result[key] = value.cpu()
             elif isinstance(value, dict):
                 result[key] = self._serialize_conditioning(value)
