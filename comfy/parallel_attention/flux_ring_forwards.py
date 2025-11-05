@@ -140,11 +140,11 @@ def ring_single_stream_forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_ma
     This function is installed via types.MethodType() in workers.
     Replaces the standard Flux SingleStreamBlock.forward() with USP-enabled version.
     """
-    # Raylight pattern: single_stream uses STANDARD attention, not USP
-    # The sequence is already gathered from double_blocks
     from comfy.ldm.flux.layers import apply_mod
     from comfy.ldm.flux.math import attention
-    from xfuser.core.distributed import get_sp_group
+    from xfuser.core.distributed import get_sequence_parallel_world_size
+    
+    sp_size = get_sequence_parallel_world_size()
     
     mod, _ = self.modulation(vec)
     qkv, mlp = torch.split(self.linear1(apply_mod(self.pre_norm(x), (1 + mod.scale), mod.shift, modulation_dims)), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
@@ -152,8 +152,12 @@ def ring_single_stream_forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_ma
     q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
     q, k = self.norm(q, k, v)
 
-    # Use standard attention (Raylight does NOT use USP for single_stream)
-    attn = attention(q, k, v, pe=pe, mask=attn_mask)
+    # Use xfuser USP attention if sp_size > 1 (Ulysses or Ring enabled)
+    if sp_size > 1:
+        from xfuser.model_executor.layers.usp import USP
+        attn = USP(query=q, key=k, value=v, dropout_p=0.0, is_causal=False)
+    else:
+        attn = attention(q, k, v, pe=pe, mask=attn_mask)
     
     output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
     x += apply_mod(output, mod.gate, None, modulation_dims)
@@ -161,5 +165,4 @@ def ring_single_stream_forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_ma
     if x.dtype == torch.float16:
         x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
     
-    # NO gathering in single_stream - sequence is already full-size from double_blocks
     return x

@@ -61,18 +61,21 @@ class ParallelAttentionConfig:
     
     def configure(self, model, enable_fsdp2, enable_ring_attention, ulysses_degree, ring_degree, device_1, device_2, backend):
         """Configure parallel attention and spawn workers."""
-        # Validate USP configuration
+        # Validate USP configuration only if Ring-Attention is enabled
         world_size = 2  # Currently hardcoded to 2 GPUs
-        if ulysses_degree * ring_degree != world_size:
+        if enable_ring_attention and ulysses_degree * ring_degree != world_size:
             raise ValueError(
                 f"{LOG_PREFIX} Invalid USP configuration: ulysses_degree ({ulysses_degree}) * "
                 f"ring_degree ({ring_degree}) must equal world_size ({world_size})"
             )
         
-        logging.info(
-            f"{LOG_PREFIX} USP Configuration: ulysses_degree={ulysses_degree}, "
-            f"ring_degree={ring_degree}, total_sp={world_size}"
-        )
+        if enable_ring_attention:
+            logging.info(
+                f"{LOG_PREFIX} USP Configuration: ulysses_degree={ulysses_degree}, "
+                f"ring_degree={ring_degree}, total_sp={world_size}"
+            )
+        else:
+            logging.info(f"{LOG_PREFIX} FSDP2-only mode (Ring-Attention disabled)")
         
         # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):

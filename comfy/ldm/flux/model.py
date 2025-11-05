@@ -103,6 +103,7 @@ class Flux(nn.Module):
         attn_mask: Tensor = None,
     ) -> Tensor:
 
+
         if y is None:
             y = torch.zeros((img.shape[0], self.params.vec_in_dim), device=img.device, dtype=img.dtype)
 
@@ -110,6 +111,7 @@ class Flux(nn.Module):
         patches_replace = transformer_options.get("patches_replace", {})
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
+
 
         # running on sequences img
         img = self.img_in(img)
@@ -120,7 +122,6 @@ class Flux(nn.Module):
 
         vec = vec + self.vector_in(y[:, :self.params.vec_in_dim])
         txt = self.txt_in(txt)
-
         if "post_input" in patches:
             for p in patches["post_input"]:
                 out = p({"img": img, "txt": txt, "img_ids": img_ids, "txt_ids": txt_ids})
@@ -128,6 +129,7 @@ class Flux(nn.Module):
                 txt = out["txt"]
                 img_ids = out["img_ids"]
                 txt_ids = out["txt_ids"]
+
 
         if img_ids is not None:
             ids = torch.cat((txt_ids, img_ids), dim=1)
@@ -176,7 +178,6 @@ class Flux(nn.Module):
             img = torch.nan_to_num(img, nan=0.0, posinf=65504, neginf=-65504)
 
         img = torch.cat((txt, img), 1)
-
         for i, block in enumerate(self.single_blocks):
             if ("single_block", i) in blocks_replace:
                 def block_wrap(args):
