@@ -31,6 +31,7 @@ class ParallelAttentionConfig:
             "required": {
                 "model": ("MODEL",),
                 "enable_fsdp2": ("BOOLEAN", {"default": True}),
+                "enable_ring_attention": ("BOOLEAN", {"default": False}),
                 "device_1": (devices, {"default": "cuda:0"}),
                 "device_2": (devices, {"default": "cuda:1"}),
                 "backend": (["auto", "nccl", "gloo"], {"default": "auto"}),
@@ -41,7 +42,24 @@ class ParallelAttentionConfig:
     FUNCTION = "configure"
     CATEGORY = "parallel_attention"
     
-    def configure(self, model, enable_fsdp2, device_1, device_2, backend):
+    @classmethod
+    def IS_CHANGED(cls, model, enable_fsdp2, enable_ring_attention, device_1, device_2, backend):
+        """Force re-execution when settings change (prevents worker reuse with wrong config)."""
+        import hashlib
+        
+        settings_str = f"{enable_fsdp2}{enable_ring_attention}{device_1}{device_2}{backend}"
+        current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
+        
+        if not hasattr(cls, '_last_hash'):
+            cls._last_hash = current_hash
+            logging.info(f"{LOG_PREFIX} IS_CHANGED first call: {current_hash[:8]}")
+        elif cls._last_hash != current_hash:
+            cls._last_hash = current_hash
+            logging.info(f"{LOG_PREFIX} IS_CHANGED CHANGED: {current_hash[:8]} ← settings changed, will reinitialize workers")
+        
+        return current_hash
+    
+    def configure(self, model, enable_fsdp2, enable_ring_attention, device_1, device_2, backend):
         """Configure parallel attention and spawn workers."""
         # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):
@@ -62,14 +80,14 @@ class ParallelAttentionConfig:
             model_type = "wan"
         
         # Phase B: Worker Initialization
-        if enable_fsdp2 and pa.get("executor") is None:
+        if enable_fsdp2:
             from comfy.parallel_attention import FSDP2Executor, FSDP2PolicyRegistry
             
-            # Cleanup any existing executor first
-            if hasattr(model, '_fsdp2_executor') and model._fsdp2_executor is not None:
-                logging.info(f"{LOG_PREFIX} Cleaning up old executor...")
-                model._fsdp2_executor.shutdown()
-                model._fsdp2_executor = None
+            # Cleanup any existing executor (IS_CHANGED forces reinit on settings change)
+            if pa.get("executor") is not None:
+                logging.info(f"{LOG_PREFIX} Settings changed, killing existing workers...")
+                pa["executor"].shutdown()
+                pa["executor"] = None
             
             # Get policy for model
             if not FSDP2PolicyRegistry.is_registered(model_type):
@@ -116,26 +134,52 @@ class ParallelAttentionConfig:
                 f"{result['sharded_count']} sharded params"
             )
             
-            # Create wrapper for per-step interception (Phase 2.1)
-            from comfy.parallel_attention.unified_wrapper import UnifiedParallelWrapper
-            
-            wrapper = UnifiedParallelWrapper(
-                executor=executor,
-                model_type=model_type,
-                enable_cfg_split=False  # Phase 2.2
-            )
-            
-            # Attach to ModelPatcher using model_function_wrapper seam
-            model.set_model_unet_function_wrapper(wrapper)
-            
-            # Initialize session logger for this workflow
-            from comfy.parallel_attention.session_logger import SessionLogger
-            session_logger = SessionLogger.get_instance()
-            session_logger.start_session()
-            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
-            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
-            session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
-            session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
+            # Create wrapper (Phase 3.1: Ring or Unified)
+            if enable_ring_attention:
+                from comfy.parallel_attention.ring_attention import RingAttentionWrapper
+                
+                wrapper = RingAttentionWrapper(
+                    executor=executor,
+                    world_size=2
+                )
+                
+                model.set_model_unet_function_wrapper(wrapper)
+                
+                logging.info(f"{LOG_PREFIX} ✅ Ring-Attention enabled (sequence split across 2 GPUs)")
+                logging.info(f"{LOG_PREFIX} Flux-Dev: 16,384 patches → {16384 // 2} per GPU")
+                
+                # Initialize session logger for this workflow
+                from comfy.parallel_attention.session_logger import SessionLogger
+                session_logger = SessionLogger.get_instance()
+                session_logger.start_session()
+                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
+                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
+                session_logger.log(f"⚡ [RingAttention] Initialized for 2 GPUs")
+                session_logger.log(f"⚡ [RingAttention] Pattern: Sequence split → Local forward → All-gather")
+                
+                # Store metadata
+                model.parallel_attention["ring_enabled"] = True
+            else:
+                from comfy.parallel_attention.unified_wrapper import UnifiedParallelWrapper
+                
+                wrapper = UnifiedParallelWrapper(
+                    executor=executor,
+                    model_type=model_type,
+                    enable_cfg_split=False  # Phase 2.2
+                )
+                
+                model.set_model_unet_function_wrapper(wrapper)
+                
+                logging.info(f"{LOG_PREFIX} ✅ Per-step wrapper attached (FSDP2 only, no Ring)")
+                
+                # Initialize session logger for this workflow
+                from comfy.parallel_attention.session_logger import SessionLogger
+                session_logger = SessionLogger.get_instance()
+                session_logger.start_session()
+                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
+                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
+                session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
+                session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
             
             # Store executor and metadata
             model.parallel_attention = {

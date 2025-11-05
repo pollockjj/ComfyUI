@@ -6,7 +6,6 @@ Based on FastVideo worker pattern.
 
 import torch
 import logging
-
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
@@ -480,7 +479,8 @@ class FSDP2Worker:
             args: {
                 "x": input tensor (latent),
                 "timestep": timestep tensor,
-                "c": conditioning dict
+                "c": conditioning dict,
+                "ring_enabled": bool (optional, for Ring-Attention)
             }
         
         Returns:
@@ -488,12 +488,24 @@ class FSDP2Worker:
         """
         LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][ApplyStep]"
         
+        # Extract ring_context from x tensor (GGUF pattern) BEFORE moving to GPU
+        x_cpu = args["x"]
+        
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ========== APPLY_MODEL_STEP START ==========")
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} Received x_cpu.shape={x_cpu.shape}")
+        
+        attached_ring_context = getattr(x_cpu, "ring_context", None)
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} hasattr(x_cpu, 'ring_context') = {hasattr(x_cpu, 'ring_context')}")
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} attached_ring_context = {attached_ring_context}")
+        
         # Move inputs to worker device
-        x = args["x"].to(self.device)
+        x = x_cpu.to(self.device)
         timestep = args["timestep"].to(self.device)
         c_dict = args.get("c", {})
         
-        # Extract conditioning (c_crossattn and y)
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} Inputs moved to {self.device}")
+        
+        # Extract conditioning (c_crossattn and y) FIRST
         c_crossattn = c_dict.get("c_crossattn")
         if c_crossattn is not None:
             c_crossattn = c_crossattn.to(self.device)
@@ -501,6 +513,64 @@ class FSDP2Worker:
         y = c_dict.get("y")
         if y is not None:
             y = y.to(self.device)
+        
+        # Handle Ring-Attention: Extract ring_context from args directly
+        ring_enabled = args.get("ring_enabled", False)
+        ring_context = args.get("ring_context")  # Get from args dict
+        transformer_options = c_dict.get("transformer_options", {})
+        
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ring_enabled from args = {ring_enabled}")
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} ring_context from args = {'PRESENT' if ring_context else 'MISSING'}")
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} transformer_options keys = {list(transformer_options.keys())}")
+        
+        if ring_enabled and ring_context:
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ RING-ATTENTION PATH ACTIVE!")
+            # Populate worker-specific info
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Populating rank={self.rank}...")
+            ring_context["rank"] = self.rank
+            ring_context["sp_group"] = self.device_mesh.get_group()
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ ring_context.rank={ring_context['rank']}")
+            
+            # Inject into transformer_options so patches can access it
+            transformer_options["ring_context"] = ring_context
+            c_dict["transformer_options"] = transformer_options
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ ring_context injected into transformer_options")
+            
+            # INJECT PATCHES LOCALLY (methods can't be serialized across processes)
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} Creating RingAttentionPatches...")
+            from comfy.parallel_attention.ring_patches import RingAttentionPatches
+            
+            patches = RingAttentionPatches(depth_double=19, depth_single=38)
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} ✅ RingAttentionPatches created")
+            
+            if "patches_replace" not in transformer_options:
+                transformer_options["patches_replace"] = {}
+            if "dit" not in transformer_options["patches_replace"]:
+                transformer_options["patches_replace"]["dit"] = {}
+            
+            # Inject all patches locally on worker
+            # CRITICAL: Patch ALL double_blocks (not just first/last) to use split pe
+            for i in range(19):  # double_blocks 0-18
+                if i == 0:
+                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_first_double_block
+                elif i == patches.last_double_idx:
+                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_last_double_block
+                else:
+                    transformer_options["patches_replace"]["dit"][("double_block", i)] = patches.patch_middle_double_block
+            
+            # Patch ALL single_blocks (0-37) to use split pe
+            for i in range(38):  # single_blocks 0-37
+                if i == patches.first_single_idx:
+                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_first_single_block
+                elif i == patches.last_single_idx:
+                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_last_single_block
+                else:
+                    transformer_options["patches_replace"]["dit"][("single_block", i)] = patches.patch_middle_single_block
+            
+            log_rank0(
+                self.rank, 'debug',
+                f"{LOG_PREFIX} Injected patches locally on worker: double_block[0,{patches.last_double_idx}], single_block[{patches.first_single_idx},{patches.last_single_idx}]"
+            )
         
         # Log VRAM before forward
         vram_before = 0.0
@@ -513,12 +583,24 @@ class FSDP2Worker:
         # Execute single forward pass with FSDP2 model
         # self.model is ModelPatcher, self.model.model is the FSDP2-wrapped BaseModel
         with torch.no_grad():
-            # apply_model signature: (x, timestep, c_crossattn=context, y=pooled)
+            # apply_model signature: (x, timestep, c_crossattn=context, y=pooled, transformer_options=dict)
             kwargs = {}
             if c_crossattn is not None:
                 kwargs["c_crossattn"] = c_crossattn
             if y is not None:
                 kwargs["y"] = y
+            
+            # CRITICAL: Pass transformer_options (with ring_context populated) to forward_orig
+            # transformer_options was already extracted and modified above
+            if transformer_options:
+                kwargs["transformer_options"] = transformer_options
+                
+                if ring_enabled:
+                    log_rank0(
+                        self.rank, 'debug',
+                        f"{LOG_PREFIX} Passing transformer_options with ring_context: "
+                        f"rank={transformer_options.get('ring_context', {}).get('rank')}"
+                    )
             
             output = self.model.model.apply_model(x, timestep, **kwargs)
         
@@ -530,11 +612,13 @@ class FSDP2Worker:
         
         log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Forward complete: output.shape={output.shape}")
         
-        # Rank 0 returns output, others return status
+        # ALL ranks return output dict for executor compatibility
+        # With Ring-Attention, patches handle split/gather internally
         if self.rank == 0:
             return {"output": output.cpu()}
         else:
-            return {"status": "ok"}
+            # Non-rank-0 returns dummy output (executor expects "output" key)
+            return {"output": torch.zeros_like(output).cpu()}
     
     def _move_conditioning_to_device(self, c: dict):
         """Recursively move conditioning tensors to worker device."""
