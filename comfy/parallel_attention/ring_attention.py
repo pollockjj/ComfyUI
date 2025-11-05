@@ -55,6 +55,10 @@ class RingAttentionWrapper:
             depth_double=depth_double,
             depth_single=depth_single
         )
+        
+        # Step tracking for it/s measurement
+        self.step_count = 0
+        self.step_times = []
     
     def __call__(
         self, 
@@ -83,6 +87,17 @@ class RingAttentionWrapper:
         x = kwargs["input"]
         timestep = kwargs["timestep"]
         c = kwargs["c"]
+        
+        # Start timing this step
+        import time
+        step_start = time.time()
+        self.step_count += 1
+        
+        # Initialize session logger on first call
+        from comfy.parallel_attention.session_logger import SessionLogger
+        session_logger = SessionLogger.get_instance()
+        if not session_logger.is_active():
+            session_logger.start_session()
         
         logging.debug(
             f"{LOG_PREFIX} Intercepted: x.shape={x.shape}, t={timestep}"
@@ -120,6 +135,17 @@ class RingAttentionWrapper:
         
         # Return output on original device
         output = result["output"].to(x.device)
+        
+        # Calculate step timing
+        step_end = time.time()
+        step_duration = step_end - step_start
+        self.step_times.append(step_duration)
+        
+        # Log per-step timing to session
+        avg_it_s = sum(self.step_times) / len(self.step_times)
+        session_logger.log(
+            f"⚡ [RingAttention] Step {self.step_count}: {step_duration:.2f}s/it (avg: {avg_it_s:.2f}s/it)"
+        )
         
         logging.debug(f"{LOG_PREFIX} Returned: output.shape={output.shape}")
         

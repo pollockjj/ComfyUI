@@ -6,13 +6,6 @@ These functions replace the forward() methods on DoubleStreamBlock and SingleStr
 
 import torch
 from torch import Tensor
-import logging
-
-LOG_PREFIX = "⚡ [FluxRing]"
-
-# Global counter for instrumentation
-_forward_call_count = 0
-_MAX_LOGGED_CALLS = 10
 
 
 def pad_if_odd(t: torch.Tensor, dim: int = 1):
@@ -35,26 +28,13 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
     
     Pattern: Same Q/K/V extraction as original, but calls xfuser attention.
     """
-    global _forward_call_count
-    _forward_call_count += 1
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥🔥🔥 RING DOUBLE_STREAM FORWARD #{_forward_call_count}: img.shape={img.shape}, txt.shape={txt.shape}", flush=True)
-        logging.warning(f"{LOG_PREFIX} DOUBLE_STREAM FORWARD #{_forward_call_count}: img.shape={img.shape}")
     
     # Import xfuser attention
     try:
         from xfuser.model_executor.layers.usp import USP
         from xfuser.core.distributed import get_sequence_parallel_world_size
         sp_size = get_sequence_parallel_world_size()
-        
-        if _forward_call_count <= _MAX_LOGGED_CALLS:
-            print(f"🔥 CALL #{_forward_call_count}: xfuser loaded, sp_size={sp_size}", flush=True)
-            logging.warning(f"{LOG_PREFIX} CALL #{_forward_call_count}: xfuser loaded, sp_size={sp_size}")
     except ImportError as e:
-        if _forward_call_count <= _MAX_LOGGED_CALLS:
-            print(f"🔥 CALL #{_forward_call_count}: xfuser unavailable, using original forward", flush=True)
-            logging.warning(f"{LOG_PREFIX} xfuser unavailable: {e}, using original")
         # Fall back to original forward if xfuser not available
         return self._original_forward(img, txt, vec, pe, attn_mask, modulation_dims_img, modulation_dims_txt, transformer_options)
     
@@ -65,9 +45,6 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
     # Pad sequences if odd length (Raylight pattern)
     img = pad_if_odd(img, dim=1)
     txt = pad_if_odd(txt, dim=1)
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: After padding - img.shape={img.shape}, txt.shape={txt.shape}", flush=True)
     
     img_mod1, img_mod2 = self.img_mod(vec)
     txt_mod1, txt_mod2 = self.txt_mod(vec)
@@ -93,9 +70,6 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
         # Split the img portion across GPUs
         pe_img = torch.chunk(pe_img, sp_size, dim=2)[sp_rank]
         pe = pe_img  # Use the split img-only pe for apply_rope
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: After split - img.shape={img.shape}, txt.shape={txt.shape}, pe.shape={pe.shape if pe is not None else None}, rank={sp_rank}", flush=True)
 
     # prepare image for attention
     img_modulated = self.img_norm1(img)
@@ -115,9 +89,6 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
     if self.flipped_img_txt:
         img_q, img_k = apply_rope(img_q, img_k, pe)
         
-        if _forward_call_count <= _MAX_LOGGED_CALLS:
-            print(f"🔥 CALL #{_forward_call_count}: Calling USP with flipped_img_txt", flush=True)
-        
         attn = USP(
             query=torch.cat((img_q, txt_q), dim=2),
             key=torch.cat((img_k, txt_k), dim=2),
@@ -130,10 +101,6 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
     else:
         img_q, img_k = apply_rope(img_q, img_k, pe)
         
-        if _forward_call_count <= _MAX_LOGGED_CALLS:
-            print(f"🔥 CALL #{_forward_call_count}: Calling USP (standard order)", flush=True)
-            logging.warning(f"{LOG_PREFIX} CALL #{_forward_call_count}: Calling USP, q.shape={torch.cat((txt_q, img_q), dim=2).shape}")
-        
         attn = USP(
             query=torch.cat((txt_q, img_q), dim=2),
             key=torch.cat((txt_k, img_k), dim=2),
@@ -144,17 +111,10 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
         
         txt_attn, img_attn = attn[:, :, : txt.shape[1]], attn[:, :, txt.shape[1]:]
 
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: USP returned, img_attn.shape={img_attn.shape}, txt_attn.shape={txt_attn.shape}", flush=True)
-        logging.warning(f"{LOG_PREFIX} CALL #{_forward_call_count}: USP returned successfully")
-
     # Reshape attention output from [B, H, S, D] to [B, S, H*D] for projection
     # img_attn: [1, 24, 2048, 128] -> [1, 2048, 3072]
     img_attn = img_attn.transpose(1, 2).reshape(img_attn.shape[0], img_attn.shape[2], -1)
     txt_attn = txt_attn.transpose(1, 2).reshape(txt_attn.shape[0], txt_attn.shape[2], -1)
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: After reshape - img_attn.shape={img_attn.shape}, txt_attn.shape={txt_attn.shape}", flush=True)
 
     # calculate the img bloks
     img = img + apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)
@@ -170,9 +130,6 @@ def ring_double_stream_forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: 
     # Gather sequences from all GPUs (Raylight pattern)
     img = get_sp_group().all_gather(img, dim=1)
     txt = get_sp_group().all_gather(txt, dim=1)
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: After gather - img.shape={img.shape}, txt.shape={txt.shape}", flush=True)
 
     return img, txt
 
@@ -183,21 +140,11 @@ def ring_single_stream_forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_ma
     This function is installed via types.MethodType() in workers.
     Replaces the standard Flux SingleStreamBlock.forward() with USP-enabled version.
     """
-    global _forward_call_count
-    _forward_call_count += 1
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥🔥🔥 RING SINGLE_STREAM FORWARD #{_forward_call_count}: x.shape={x.shape}", flush=True)
-        logging.warning(f"{LOG_PREFIX} SINGLE_STREAM FORWARD #{_forward_call_count}: x.shape={x.shape}")
-    
     # Raylight pattern: single_stream uses STANDARD attention, not USP
     # The sequence is already gathered from double_blocks
     from comfy.ldm.flux.layers import apply_mod
     from comfy.ldm.flux.math import attention
     from xfuser.core.distributed import get_sp_group
-    
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: SingleStream using standard attention (no USP)", flush=True)
     
     mod, _ = self.modulation(vec)
     qkv, mlp = torch.split(self.linear1(apply_mod(self.pre_norm(x), (1 + mod.scale), mod.shift, modulation_dims)), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
@@ -215,7 +162,4 @@ def ring_single_stream_forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_ma
         x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
     
     # NO gathering in single_stream - sequence is already full-size from double_blocks
-    if _forward_call_count <= _MAX_LOGGED_CALLS:
-        print(f"🔥 CALL #{_forward_call_count}: SingleStream complete - x.shape={x.shape}", flush=True)
-    
     return x

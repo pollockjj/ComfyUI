@@ -57,18 +57,6 @@ class UnifiedParallelWrapper:
         timestep = kwargs["timestep"]
         c = kwargs["c"]
         
-        from comfy.parallel_attention.session_logger import SessionLogger
-        session_logger = SessionLogger.get_instance()
-        
-        # Start new session on first call
-        if not session_logger.is_active():
-            session_logger.start_session()
-            session_logger.log(f"⚡ [UnifiedWrapper] Session started (workers active)")
-            session_logger.log(f"⚡ [UnifiedWrapper] Model type: {self.model_type}")
-            session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: {'enabled' if self.enable_cfg_split else 'disabled'}")
-        
-        session_logger.log(f"⚡ [UnifiedWrapper] Intercepted: x.shape={x.shape}")
-        
         logging.debug(f"{LOG_PREFIX} Intercepted: x.shape={x.shape}, t={timestep}")
         
         # Phase 2.1: No CFG-Split yet, just dispatch to workers
@@ -90,8 +78,6 @@ class UnifiedParallelWrapper:
         # Move back to original device (samplers expect this)
         if hasattr(x, 'device'):
             output = output.to(x.device)
-        
-        SessionLogger.get_instance().log(f"⚡ [UnifiedWrapper] Returned: output.shape={output.shape}")
         
         logging.debug(f"{LOG_PREFIX} Returned: output.shape={output.shape}")
         

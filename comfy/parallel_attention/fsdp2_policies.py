@@ -42,7 +42,6 @@ class FSDP2PolicyRegistry:
         """
         def decorator(policy_fn: Callable) -> Callable:
             cls._policies[model_name] = policy_fn
-            logging.info(f"{LOG_PREFIX} [FSDP2Registry] Registered policy: {model_name}")
             return policy_fn
         return decorator
     

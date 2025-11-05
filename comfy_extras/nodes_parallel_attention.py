@@ -32,6 +32,8 @@ class ParallelAttentionConfig:
                 "model": ("MODEL",),
                 "enable_fsdp2": ("BOOLEAN", {"default": True}),
                 "enable_ring_attention": ("BOOLEAN", {"default": False}),
+                "ulysses_degree": ("INT", {"default": 1, "min": 1, "max": 8}),
+                "ring_degree": ("INT", {"default": 2, "min": 1, "max": 8}),
                 "device_1": (devices, {"default": "cuda:0"}),
                 "device_2": (devices, {"default": "cuda:1"}),
                 "backend": (["auto", "nccl", "gloo"], {"default": "auto"}),
@@ -43,24 +45,35 @@ class ParallelAttentionConfig:
     CATEGORY = "parallel_attention"
     
     @classmethod
-    def IS_CHANGED(cls, model, enable_fsdp2, enable_ring_attention, device_1, device_2, backend):
+    def IS_CHANGED(cls, model, enable_fsdp2, enable_ring_attention, ulysses_degree, ring_degree, device_1, device_2, backend):
         """Force re-execution when settings change (prevents worker reuse with wrong config)."""
         import hashlib
         
-        settings_str = f"{enable_fsdp2}{enable_ring_attention}{device_1}{device_2}{backend}"
+        settings_str = f"{enable_fsdp2}{enable_ring_attention}{ulysses_degree}{ring_degree}{device_1}{device_2}{backend}"
         current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
         
         if not hasattr(cls, '_last_hash'):
             cls._last_hash = current_hash
-            logging.info(f"{LOG_PREFIX} IS_CHANGED first call: {current_hash[:8]}")
         elif cls._last_hash != current_hash:
             cls._last_hash = current_hash
-            logging.info(f"{LOG_PREFIX} IS_CHANGED CHANGED: {current_hash[:8]} ← settings changed, will reinitialize workers")
         
         return current_hash
     
-    def configure(self, model, enable_fsdp2, enable_ring_attention, device_1, device_2, backend):
+    def configure(self, model, enable_fsdp2, enable_ring_attention, ulysses_degree, ring_degree, device_1, device_2, backend):
         """Configure parallel attention and spawn workers."""
+        # Validate USP configuration
+        world_size = 2  # Currently hardcoded to 2 GPUs
+        if ulysses_degree * ring_degree != world_size:
+            raise ValueError(
+                f"{LOG_PREFIX} Invalid USP configuration: ulysses_degree ({ulysses_degree}) * "
+                f"ring_degree ({ring_degree}) must equal world_size ({world_size})"
+            )
+        
+        logging.info(
+            f"{LOG_PREFIX} USP Configuration: ulysses_degree={ulysses_degree}, "
+            f"ring_degree={ring_degree}, total_sp={world_size}"
+        )
+        
         # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):
             raise RuntimeError(
@@ -131,6 +144,8 @@ class ParallelAttentionConfig:
                 "model_type": model_type,
                 "object_patches": object_patches,  # Pass patches to workers
                 "enable_ring_attention": enable_ring_attention,  # Enable Ring forward methods in workers
+                "ulysses_degree": ulysses_degree,  # USP configuration
+                "ring_degree": ring_degree,        # USP configuration
             })
             
             if result.get("status") != "success":
@@ -143,6 +158,8 @@ class ParallelAttentionConfig:
             
             # Create wrapper (Phase 3.1: Ring or Unified)
             if enable_ring_attention:
+                logging.info(f"{LOG_PREFIX} BRANCH: enable_ring_attention=TRUE, using RingAttentionWrapper")
+                
                 from comfy.parallel_attention.ring_attention import RingAttentionWrapper
                 
                 wrapper = RingAttentionWrapper(
@@ -167,6 +184,8 @@ class ParallelAttentionConfig:
                 # Store metadata
                 model.parallel_attention["ring_enabled"] = True
             else:
+                logging.info(f"{LOG_PREFIX} BRANCH: enable_ring_attention=FALSE, using UnifiedParallelWrapper (FSDP2-only)")
+                
                 from comfy.parallel_attention.unified_wrapper import UnifiedParallelWrapper
                 
                 wrapper = UnifiedParallelWrapper(
@@ -178,15 +197,6 @@ class ParallelAttentionConfig:
                 model.set_model_unet_function_wrapper(wrapper)
                 
                 logging.info(f"{LOG_PREFIX} ✅ Per-step wrapper attached (FSDP2 only, no Ring)")
-                
-                # Initialize session logger for this workflow
-                from comfy.parallel_attention.session_logger import SessionLogger
-                session_logger = SessionLogger.get_instance()
-                session_logger.start_session()
-                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
-                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
-                session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
-                session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
             
             # Store executor and metadata
             model.parallel_attention = {
@@ -209,14 +219,6 @@ class ParallelAttentionConfig:
             logging.info(f"{LOG_PREFIX} ✅ Model ready for distributed inference")
         elif pa.get("executor") is not None:
             logging.info(f"{LOG_PREFIX} Workers already initialized, reusing")
-            
-            # Start new session logger for each workflow run
-            from comfy.parallel_attention.session_logger import SessionLogger
-            session_logger = SessionLogger.get_instance()
-            session_logger.start_session()
-            session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers reused (already initialized)")
-            session_logger.log(f"⚡ [UnifiedWrapper] Initialized for {model_type}")
-            session_logger.log(f"⚡ [UnifiedWrapper] CFG-Split: disabled")
         
         return (model,)
     

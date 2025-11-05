@@ -1355,8 +1355,7 @@ def load_diffusion_model_state_dict(sd, model_options={}):
     # Phase 0.1: Attach minimal parallel config if flag set
     if model_management.is_parallel_attention_enabled():
         model.parallel_config = {"enabled": True}
-        logging.info("⚡ [Parallel-Attention] Base config attached (CLI flag detected)")
-        logging.info(f"⚡ [Parallel-Attention] Model: {type(model).__name__}, Device: {model.device}")
+        logging.debug(f"⚡ [Parallel-Attention] Model: {type(model).__name__}, Device: {model.device}")
     
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
@@ -1372,7 +1371,6 @@ def load_diffusion_model(unet_path, model_options={}):
     sd = comfy.utils.load_torch_file(unet_path)
     model_options = model_options.copy()
     model_options['_checkpoint_path'] = unet_path
-    logging.info(f"⚡ [DEBUG] load_diffusion_model: Stored checkpoint_path={unet_path}")
     
     model = load_diffusion_model_state_dict(sd, model_options=model_options)
     if model is None:

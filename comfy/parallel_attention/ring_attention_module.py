@@ -53,17 +53,12 @@ class RingAttentionModule(nn.Module):
         # Also set on self for safety
         self.comfy_cast_weights = True
         
-        # Import xfuser if enabled
+        # Import xfuser - REQUIRED for Ring-Attention
         if use_usp:
-            try:
-                from xfuser.model_executor.layers.usp import USP
-                from xfuser.core.distributed import get_sequence_parallel_world_size
-                self._usp_fn = USP
-                self._get_sp_size = get_sequence_parallel_world_size
-                logging.info(f"{LOG_PREFIX} ✅ DEBUG: xfuser imported successfully")
-            except ImportError as e:
-                logging.warning(f"{LOG_PREFIX} ⚠️ DEBUG: xfuser unavailable: {e}, using original attention")
-                self.use_usp = False
+            from xfuser.model_executor.layers.usp import USP
+            from xfuser.core.distributed import get_sequence_parallel_world_size
+            self._usp_fn = USP
+            self._get_sp_size = get_sequence_parallel_world_size
     
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         """Forward with optional Ring-Attention.

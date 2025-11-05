@@ -59,6 +59,12 @@ class FSDP2Worker:
         log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} initialized on {self.device}")
         log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} DeviceMesh: {device_type} mesh_shape=({world_size},)")
         
+        # LOG ACTUAL BACKEND BEING USED
+        import torch.distributed as dist
+        if dist.is_initialized():
+            actual_backend = dist.get_backend()
+            log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} ACTUAL BACKEND: {actual_backend}")
+        
         # Initialize xDiT for Ring-Attention (FSDP2 first, then xDiT)
         self._init_xdit_distributed()
     
@@ -77,18 +83,12 @@ class FSDP2Worker:
             # Initialize xDiT base environment
             init_distributed_environment(rank=self.rank, world_size=self.world_size)
             
-            # Configure for Ring-only (2 GPUs) with NCCL backend
-            initialize_model_parallel(
-                sequence_parallel_degree=self.world_size,
-                ring_degree=self.world_size,  # Use all GPUs for Ring
-                ulysses_degree=1,  # No head parallelism yet
-                backend="nccl",  # Force NCCL for GPU communication
-            )
-            
+            # USP degrees will be configured during model initialization
+            # This is a placeholder - actual initialization happens in _initialize_fsdp2_from_checkpoint
             log_rank0(
                 self.rank, 'info',
-                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xDiT initialized: "
-                f"ring_degree={self.world_size}, ulysses_degree=1"
+                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xDiT environment initialized, "
+                f"waiting for USP configuration"
             )
         except ImportError as e:
             log_rank0(
@@ -508,13 +508,66 @@ class FSDP2Worker:
             # Store ModelPatcher, not raw model
             self.model = model_patcher
             
-            # Install Ring-Attention forward methods if enabled
-            # Uses official ModelPatcher API for worker model modifications
+            # ========== RING-ATTENTION CONFIGURATION DEBUG SECTION ==========
+            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ========== RING-ATTENTION CONFIG CHECK START ==========")
+            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ALL ARGS KEYS: {list(args.keys())}")
+            
             enable_ring = args.get("enable_ring_attention", False)
+            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] enable_ring_attention = {enable_ring} (type: {type(enable_ring).__name__})")
+            
             if enable_ring:
-                log_rank0(self.rank, 'info', f"⚡ [Worker][Rank {self.rank}] Installing Ring-Attention forward methods")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ ENTERED RING-ATTENTION IF BLOCK ✅✅✅")
+                
+                ulysses_degree = args.get("ulysses_degree", 1)
+                ring_degree = args.get("ring_degree", self.world_size)
+                
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] USP PARAMS: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, world_size={self.world_size}")
+                
+                # Validate USP configuration
+                if ulysses_degree * ring_degree != self.world_size:
+                    raise ValueError(
+                        f"Invalid USP config: ulysses_degree ({ulysses_degree}) * "
+                        f"ring_degree ({ring_degree}) != world_size ({self.world_size})"
+                    )
+                
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ USP validation passed")
+                
+                # Initialize xDiT with USP configuration
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Importing initialize_model_parallel from xfuser...")
+                from xfuser.core.distributed import initialize_model_parallel
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Import successful")
+                
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling initialize_model_parallel(sp={self.world_size}, ulysses={ulysses_degree}, ring={ring_degree})...")
+                initialize_model_parallel(
+                    sequence_parallel_degree=self.world_size,
+                    ulysses_degree=ulysses_degree,
+                    ring_degree=ring_degree,
+                    backend="nccl",
+                )
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ initialize_model_parallel COMPLETED")
+                
+                log_rank0(
+                    self.rank, 'info',
+                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ xDiT USP CONFIGURED SUCCESSFULLY ✅✅✅: "
+                    f"ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, "
+                    f"total_sp={self.world_size}, backend=nccl"
+                )
+                
+                # Install Ring-Attention forward methods
                 model_type = args.get("model_type", "flux")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] About to call install_parallel_attention_forward_methods(model_type='{model_type}')")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] model_patcher type: {type(model_patcher).__name__}")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] model_patcher.model type: {type(model_patcher.model).__name__}")
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling install_parallel_attention_forward_methods NOW...")
+                
                 model_patcher.install_parallel_attention_forward_methods(model_type)
+                
+                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ install_parallel_attention_forward_methods RETURNED SUCCESSFULLY ✅✅✅")
+            else:
+                log_rank0(self.rank, 'warning', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ❌❌❌ RING-ATTENTION DISABLED - SKIPPING ENTIRE BLOCK ❌❌❌")
+            
+            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ========== RING-ATTENTION CONFIG CHECK END ==========")
+            # ========== END RING-ATTENTION CONFIGURATION DEBUG SECTION ==========
             
             # Apply object patches from parent (if any)
             # This is the clean extension point for distributed model modifications

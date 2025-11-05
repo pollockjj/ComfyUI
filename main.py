@@ -147,20 +147,10 @@ if 'torch' in sys.modules:
 # Initialize multiprocessing for parallel attention if enabled
 if args.use_parallel_attention:
     import torch.multiprocessing as mp
-    
-    try:
-        mp.set_start_method('spawn', force=True)
-        logging.info("Parallel attention enabled: multiprocessing start method set to 'spawn'")
-    except RuntimeError as e:
-        if mp.get_start_method() != 'spawn':
-            logging.error(f"Failed to set multiprocessing start method to 'spawn': {e}")
-        else:
-            logging.info("Parallel attention enabled: multiprocessing already using 'spawn' method")
+    mp.set_start_method('spawn', force=True)
     
     # Initialize parallel attention schema (FSDP2 policies, etc.)
-    logging.info("Parallel attention enabled: initializing FSDP2 policy registry")
     import comfy.parallel_attention.fsdp2_policies
-    logging.info(f"Parallel attention enabled: registered FSDP2 policies: {comfy.parallel_attention.fsdp2_policies.FSDP2PolicyRegistry.list_registered()}")
 
 import comfy.utils
 
