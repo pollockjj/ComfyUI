@@ -156,58 +156,17 @@ class ParallelAttentionConfig:
                 f"{result['sharded_count']} sharded params"
             )
             
-            # Create wrapper (Phase 3.1: Ring or Unified)
-            if enable_ring_attention:
-                logging.info(f"{LOG_PREFIX} BRANCH: enable_ring_attention=TRUE, using RingAttentionWrapper")
-                
-                from comfy.parallel_attention.ring_attention import RingAttentionWrapper
-                
-                wrapper = RingAttentionWrapper(
-                    executor=executor,
-                    world_size=2
-                )
-                
-                model.set_model_unet_function_wrapper(wrapper)
-                
-                logging.info(f"{LOG_PREFIX} ✅ Ring-Attention enabled (sequence split across 2 GPUs)")
-                logging.info(f"{LOG_PREFIX} Flux-Dev: 16,384 patches → {16384 // 2} per GPU")
-                
-                # Initialize session logger for this workflow
-                from comfy.parallel_attention.session_logger import SessionLogger
-                session_logger = SessionLogger.get_instance()
-                session_logger.start_session()
-                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers spawned")
-                session_logger.log(f"⚡ [Parallel-Attention][Config Node] Workers initialized: {result['vram_gb']:.2f}GB per GPU")
-                session_logger.log(f"⚡ [RingAttention] Initialized for 2 GPUs")
-                session_logger.log(f"⚡ [RingAttention] Pattern: Sequence split → Local forward → All-gather")
-                
-                # Store metadata
-                model.parallel_attention["ring_enabled"] = True
-            else:
-                logging.info(f"{LOG_PREFIX} BRANCH: enable_ring_attention=FALSE, using UnifiedParallelWrapper (FSDP2-only)")
-                
-                from comfy.parallel_attention.unified_wrapper import UnifiedParallelWrapper
-                
-                wrapper = UnifiedParallelWrapper(
-                    executor=executor,
-                    model_type=model_type,
-                    enable_cfg_split=False  # Phase 2.2
-                )
-                
-                model.set_model_unet_function_wrapper(wrapper)
-                
-                logging.info(f"{LOG_PREFIX} ✅ Per-step wrapper attached (FSDP2 only, no Ring)")
-            
-            # Store executor and metadata
+            # Store executor and metadata (NO wrapper attachment - use FSDP2DistributedSampler custom node)
             model.parallel_attention = {
                 "executor": executor,
                 "model_type": model_type,
                 "sharded": True,
                 "vram_per_gpu": result["vram_gb"],
-                "sharded_params": result["sharded_count"]
+                "sharded_params": result["sharded_count"],
+                "ring_enabled": enable_ring_attention
             }
             
-            logging.info(f"{LOG_PREFIX} ✅ Per-step wrapper attached for standard KSampler")
+            logging.info(f"{LOG_PREFIX} ✅ Workers ready (use FSDP2DistributedSampler custom node)")
             
             # Update inner parallel_attention context
             pa["executor"] = executor
@@ -391,59 +350,35 @@ class FSDP2DistributedSampler:
     
     def sample(self, model, seed, steps, cfg, sampler_name, scheduler, 
                positive, negative, latent_image, denoise=1.0):
-        """Execute distributed sampling via workers."""
-        import comfy.sample
+        """Execute distributed sampling via workers (Direct RPC pattern)."""
+        LOG_PREFIX = "⚡ [FSDP2DistributedSampler]"
         
-        # Model must have parallel_attention from ParallelAttentionConfig
-        pa_config = model.parallel_attention
-        executor = pa_config["executor"]
+        # Get executor from model
+        executor = model.parallel_attention["executor"]
         
-        # Prepare noise
-        latent_samples = latent_image["samples"]
-        
-        # Build sampling config for workers (common_ksampler signature)
+        # Build standard ksampler args matching worker's _common_ksampler signature
         ksampler_args = {
             "seed": seed,
             "steps": steps,
             "cfg": cfg,
             "sampler_name": sampler_name,
             "scheduler": scheduler,
-            "positive": self._prepare_conditioning_for_serialization(positive),
-            "negative": self._prepare_conditioning_for_serialization(negative),
-            "latent": {"samples": latent_samples.cpu()},
-            "denoise": denoise,
+            "positive": positive,
+            "negative": negative,
+            "latent": latent_image,  # Worker expects "latent" not "latent_image"
+            "denoise": denoise
         }
         
-        logging.info(f"{LOG_PREFIX} Dispatching to workers: {steps} steps, seed={seed}")
+        logging.info(f"{LOG_PREFIX} Direct RPC dispatch: {steps} steps, seed={seed}")
         
-        # Execute on all workers using common_ksampler (Raylight pattern)
+        # Direct RPC to workers (Commit 7abfaef pattern)
         result = executor.execute_collective("common_ksampler", ksampler_args)
         
-        # common_ksampler returns {"status": "success", "result": {"samples": tensor}}
         if result.get("status") != "success":
-            raise RuntimeError(f"Worker sampling failed: {result.get('error', 'unknown error')}")
+            raise RuntimeError(f"{LOG_PREFIX} Worker sampling failed: {result.get('error')}")
         
-        samples = result["result"]["samples"]
-        
-        logging.info(f"{LOG_PREFIX} Received samples: {samples.shape}")
-        
-        return ({"samples": samples},)
-    
-    def _prepare_conditioning_for_serialization(self, cond):
-        """Move conditioning tensors to CPU for serialization."""
-        if isinstance(cond, list):
-            return [[self._move_tensor_to_cpu(c[0]), c[1]] for c in cond]
-        return cond
-    
-    def _move_tensor_to_cpu(self, obj):
-        """Recursively move tensors to CPU."""
-        if isinstance(obj, torch.Tensor):
-            return obj.cpu()
-        elif isinstance(obj, dict):
-            return {k: self._move_tensor_to_cpu(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return type(obj)(self._move_tensor_to_cpu(v) for v in obj)
-        return obj
+        # Extract samples
+        return ({"samples": result["result"]["samples"]},)
 
 
 class TestApplyModelStep:
