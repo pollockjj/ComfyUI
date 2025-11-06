@@ -8,26 +8,11 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from .usp_attention import (
-    apply_rope,
-    chunk_sequence_for_rank,
-    gather_sequence_from_ranks,
-    usp_attention,
-)
+from .usp_attention import apply_rope, usp_attention
 from .usp_single_forward import apply_mod
 
 LOG_PREFIX = "⚡ [Parallel-Attention][USP][Double]"
 LOGGER = logging.getLogger(__name__)
-
-
-def _split_attn_output(attn: Tensor, split: int, flipped: bool) -> tuple[Tensor, Tensor]:
-    if flipped:
-        img_attn = attn[:, :split]
-        txt_attn = attn[:, split:]
-    else:
-        txt_attn = attn[:, :split]
-        img_attn = attn[:, split:]
-    return img_attn.contiguous(), txt_attn.contiguous()
 
 
 def usp_double_forward(
@@ -44,12 +29,9 @@ def usp_double_forward(
 ) -> tuple[Tensor, Tensor]:
     """Sequence-parallel double-stream forward pass."""
 
-    img_local = chunk_sequence_for_rank(img, dim=1)
-    txt_local = chunk_sequence_for_rank(txt, dim=1)
-    if pe is not None:
-        pe_local = chunk_sequence_for_rank(pe, dim=2)
-    else:
-        pe_local = None
+    img_local = img
+    txt_local = txt
+    pe_local = pe
 
     if LOGGER.isEnabledFor(logging.INFO):
         LOGGER.info(
@@ -122,7 +104,4 @@ def usp_double_forward(
     if txt_updated.dtype == torch.float16:
         txt_updated = torch.nan_to_num(txt_updated, nan=0.0, posinf=65504, neginf=-65504)
 
-    return (
-        gather_sequence_from_ranks(img_updated, dim=1),
-        gather_sequence_from_ranks(txt_updated, dim=1),
-    )
+    return img_updated, txt_updated

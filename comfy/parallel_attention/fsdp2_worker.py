@@ -6,6 +6,7 @@ Based on FastVideo worker pattern.
 
 import torch
 import logging
+import types
 LOG_PREFIX = "⚡ [Parallel-Attention]"
 
 
@@ -49,6 +50,10 @@ class FSDP2Worker:
         if torch.cuda.is_available():
             torch.cuda.set_device(self.device)
         
+        self.usp_config = None
+        self.usp_enabled = False
+        self._usp_parallel_initialized = False
+
         # Create DeviceMesh (ARCHITECTURE.md requirement)
         from torch.distributed.device_mesh import init_device_mesh
         # Use "cpu" device type for gloo backend, "cuda" for nccl
@@ -422,6 +427,11 @@ class FSDP2Worker:
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Applying weights to model...")
             fsdp_model.load_state_dict(sharded_sd, assign=True, strict=False)
             
+            # Install USP forwards RIGHT AFTER weight loading (blocks are FSDP-wrapped with weights loaded)
+            usp_config = args.get("usp_config")
+            if usp_config:
+                self._patch_usp_forwards_after_load(fsdp_model, usp_config)
+            
             # CRITICAL: Enable comfy_cast_weights on ALL modules (multi-GPU pattern)
             # This ensures weights auto-cast to input device during forward (handles FSDP2 cross-device)
             for module in fsdp_model.diffusion_model.modules():
@@ -466,9 +476,7 @@ class FSDP2Worker:
             # Store ModelPatcher, not raw model
             self.model = model_patcher
             
-            # Legacy ring-attention configuration removed during purge
-            
-            # Apply object patches from parent (if any)
+            # Legacy ring-attention configuration removed during purge            # Apply object patches from parent (if any)
             # This is the clean extension point for distributed model modifications
             object_patches = args.get("object_patches", {})
             if object_patches:
@@ -485,6 +493,91 @@ class FSDP2Worker:
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
+
+    def _patch_usp_forwards_after_load(self, fsdp_model, usp_config):
+        """Patch USP forwards after weights loaded into FSDP-wrapped blocks.
+        
+        Called immediately after load_state_dict but before ModelPatcher wrapping.
+        At this point blocks are FSDP modules with loaded weights, so we can safely
+        patch their forward methods without DTensor mixing issues.
+        """
+        if self.usp_enabled:
+            return
+
+        ulysses_degree = int(usp_config.get("ulysses_degree", 1))
+        ring_degree = int(usp_config.get("ring_degree", 1))
+        attention_backend = usp_config.get("attention_backend", "FLASH_ATTN")
+
+        if ulysses_degree <= 1 and ring_degree <= 1:
+            return
+
+        sequence_degree = ulysses_degree * ring_degree
+        if sequence_degree != self.world_size:
+            raise RuntimeError(
+                f"{LOG_PREFIX} USP configuration mismatch: ulysses_degree={ulysses_degree}, "
+                f"ring_degree={ring_degree}, world_size={self.world_size}"
+            )
+
+        try:
+            from xfuser.core.distributed import (
+                init_distributed_environment,
+                initialize_model_parallel,
+            )
+        except ImportError as exc:
+            raise RuntimeError("xfuser package is required for USP attention") from exc
+
+        if not self._usp_parallel_initialized:
+            init_distributed_environment(rank=self.rank, world_size=self.world_size)
+            initialize_model_parallel(
+                sequence_parallel_degree=self.world_size,
+                ring_degree=ring_degree,
+                ulysses_degree=ulysses_degree,
+            )
+            self._usp_parallel_initialized = True
+
+        from .usp_attention import initialize_usp_attention
+        from .usp_single_forward import usp_single_forward
+        from .usp_double_forward import usp_double_forward
+        from .usp_dit_forward import usp_dit_forward
+
+        initialize_usp_attention(
+            ulysses_degree,
+            ring_degree,
+            attn_type=attention_backend,
+        )
+
+        # Patch blocks directly on FSDP model (blocks have weights loaded, no DTensor issues)
+        diffusion_model = fsdp_model.diffusion_model
+        double_blocks = getattr(diffusion_model, "double_blocks", [])
+        single_blocks = getattr(diffusion_model, "single_blocks", [])
+
+        patched_double = 0
+        for block in double_blocks:
+            block.forward = types.MethodType(usp_double_forward, block)
+            patched_double += 1
+
+        patched_single = 0
+        for block in single_blocks:
+            block.forward = types.MethodType(usp_single_forward, block)
+            patched_single += 1
+
+        diffusion_model.forward_orig = types.MethodType(usp_dit_forward, diffusion_model)
+
+        self.usp_config = {
+            "ulysses_degree": ulysses_degree,
+            "ring_degree": ring_degree,
+            "attention_backend": attention_backend,
+        }
+        self.usp_enabled = True
+
+        log_rank0(
+            self.rank,
+            'info',
+            (
+                f"{LOG_PREFIX} USP forwards patched (ulysses={ulysses_degree}, ring={ring_degree}, "
+                f"double_blocks={patched_double}, single_blocks={patched_single}, backend={attention_backend})"
+            ),
+        )
     
     def _apply_object_patches_to_worker_model(self, object_patches: dict):
         """Apply object patches to worker's FSDP2-sharded model.

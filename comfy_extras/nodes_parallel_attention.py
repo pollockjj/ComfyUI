@@ -34,6 +34,21 @@ class ParallelAttentionConfig:
                 "device_1": (devices, {"default": "cuda:0"}),
                 "device_2": (devices, {"default": "cuda:1"}),
                 "backend": (["auto", "nccl", "gloo"], {"default": "auto"}),
+                "ulysses_degree": ("INT", {"default": 1, "min": 1, "max": 16}),
+                "ring_degree": ("INT", {"default": 1, "min": 1, "max": 16}),
+                "attention_backend": (
+                    [
+                        "FLASH_ATTN",
+                        "FLASH_ATTN_3",
+                        "SAGE_AUTO_DETECT",
+                        "SAGE_FP16_TRITON",
+                        "SAGE_FP16_CUDA",
+                        "SAGE_FP8_CUDA",
+                        "SAGE_FP8_SM90",
+                        "TORCH",
+                    ],
+                    {"default": "FLASH_ATTN"},
+                ),
             }
         }
     
@@ -42,11 +57,11 @@ class ParallelAttentionConfig:
     CATEGORY = "parallel_attention"
     
     @classmethod
-    def IS_CHANGED(cls, model, enable_fsdp2, device_1, device_2, backend):
+    def IS_CHANGED(cls, model, enable_fsdp2, device_1, device_2, backend, ulysses_degree, ring_degree, attention_backend):
         """Force re-execution when settings change (prevents worker reuse with wrong config)."""
         import hashlib
         
-        settings_str = f"{enable_fsdp2}{device_1}{device_2}{backend}"
+        settings_str = f"{enable_fsdp2}{device_1}{device_2}{backend}{ulysses_degree}{ring_degree}{attention_backend}"
         current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
         
         if not hasattr(cls, '_last_hash'):
@@ -56,10 +71,21 @@ class ParallelAttentionConfig:
         
         return current_hash
     
-    def configure(self, model, enable_fsdp2, device_1, device_2, backend):
+    def configure(self, model, enable_fsdp2, device_1, device_2, backend, ulysses_degree, ring_degree, attention_backend):
         """Configure parallel attention and spawn workers."""
         world_size = 2  # Currently hardcoded to 2 GPUs
         logging.info(f"{LOG_PREFIX} FSDP2 mode selected (world_size={world_size})")
+
+        sequence_degree = ulysses_degree * ring_degree
+        if sequence_degree > world_size:
+            raise RuntimeError(
+                f"{LOG_PREFIX} Invalid USP config: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, world_size={world_size}"
+            )
+        usp_enabled = sequence_degree > 1
+        if usp_enabled:
+            logging.info(
+                f"{LOG_PREFIX} USP enabled (ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, attention={attention_backend})"
+            )
         
         # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):
@@ -121,10 +147,17 @@ class ParallelAttentionConfig:
             
             # Initialize workers: load, shard model, and apply any provided object patches
             object_patches = {}
+            usp_config = {
+                "ulysses_degree": ulysses_degree,
+                "ring_degree": ring_degree,
+                "attention_backend": attention_backend,
+            }
+
             result = executor.execute_collective("initialize_fsdp2_from_checkpoint", {
                 "checkpoint_path": checkpoint_path,
                 "model_type": model_type,
                 "object_patches": object_patches,
+                "usp_config": usp_config,
             })
             
             if result.get("status") != "success":
@@ -142,6 +175,7 @@ class ParallelAttentionConfig:
                 "sharded": True,
                 "vram_per_gpu": result["vram_gb"],
                 "sharded_params": result["sharded_count"],
+                "usp_config": usp_config,
             }
             
             logging.info(f"{LOG_PREFIX} ✅ Workers ready (use FSDP2DistributedSampler custom node)")
@@ -151,6 +185,7 @@ class ParallelAttentionConfig:
             pa["sharded"] = True
             pa["vram_per_gpu"] = result["vram_gb"]
             pa["sharded_params"] = result["sharded_count"]
+            pa["usp_config"] = usp_config
             pa["phase"] = "ready_for_inference"
             
             logging.info(f"{LOG_PREFIX} ✅ Model ready for distributed inference")

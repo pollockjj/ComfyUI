@@ -8,11 +8,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from .usp_attention import (
-    chunk_sequence_for_rank,
-    gather_sequence_from_ranks,
-    usp_attention,
-)
+from .usp_attention import usp_attention
 
 LOG_PREFIX = "⚡ [Parallel-Attention][USP][Single]"
 LOGGER = logging.getLogger(__name__)
@@ -44,11 +40,8 @@ def usp_single_forward(
 ) -> Tensor:
     """Sequence-parallel single-stream forward pass."""
 
-    local_tokens = chunk_sequence_for_rank(x, dim=1)
-    if pe is not None:
-        pe_local = chunk_sequence_for_rank(pe, dim=2)
-    else:
-        pe_local = None
+    local_tokens = x
+    pe_local = pe
 
     if LOGGER.isEnabledFor(logging.INFO):
         LOGGER.info("%s rank_chunk=%d", LOG_PREFIX, local_tokens.shape[1])
@@ -70,4 +63,4 @@ def usp_single_forward(
     if updated.dtype == torch.float16:
         updated = torch.nan_to_num(updated, nan=0.0, posinf=65504, neginf=-65504)
 
-    return gather_sequence_from_ranks(updated, dim=1)
+    return updated
