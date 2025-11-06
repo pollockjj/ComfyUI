@@ -562,6 +562,30 @@ class FSDP2Worker:
                     f"total_sp={self.world_size}, xfuser_backend={actual_xfuser_backend}"
                 )
                 
+                from comfy.parallel_attention.raylight_attention import initialize_raylight_attention
+                from comfy.parallel_attention.raylight_single_block_forward import raylight_single_stream_forward
+                import types
+
+                attn_backend = args.get("usp_attention_type", "flash_attn")
+                initialize_raylight_attention(attn_backend)
+                log_rank0(
+                    self.rank,
+                    'info',
+                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Raylight attention initialized",
+                )
+
+                single_blocks = getattr(model_patcher.model.diffusion_model, "single_blocks", [])
+                patched_blocks = 0
+                for block in single_blocks:
+                    block.forward = types.MethodType(raylight_single_stream_forward, block)
+                    patched_blocks += 1
+
+                log_rank0(
+                    self.rank,
+                    'info',
+                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Patched {patched_blocks} single blocks with Raylight forward",
+                )
+                
                 # Install Ring-Attention forward methods
                 model_type = args.get("model_type", "flux")
                 log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] About to call install_parallel_attention_forward_methods(model_type='{model_type}')")
@@ -848,26 +872,33 @@ class FSDP2Worker:
                 log_rank0(self.rank, 'debug', f"{LOG_PREFIX} All ranks synced")
             
             # Step 5: Execute standard ComfyUI sampling (Raylight pattern)
-            with torch.no_grad():
-                samples = comfy.sample.sample(
-                    self.model,
-                    noise,
-                    steps,
-                    cfg,
-                    sampler_name,
-                    scheduler,
-                    positive,
-                    negative,
-                    latent_image,
-                    denoise=denoise,
-                    disable_noise=disable_noise,
-                    start_step=start_step,
-                    last_step=last_step,
-                    force_full_denoise=force_full_denoise,
-                    noise_mask=noise_mask,
-                    disable_pbar=disable_pbar,
-                    seed=seed,
-                )
+            try:
+                with torch.no_grad():
+                    samples = comfy.sample.sample(
+                        self.model,
+                        noise,
+                        steps,
+                        cfg,
+                        sampler_name,
+                        scheduler,
+                        positive,
+                        negative,
+                        latent_image,
+                        denoise=denoise,
+                        disable_noise=disable_noise,
+                        start_step=start_step,
+                        last_step=last_step,
+                        force_full_denoise=force_full_denoise,
+                        noise_mask=noise_mask,
+                        disable_pbar=disable_pbar,
+                        seed=seed,
+                    )
+            except RuntimeError as e:
+                if "same number of dimensions" in str(e):
+                    log_rank0(self.rank, 'error', f"{LOG_PREFIX} DIMENSION MISMATCH ERROR: {e}")
+                    log_rank0(self.rank, 'error', f"{LOG_PREFIX} This error happens during forward pass")
+                    log_rank0(self.rank, 'error', f"{LOG_PREFIX} Likely in xfuser attention call")
+                raise
             
             # Log VRAM AFTER sampling
             vram_after = 0.0
