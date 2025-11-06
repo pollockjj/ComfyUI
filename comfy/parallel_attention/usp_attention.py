@@ -3,6 +3,9 @@
 Provides low level building blocks to execute sequence-parallel attention in
 the ComfyUI core runtime. Interfaces mirror the flux context-parallel forward
 helpers so higher-level patches can be ported with minimal changes.
+
+Call `initialize_usp_attention()` once before invoking any of the forward
+patches so the xfuser backend is ready.
 """
 
 from __future__ import annotations
