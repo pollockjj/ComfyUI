@@ -98,7 +98,7 @@ def flux_fsdp2_policy() -> ShardingConfig:
     - single_blocks: 38 SingleStreamBlock
     - Other components: img_in, txt_in, time_in, vector_in, guidance_in, pe_embedder, final_layer
     
-    Sharding strategy (Raylight EXCLUSIVE):
+    Sharding strategy:
     - Shard: single_blocks.*, double_blocks.* (760 params)
     - Ignore: Everything else (20 params)
     
@@ -173,7 +173,7 @@ def qwen_image_fsdp2_policy() -> ShardingConfig:
     - transformer_blocks: 60 blocks (default)
     - Other components: embeddings, final_layer
     
-    Sharding strategy (Raylight EXCLUSIVE):
+    Sharding strategy:
     - Shard: transformer_blocks.*
     - Ignore: Everything else (embeddings, final_layer)
     

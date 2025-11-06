@@ -34,7 +34,7 @@ def detect_model_type_from_config(model_config):
 
 
 def fsdp2_load_diffusion_model_state_dict(sd, model_options, device_mesh, model_type, cpu_offload):
-    """Load model with FSDP2 preparation (Raylight pattern).
+    """Load model with FSDP2 preparation for distributed inference.
     
     Called by comfy/sd.py when model_options['fsdp']['enabled'] is True.
     
@@ -92,7 +92,7 @@ def fsdp2_load_diffusion_model_state_dict(sd, model_options, device_mesh, model_
     
     logging.info(f"{LOG_PREFIX} Model created on CPU")
     
-    # Add inner model metadata (Raylight pattern) if not already set by UNETLoader
+    # Add inner model metadata if not already set by UNETLoader
     # Workers will access this via model.model._parallel_attention
     if not hasattr(model, '_parallel_attention'):
         model._parallel_attention = {

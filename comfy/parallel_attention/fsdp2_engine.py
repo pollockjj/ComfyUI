@@ -1,7 +1,7 @@
 """Core FSDP2 sharding engine - model-agnostic execution.
 
 Applies FSDP2 sharding based on ShardingConfig.
-Reusable across FSDP2-only, FSDP2+USP, FSDP2+CFG strategies.
+Reusable across future distributed strategies (FSDP2-only today).
 
 Based on Phase 2.7 refactor for separation of concerns and extensibility.
 """
@@ -99,8 +99,7 @@ def apply_fsdp2_sharding(
         if rank == 0:
             logging.info(f"{LOG_PREFIX} [FSDP2Engine] Reference dtype: {ref_dtype}")
     
-    # Get diffusion_model (Raylight pattern: FSDP2 only touches diffusion_model)
-    # model_sampling and other BaseModel attributes are left untouched
+
     diffusion_model = meta_model.diffusion_model
     
     # Collect ignored params using policy's EXCLUSIVE logic
@@ -170,7 +169,7 @@ def apply_fsdp2_sharding(
     if rank == 0:
         logging.info(f"{LOG_PREFIX} [FSDP2Engine] Sharded {total_blocks_sharded} blocks")
     
-    # Root wrap diffusion_model if configured (Raylight pattern)
+
     if config.root_wrap:
         # Add universal scalar detection to root ignored params
         from comfy.parallel_attention.fsdp2_utils import detect_scalar_params
@@ -190,7 +189,6 @@ def apply_fsdp2_sharding(
             mesh=device_mesh
         )
     
-    # Update meta_model with sharded diffusion_model (Raylight pattern)
     meta_model.diffusion_model = diffusion_model
     
     # Load state_dict if provided

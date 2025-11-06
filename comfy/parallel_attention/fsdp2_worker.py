@@ -68,53 +68,9 @@ class FSDP2Worker:
             actual_backend = dist.get_backend()
             log_rank0(rank, 'info', f"{LOG_PREFIX} Worker-{rank} ACTUAL BACKEND: {actual_backend}")
         
-        # Initialize xDiT for Ring-Attention (FSDP2 first, then xDiT)
-        self._init_xdit_distributed()
+        # Worker initialization complete; USP-specific hooks removed in purge
     
-    def _init_xdit_distributed(self):
-        """Initialize xDiT distributed environment for USP (Ring/Ulysses).
-        
-        Sets up yunchang process groups for sequence parallelism.
-        Called after DeviceMesh is initialized.
-        """
-        try:
-            from xfuser.core.distributed import (
-                init_distributed_environment,
-                initialize_model_parallel,
-            )
-            
-            # Initialize xDiT base environment
-            init_distributed_environment(rank=self.rank, world_size=self.world_size)
-            
-            # USP degrees will be configured during model initialization
-            # This is a placeholder - actual initialization happens in _initialize_fsdp2_from_checkpoint
-            log_rank0(
-                self.rank, 'info',
-                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xDiT environment initialized, "
-                f"waiting for USP configuration"
-            )
-        except ImportError as e:
-            log_rank0(
-                self.rank, 'warning',
-                f"{LOG_PREFIX}[Worker][Rank {self.rank}] xfuser not available: {e}. "
-                f"Ring-Attention will not work."
-            )
-    
-    def _install_xfuser_attention_processors(self):
-        """Install xfuser Ring-Attention via add_object_patch (Logic Seam).
-        
-        TODO: This needs to use add_object_patch to replace attention modules
-        with ParallelAttentionModule instances that contain Ring-Attention logic.
-        
-        This is a placeholder - the actual implementation will be done via
-        the config node using add_object_patch, NOT in workers.
-        
-        Workers just need xDiT initialized (already done in __init__).
-        """
-        log_rank0(
-            self.rank, 'info',
-            f"⚡ [Worker][Rank {self.rank}] xDiT initialized, ready for Ring-Attention modules"
-        )
+    # Legacy USP helpers removed during purge
     
     def execute(self, command: str, args: dict):
         """Execute command and return result.
@@ -196,7 +152,7 @@ class FSDP2Worker:
         }
     
     def _sample(self, args: dict):
-        """Execute full sampling session (Raylight pattern).
+        """Execute full sampling session for distributed inference.
         
         Workers call comfy.sample.sample() with FSDP2-sharded ModelPatcher.
         FSDP2 handles all-gather/reshard transparently during forward passes.
@@ -466,7 +422,7 @@ class FSDP2Worker:
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Applying weights to model...")
             fsdp_model.load_state_dict(sharded_sd, assign=True, strict=False)
             
-            # CRITICAL: Enable comfy_cast_weights on ALL modules (Raylight/MultiGPU pattern)
+            # CRITICAL: Enable comfy_cast_weights on ALL modules (multi-GPU pattern)
             # This ensures weights auto-cast to input device during forward (handles FSDP2 cross-device)
             for module in fsdp_model.diffusion_model.modules():
                 if hasattr(module, "comfy_cast_weights"):
@@ -497,8 +453,7 @@ class FSDP2Worker:
             fsdp_model.manual_cast_dtype = ref_dtype
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Set manual_cast_dtype={ref_dtype}")
             
-            # Wrap in ModelPatcher (Raylight FSDPModelPatcher pattern)
-            # Workers need ModelPatcher interface for ComfyUI APIs
+            # Wrap in ModelPatcher so workers retain standard ComfyUI APIs
             from comfy.model_patcher import ModelPatcher
             import comfy.model_management
             
@@ -511,96 +466,7 @@ class FSDP2Worker:
             # Store ModelPatcher, not raw model
             self.model = model_patcher
             
-            # ========== RING-ATTENTION CONFIGURATION DEBUG SECTION ==========
-            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ========== RING-ATTENTION CONFIG CHECK START ==========")
-            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ALL ARGS KEYS: {list(args.keys())}")
-            
-            enable_ring = args.get("enable_ring_attention", False)
-            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] enable_ring_attention = {enable_ring} (type: {type(enable_ring).__name__})")
-            
-            if enable_ring:
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ ENTERED RING-ATTENTION IF BLOCK ✅✅✅")
-                
-                ulysses_degree = args.get("ulysses_degree", 1)
-                ring_degree = args.get("ring_degree", self.world_size)
-                
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] USP PARAMS: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, world_size={self.world_size}")
-                
-                # Validate USP configuration
-                if ulysses_degree * ring_degree != self.world_size:
-                    raise ValueError(
-                        f"Invalid USP config: ulysses_degree ({ulysses_degree}) * "
-                        f"ring_degree ({ring_degree}) != world_size ({self.world_size})"
-                    )
-                
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ USP validation passed")
-                
-                # Initialize xDiT with USP configuration
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Importing initialize_model_parallel from xfuser...")
-                from xfuser.core.distributed import initialize_model_parallel
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Import successful")
-                
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling initialize_model_parallel(sp={self.world_size}, ulysses={ulysses_degree}, ring={ring_degree}, backend={self.backend})...")
-                
-                initialize_model_parallel(
-                    sequence_parallel_degree=self.world_size,
-                    ulysses_degree=ulysses_degree,
-                    ring_degree=ring_degree,
-                    backend=self.backend,
-                )
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ initialize_model_parallel COMPLETED")
-                
-                # Query xfuser's ACTUAL backend after initialization
-                import torch.distributed as dist
-                from xfuser.core.distributed import get_world_group
-                actual_xfuser_backend = dist.get_backend(get_world_group().device_group)
-                
-                log_rank0(
-                    self.rank, 'info',
-                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ xDiT USP CONFIGURED SUCCESSFULLY ✅✅✅: "
-                    f"ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, "
-                    f"total_sp={self.world_size}, xfuser_backend={actual_xfuser_backend}"
-                )
-                
-                from comfy.parallel_attention.raylight_attention import initialize_raylight_attention
-                from comfy.parallel_attention.raylight_single_block_forward import raylight_single_stream_forward
-                import types
-
-                attn_backend = args.get("usp_attention_type", "flash_attn")
-                initialize_raylight_attention(attn_backend)
-                log_rank0(
-                    self.rank,
-                    'info',
-                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Raylight attention initialized",
-                )
-
-                single_blocks = getattr(model_patcher.model.diffusion_model, "single_blocks", [])
-                patched_blocks = 0
-                for block in single_blocks:
-                    block.forward = types.MethodType(raylight_single_stream_forward, block)
-                    patched_blocks += 1
-
-                log_rank0(
-                    self.rank,
-                    'info',
-                    f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅ Patched {patched_blocks} single blocks with Raylight forward",
-                )
-                
-                # Install Ring-Attention forward methods
-                model_type = args.get("model_type", "flux")
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] About to call install_parallel_attention_forward_methods(model_type='{model_type}')")
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] model_patcher type: {type(model_patcher).__name__}")
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] model_patcher.model type: {type(model_patcher.model).__name__}")
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] Calling install_parallel_attention_forward_methods NOW...")
-                
-                model_patcher.install_parallel_attention_forward_methods(model_type)
-                
-                log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ✅✅✅ install_parallel_attention_forward_methods RETURNED SUCCESSFULLY ✅✅✅")
-            else:
-                log_rank0(self.rank, 'warning', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ❌❌❌ RING-ATTENTION DISABLED - SKIPPING ENTIRE BLOCK ❌❌❌")
-            
-            log_rank0(self.rank, 'info', f"⚡ [Parallel-Attention][Worker][Rank {self.rank}] ========== RING-ATTENTION CONFIG CHECK END ==========")
-            # ========== END RING-ATTENTION CONFIGURATION DEBUG SECTION ==========
+            # Legacy ring-attention configuration removed during purge
             
             # Apply object patches from parent (if any)
             # This is the clean extension point for distributed model modifications
@@ -620,37 +486,6 @@ class FSDP2Worker:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
     
-    def _replace_attention_modules_with_ring(self, fsdp_model):
-        """Replace Flux attention modules with Ring-Attention versions.
-        
-        This is the CORRECT approach: modify the model graph directly in workers
-        after FSDP2 sharding. No object_patches, no serialization issues.
-        
-        Pattern: xfuser replaces attention processors, we replace attention modules.
-        """
-        from comfy.parallel_attention.ring_attention_module import RingAttentionModule
-        
-        transformer = fsdp_model.diffusion_model
-        replaced_count = 0
-        
-        # Replace double block attention modules
-        for i, block in enumerate(transformer.double_blocks):
-            # Replace img_attn
-            original_img_attn = block.img_attn
-            ring_img_attn = RingAttentionModule(original_img_attn, use_usp=True)
-            block.img_attn = ring_img_attn
-            replaced_count += 1
-            
-            # Replace txt_attn
-            original_txt_attn = block.txt_attn
-            ring_txt_attn = RingAttentionModule(original_txt_attn, use_usp=True)
-            block.txt_attn = ring_txt_attn
-            replaced_count += 1
-        
-        log_rank0(self.rank, 'info',
-            f"⚡ [Worker][Rank {self.rank}] ✅ Replaced {replaced_count} attention modules with Ring-Attention"
-        )
-    
     def _apply_object_patches_to_worker_model(self, object_patches: dict):
         """Apply object patches to worker's FSDP2-sharded model.
         
@@ -659,7 +494,7 @@ class FSDP2Worker:
         but FSDP2 sharding in workers creates new model graph. This method reapplies
         patches AFTER sharding.
         
-        Pattern: Clean alternative to Raylight's monkey-patching.
+        Pattern: Clean alternative to ad-hoc monkey-patching.
         
         Args:
             object_patches: Dict mapping module paths to replacement modules.
@@ -667,8 +502,8 @@ class FSDP2Worker:
         
         Example:
             {
-                "diffusion_model.double_blocks.0.img_attn": <RingAttentionModule>,
-                "diffusion_model.double_blocks.0.txt_attn": <RingAttentionModule>,
+                "diffusion_model.double_blocks.0.img_attn": <CustomModule>,
+                "diffusion_model.double_blocks.0.txt_attn": <CustomModule>,
                 ...
             }
         """
@@ -786,7 +621,7 @@ class FSDP2Worker:
     def _common_ksampler(self, args: dict):
         """Execute sampling using standard ComfyUI APIs.
         
-        Copy-exact from Raylight RayWorker.common_ksampler().
+        Adapted from distributed reference implementation.
         Workers execute full comfy.sample.sample() with FSDP2 model.
         
         Args:
@@ -830,13 +665,13 @@ class FSDP2Worker:
         force_full_denoise = args.get("force_full_denoise", False)
         
         try:
-            # Step 1: Extract and fix latent channels (Raylight pattern)
+            # Step 1: Extract and fix latent channels
             latent_image = latent["samples"]
             latent_image = comfy.sample.fix_empty_latent_channels(self.model, latent_image)
             
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Latent shape: {latent_image.shape}")
             
-            # Step 2: Prepare noise (Raylight pattern)
+            # Step 2: Prepare noise
             if disable_noise:
                 noise = torch.zeros(
                     latent_image.size(),
@@ -848,10 +683,10 @@ class FSDP2Worker:
                 batch_inds = latent.get("batch_index", None)
                 noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
             
-            # Step 3: Get noise mask if present (Raylight pattern)
+            # Step 3: Get noise mask if present
             noise_mask = latent.get("noise_mask", None)
             
-            # Step 4: Disable progress bar on non-rank-0 (Raylight pattern)
+            # Step 4: Disable progress bar on non-rank-0
             disable_pbar = True
             if self.rank == 0:
                 disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
@@ -871,7 +706,7 @@ class FSDP2Worker:
                 dist.barrier()
                 log_rank0(self.rank, 'debug', f"{LOG_PREFIX} All ranks synced")
             
-            # Step 5: Execute standard ComfyUI sampling (Raylight pattern)
+            # Step 5: Execute standard ComfyUI sampling
             try:
                 with torch.no_grad():
                     samples = comfy.sample.sample(
@@ -910,7 +745,7 @@ class FSDP2Worker:
             
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} Sampling complete")
             
-            # Step 6: Return result (rank 0 only, Raylight pattern)
+            # Step 6: Return result (rank 0 only)
             if self.rank == 0:
                 out = latent.copy()
                 out["samples"] = samples

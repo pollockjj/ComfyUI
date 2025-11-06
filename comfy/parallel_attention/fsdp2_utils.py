@@ -1,10 +1,6 @@
 """
 Universal FSDP2 utilities - apply to ALL models.
 
-These are defensive patterns to prevent FSDP2 errors, extracted from:
-- FastVideo (incumbent): Weight loading patterns
-- Raylight (validation): Dtype mismatch detection, scalar handling
-
 Design: Universal logic here, model-specific logic in policies.
 """
 
@@ -21,7 +17,6 @@ def detect_scalar_params(module):
     0-dimensional tensors. FSDP2's fully_shard() cannot handle these and will
     raise ValueError. These must be excluded from sharding.
     
-    Source: Raylight ensure_no_scalar() pattern (defensive exclusion)
     
     Args:
         module: PyTorch module to scan
@@ -50,7 +45,6 @@ def detect_dtype_mismatch(module, ref_dtype):
     dtypes than the main model. FSDP2 cannot shard mixed dtypes in the same
     unit. These parameters are excluded and kept replicated.
     
-    Source: Raylight detect_dtype_mismatch() - used in ALL models
     
     Args:
         module: PyTorch module to scan

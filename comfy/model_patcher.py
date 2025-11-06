@@ -1300,46 +1300,6 @@ class ModelPatcher:
         self.unpatch_hooks()
         self.clear_cached_hook_weights()
     
-    def install_parallel_attention_forward_methods(self, model_type: str):
-        """Install Ring-Attention forward methods for distributed workers.
-        
-        This is the OFFICIAL method for workers to enable Ring-Attention.
-        Called AFTER FSDP2 sharding, directly modifies the worker's model graph.
-        
-        Pattern: Replaces forward() methods on attention blocks with USP-enabled versions.
-        Based on Raylight's approach but integrated as official ModelPatcher API.
-        
-        Args:
-            model_type: Model type ("flux", "wan", etc.)
-        
-        Example (in worker):
-            model_patcher = ModelPatcher(fsdp_model, ...)
-            model_patcher.install_parallel_attention_forward_methods("flux")
-        """
-        import types
-        import logging
-        
-        if model_type == "flux":
-            from comfy.parallel_attention.flux_ring_forwards import (
-                ring_double_stream_forward,
-                ring_single_stream_forward
-            )
-            
-            # Replace forward() on each block
-            for block in self.model.diffusion_model.double_blocks:
-                block.forward = types.MethodType(ring_double_stream_forward, block)
-            
-            for block in self.model.diffusion_model.single_blocks:
-                block.forward = types.MethodType(ring_single_stream_forward, block)
-            
-            logging.info(
-                f"⚡ [ModelPatcher] Installed Ring-Attention forward methods: "
-                f"{len(self.model.diffusion_model.double_blocks)} double_blocks, "
-                f"{len(self.model.diffusion_model.single_blocks)} single_blocks"
-            )
-        else:
-            raise ValueError(f"Unsupported model_type for Ring-Attention: {model_type}")
-
     def __del__(self):
         self.detach(unpatch_all=False)
 

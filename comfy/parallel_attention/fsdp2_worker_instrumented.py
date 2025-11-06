@@ -172,7 +172,7 @@ class FSDP2Worker:
             logging.info(f"{LOG_PREFIX} 🔍 DELTA: allocated={vram_after_forward - vram_before_forward:.3f}GB, reserved={vram_reserved_after - vram_reserved_before:.3f}GB")
             
             # Save memory snapshot
-            snapshot_dir = "/home/johnj/parallel-attention/reference/reference_repositiories/raylight/datalogs"
+            snapshot_dir = "/home/johnj/parallel-attention/unified_sequence/test_logs"
             os.makedirs(snapshot_dir, exist_ok=True)
             snapshot_file = os.path.join(snapshot_dir, f"cuda_memory_rank{self.rank}.pickle")
             

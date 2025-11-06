@@ -31,9 +31,6 @@ class ParallelAttentionConfig:
             "required": {
                 "model": ("MODEL",),
                 "enable_fsdp2": ("BOOLEAN", {"default": True}),
-                "enable_ring_attention": ("BOOLEAN", {"default": False}),
-                "ulysses_degree": ("INT", {"default": 1, "min": 1, "max": 8}),
-                "ring_degree": ("INT", {"default": 2, "min": 1, "max": 8}),
                 "device_1": (devices, {"default": "cuda:0"}),
                 "device_2": (devices, {"default": "cuda:1"}),
                 "backend": (["auto", "nccl", "gloo"], {"default": "auto"}),
@@ -45,11 +42,11 @@ class ParallelAttentionConfig:
     CATEGORY = "parallel_attention"
     
     @classmethod
-    def IS_CHANGED(cls, model, enable_fsdp2, enable_ring_attention, ulysses_degree, ring_degree, device_1, device_2, backend):
+    def IS_CHANGED(cls, model, enable_fsdp2, device_1, device_2, backend):
         """Force re-execution when settings change (prevents worker reuse with wrong config)."""
         import hashlib
         
-        settings_str = f"{enable_fsdp2}{enable_ring_attention}{ulysses_degree}{ring_degree}{device_1}{device_2}{backend}"
+        settings_str = f"{enable_fsdp2}{device_1}{device_2}{backend}"
         current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
         
         if not hasattr(cls, '_last_hash'):
@@ -59,23 +56,10 @@ class ParallelAttentionConfig:
         
         return current_hash
     
-    def configure(self, model, enable_fsdp2, enable_ring_attention, ulysses_degree, ring_degree, device_1, device_2, backend):
+    def configure(self, model, enable_fsdp2, device_1, device_2, backend):
         """Configure parallel attention and spawn workers."""
-        # Validate USP configuration only if Ring-Attention is enabled
         world_size = 2  # Currently hardcoded to 2 GPUs
-        if enable_ring_attention and ulysses_degree * ring_degree != world_size:
-            raise ValueError(
-                f"{LOG_PREFIX} Invalid USP configuration: ulysses_degree ({ulysses_degree}) * "
-                f"ring_degree ({ring_degree}) must equal world_size ({world_size})"
-            )
-        
-        if enable_ring_attention:
-            logging.info(
-                f"{LOG_PREFIX} USP Configuration: ulysses_degree={ulysses_degree}, "
-                f"ring_degree={ring_degree}, total_sp={world_size}"
-            )
-        else:
-            logging.info(f"{LOG_PREFIX} FSDP2-only mode (Ring-Attention disabled)")
+        logging.info(f"{LOG_PREFIX} FSDP2 mode selected (world_size={world_size})")
         
         # Check for parallel_attention dict (CFG-Split pattern)
         if not hasattr(model, 'parallel_attention'):
@@ -135,20 +119,12 @@ class ParallelAttentionConfig:
             
             logging.info(f"{LOG_PREFIX} Initializing workers with checkpoint: {checkpoint_path}")
             
-            # Install Ring-Attention modules on parent model FIRST
+            # Initialize workers: load, shard model, and apply any provided object patches
             object_patches = {}
-            if enable_ring_attention:
-                logging.info(f"{LOG_PREFIX} Installing Ring-Attention modules on parent model")
-                object_patches = self._install_ring_attention_modules(model, enable_ring=True)
-            
-            # Initialize workers: load, shard model, and apply object patches
             result = executor.execute_collective("initialize_fsdp2_from_checkpoint", {
                 "checkpoint_path": checkpoint_path,
                 "model_type": model_type,
-                "object_patches": object_patches,  # Pass patches to workers
-                "enable_ring_attention": enable_ring_attention,  # Enable Ring forward methods in workers
-                "ulysses_degree": ulysses_degree,  # USP configuration
-                "ring_degree": ring_degree,        # USP configuration
+                "object_patches": object_patches,
             })
             
             if result.get("status") != "success":
@@ -166,7 +142,6 @@ class ParallelAttentionConfig:
                 "sharded": True,
                 "vram_per_gpu": result["vram_gb"],
                 "sharded_params": result["sharded_count"],
-                "ring_enabled": enable_ring_attention
             }
             
             logging.info(f"{LOG_PREFIX} ✅ Workers ready (use FSDP2DistributedSampler custom node)")
@@ -184,56 +159,6 @@ class ParallelAttentionConfig:
         
         return (model,)
     
-    def _install_ring_attention_modules(self, model, enable_ring: bool):
-        """Install RingAttentionModule via add_object_patch (Logic Seam).
-        
-        Per core_plan.md Section II.D: "The launcher node will use
-        add_object_patch to replace attention blocks with ParallelAttentionModule."
-        """
-        logging.info(f"{LOG_PREFIX} 🔍 DEBUG: _install_ring_attention_modules ENTRY: enable_ring={enable_ring}")
-        
-        from comfy.parallel_attention.ring_attention_module import RingAttentionModule
-        
-        transformer = model.model.diffusion_model
-        logging.info(f"{LOG_PREFIX} DEBUG: Got transformer: {type(transformer)}")
-        logging.info(f"{LOG_PREFIX} DEBUG: double_blocks: {len(transformer.double_blocks)}, single_blocks: {len(transformer.single_blocks)}")
-        
-        patches = {}  # Return patches for workers
-        num_patched = 0
-        
-        # Patch double blocks (19 blocks × 2 attention modules)
-        for i, block in enumerate(transformer.double_blocks):
-            # img_attn
-            logging.debug(f"{LOG_PREFIX} DEBUG: Patching double_block[{i}].img_attn")
-            ring_img = RingAttentionModule(block.img_attn, use_usp=enable_ring)
-            patch_path = f"diffusion_model.double_blocks.{i}.img_attn"
-            model.add_object_patch(patch_path, ring_img)
-            patches[patch_path] = ring_img
-            
-            # txt_attn
-            logging.debug(f"{LOG_PREFIX} DEBUG: Patching double_block[{i}].txt_attn")
-            ring_txt = RingAttentionModule(block.txt_attn, use_usp=enable_ring)
-            patch_path = f"diffusion_model.double_blocks.{i}.txt_attn"
-            model.add_object_patch(patch_path, ring_txt)
-            patches[patch_path] = ring_txt
-            
-            num_patched += 2
-        
-        # Skip single blocks - they use fused linear attention (no separate attn module)
-        # SingleStreamBlock has linear1/linear2 for fused QKV+MLP computation
-        logging.info(
-            f"{LOG_PREFIX} ℹ️ Skipping single_blocks (38 blocks) - fused linear attention not yet supported"
-        )
-        
-        logging.info(
-            f"{LOG_PREFIX} ✅ Installed {num_patched} RingAttentionModules on double_blocks "
-            f"({'USP enabled' if enable_ring else 'passthrough mode'})"
-        )
-        logging.info(f"{LOG_PREFIX} DEBUG: Module installation complete, returning patches dict")
-        
-        return patches
-
-
 class TestFSDP2Inference:
     """Test FSDP2 distributed inference with sharded model.
     
@@ -323,8 +248,8 @@ class TestFSDP2Inference:
 
 
 class FSDP2DistributedSampler:
-    """Custom sampler for FSDP2 distributed inference (Raylight pattern).
-    
+    """Custom sampler for FSDP2 distributed inference.
+
     Replaces standard KSampler when using FSDP2.
     Workers execute full sampling sessions via comfy.sample.sample().
     """
