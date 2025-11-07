@@ -39,7 +39,7 @@ class ParallelAttentionConfig:
                 "expert_config": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": '{"ring": 1, "ulysses": 2, "backend": "nccl", "attention": "FLASH_ATTN"}'
+                    "placeholder": '{"impl": "xfuser", "ring": 1, "ulysses": 2, "attention": "FLASH_ATTN"}'
                 }),
             }
         }
@@ -68,6 +68,8 @@ class ParallelAttentionConfig:
         import json
         
         # Parse expert config or use defaults
+        attention_impl = "xfuser"  # Default implementation
+        
         if expert_config.strip():
             try:
                 config = json.loads(expert_config)
@@ -75,8 +77,16 @@ class ParallelAttentionConfig:
                 ulysses_degree = config.get("ulysses", 2 if enable_usp else 1)
                 ring_degree = config.get("ring", 1)
                 attention_backend = config.get("attention", "FLASH_ATTN")
+                attention_impl = config.get("impl", "xfuser")  # "xfuser" or "fastvideo"
+                
                 logging.info(f"{LOG_PREFIX} ⚙️  EXPERT MODE: {config}")
-                logging.info(f"{LOG_PREFIX} ⚙️  Parsed: ulysses={ulysses_degree}, ring={ring_degree}, backend={backend}, attention={attention_backend}")
+                logging.info(f"{LOG_PREFIX} ⚙️  Parsed: impl={attention_impl}, ulysses={ulysses_degree}, ring={ring_degree}, backend={backend}, attention={attention_backend}")
+                
+                # Validate FastVideo constraints
+                if attention_impl == "fastvideo":
+                    if ring_degree > 1:
+                        raise RuntimeError(f"{LOG_PREFIX} FastVideo implementation only supports Ulysses (ring_degree must be 1)")
+                    logging.info(f"{LOG_PREFIX} Using FastVideo pure Ulysses implementation (zero-dependency)")
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"{LOG_PREFIX} Invalid expert_config JSON: {e}")
         else:
@@ -185,6 +195,7 @@ class ParallelAttentionConfig:
                 "model_type": model_type,
                 "object_patches": object_patches,
                 "usp_config": usp_config,
+                "attention_impl": attention_impl,  # Pass implementation choice
             })
             
             if result.get("status") != "success":

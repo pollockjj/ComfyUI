@@ -427,10 +427,18 @@ class FSDP2Worker:
             log_rank0(self.rank, 'debug', f"{LOG_PREFIX} Applying weights to model...")
             fsdp_model.load_state_dict(sharded_sd, assign=True, strict=False)
             
-            # Install USP forwards RIGHT AFTER weight loading (blocks are FSDP-wrapped with weights loaded)
+            # Install attention forwards RIGHT AFTER weight loading
             usp_config = args.get("usp_config")
+            attention_impl = args.get("attention_impl", "xfuser")  # Default to xFuser for backward compat
+            
             if usp_config:
-                self._patch_usp_forwards_after_load(fsdp_model, usp_config)
+                if attention_impl == "fastvideo":
+                    # Use FastVideo-style pure Ulysses implementation
+                    ulysses_degree = int(usp_config.get("ulysses_degree", 2))
+                    self._apply_fastvideo_ulysses_patches(fsdp_model, ulysses_degree)
+                else:
+                    # Use xFuser USP implementation (default)
+                    self._patch_usp_forwards_after_load(fsdp_model, usp_config)
             
             # CRITICAL: Enable comfy_cast_weights on ALL modules (multi-GPU pattern)
             # This ensures weights auto-cast to input device during forward (handles FSDP2 cross-device)
@@ -577,6 +585,55 @@ class FSDP2Worker:
                 f"{LOG_PREFIX} USP forwards patched (ulysses={ulysses_degree}, ring={ring_degree}, "
                 f"double_blocks={patched_double}, single_blocks={patched_single}, backend={attention_backend})"
             ),
+        )
+    
+    def _apply_fastvideo_ulysses_patches(self, fsdp_model, ulysses_degree: int):
+        """Apply FastVideo-style pure Ulysses patches (no xFuser dependency).
+        
+        This is a minimal, self-contained implementation using raw torch.distributed.
+        """
+        import types
+        
+        LOG_PREFIX = f"⚡ [Worker][Rank {self.rank}][FastVideo-Ulysses]"
+        
+        # Initialize SP group using our minimal communicator
+        from comfy.parallel_attention.fastvideo_ulysses.communicator import initialize_sp_group
+        
+        if not hasattr(self, '_fastvideo_sp_initialized'):
+            initialize_sp_group(sp_degree=ulysses_degree)
+            self._fastvideo_sp_initialized = True
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} SP group initialized (degree={ulysses_degree})")
+        
+        # Import forward hooks
+        from comfy.parallel_attention.fastvideo_ulysses.hooks import (
+            ulysses_dit_forward,
+            ulysses_double_block_forward,
+            ulysses_single_block_forward,
+        )
+        
+        # Patch blocks
+        diffusion_model = fsdp_model.diffusion_model
+        double_blocks = getattr(diffusion_model, "double_blocks", [])
+        single_blocks = getattr(diffusion_model, "single_blocks", [])
+        
+        patched_double = 0
+        for block in double_blocks:
+            block.forward = types.MethodType(ulysses_double_block_forward, block)
+            patched_double += 1
+        
+        patched_single = 0
+        for block in single_blocks:
+            block.forward = types.MethodType(ulysses_single_block_forward, block)
+            patched_single += 1
+        
+        # Patch DiT forward
+        diffusion_model.forward_orig = types.MethodType(ulysses_dit_forward, diffusion_model)
+        
+        log_rank0(
+            self.rank,
+            'info',
+            f"{LOG_PREFIX} Pure Ulysses forwards patched (ulysses={ulysses_degree}, "
+            f"double_blocks={patched_double}, single_blocks={patched_single})"
         )
     
     def _apply_object_patches_to_worker_model(self, object_patches: dict):
