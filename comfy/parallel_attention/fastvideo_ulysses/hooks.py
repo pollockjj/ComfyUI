@@ -9,6 +9,7 @@ from torch import Tensor
 from typing import Optional
 
 from comfy.ldm.flux.layers import timestep_embedding
+from comfy.ldm.flux.math import apply_rope
 from comfy.parallel_attention.fastvideo_ulysses.communicator import (
     get_sp_rank,
     get_sp_world_size,
@@ -92,18 +93,11 @@ def ulysses_dit_forward(
     vec = vec + self.vector_in(y[:, : self.params.vec_in_dim])
     txt = self.txt_in(txt)
     
-    # Positional embeddings
-    if img_ids is not None:
-        ids = torch.cat((txt_ids, img_ids), dim=1)
-        pe = self.pe_embedder(ids)
-    else:
-        pe = None
-    
-    # Chunk BOTH image and text tokens for sequence parallelism
-    # This matches xFuser's approach
+    # Get SP info first
     sp_rank = get_sp_rank()
     sp_size = get_sp_world_size()
     
+    # Chunk BOTH image and text tokens for sequence parallelism
     img_chunks = torch.chunk(img, sp_size, dim=1)
     txt_chunks = torch.chunk(txt, sp_size, dim=1)
     
@@ -111,7 +105,6 @@ def ulysses_dit_forward(
     if sp_rank < len(img_chunks):
         img = img_chunks[sp_rank]
     else:
-        # This shouldn't happen, but handle gracefully
         img = img_chunks[0]
     
     if sp_rank < len(txt_chunks):
@@ -119,13 +112,29 @@ def ulysses_dit_forward(
     else:
         txt = txt_chunks[0]
     
-    if pe is not None:
-        # Chunk the full PE (includes both txt and img)
-        pe_chunks = torch.chunk(pe, sp_size, dim=1)
-        if sp_rank < len(pe_chunks):
-            pe = pe_chunks[sp_rank]
-        else:
-            pe = pe_chunks[0]
+    # Create PE from FULL IDs, then chunk features (like xFuser)
+    if img_ids is not None:
+        ids = torch.cat((txt_ids, img_ids), dim=1)
+        pe_combine = self.pe_embedder(ids)
+        pe_image = self.pe_embedder(img_ids)
+        logger.warning(
+            "⚡ [DiT] Raw PE shapes: pe_combine=%s pe_image=%s",
+            tuple(pe_combine.shape),
+            tuple(pe_image.shape),
+        )
+        
+        # Chunk PE along dim=2 (features/heads) for Ulysses, like xFuser
+        # This is because Ulysses splits heads, not sequence!
+        pe_combine = torch.chunk(pe_combine, sp_size, dim=2)[sp_rank]
+        pe_image = torch.chunk(pe_image, sp_size, dim=2)[sp_rank]
+        logger.warning(
+            "⚡ [DiT] Chunked PE shapes: pe_combine=%s pe_image=%s",
+            tuple(pe_combine.shape),
+            tuple(pe_image.shape),
+        )
+    else:
+        pe_image = None
+        pe_combine = None
     
     # Process through double blocks
     blocks_replace = patches_replace.get("dit", {})
@@ -150,7 +159,7 @@ def ulysses_dit_forward(
             txt = out["txt"]
             img = out["img"]
         else:
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe_image)
     
     # Concatenate for single blocks
     logger.info(f"⚡ [DiT] Before concat: txt.shape={txt.shape}, img.shape={img.shape}")
@@ -173,7 +182,7 @@ def ulysses_dit_forward(
             )
             img = out["img"]
         else:
-            img = block(img, vec=vec, pe=pe)
+            img = block(img, vec=vec, pe=pe_combine)
     
     # All-gather img and txt to get full sequences
     from comfy.parallel_attention.fastvideo_ulysses.communicator import all_gather_nd
@@ -199,7 +208,7 @@ def ulysses_dit_forward(
             )
             combined = patched["img"]
         else:
-            combined = block(combined, vec=vec, pe=pe)
+            combined = block(combined, vec=vec, pe=pe_combine)
     
     # All-gather and separate text/image
     combined = all_gather_nd(combined.contiguous(), dim=1)
@@ -255,9 +264,11 @@ def ulysses_double_block_forward(
     img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
     txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
     
-    # Apply RoPE to image tokens only
+    # Apply RoPE to image tokens only (using Flux's apply_rope)
     if pe is not None:
-        from comfy.parallel_attention.usp_attention import apply_rope
+        raise RuntimeError(
+            f"{LOG_PREFIX} RoPE debug: img_q={tuple(img_q.shape)} img_k={tuple(img_k.shape)} pe={tuple(pe.shape)}"
+        )
         img_q, img_k = apply_rope(img_q, img_k, pe)
     
     # Concatenate txt and img for joint attention (Flux pattern)
