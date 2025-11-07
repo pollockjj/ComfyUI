@@ -192,7 +192,11 @@ def ulysses_double_block_forward(
     
     # Reshape for attention [batch, seq, heads, dim]
     num_heads = self.img_attn.num_heads
-    head_dim = self.img_attn.head_dim
+    # Calculate head_dim from the qkv projection dimensions
+    # qkv output is [batch, seq, hidden_size * 3]
+    # So hidden_size = qkv.shape[-1] // 3, head_dim = hidden_size // num_heads
+    hidden_size = img_q.shape[-1] // 3
+    head_dim = hidden_size // num_heads
     
     # Split QKV
     img_qkv = img_q.reshape(img.shape[0], img.shape[1], 3, num_heads, head_dim)
@@ -244,7 +248,9 @@ def ulysses_single_block_forward(
     
     # Reshape for attention
     num_heads = self.num_heads
-    head_dim = self.head_dim
+    # Calculate head_dim from qkv dimensions
+    hidden_size = qkv.shape[-1] // 3
+    head_dim = hidden_size // num_heads
     
     qkv = qkv.reshape(x.shape[0], x.shape[1], 3, num_heads, head_dim)
     q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
