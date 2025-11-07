@@ -18,10 +18,10 @@ def get_device_list():
 
 
 class ParallelAttentionConfig:
-    """Configure parallel attention options for a model.
+    """Configure parallel attention for multi-GPU inference.
     
-    Requires --use-parallel-attention CLI flag to be set.
-    Extends base config attached by comfy/sd.py.
+    Simple mode: Enable FSDP2 and/or USP with sensible defaults.
+    Expert mode: Override via JSON string (for testing).
     """
     
     @classmethod
@@ -30,25 +30,17 @@ class ParallelAttentionConfig:
         return {
             "required": {
                 "model": ("MODEL",),
-                "enable_fsdp2": ("BOOLEAN", {"default": True}),
                 "device_1": (devices, {"default": "cuda:0"}),
                 "device_2": (devices, {"default": "cuda:1"}),
-                "backend": (["auto", "nccl", "gloo"], {"default": "auto"}),
-                "ulysses_degree": ("INT", {"default": 1, "min": 1, "max": 16}),
-                "ring_degree": ("INT", {"default": 1, "min": 1, "max": 16}),
-                "attention_backend": (
-                    [
-                        "FLASH_ATTN",
-                        "FLASH_ATTN_3",
-                        "SAGE_AUTO_DETECT",
-                        "SAGE_FP16_TRITON",
-                        "SAGE_FP16_CUDA",
-                        "SAGE_FP8_CUDA",
-                        "SAGE_FP8_SM90",
-                        "TORCH",
-                    ],
-                    {"default": "FLASH_ATTN"},
-                ),
+                "enable_fsdp2": ("BOOLEAN", {"default": True}),
+                "enable_usp": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "expert_config": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": '{"ring": 1, "ulysses": 2, "backend": "nccl", "attention": "FLASH_ATTN"}'
+                }),
             }
         }
     
@@ -57,11 +49,11 @@ class ParallelAttentionConfig:
     CATEGORY = "parallel_attention"
     
     @classmethod
-    def IS_CHANGED(cls, model, enable_fsdp2, device_1, device_2, backend, ulysses_degree, ring_degree, attention_backend):
+    def IS_CHANGED(cls, model, device_1, device_2, enable_fsdp2, enable_usp, expert_config=""):
         """Force re-execution when settings change (prevents worker reuse with wrong config)."""
         import hashlib
         
-        settings_str = f"{enable_fsdp2}{device_1}{device_2}{backend}{ulysses_degree}{ring_degree}{attention_backend}"
+        settings_str = f"{enable_fsdp2}{enable_usp}{device_1}{device_2}{expert_config}"
         current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
         
         if not hasattr(cls, '_last_hash'):
@@ -71,20 +63,55 @@ class ParallelAttentionConfig:
         
         return current_hash
     
-    def configure(self, model, enable_fsdp2, device_1, device_2, backend, ulysses_degree, ring_degree, attention_backend):
+    def configure(self, model, device_1, device_2, enable_fsdp2, enable_usp, expert_config=""):
         """Configure parallel attention and spawn workers."""
+        import json
+        
+        # Parse expert config or use defaults
+        if expert_config.strip():
+            try:
+                config = json.loads(expert_config)
+                backend = config.get("backend", "auto")
+                ulysses_degree = config.get("ulysses", 2 if enable_usp else 1)
+                ring_degree = config.get("ring", 1)
+                attention_backend = config.get("attention", "FLASH_ATTN")
+                logging.info(f"{LOG_PREFIX} ⚙️  EXPERT MODE: {config}")
+                logging.info(f"{LOG_PREFIX} ⚙️  Parsed: ulysses={ulysses_degree}, ring={ring_degree}, backend={backend}, attention={attention_backend}")
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"{LOG_PREFIX} Invalid expert_config JSON: {e}")
+        else:
+            # Simple mode defaults
+            backend = "auto"
+            ulysses_degree = 2 if enable_usp else 1
+            ring_degree = 1  # Ring disabled by default (IPC issues with cudaMallocAsync)
+            attention_backend = "FLASH_ATTN"
+            logging.info(f"{LOG_PREFIX} Simple mode: enable_usp={enable_usp} → ulysses={ulysses_degree}, ring={ring_degree}")
+        
         world_size = 2  # Currently hardcoded to 2 GPUs
+        
+        if not enable_fsdp2:
+            logging.warning(f"{LOG_PREFIX} FSDP2 disabled - model will run on single GPU")
+            return (model,)
+        
         logging.info(f"{LOG_PREFIX} FSDP2 mode selected (world_size={world_size})")
 
+        # Validate USP configuration
         sequence_degree = ulysses_degree * ring_degree
         if sequence_degree > world_size:
             raise RuntimeError(
-                f"{LOG_PREFIX} Invalid USP config: ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, world_size={world_size}"
+                f"{LOG_PREFIX} Invalid USP config: ulysses={ulysses_degree}, ring={ring_degree}, world_size={world_size}"
             )
-        usp_enabled = sequence_degree > 1
-        if usp_enabled:
+        
+        # Warn about Ring limitations
+        if ring_degree > 1:
+            logging.warning(
+                f"{LOG_PREFIX} Ring-Attention (ring={ring_degree}) may fail with cudaMallocAsync. "
+                f"If you see IPC errors, use ulysses_degree={world_size}, ring_degree=1 instead."
+            )
+        
+        if enable_usp:
             logging.info(
-                f"{LOG_PREFIX} USP enabled (ulysses_degree={ulysses_degree}, ring_degree={ring_degree}, attention={attention_backend})"
+                f"{LOG_PREFIX} USP enabled (ulysses={ulysses_degree}, ring={ring_degree}, attention={attention_backend})"
             )
         
         # Check for parallel_attention dict (CFG-Split pattern)
@@ -168,7 +195,21 @@ class ParallelAttentionConfig:
                 f"{result['sharded_count']} sharded params"
             )
             
-            # Store executor and metadata (NO wrapper attachment - use FSDP2DistributedSampler custom node)
+            # NEW: Create and attach wrapper for standard KSampler compatibility
+            from comfy.parallel_attention.distributed_wrapper import DistributedEnvironmentWrapper
+            
+            wrapper = DistributedEnvironmentWrapper(
+                executor=executor,
+                world_size=2,
+                backend=actual_backend,
+            )
+            
+            # Attach wrapper using State Seam
+            model.set_model_unet_function_wrapper(wrapper)
+            
+            logging.info(f"{LOG_PREFIX} ✅ Wrapper attached - use standard KSampler")
+            
+            # Store executor and metadata
             model.parallel_attention = {
                 "executor": executor,
                 "model_type": model_type,
@@ -176,9 +217,11 @@ class ParallelAttentionConfig:
                 "vram_per_gpu": result["vram_gb"],
                 "sharded_params": result["sharded_count"],
                 "usp_config": usp_config,
+                "wrapper": wrapper,  # Store for cleanup
+                "uses_standard_ksampler": True,
             }
             
-            logging.info(f"{LOG_PREFIX} ✅ Workers ready (use FSDP2DistributedSampler custom node)")
+            logging.info(f"{LOG_PREFIX} ✅ Standard KSampler integration active")
             
             # Update inner parallel_attention context
             pa["executor"] = executor

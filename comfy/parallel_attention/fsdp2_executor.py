@@ -96,6 +96,9 @@ class FSDP2Executor:
         Returns:
             Result dictionary from rank 0 worker
         """
+        import time
+        rpc_start = time.time()
+        
         # Add DeviceMesh info to args if initializing
         if command == "initialize_fsdp2":
             device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -148,6 +151,10 @@ class FSDP2Executor:
                         f"shape={self.device_mesh['mesh_shape']}"
                     )
 
+            # Log RPC timing
+            rpc_elapsed = (time.time() - rpc_start) * 1000  # Convert to ms
+            logging.debug(f"{LOG_PREFIX} RPC '{command}' completed in {rpc_elapsed:.1f}ms")
+            
             return result
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Failed to receive from rank 0: {e}")

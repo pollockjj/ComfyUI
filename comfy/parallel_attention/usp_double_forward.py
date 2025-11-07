@@ -33,14 +33,6 @@ def usp_double_forward(
     txt_local = txt
     pe_local = pe
 
-    if LOGGER.isEnabledFor(logging.INFO):
-        LOGGER.info(
-            "%s rank_chunk_img=%d rank_chunk_txt=%d",
-            LOG_PREFIX,
-            img_local.shape[1],
-            txt_local.shape[1],
-        )
-
     img_mod1, img_mod2 = self.img_mod(vec)
     txt_mod1, txt_mod2 = self.txt_mod(vec)
 

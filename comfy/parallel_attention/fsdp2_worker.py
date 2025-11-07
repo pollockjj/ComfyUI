@@ -689,13 +689,12 @@ class FSDP2Worker:
             
             output = self.model.model.apply_model(x, timestep, **kwargs)
         
-        # Rank 0 returns output, others return dummy for executor compatibility
+        # Only rank 0 returns output (needs CPU for multiprocessing Queue pickling)
         if self.rank == 0:
-            logging.warning(f"🚨🚨🚨 CPU TRANSFER: output.shape={output.shape}, device={output.device} → CPU (RANK 0)")
             return {"output": output.cpu()}
         else:
-            logging.warning(f"🚨🚨🚨 CPU TRANSFER: dummy output.shape={output.shape}, device={output.device} → CPU (RANK {self.rank})")
-            return {"output": torch.zeros_like(output).cpu()}
+            # Rank 1+ returns empty dict (no dummy tensor needed)
+            return {}
     
     def _move_conditioning_to_device(self, c: dict):
         """Recursively move conditioning tensors to worker device."""

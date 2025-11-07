@@ -81,13 +81,6 @@ def usp_dit_forward(
     img = torch.chunk(img, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
     txt = torch.chunk(txt, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
 
-    LOGGER.info(
-        "%s img_chunk=%d txt_chunk=%d per_rank",
-        LOG_PREFIX,
-        img.shape[1],
-        txt.shape[1],
-    )
-
     blocks_replace = patches_replace.get("dit", {})
     for i, block in enumerate(self.double_blocks):
         block_key = ("double_block", i)

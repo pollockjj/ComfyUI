@@ -43,9 +43,6 @@ def usp_single_forward(
     local_tokens = x
     pe_local = pe
 
-    if LOGGER.isEnabledFor(logging.INFO):
-        LOGGER.info("%s rank_chunk=%d", LOG_PREFIX, local_tokens.shape[1])
-
     mod, _ = self.modulation(vec)
     pre_norm = self.pre_norm(local_tokens)
     modulated = apply_mod(pre_norm, (1 + mod.scale), mod.shift, modulation_dims)
