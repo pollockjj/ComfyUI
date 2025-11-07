@@ -104,12 +104,28 @@ def ulysses_dit_forward(
     sp_rank = get_sp_rank()
     sp_size = get_sp_world_size()
     
-    img = torch.chunk(img, sp_size, dim=1)[sp_rank]
-    txt = torch.chunk(txt, sp_size, dim=1)[sp_rank]  # txt is also chunked!
+    img_chunks = torch.chunk(img, sp_size, dim=1)
+    txt_chunks = torch.chunk(txt, sp_size, dim=1)
+    
+    # Handle case where sequence length doesn't divide evenly
+    if sp_rank < len(img_chunks):
+        img = img_chunks[sp_rank]
+    else:
+        # This shouldn't happen, but handle gracefully
+        img = img_chunks[0]
+    
+    if sp_rank < len(txt_chunks):
+        txt = txt_chunks[sp_rank]
+    else:
+        txt = txt_chunks[0]
     
     if pe is not None:
         # Chunk the full PE (includes both txt and img)
-        pe = torch.chunk(pe, sp_size, dim=1)[sp_rank]
+        pe_chunks = torch.chunk(pe, sp_size, dim=1)
+        if sp_rank < len(pe_chunks):
+            pe = pe_chunks[sp_rank]
+        else:
+            pe = pe_chunks[0]
     
     # Process through double blocks
     blocks_replace = patches_replace.get("dit", {})
