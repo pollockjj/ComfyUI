@@ -435,7 +435,8 @@ class FSDP2Worker:
                 if attention_impl == "fastvideo":
                     # Use FastVideo-style pure Ulysses implementation
                     ulysses_degree = int(usp_config.get("ulysses_degree", 2))
-                    self._apply_fastvideo_ulysses_patches(fsdp_model, ulysses_degree)
+                    attention_backend = usp_config.get("attention_backend", "sdpa")
+                    self._apply_fastvideo_ulysses_patches(fsdp_model, ulysses_degree, attention_backend)
                 else:
                     # Use xFuser USP implementation (default)
                     self._patch_usp_forwards_after_load(fsdp_model, usp_config)
@@ -587,10 +588,15 @@ class FSDP2Worker:
             ),
         )
     
-    def _apply_fastvideo_ulysses_patches(self, fsdp_model, ulysses_degree: int):
+    def _apply_fastvideo_ulysses_patches(self, fsdp_model, ulysses_degree: int, attention_backend: str = "sdpa"):
         """Apply FastVideo-style pure Ulysses patches (no xFuser dependency).
         
         This is a minimal, self-contained implementation using raw torch.distributed.
+        
+        Args:
+            fsdp_model: FSDP2-wrapped model
+            ulysses_degree: Degree of Ulysses parallelism (typically world_size)
+            attention_backend: Backend for local attention - "flash", "sdpa", or "math"
         """
         import types
         
@@ -603,6 +609,11 @@ class FSDP2Worker:
             initialize_sp_group(sp_degree=ulysses_degree)
             self._fastvideo_sp_initialized = True
             log_rank0(self.rank, 'info', f"{LOG_PREFIX} SP group initialized (degree={ulysses_degree})")
+        
+        # Set attention backend globally for this worker
+        from comfy.parallel_attention.fastvideo_ulysses.hooks import set_attention_backend
+        set_attention_backend(attention_backend)
+        log_rank0(self.rank, 'info', f"{LOG_PREFIX} Attention backend: {attention_backend}")
         
         # Import forward hooks
         from comfy.parallel_attention.fastvideo_ulysses.hooks import (

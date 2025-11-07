@@ -21,13 +21,24 @@ logger = logging.getLogger(__name__)
 
 # Global attention instance (created on first use)
 _ULYSSES_ATTENTION: Optional[UlyssesAttention] = None
+_ATTENTION_BACKEND: str = "sdpa"  # Default to PyTorch SDPA
+
+
+def set_attention_backend(backend: str):
+    """Set the attention backend for all hooks."""
+    global _ATTENTION_BACKEND
+    _ATTENTION_BACKEND = backend
 
 
 def _get_or_create_attention(num_heads: int, head_dim: int) -> UlyssesAttention:
     """Lazy-init global attention instance."""
     global _ULYSSES_ATTENTION
     if _ULYSSES_ATTENTION is None:
-        _ULYSSES_ATTENTION = UlyssesAttention(num_heads=num_heads, head_dim=head_dim)
+        _ULYSSES_ATTENTION = UlyssesAttention(
+            num_heads=num_heads, 
+            head_dim=head_dim,
+            backend=_ATTENTION_BACKEND
+        )
     return _ULYSSES_ATTENTION
 
 

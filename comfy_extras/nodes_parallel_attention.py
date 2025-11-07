@@ -39,7 +39,7 @@ class ParallelAttentionConfig:
                 "expert_config": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": '{"impl": "xfuser", "ring": 1, "ulysses": 2, "attention": "FLASH_ATTN"}'
+                    "placeholder": '{"impl": "fastvideo", "ulysses": 2, "attention": "sdpa"}'
                 }),
             }
         }
@@ -76,7 +76,7 @@ class ParallelAttentionConfig:
                 backend = config.get("backend", "auto")
                 ulysses_degree = config.get("ulysses", 2 if enable_usp else 1)
                 ring_degree = config.get("ring", 1)
-                attention_backend = config.get("attention", "FLASH_ATTN")
+                attention_backend = config.get("attention", "sdpa")  # "flash", "sdpa", or "math"
                 attention_impl = config.get("impl", "xfuser")  # "xfuser" or "fastvideo"
                 
                 logging.info(f"{LOG_PREFIX} ⚙️  EXPERT MODE: {config}")
@@ -86,7 +86,7 @@ class ParallelAttentionConfig:
                 if attention_impl == "fastvideo":
                     if ring_degree > 1:
                         raise RuntimeError(f"{LOG_PREFIX} FastVideo implementation only supports Ulysses (ring_degree must be 1)")
-                    logging.info(f"{LOG_PREFIX} Using FastVideo pure Ulysses implementation (zero-dependency)")
+                    logging.info(f"{LOG_PREFIX} Using FastVideo pure Ulysses implementation (zero-dependency, backend={attention_backend})")
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"{LOG_PREFIX} Invalid expert_config JSON: {e}")
         else:
@@ -94,7 +94,7 @@ class ParallelAttentionConfig:
             backend = "auto"
             ulysses_degree = 2 if enable_usp else 1
             ring_degree = 1  # Ring disabled by default (IPC issues with cudaMallocAsync)
-            attention_backend = "FLASH_ATTN"
+            attention_backend = "sdpa"  # Default to PyTorch SDPA for FastVideo
             logging.info(f"{LOG_PREFIX} Simple mode: enable_usp={enable_usp} → ulysses={ulysses_degree}, ring={ring_degree}")
         
         world_size = 2  # Currently hardcoded to 2 GPUs

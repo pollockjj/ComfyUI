@@ -1,12 +1,10 @@
-"""Pure Ulysses attention implementation using flash-attn."""
+"""Pure Ulysses attention implementation with pluggable backends."""
 
 import logging
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from typing import Optional, Tuple
-
-from flash_attn import flash_attn_func
 
 from comfy.parallel_attention.fastvideo_ulysses.communicator import (
     get_sp_rank,
@@ -36,19 +34,21 @@ class UlyssesAttention:
     5. All-to-all: scatter sequence → gather heads (reverse step 1)
     """
     
-    def __init__(self, num_heads: int, head_dim: int):
+    def __init__(self, num_heads: int, head_dim: int, backend: str = "sdpa"):
         """
         Args:
             num_heads: Total number of attention heads
             head_dim: Dimension of each head
+            backend: Attention backend - "flash", "sdpa", or "math"
         """
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.backend = backend
         self.world_size = None  # Will be set on first forward
         self.rank = None
         
         logger.info(
-            f"{LOG_PREFIX} Initialized (num_heads={num_heads}, head_dim={head_dim})"
+            f"{LOG_PREFIX} Initialized (num_heads={num_heads}, head_dim={head_dim}, backend={backend})"
         )
     
     def forward(
@@ -110,9 +110,8 @@ class UlyssesAttention:
             k = torch.cat([k, replicated_k], dim=1)
             v = torch.cat([v, replicated_v], dim=1)
         
-        # Step 3: Local flash attention
-        # flash_attn_func expects [batch, seq_len, num_heads, head_dim]
-        output = flash_attn_func(q, k, v, causal=False)
+        # Step 3: Local attention with pluggable backend
+        output = self._local_attention(q, k, v)
         
         # Step 4: Separate distributed and replicated outputs
         if replicated_q is not None:
@@ -137,3 +136,72 @@ class UlyssesAttention:
         logger.info(f"{LOG_PREFIX} After reverse all-to-all: distributed_output.shape={distributed_output.shape}")
         
         return distributed_output, replicated_output
+    
+    def _local_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        """Execute local attention using selected backend.
+        
+        Args:
+            q, k, v: [batch, seq_len, num_heads, head_dim]
+        
+        Returns:
+            output: [batch, seq_len, num_heads, head_dim]
+        """
+        if self.backend == "flash":
+            # FlashAttention 2/3 (fastest, requires flash-attn package)
+            from flash_attn import flash_attn_func
+            return flash_attn_func(q, k, v, causal=False)
+        
+        elif self.backend == "sdpa":
+            # PyTorch scaled_dot_product_attention (PyTorch 2.0+)
+            # Automatically uses FlashAttention/Memory-Efficient attention when available
+            return torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, 
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False
+            )
+        
+        elif self.backend == "math":
+            # Manual attention (fallback, slowest but always works)
+            return self._manual_attention(q, k, v)
+        
+        else:
+            raise ValueError(f"Unknown attention backend: {self.backend}")
+    
+    def _manual_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        """Manual attention implementation (fallback).
+        
+        Args:
+            q, k, v: [batch, seq_len, num_heads, head_dim]
+        
+        Returns:
+            output: [batch, seq_len, num_heads, head_dim]
+        """
+        # q, k, v: [batch, seq_len, num_heads, head_dim]
+        scale = 1.0 / (self.head_dim ** 0.5)
+        
+        # Compute attention scores
+        # [batch, num_heads, seq_len, head_dim] @ [batch, num_heads, head_dim, seq_len]
+        # = [batch, num_heads, seq_len, seq_len]
+        q = q.transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+        
+        # Apply attention to values
+        output = torch.matmul(attn_weights, v)  # [batch, num_heads, seq_len, head_dim]
+        output = output.transpose(1, 2)  # [batch, seq_len, num_heads, head_dim]
+        
+        return output
