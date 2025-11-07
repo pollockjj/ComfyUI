@@ -89,8 +89,8 @@ def all_to_all_4d(
     if world_size == 1:
         return tensor
     
-    # Split tensor along scatter_dim
-    input_list = list(torch.chunk(tensor, world_size, dim=scatter_dim))
+    # Split tensor along scatter_dim and ensure contiguous
+    input_list = [chunk.contiguous() for chunk in torch.chunk(tensor, world_size, dim=scatter_dim)]
     
     # Prepare output tensors
     output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]

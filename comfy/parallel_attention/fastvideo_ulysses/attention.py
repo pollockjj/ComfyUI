@@ -77,11 +77,15 @@ class UlyssesAttention:
         
         batch_size, seq_len, num_heads, head_dim = q.shape
         
+        logger.info(f"{LOG_PREFIX} Input shapes: q={q.shape}, k={k.shape}, v={v.shape}")
+        
         # Step 1: All-to-all for main QKV (scatter heads, gather sequence)
         # Before: [batch, seq_len, num_heads, head_dim]
         # After:  [batch, seq_len * world_size, num_heads / world_size, head_dim]
         qkv = torch.stack([q, k, v], dim=0)  # [3, batch, seq, heads, dim]
+        logger.info(f"{LOG_PREFIX} Before all-to-all: qkv.shape={qkv.shape}")
         qkv = all_to_all_4d(qkv, scatter_dim=3, gather_dim=2)  # Scatter heads (dim=3), gather seq (dim=2)
+        logger.info(f"{LOG_PREFIX} After all-to-all: qkv.shape={qkv.shape}")
         q, k, v = qkv.unbind(0)
         
         # Step 2: Handle replicated tokens (text) if provided
@@ -126,8 +130,10 @@ class UlyssesAttention:
         # After:  [batch, seq, heads, dim]
         distributed_output = all_to_all_4d(
             distributed_output, 
-            scatter_dim=2,  # Scatter sequence (was gathered)
-            gather_dim=3    # Gather heads (was scattered)
+            scatter_dim=1,  # Scatter sequence (was gathered)
+            gather_dim=2    # Gather heads (was scattered)
         )
+        
+        logger.info(f"{LOG_PREFIX} After reverse all-to-all: distributed_output.shape={distributed_output.shape}")
         
         return distributed_output, replicated_output

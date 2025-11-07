@@ -88,22 +88,17 @@ def ulysses_dit_forward(
     else:
         pe = None
     
-    # Chunk image tokens for sequence parallelism
-    # Text tokens stay replicated (full copy on each rank)
+    # Chunk BOTH image and text tokens for sequence parallelism
+    # This matches xFuser's approach
     sp_rank = get_sp_rank()
     sp_size = get_sp_world_size()
     
     img = torch.chunk(img, sp_size, dim=1)[sp_rank]
-    txt = txt  # Replicated, no chunking
+    txt = torch.chunk(txt, sp_size, dim=1)[sp_rank]  # txt is also chunked!
     
     if pe is not None:
-        # Split PE for both image and text
-        img_pe_len = img_ids.shape[1]
-        txt_pe_len = txt_ids.shape[1]
-        pe_txt = pe[:, :txt_pe_len]
-        pe_img = pe[:, txt_pe_len:]
-        pe_img = torch.chunk(pe_img, sp_size, dim=1)[sp_rank]
-        pe = torch.cat([pe_txt, pe_img], dim=1)
+        # Chunk the full PE (includes both txt and img)
+        pe = torch.chunk(pe, sp_size, dim=1)[sp_rank]
     
     # Process through double blocks
     blocks_replace = patches_replace.get("dit", {})
@@ -131,7 +126,9 @@ def ulysses_dit_forward(
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
     
     # Concatenate for single blocks
+    logger.info(f"⚡ [DiT] Before concat: txt.shape={txt.shape}, img.shape={img.shape}")
     img = torch.cat((txt, img), 1)
+    logger.info(f"⚡ [DiT] After concat: img.shape={img.shape}")
     
     # Process through single blocks
     for i, block in enumerate(self.single_blocks):
@@ -151,16 +148,38 @@ def ulysses_dit_forward(
         else:
             img = block(img, vec=vec, pe=pe)
     
-    # Separate text and image
-    txt_len = txt.shape[1]
-    img = img[:, txt_len:]
-    
-    # Final layer norm and projection
-    img = self.final_layer(img, vec)
-    
-    # All-gather image tokens back to full sequence
+    # All-gather img and txt to get full sequences
     from comfy.parallel_attention.fastvideo_ulysses.communicator import all_gather_nd
     img = all_gather_nd(img.contiguous(), dim=1)
+    txt = all_gather_nd(txt.contiguous(), dim=1)
+    
+    # Concatenate and rechunk for single blocks
+    txt_len = txt.shape[1]
+    combined = torch.cat((txt, img), dim=1)
+    combined = torch.chunk(combined, get_sp_world_size(), dim=1)[get_sp_rank()]
+    
+    # Process through single blocks
+    for i, block in enumerate(self.single_blocks):
+        block_key = ("single_block", i)
+        if block_key in blocks_replace:
+            def block_wrap(args):
+                out = block(args["img"], vec=args["vec"], pe=args["pe"])
+                return {"img": out}
+            
+            patched = blocks_replace[block_key](
+                {"img": combined, "vec": vec, "pe": pe},
+                {"original_block": block_wrap}
+            )
+            combined = patched["img"]
+        else:
+            combined = block(combined, vec=vec, pe=pe)
+    
+    # All-gather and separate text/image
+    combined = all_gather_nd(combined.contiguous(), dim=1)
+    img = combined[:, txt_len:]
+    
+    # Final layer
+    img = self.final_layer(img, vec)
     
     return img
 
@@ -205,16 +224,29 @@ def ulysses_double_block_forward(
     txt_qkv = txt_q.reshape(txt.shape[0], txt.shape[1], 3, num_heads, head_dim)
     txt_q, txt_k, txt_v = txt_qkv.permute(2, 0, 1, 3, 4).unbind(0)
     
-    # Apply RoPE to image tokens
-    if pe is not None:
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v, pe)
+    # Apply QKNorm
+    img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+    txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
     
-    # Ulysses attention: image is distributed, text is replicated
+    # Apply RoPE to image tokens only
+    if pe is not None:
+        from comfy.parallel_attention.usp_attention import apply_rope
+        img_q, img_k = apply_rope(img_q, img_k, pe)
+    
+    # Concatenate txt and img for joint attention (Flux pattern)
+    # txt is NOT replicated - it's part of the joint sequence!
+    joint_q = torch.cat([txt_q, img_q], dim=1)  # [batch, txt_seq + img_seq, heads, dim]
+    joint_k = torch.cat([txt_k, img_k], dim=1)
+    joint_v = torch.cat([txt_v, img_v], dim=1)
+    
+    # Ulysses attention on joint sequence
     attn = _get_or_create_attention(num_heads, head_dim)
-    img_attn_out, txt_attn_out = attn.forward(
-        q=img_q, k=img_k, v=img_v,
-        replicated_q=txt_q, replicated_k=txt_k, replicated_v=txt_v
-    )
+    joint_attn_out, _ = attn.forward(q=joint_q, k=joint_k, v=joint_v)
+    
+    # Split back into txt and img
+    txt_seq_len = txt.shape[1]
+    txt_attn_out = joint_attn_out[:, :txt_seq_len]
+    img_attn_out = joint_attn_out[:, txt_seq_len:]
     
     # Reshape back
     img_attn_out = img_attn_out.reshape(img.shape[0], img.shape[1], -1)
@@ -227,6 +259,8 @@ def ulysses_double_block_forward(
     # FFN
     img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
     txt = txt + txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+    
+    logger.info(f"⚡ [Double Block] Returning img.shape={img.shape}, txt.shape={txt.shape}")
     
     return img, txt
 
@@ -244,27 +278,32 @@ def ulysses_single_block_forward(
     """
     mod, _ = self.modulation(vec)
     x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
-    qkv = self.linear1(x_mod)
+    linear1_out = self.linear1(x_mod)
+    
+    # Split into QKV and MLP (linear1 outputs both!)
+    qkv, mlp = torch.split(linear1_out, [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
     
     # Reshape for attention
     num_heads = self.num_heads
-    # Calculate head_dim from qkv dimensions
-    hidden_size = qkv.shape[-1] // 3
-    head_dim = hidden_size // num_heads
+    head_dim = self.hidden_size // num_heads
     
     qkv = qkv.reshape(x.shape[0], x.shape[1], 3, num_heads, head_dim)
     q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
     
     # Apply RoPE
     if pe is not None:
-        q, k = self.norm(q, k, v, pe)
+        q, k = self.norm(q, k, v)
     
     # Ulysses attention (all distributed, no replicated)
     attn = _get_or_create_attention(num_heads, head_dim)
     attn_out, _ = attn.forward(q=q, k=k, v=v)
     
-    # Reshape and project
+    # Reshape attention output
     attn_out = attn_out.reshape(x.shape[0], x.shape[1], -1)
-    x = x + mod.gate * self.linear2(attn_out)
+    
+    # Concatenate with MLP stream and project
+    mlp_out = self.mlp_act(mlp)
+    output = self.linear2(torch.cat((attn_out, mlp_out), dim=-1))
+    x = x + mod.gate * output
     
     return x
