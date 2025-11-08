@@ -6,14 +6,14 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from comfy.parallel_attention.fastvideo_ulysses.communicator import (
+from comfy.parallel_attention.torch_sp_ulysses.communicator import (
     get_sp_rank,
     get_sp_world_size,
     all_to_all_4d,
     all_gather_nd,
 )
 
-LOG_PREFIX = "⚡ [FastVideo-Ulysses][Attention]"
+LOG_PREFIX = "⚡ [Parallel-Attention][TorchSP-Ulysses][Attention]"
 logger = logging.getLogger(__name__)
 
 
@@ -159,12 +159,17 @@ class UlyssesAttention:
         elif self.backend == "sdpa":
             # PyTorch scaled_dot_product_attention (PyTorch 2.0+)
             # Automatically uses FlashAttention/Memory-Efficient attention when available
-            return torch.nn.functional.scaled_dot_product_attention(
+            logger.info(
+                f"{LOG_PREFIX} Calling SDPA: q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}"
+            )
+            result = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, 
                 attn_mask=None,
                 dropout_p=0.0,
                 is_causal=False
             )
+            logger.info(f"{LOG_PREFIX} SDPA output shape: {result.shape}")
+            return result
         
         elif self.backend == "math":
             # Manual attention (fallback, slowest but always works)

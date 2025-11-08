@@ -1,10 +1,10 @@
-"""FastVideo-style pure Ulysses attention implementation.
+"""Torch Sequence-Parallel Ulysses attention implementation.
 
 Zero-dependency (except torch.distributed and flash-attn) bare-metal implementation
 of Ulysses-style sequence parallelism for ComfyUI.
 """
 
-from comfy.parallel_attention.fastvideo_ulysses.communicator import (
+from comfy.parallel_attention.torch_sp_ulysses.communicator import (
     initialize_sp_group,
     get_sp_group,
     get_sp_rank,
@@ -13,7 +13,7 @@ from comfy.parallel_attention.fastvideo_ulysses.communicator import (
     all_gather_nd,
 )
 
-from comfy.parallel_attention.fastvideo_ulysses.attention import (
+from comfy.parallel_attention.torch_sp_ulysses.attention import (
     UlyssesAttention,
 )
 

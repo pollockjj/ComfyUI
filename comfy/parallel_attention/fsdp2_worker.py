@@ -328,12 +328,14 @@ class FSDP2Worker:
         
         LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
         
+        # Override worker BPS flag if explicitly requested via args
         requested_bps = bool(args.get("use_backend_plugin_system", False))
-        if requested_bps and not self.use_backend_plugin_system:
+        if requested_bps:
+            self.use_backend_plugin_system = True
             log_rank0(
                 self.rank,
-                "warning",
-                f"{LOG_PREFIX} Requested Backend Plugin System but feature flag disabled for worker",
+                "info",
+                f"{LOG_PREFIX} Backend Plugin System enabled via workflow request",
             )
         elif self.use_backend_plugin_system and not requested_bps:
             log_rank0(
@@ -468,11 +470,15 @@ class FSDP2Worker:
                     ulysses_degree = int(usp_config.get("ulysses_degree", 1))
                     ring_degree = int(usp_config.get("ring_degree", 1))
                     attention_backend = usp_config.get("attention_backend", "FLASH_ATTN")
-                    # Normalize attention backend name for xFuser compatibility
-                    if attention_backend.upper() == "SDPA":
-                        attention_backend = "FLASH_ATTN"
+                    
+                    # Map impl to backend name for BPS
+                    if attention_impl == "torch_sp_ulysses":
+                        bps_backend_name = "TORCH_SP_ULYSSES"
+                    else:
+                        bps_backend_name = "XFUSER_USP"
+                    
                     self._patch_distributed_attention_bps(
-                        fsdp_model, ulysses_degree, ring_degree, attention_backend
+                        fsdp_model, ulysses_degree, ring_degree, attention_backend, bps_backend_name
                     )
                 elif attention_impl == "fastvideo":
                     # Use FastVideo-style pure Ulysses implementation
@@ -545,7 +551,7 @@ class FSDP2Worker:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
 
-    def _patch_distributed_attention_bps(self, fsdp_model, ulysses_degree, ring_degree, attention_backend):
+    def _patch_distributed_attention_bps(self, fsdp_model, ulysses_degree, ring_degree, attention_backend, bps_backend_name="XFUSER_USP"):
         """Patch model forwards to use Backend Plugin System DistributedAttention.
 
         Called when USE_BACKEND_PLUGIN_SYSTEM=true. Initializes xFuser parallel state
@@ -565,24 +571,46 @@ class FSDP2Worker:
                 f"ring_degree={ring_degree}, world_size={self.world_size}"
             )
 
-        # Initialize xFuser parallel state (we still need its process group management)
-        try:
-            from xfuser.core.distributed import (
-                init_distributed_environment,
-                initialize_model_parallel,
-            )
-        except ImportError as exc:
-            raise RuntimeError("xfuser package is required for process group management") from exc
+        # Initialize parallel state based on backend
+        if bps_backend_name == "TORCH_SP_ULYSSES":
+            # Use TorchSP communicator (expects dist already initialized by FSDP2)
+            from .torch_sp_ulysses import initialize_sp_group, get_sp_rank, get_sp_world_size, get_sp_group
+            if not self._usp_parallel_initialized:
+                initialize_sp_group(sp_degree=self.world_size)
+                self._usp_parallel_initialized = True
+                log_rank0(self.rank, "info", f"{LOG_PREFIX} Initialized TorchSP communicator")
+            
+            # Store backend-agnostic accessors
+            self._sp_get_rank = get_sp_rank
+            self._sp_get_world_size = get_sp_world_size
+            self._sp_get_group = get_sp_group
+        else:
+            # Initialize xFuser parallel state (for xFuser backend)
+            try:
+                from xfuser.core.distributed import (
+                    init_distributed_environment,
+                    initialize_model_parallel,
+                    get_sequence_parallel_rank,
+                    get_sequence_parallel_world_size,
+                    get_sp_group,
+                )
+            except ImportError as exc:
+                raise RuntimeError("xfuser package is required for process group management") from exc
 
-        if not self._usp_parallel_initialized:
-            init_distributed_environment(rank=self.rank, world_size=self.world_size)
-            initialize_model_parallel(
-                sequence_parallel_degree=self.world_size,
-                ring_degree=ring_degree,
-                ulysses_degree=ulysses_degree,
-            )
-            self._usp_parallel_initialized = True
-            log_rank0(self.rank, "info", f"{LOG_PREFIX} Initialized xFuser parallel state")
+            if not self._usp_parallel_initialized:
+                init_distributed_environment(rank=self.rank, world_size=self.world_size)
+                initialize_model_parallel(
+                    sequence_parallel_degree=self.world_size,
+                    ring_degree=ring_degree,
+                    ulysses_degree=ulysses_degree,
+                )
+                self._usp_parallel_initialized = True
+                log_rank0(self.rank, "info", f"{LOG_PREFIX} Initialized xFuser parallel state")
+            
+            # Store backend-agnostic accessors (xFuser naming)
+            self._sp_get_rank = get_sequence_parallel_rank
+            self._sp_get_world_size = get_sequence_parallel_world_size
+            self._sp_get_group = get_sp_group
 
         # Import Backend Plugin System components
         from .distributed_attention import DistributedAttention
@@ -609,7 +637,7 @@ class FSDP2Worker:
         log_rank0(
             self.rank,
             "info",
-            f"{LOG_PREFIX} Creating DistributedAttention (heads={num_heads}, dim={head_dim})",
+            f"{LOG_PREFIX} Creating DistributedAttention (heads={num_heads}, dim={head_dim}, backend={bps_backend_name})",
         )
 
         # Patch double blocks
@@ -622,7 +650,7 @@ class FSDP2Worker:
                 head_dim=head_dim,
                 device=self.device,
                 dtype=torch.bfloat16,
-                backend_name="XFUSER_USP",
+                backend_name=bps_backend_name,
                 **backend_kwargs,
             )
 
@@ -662,28 +690,28 @@ class FSDP2Worker:
                 img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
                 txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
-                # Backend Plugin System handles RoPE internally
-                if self.flipped_img_txt:
-                    attn = self._distributed_attn.forward(
-                        torch.cat((img_q, txt_q), dim=2),
-                        torch.cat((img_k, txt_k), dim=2),
-                        torch.cat((img_v, txt_v), dim=2),
-                        freqs_cis=pe,
-                        attn_mask=attn_mask,
-                    )
-                    img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
-                else:
-                    attn = self._distributed_attn.forward(
-                        torch.cat((txt_q, img_q), dim=2),
-                        torch.cat((txt_k, img_k), dim=2),
-                        torch.cat((txt_v, img_v), dim=2),
-                        freqs_cis=pe,
-                        attn_mask=attn_mask,
-                    )
-                    txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+                # FastVideo pattern: img is sharded via Ulysses, txt is replicated
+                # Transpose to FastVideo convention: [batch, heads, seq, dim] → [batch, seq, heads, dim]
+                img_q = img_q.transpose(1, 2)
+                img_k = img_k.transpose(1, 2)
+                img_v = img_v.transpose(1, 2)
+                txt_q = txt_q.transpose(1, 2)
+                txt_k = txt_k.transpose(1, 2)
+                txt_v = txt_v.transpose(1, 2)
+                
+                # Pass img as main q/k/v, txt as replicated_q/k/v
+                img_attn, txt_attn = self._distributed_attn.forward(
+                    img_q, img_k, img_v,
+                    replicated_q=txt_q,
+                    replicated_k=txt_k,
+                    replicated_v=txt_v,
+                    freqs_cis=pe,
+                    attn_mask=attn_mask,
+                )
 
-                img_attn = img_attn.contiguous()
-                txt_attn = txt_attn.contiguous()
+                # Transpose back: [batch, seq, heads, dim] → [batch, heads, seq, dim]
+                img_attn = img_attn.transpose(1, 2).contiguous()
+                txt_attn = txt_attn.transpose(1, 2).contiguous() if txt_attn is not None else txt_attn
 
                 img_updated = img + apply_mod(
                     self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img
@@ -736,7 +764,7 @@ class FSDP2Worker:
                 head_dim=head_dim,
                 device=self.device,
                 dtype=torch.bfloat16,
-                backend_name="XFUSER_USP",
+                backend_name=bps_backend_name,
                 **backend_kwargs,
             )
 
@@ -766,8 +794,11 @@ class FSDP2Worker:
         log_rank0(self.rank, "info", f"{LOG_PREFIX} Patched {len(single_blocks)} single blocks")
 
         # Patch DiT orchestrator
+        # Create closure to capture worker instance for backend-agnostic group access
+        worker = self
+        
         def bps_dit_forward(
-            self,
+            self,  # This is the DiT model instance
             img,
             img_ids,
             txt,
@@ -779,14 +810,13 @@ class FSDP2Worker:
             transformer_options=None,
             attn_mask=None,
         ):
-            """Backend Plugin System DiT orchestrator forward."""
+            """Backend Plugin System DiT orchestrator forward (backend-agnostic)."""
             from .usp_dit_forward import pad_if_odd
             from comfy.ldm.flux.layers import timestep_embedding
-            from xfuser.core.distributed import (
-                get_sequence_parallel_rank,
-                get_sequence_parallel_world_size,
-                get_sp_group,
-            )
+            
+            # Use worker's stored backend-agnostic accessors instead of importing xFuser
+            get_sp_rank = worker._sp_get_rank
+            get_sp_world_size = worker._sp_get_world_size
 
             transformer_options = transformer_options or {}
             patches_replace = transformer_options.get("patches_replace", {})
@@ -815,22 +845,14 @@ class FSDP2Worker:
                 ids = torch.cat((txt_ids, img_ids), dim=1)
                 pe_combine = self.pe_embedder(ids)
                 pe_image = self.pe_embedder(img_ids)
-                pe_combine = torch.chunk(pe_combine, get_sequence_parallel_world_size(), dim=2)[
-                    get_sequence_parallel_rank()
-                ]
-                pe_image = torch.chunk(pe_image, get_sequence_parallel_world_size(), dim=2)[
-                    get_sequence_parallel_rank()
-                ]
+                pe_combine = torch.chunk(pe_combine, get_sp_world_size(), dim=2)[get_sp_rank()]
+                pe_image = torch.chunk(pe_image, get_sp_world_size(), dim=2)[get_sp_rank()]
             else:
                 pe_combine = None
                 pe_image = None
 
-            img = torch.chunk(img, get_sequence_parallel_world_size(), dim=1)[
-                get_sequence_parallel_rank()
-            ]
-            txt = torch.chunk(txt, get_sequence_parallel_world_size(), dim=1)[
-                get_sequence_parallel_rank()
-            ]
+            img = torch.chunk(img, get_sp_world_size(), dim=1)[get_sp_rank()]
+            txt = torch.chunk(txt, get_sp_world_size(), dim=1)[get_sp_rank()]
 
             blocks_replace = patches_replace.get("dit", {})
             for i, block in enumerate(self.double_blocks):
@@ -852,7 +874,7 @@ class FSDP2Worker:
                             "img": img,
                             "txt": txt,
                             "vec": vec,
-                            "pe": pe_image,
+                            "pe": pe_combine,  # Use combined pe for txt+img
                             "attn_mask": attn_mask,
                             "transformer_options": transformer_options,
                         },
@@ -861,7 +883,7 @@ class FSDP2Worker:
                     img = patched["img"]
                     txt = patched["txt"]
                 else:
-                    img, txt = block(img=img, txt=txt, vec=vec, pe=pe_image, attn_mask=attn_mask)
+                    img, txt = block(img=img, txt=txt, vec=vec, pe=pe_combine, attn_mask=attn_mask)
 
                 if control is not None:
                     control_i = control.get("input")

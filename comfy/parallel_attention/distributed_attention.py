@@ -71,36 +71,73 @@ class DistributedAttention(nn.Module):
         q: Tensor,
         k: Tensor,
         v: Tensor,
+        replicated_q: Optional[Tensor] = None,
+        replicated_k: Optional[Tensor] = None,
+        replicated_v: Optional[Tensor] = None,
         freqs_cis: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Optional[Tensor]]:
         """Execute distributed attention using the configured backend.
 
+        FastVideo pattern: Main q/k/v are sharded across sequence (Ulysses),
+        replicated q/k/v are replicated on all GPUs (typically text conditioning).
+
         Args:
-            q, k, v: Query, key, value tensors shaped [batch, heads, seq_local, head_dim].
+            q, k, v: Query, key, value tensors shaped [batch, seq, heads, dim] (will be sharded).
+            replicated_q/k/v: Optional replicated tensors [batch, seq, heads, dim] (not sharded).
             freqs_cis: Optional RoPE coefficients.
             attn_mask: Optional attention mask.
 
         Returns:
-            Attention output shaped [batch, seq_local, heads * head_dim].
+            Tuple of (main_output [batch, seq, heads, dim], replicated_output or None).
         """
         metadata = AttentionMetadata(freqs_cis=freqs_cis)
 
-        # Backend-specific preprocessing (e.g., RoPE application)
-        q_prep = self.attn_impl.preprocess_qkv(q, metadata)
-        k_prep = self.attn_impl.preprocess_qkv(k, metadata)
-        v_prep = self.attn_impl.preprocess_qkv(v, metadata)
+        # Stack QKV (FastVideo pattern uses torch.cat along dim 0)
+        # Input: [batch, seq, heads, dim] each → Cat to: [batch*3, seq, heads, dim]
+        qkv = torch.cat([q, k, v], dim=0)
+
+        # Backend-specific preprocessing on STACKED tensor (e.g., RoPE application)
+        qkv = self.attn_impl.preprocess_qkv(qkv, metadata)
+
+        # Split back to individual tensors
+        batch_size = q.shape[0]
+        q, k, v = torch.split(qkv, batch_size, dim=0)
+        
+        # Store original sequence length before concatenation
+        main_seq_len = q.shape[1]
+        
+        # Handle replicated tensors if provided
+        if replicated_q is not None:
+            # Concatenate replicated tokens with main tokens
+            assert replicated_k is not None and replicated_v is not None
+            replicated_qkv = torch.cat([replicated_q, replicated_k, replicated_v], dim=0)
+            replicated_qkv = self.attn_impl.preprocess_qkv(replicated_qkv, metadata)
+            rep_batch_size = replicated_q.shape[0]
+            rep_q, rep_k, rep_v = torch.split(replicated_qkv, rep_batch_size, dim=0)
+            
+            # Concatenate: [main_seq + replicated_seq, ...]
+            q = torch.cat([q, rep_q], dim=1)
+            k = torch.cat([k, rep_k], dim=1)
+            v = torch.cat([v, rep_v], dim=1)
 
         # Core attention computation
         output = self.attn_impl.forward(
-            q_prep,
-            k_prep,
-            v_prep,
+            q,
+            k,
+            v,
             metadata,
             attn_mask=attn_mask,
         )
 
         # Backend-specific postprocessing
         output = self.attn_impl.postprocess_output(output, metadata)
+        
+        # Split output if we had replicated tokens
+        replicated_output = None
+        if replicated_q is not None:
+            main_output = output[:, :main_seq_len]
+            replicated_output = output[:, main_seq_len:]
+            return main_output, replicated_output
 
-        return output
+        return output, None

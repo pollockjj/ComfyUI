@@ -55,6 +55,11 @@ def canonicalize_rope(freqs_cis: Tensor | Iterable[Tensor]) -> Tensor:
         LOGGER.debug("⚡ [Parallel-Attention][BPS-RoPE] canonical tensor already 5D shape=%s", tuple(tensor.shape))
         return tensor
 
+    if tensor.ndim == 6 and tensor.shape[1] == 1:
+        # Squeeze spurious dimension: (batch, 1, seq, rotary_dim, 2, 2) -> (batch, seq, rotary_dim, 2, 2)
+        LOGGER.debug("⚡ [Parallel-Attention][BPS-RoPE] squeezing 6D tensor shape=%s", tuple(tensor.shape))
+        return tensor.squeeze(1)
+
     if tensor.ndim == 4 and tensor.shape[-1] == 2:
         LOGGER.debug("⚡ [Parallel-Attention][BPS-RoPE] expanding 4D tensor shape=%s", tuple(tensor.shape))
         return tensor.unsqueeze(-2)
@@ -67,7 +72,13 @@ def canonicalize_rope(freqs_cis: Tensor | Iterable[Tensor]) -> Tensor:
         LOGGER.debug("⚡ [Parallel-Attention][BPS-RoPE] expanding 2D tensor shape=%s", tuple(tensor.shape))
         return tensor.unsqueeze(0).unsqueeze(0).unsqueeze(-2)
 
-    raise ValueError("Unsupported RoPE tensor shape")
+    LOGGER.error(
+        "⚡ [Parallel-Attention][BPS-RoPE] Unsupported RoPE tensor: ndim=%d, shape=%s, dtype=%s",
+        tensor.ndim,
+        tuple(tensor.shape),
+        tensor.dtype,
+    )
+    raise ValueError(f"Unsupported RoPE tensor shape: ndim={tensor.ndim}, shape={tuple(tensor.shape)}")
 
 
 def match_rope_batch(freqs_cis: Tensor, batch_size: int) -> Tensor:
