@@ -1,9 +1,145 @@
 """Parallel Attention configuration and control nodes."""
 
-import torch
+import importlib
 import logging
+import os
+import sys
+from pathlib import Path
+from typing import Tuple
+
+import torch
+
+from comfy.parallel_attention.backends import rope_utils
 
 LOG_PREFIX = "⚡ [Parallel-Attention][Config Node]"
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PARALLEL_ATTENTION_ROOT = _PROJECT_ROOT / "parallel-attention"
+if str(_PARALLEL_ATTENTION_ROOT) not in sys.path:
+    sys.path.append(str(_PARALLEL_ATTENTION_ROOT))
+
+TEST_MODULES = {
+    "usp_attention_smoke": "unified_sequence.tests.usp_attention_smoke",
+    "usp_dit_forward_smoke": "unified_sequence.tests.usp_dit_forward_smoke",
+    "usp_double_forward_smoke": "unified_sequence.tests.usp_double_forward_smoke",
+    "usp_single_forward_smoke": "unified_sequence.tests.usp_single_forward_smoke",
+}
+
+
+class ParallelAttentionTestRunner:
+    """Runs existing parallel attention smoke tests inside MCP workflows."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "test_name": (list(TEST_MODULES.keys()), {"default": "usp_attention_smoke"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "run_test"
+    CATEGORY = "parallel_attention/tests"
+    OUTPUT_NODE = True
+
+    def run_test(self, test_name: str):
+        module_path = TEST_MODULES.get(test_name)
+        if module_path is None:
+            message = f"Unknown test name: {test_name}"
+            logging.error("⚡ [Parallel-Attention][Tests] %s", message)
+            raise ValueError(message)
+
+        logging.info(
+            "⚡ [Parallel-Attention][Tests] Running smoke test '%s' (%s)",
+            test_name,
+            module_path,
+        )
+
+        module = importlib.import_module(module_path)
+        if hasattr(module, "run"):
+            module.run()
+            logging.info("⚡ [Parallel-Attention][Tests] ✅ %s passed", test_name)
+            return (f"PASS: {test_name}",)
+
+        if hasattr(module, "main"):
+            module.main()
+            logging.info("⚡ [Parallel-Attention][Tests] ✅ %s passed via main()", test_name)
+            return (f"PASS: {test_name}",)
+
+        message = f"Test module '{module_path}' does not expose run() or main()"
+        logging.error("⚡ [Parallel-Attention][Tests] %s", message)
+        raise AttributeError(message)
+
+
+class ParallelAttentionRoPETestSuite:
+    """Validates rope_utils canonicalisation semantics via deterministic checks."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "run_tests"
+    CATEGORY = "parallel_attention/tests"
+    OUTPUT_NODE = True
+
+    def run_tests(self):
+        checks = [
+            self._check_tuple_input,
+            self._check_4d_input,
+            self._check_3d_input,
+            self._check_broadcast,
+            self._check_prepare,
+        ]
+
+        prefix = "⚡ [Parallel-Attention][Tests-RoPE]"
+        for check in checks:
+            logging.info("%s Running %s", prefix, check.__name__)
+            check()
+            logging.info("%s ✅ %s", prefix, check.__name__)
+
+        return ("PASS: rope_utils",)
+
+    @staticmethod
+    def _make_cos_sin(shape: Tuple[int, ...]):
+        cos = torch.ones(shape)
+        sin = torch.zeros(shape)
+        return cos, sin
+
+    def _check_tuple_input(self):
+        cos, sin = self._make_cos_sin((1, 8, 64))
+        tensor = rope_utils.canonicalize_rope((cos, sin))
+        assert tensor.shape == (1, 8, 64, 2, 2)
+        assert torch.allclose(tensor[..., 0, 0], cos)
+
+    def _check_4d_input(self):
+        tensor = torch.ones(1, 8, 64, 2)
+        canonical = rope_utils.canonicalize_rope(tensor)
+        assert canonical.shape == (1, 8, 64, 1, 2)
+
+    def _check_3d_input(self):
+        tensor = torch.ones(8, 64, 2)
+        canonical = rope_utils.canonicalize_rope(tensor)
+        assert canonical.shape == (1, 8, 64, 1, 2)
+
+    def _check_broadcast(self):
+        tensor = torch.ones(1, 8, 64, 2, 2)
+        broadcast = rope_utils.match_rope_batch(tensor, batch_size=2)
+        assert broadcast.shape == (2, 8, 64, 2, 2)
+
+    def _check_prepare(self):
+        q = torch.randn(2, 24, 128)
+        tensor = torch.ones(1, 8, 64, 2, 2)
+        prepared = rope_utils.prepare_rope_for_qkv(tensor, q)
+        assert prepared.shape[0] == q.shape[0]
+        assert prepared.device == q.device
+        assert prepared.dtype == q.dtype
+
+
+def _use_backend_plugin_system() -> bool:
+    return os.getenv("USE_BACKEND_PLUGIN_SYSTEM", "false").lower() == "true"
 
 
 def get_device_list():
@@ -34,6 +170,7 @@ class ParallelAttentionConfig:
                 "device_2": (devices, {"default": "cuda:1"}),
                 "enable_fsdp2": ("BOOLEAN", {"default": True}),
                 "enable_usp": ("BOOLEAN", {"default": False}),
+                "use_backend_plugin_system": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "expert_config": ("STRING", {
@@ -49,11 +186,11 @@ class ParallelAttentionConfig:
     CATEGORY = "parallel_attention"
     
     @classmethod
-    def IS_CHANGED(cls, model, device_1, device_2, enable_fsdp2, enable_usp, expert_config=""):
+    def IS_CHANGED(cls, model, device_1, device_2, enable_fsdp2, enable_usp, use_backend_plugin_system=False, expert_config=""):
         """Force re-execution when settings change (prevents worker reuse with wrong config)."""
         import hashlib
         
-        settings_str = f"{enable_fsdp2}{enable_usp}{device_1}{device_2}{expert_config}"
+        settings_str = f"{enable_fsdp2}{enable_usp}{use_backend_plugin_system}{device_1}{device_2}{expert_config}"
         current_hash = hashlib.sha256(settings_str.encode()).hexdigest()
         
         if not hasattr(cls, '_last_hash'):
@@ -63,7 +200,7 @@ class ParallelAttentionConfig:
         
         return current_hash
     
-    def configure(self, model, device_1, device_2, enable_fsdp2, enable_usp, expert_config=""):
+    def configure(self, model, device_1, device_2, enable_fsdp2, enable_usp, use_backend_plugin_system=False, expert_config=""):
         """Configure parallel attention and spawn workers."""
         import json
         
@@ -94,7 +231,7 @@ class ParallelAttentionConfig:
             backend = "auto"
             ulysses_degree = 2 if enable_usp else 1
             ring_degree = 1  # Ring disabled by default (IPC issues with cudaMallocAsync)
-            attention_backend = "sdpa"  # Default to PyTorch SDPA for FastVideo
+            attention_backend = "FLASH_ATTN"  # Default to FlashAttention
             logging.info(f"{LOG_PREFIX} Simple mode: enable_usp={enable_usp} → ulysses={ulysses_degree}, ring={ring_degree}")
         
         world_size = 2  # Currently hardcoded to 2 GPUs
@@ -135,6 +272,19 @@ class ParallelAttentionConfig:
         if not isinstance(pa, dict):
             raise RuntimeError(f"{LOG_PREFIX} parallel_attention is not a dict")
         
+        # Check if BPS override is provided via node input
+        if use_backend_plugin_system:
+            bps_enabled = True
+            logging.info(f"{LOG_PREFIX} Backend Plugin System enabled via workflow input")
+        else:
+            bps_enabled = _use_backend_plugin_system()
+            if bps_enabled:
+                logging.info(f"{LOG_PREFIX} Backend Plugin System feature flag enabled")
+            else:
+                logging.debug(f"{LOG_PREFIX} Backend Plugin System feature flag disabled")
+
+        pa["use_backend_plugin_system"] = bps_enabled
+
         # Detect model type
         model_type = type(model.model).__name__.lower()
         if model_type == "qwenimage":
@@ -196,6 +346,7 @@ class ParallelAttentionConfig:
                 "object_patches": object_patches,
                 "usp_config": usp_config,
                 "attention_impl": attention_impl,  # Pass implementation choice
+                "use_backend_plugin_system": bps_enabled,
             })
             
             if result.get("status") != "success":
@@ -505,6 +656,8 @@ class TestApplyModelStep:
 
 
 NODE_CLASS_MAPPINGS = {
+    "ParallelAttentionTestRunner": ParallelAttentionTestRunner,
+    "ParallelAttentionRoPETestSuite": ParallelAttentionRoPETestSuite,
     "ParallelAttentionConfig": ParallelAttentionConfig,
     "TestFSDP2Inference": TestFSDP2Inference,
     "FSDP2DistributedSampler": FSDP2DistributedSampler,
@@ -512,6 +665,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "ParallelAttentionTestRunner": "Parallel Attention Test Runner",
+    "ParallelAttentionRoPETestSuite": "Parallel Attention RoPE Test Suite",
     "ParallelAttentionConfig": "Parallel Attention Config",
     "TestFSDP2Inference": "Test FSDP2 Inference",
     "FSDP2DistributedSampler": "FSDP2 Distributed Sampler",

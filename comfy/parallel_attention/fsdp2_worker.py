@@ -4,6 +4,7 @@ Implements multi-GPU model sharding using PyTorch FSDP2 and DeviceMesh.
 Based on FastVideo worker pattern.
 """
 
+import os
 import torch
 import logging
 import types
@@ -53,6 +54,22 @@ class FSDP2Worker:
         self.usp_config = None
         self.usp_enabled = False
         self._usp_parallel_initialized = False
+
+        self.use_backend_plugin_system = (
+            os.getenv("USE_BACKEND_PLUGIN_SYSTEM", "false").lower() == "true"
+        )
+        if self.use_backend_plugin_system:
+            log_rank0(
+                rank,
+                "info",
+                f"{LOG_PREFIX} Worker-{rank} Backend Plugin System feature flag enabled",
+            )
+        else:
+            log_rank0(
+                rank,
+                "debug",
+                f"{LOG_PREFIX} Worker-{rank} Backend Plugin System feature flag disabled",
+            )
 
         # Create DeviceMesh (ARCHITECTURE.md requirement)
         from torch.distributed.device_mesh import init_device_mesh
@@ -306,10 +323,23 @@ class FSDP2Worker:
                 "meta_params": int
             }
         """
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
+        
         checkpoint_path = args["checkpoint_path"]
         model_type = args["model_type"]
-        
-        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
+        requested_bps = bool(args.get("use_backend_plugin_system", False))
+        if requested_bps and not self.use_backend_plugin_system:
+            log_rank0(
+                self.rank,
+                "warning",
+                f"{LOG_PREFIX} Requested Backend Plugin System but feature flag disabled for worker",
+            )
+        elif self.use_backend_plugin_system and not requested_bps:
+            log_rank0(
+                self.rank,
+                "debug",
+                f"{LOG_PREFIX} Worker feature flag enabled; upstream request did not opt-in",
+            )
         
         # Get policy from registry (don't pass through pipe - dataclass serialization issues)
         from comfy.parallel_attention.fsdp2_policies import FSDP2PolicyRegistry
@@ -432,7 +462,18 @@ class FSDP2Worker:
             attention_impl = args.get("attention_impl", "xfuser")  # Default to xFuser for backward compat
             
             if usp_config:
-                if attention_impl == "fastvideo":
+                if self.use_backend_plugin_system:
+                    # Use Backend Plugin System for attention
+                    ulysses_degree = int(usp_config.get("ulysses_degree", 1))
+                    ring_degree = int(usp_config.get("ring_degree", 1))
+                    attention_backend = usp_config.get("attention_backend", "FLASH_ATTN")
+                    # Normalize attention backend name for xFuser compatibility
+                    if attention_backend.upper() == "SDPA":
+                        attention_backend = "FLASH_ATTN"
+                    self._patch_distributed_attention_bps(
+                        fsdp_model, ulysses_degree, ring_degree, attention_backend
+                    )
+                elif attention_impl == "fastvideo":
                     # Use FastVideo-style pure Ulysses implementation
                     ulysses_degree = int(usp_config.get("ulysses_degree", 2))
                     attention_backend = usp_config.get("attention_backend", "sdpa")
@@ -502,6 +543,382 @@ class FSDP2Worker:
         except Exception as e:
             logging.error(f"{LOG_PREFIX} Error: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}
+
+    def _patch_distributed_attention_bps(self, fsdp_model, ulysses_degree, ring_degree, attention_backend):
+        """Patch model forwards to use Backend Plugin System DistributedAttention.
+
+        Called when USE_BACKEND_PLUGIN_SYSTEM=true. Initializes xFuser parallel state
+        (required for process groups), then monkey-patches forwards to delegate to
+        the unified DistributedAttention layer.
+        """
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}][BPS]"
+
+        if ulysses_degree <= 1 and ring_degree <= 1:
+            log_rank0(self.rank, "debug", f"{LOG_PREFIX} Skipping BPS patching (no parallelism)")
+            return
+
+        sequence_degree = ulysses_degree * ring_degree
+        if sequence_degree != self.world_size:
+            raise RuntimeError(
+                f"{LOG_PREFIX} USP configuration mismatch: ulysses_degree={ulysses_degree}, "
+                f"ring_degree={ring_degree}, world_size={self.world_size}"
+            )
+
+        # Initialize xFuser parallel state (we still need its process group management)
+        try:
+            from xfuser.core.distributed import (
+                init_distributed_environment,
+                initialize_model_parallel,
+            )
+        except ImportError as exc:
+            raise RuntimeError("xfuser package is required for process group management") from exc
+
+        if not self._usp_parallel_initialized:
+            init_distributed_environment(rank=self.rank, world_size=self.world_size)
+            initialize_model_parallel(
+                sequence_parallel_degree=self.world_size,
+                ring_degree=ring_degree,
+                ulysses_degree=ulysses_degree,
+            )
+            self._usp_parallel_initialized = True
+            log_rank0(self.rank, "info", f"{LOG_PREFIX} Initialized xFuser parallel state")
+
+        # Import Backend Plugin System components
+        from .distributed_attention import DistributedAttention
+        from .usp_single_forward import apply_mod
+
+        # Determine backend kwargs based on attention type
+        backend_kwargs = {
+            "ulysses_degree": ulysses_degree,
+            "ring_degree": ring_degree,
+            "attn_type": attention_backend,
+        }
+
+        # Create DistributedAttention instances for this model
+        # We need to inspect the model to get head count and head_dim
+        diffusion_model = fsdp_model.diffusion_model
+        first_double = getattr(diffusion_model, "double_blocks", [None])[0]
+        if first_double is None:
+            log_rank0(self.rank, "warning", f"{LOG_PREFIX} No double_blocks found, skipping")
+            return
+
+        num_heads = first_double.num_heads
+        head_dim = first_double.img_attn.qkv.out_features // (3 * num_heads)
+
+        log_rank0(
+            self.rank,
+            "info",
+            f"{LOG_PREFIX} Creating DistributedAttention (heads={num_heads}, dim={head_dim})",
+        )
+
+        # Patch double blocks
+        import types
+        double_blocks = getattr(diffusion_model, "double_blocks", [])
+        for block in double_blocks:
+            # Store the DistributedAttention instance on the block
+            block._distributed_attn = DistributedAttention(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                device=self.device,
+                dtype=torch.bfloat16,
+                backend_name="XFUSER_USP",
+                **backend_kwargs,
+            )
+
+            def bps_double_forward(
+                self,
+                *,
+                img,
+                txt,
+                vec,
+                pe,
+                attn_mask=None,
+                modulation_dims_img=None,
+                modulation_dims_txt=None,
+                **kwargs,
+            ):
+                """Backend Plugin System double-stream forward."""
+                img_mod1, img_mod2 = self.img_mod(vec)
+                txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+                img_modulated = apply_mod(
+                    self.img_norm1(img), (1 + img_mod1.scale), img_mod1.shift, modulation_dims_img
+                )
+                txt_modulated = apply_mod(
+                    self.txt_norm1(txt), (1 + txt_mod1.scale), txt_mod1.shift, modulation_dims_txt
+                )
+
+                img_qkv = self.img_attn.qkv(img_modulated)
+                txt_qkv = self.txt_attn.qkv(txt_modulated)
+
+                img_q, img_k, img_v = img_qkv.view(
+                    img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1
+                ).permute(2, 0, 3, 1, 4)
+                txt_q, txt_k, txt_v = txt_qkv.view(
+                    txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1
+                ).permute(2, 0, 3, 1, 4)
+
+                img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+                txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+
+                # Backend Plugin System handles RoPE internally
+                if self.flipped_img_txt:
+                    attn = self._distributed_attn.forward(
+                        torch.cat((img_q, txt_q), dim=2),
+                        torch.cat((img_k, txt_k), dim=2),
+                        torch.cat((img_v, txt_v), dim=2),
+                        freqs_cis=pe,
+                        attn_mask=attn_mask,
+                    )
+                    img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
+                else:
+                    attn = self._distributed_attn.forward(
+                        torch.cat((txt_q, img_q), dim=2),
+                        torch.cat((txt_k, img_k), dim=2),
+                        torch.cat((txt_v, img_v), dim=2),
+                        freqs_cis=pe,
+                        attn_mask=attn_mask,
+                    )
+                    txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+
+                img_attn = img_attn.contiguous()
+                txt_attn = txt_attn.contiguous()
+
+                img_updated = img + apply_mod(
+                    self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img
+                )
+                img_updated = img_updated + apply_mod(
+                    self.img_mlp(
+                        apply_mod(
+                            self.img_norm2(img_updated),
+                            (1 + img_mod2.scale),
+                            img_mod2.shift,
+                            modulation_dims_img,
+                        )
+                    ),
+                    img_mod2.gate,
+                    None,
+                    modulation_dims_img,
+                )
+
+                txt_updated = txt + apply_mod(
+                    self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt
+                )
+                txt_updated = txt_updated + apply_mod(
+                    self.txt_mlp(
+                        apply_mod(
+                            self.txt_norm2(txt_updated),
+                            (1 + txt_mod2.scale),
+                            txt_mod2.shift,
+                            modulation_dims_txt,
+                        )
+                    ),
+                    txt_mod2.gate,
+                    None,
+                    modulation_dims_txt,
+                )
+
+                if txt_updated.dtype == torch.float16:
+                    txt_updated = torch.nan_to_num(txt_updated, nan=0.0, posinf=65504, neginf=-65504)
+
+                return img_updated, txt_updated
+
+            block.forward = types.MethodType(bps_double_forward, block)
+
+        log_rank0(self.rank, "info", f"{LOG_PREFIX} Patched {len(double_blocks)} double blocks")
+
+        # Patch single blocks (similar pattern)
+        single_blocks = getattr(diffusion_model, "single_blocks", [])
+        for block in single_blocks:
+            block._distributed_attn = DistributedAttention(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                device=self.device,
+                dtype=torch.bfloat16,
+                backend_name="XFUSER_USP",
+                **backend_kwargs,
+            )
+
+            def bps_single_forward(self, tensor, *, vec, pe, attn_mask=None, **kwargs):
+                """Backend Plugin System single-stream forward."""
+                mod_mlp, mod_attn = self.modulation(vec)
+
+                norm_tensor = self.pre_norm(tensor)
+                modulated_tensor = apply_mod(norm_tensor, (1 + mod_attn.scale), mod_attn.shift, None)
+
+                qkv = self.attn.qkv(modulated_tensor)
+                q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(
+                    2, 0, 3, 1, 4
+                )
+                q, k = self.attn.norm(q, k, v)
+
+                attn_out = self._distributed_attn.forward(q, k, v, freqs_cis=pe, attn_mask=attn_mask)
+                attn_out = apply_mod(self.attn.proj(attn_out), mod_attn.gate, None, None)
+
+                mlp_out = self.mlp(apply_mod(norm_tensor, (1 + mod_mlp.scale), mod_mlp.shift, None))
+                mlp_out = apply_mod(mlp_out, mod_mlp.gate, None, None)
+
+                return tensor + attn_out + mlp_out
+
+            block.forward = types.MethodType(bps_single_forward, block)
+
+        log_rank0(self.rank, "info", f"{LOG_PREFIX} Patched {len(single_blocks)} single blocks")
+
+        # Patch DiT orchestrator
+        def bps_dit_forward(
+            self,
+            img,
+            img_ids,
+            txt,
+            txt_ids,
+            timesteps,
+            y,
+            guidance=None,
+            control=None,
+            transformer_options=None,
+            attn_mask=None,
+        ):
+            """Backend Plugin System DiT orchestrator forward."""
+            from .usp_dit_forward import pad_if_odd
+            from comfy.ldm.flux.layers import timestep_embedding
+            from xfuser.core.distributed import (
+                get_sequence_parallel_rank,
+                get_sequence_parallel_world_size,
+                get_sp_group,
+            )
+
+            transformer_options = transformer_options or {}
+            patches_replace = transformer_options.get("patches_replace", {})
+
+            img = pad_if_odd(img, dim=1)
+            if img_ids is not None:
+                img_ids = pad_if_odd(img_ids, dim=1)
+            txt = pad_if_odd(txt, dim=1)
+            if txt_ids is not None:
+                txt_ids = pad_if_odd(txt_ids, dim=1)
+
+            if y is None:
+                y = torch.zeros(
+                    (img.shape[0], self.params.vec_in_dim), device=img.device, dtype=img.dtype
+                )
+
+            img = self.img_in(img)
+            vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
+            if self.params.guidance_embed and guidance is not None:
+                vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
+
+            vec = vec + self.vector_in(y[:, : self.params.vec_in_dim])
+            txt = self.txt_in(txt)
+
+            if img_ids is not None:
+                ids = torch.cat((txt_ids, img_ids), dim=1)
+                pe_combine = self.pe_embedder(ids)
+                pe_image = self.pe_embedder(img_ids)
+                pe_combine = torch.chunk(pe_combine, get_sequence_parallel_world_size(), dim=2)[
+                    get_sequence_parallel_rank()
+                ]
+                pe_image = torch.chunk(pe_image, get_sequence_parallel_world_size(), dim=2)[
+                    get_sequence_parallel_rank()
+                ]
+            else:
+                pe_combine = None
+                pe_image = None
+
+            img = torch.chunk(img, get_sequence_parallel_world_size(), dim=1)[
+                get_sequence_parallel_rank()
+            ]
+            txt = torch.chunk(txt, get_sequence_parallel_world_size(), dim=1)[
+                get_sequence_parallel_rank()
+            ]
+
+            blocks_replace = patches_replace.get("dit", {})
+            for i, block in enumerate(self.double_blocks):
+                block_key = ("double_block", i)
+                if block_key in blocks_replace:
+
+                    def block_wrap(args):
+                        out_img, out_txt = block(
+                            img=args["img"],
+                            txt=args["txt"],
+                            vec=args["vec"],
+                            pe=args["pe"],
+                            attn_mask=args.get("attn_mask"),
+                        )
+                        return {"img": out_img, "txt": out_txt}
+
+                    patched = blocks_replace[block_key](
+                        {
+                            "img": img,
+                            "txt": txt,
+                            "vec": vec,
+                            "pe": pe_image,
+                            "attn_mask": attn_mask,
+                            "transformer_options": transformer_options,
+                        },
+                        {"original_block": block_wrap},
+                    )
+                    img = patched["img"]
+                    txt = patched["txt"]
+                else:
+                    img, txt = block(img=img, txt=txt, vec=vec, pe=pe_image, attn_mask=attn_mask)
+
+                if control is not None:
+                    control_i = control.get("input")
+                    if control_i and i < len(control_i):
+                        add = control_i[i]
+                        if add is not None:
+                            img += add
+
+            if img.dtype == torch.float16:
+                img = torch.nan_to_num(img, nan=0.0, posinf=65504, neginf=-65504)
+
+            img = get_sp_group().all_gather(img.contiguous(), dim=1)
+            txt = get_sp_group().all_gather(txt.contiguous(), dim=1)
+
+            txt_len = txt.shape[1]
+            combined = torch.cat((txt, img), dim=1)
+            combined = torch.chunk(combined, get_sequence_parallel_world_size(), dim=1)[
+                get_sequence_parallel_rank()
+            ]
+
+            for i, block in enumerate(self.single_blocks):
+                block_key = ("single_block", i)
+                if block_key in blocks_replace:
+
+                    def block_wrap(args):
+                        out = block(
+                            args["img"], vec=args["vec"], pe=args["pe"], attn_mask=args.get("attn_mask")
+                        )
+                        return {"img": out}
+
+                    patched = blocks_replace[block_key](
+                        {
+                            "img": combined,
+                            "vec": vec,
+                            "pe": pe_combine,
+                            "attn_mask": attn_mask,
+                            "transformer_options": transformer_options,
+                        },
+                        {"original_block": block_wrap},
+                    )
+                    combined = patched["img"]
+                else:
+                    combined = block(combined, vec=vec, pe=pe_combine, attn_mask=attn_mask)
+
+                if control is not None:
+                    control_o = control.get("output")
+                    if control_o and i < len(control_o):
+                        add = control_o[i]
+                        if add is not None:
+                            combined[:, txt_len:] += add
+
+            combined = get_sp_group().all_gather(combined, dim=1)
+            result = combined[:, txt_len:]
+
+            return self.final_layer(result, vec)
+
+        diffusion_model.forward_orig = types.MethodType(bps_dit_forward, diffusion_model)
+        log_rank0(self.rank, "info", f"{LOG_PREFIX} Patched DiT orchestrator")
 
     def _patch_usp_forwards_after_load(self, fsdp_model, usp_config):
         """Patch USP forwards after weights loaded into FSDP-wrapped blocks.

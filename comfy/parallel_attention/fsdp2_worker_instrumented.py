@@ -54,6 +54,22 @@ class FSDP2Worker:
         # Set device
         torch.cuda.set_device(self.device)
         
+        self.use_backend_plugin_system = (
+            os.getenv("USE_BACKEND_PLUGIN_SYSTEM", "false").lower() == "true"
+        )
+        if self.use_backend_plugin_system:
+            log_rank0(
+                rank,
+                'info',
+                f"{LOG_PREFIX}[Worker][Rank {rank}] Backend Plugin System feature flag enabled",
+            )
+        else:
+            log_rank0(
+                rank,
+                'debug',
+                f"{LOG_PREFIX}[Worker][Rank {rank}] Backend Plugin System feature flag disabled",
+            )
+
         log_rank0(rank, 'info', f"{LOG_PREFIX}[Worker][Rank {rank}] Initialized on {self.device}")
     
     def execute(self, command: str, args: dict):
@@ -221,6 +237,19 @@ class FSDP2Worker:
             checkpoint_path = args["checkpoint_path"]
             model_type = args["model_type"]
             policy_name = args.get("policy_name", "flux_dev_fsdp2")
+            requested_bps = bool(args.get("use_backend_plugin_system", False))
+            if requested_bps and not self.use_backend_plugin_system:
+                log_rank0(
+                    self.rank,
+                    'warning',
+                    f"{LOG_PREFIX} Requested Backend Plugin System but feature flag disabled for worker",
+                )
+            elif self.use_backend_plugin_system and not requested_bps:
+                log_rank0(
+                    self.rank,
+                    'debug',
+                    f"{LOG_PREFIX} Worker feature flag enabled; upstream request did not opt-in",
+                )
             
             logging.info(f"{LOG_PREFIX} Initializing FSDP2 from {checkpoint_path}")
             
