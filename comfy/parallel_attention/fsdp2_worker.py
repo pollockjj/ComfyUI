@@ -464,9 +464,12 @@ class FSDP2Worker:
             usp_config = args.get("usp_config")
             attention_impl = args.get("attention_impl", "xfuser")  # Default to xFuser for backward compat
             
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 PATH SELECTION: usp_config={usp_config is not None}, use_backend_plugin_system={self.use_backend_plugin_system}, attention_impl={attention_impl}")
+            
             if usp_config:
                 if self.use_backend_plugin_system:
                     # Use Backend Plugin System for attention
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING BPS PATH")
                     ulysses_degree = int(usp_config.get("ulysses_degree", 1))
                     ring_degree = int(usp_config.get("ring_degree", 1))
                     attention_backend = usp_config.get("attention_backend", "FLASH_ATTN")
@@ -474,19 +477,23 @@ class FSDP2Worker:
                     # Map impl to backend name for BPS
                     if attention_impl == "torch_sp_ulysses":
                         bps_backend_name = "TORCH_SP_ULYSSES"
+                        log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 BPS BACKEND: TORCH_SP_ULYSSES")
                     else:
                         bps_backend_name = "XFUSER_USP"
+                        log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 BPS BACKEND: XFUSER_USP")
                     
                     self._patch_distributed_attention_bps(
                         fsdp_model, ulysses_degree, ring_degree, attention_backend, bps_backend_name
                     )
                 elif attention_impl == "fastvideo":
                     # Use FastVideo-style pure Ulysses implementation
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING FASTVIDEO PATH")
                     ulysses_degree = int(usp_config.get("ulysses_degree", 2))
                     attention_backend = usp_config.get("attention_backend", "sdpa")
                     self._apply_fastvideo_ulysses_patches(fsdp_model, ulysses_degree, attention_backend)
                 else:
                     # Use xFuser USP implementation (default)
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING XFUSER USP PATH")
                     self._patch_usp_forwards_after_load(fsdp_model, usp_config)
             
             # CRITICAL: Enable comfy_cast_weights on ALL modules (multi-GPU pattern)
@@ -667,6 +674,9 @@ class FSDP2Worker:
                 **kwargs,
             ):
                 """Backend Plugin System double-stream forward."""
+                print(f"🔥🔥🔥 BPS DOUBLE FORWARD CALLED: img.shape={img.shape}, txt.shape={txt.shape}, vec={'None' if vec is None else vec.shape}")
+                print(f"🔥🔥🔥 self type: {type(self).__name__}, has img_mod: {hasattr(self, 'img_mod')}, has _distributed_attn: {hasattr(self, '_distributed_attn')}")
+                
                 img_mod1, img_mod2 = self.img_mod(vec)
                 txt_mod1, txt_mod2 = self.txt_mod(vec)
 
