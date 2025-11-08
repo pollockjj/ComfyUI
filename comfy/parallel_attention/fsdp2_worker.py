@@ -323,10 +323,11 @@ class FSDP2Worker:
                 "meta_params": int
             }
         """
-        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
-        
         checkpoint_path = args["checkpoint_path"]
         model_type = args["model_type"]
+        
+        LOG_PREFIX = f"⚡ [Parallel-Attention][Worker][Rank {self.rank}]"
+        
         requested_bps = bool(args.get("use_backend_plugin_system", False))
         if requested_bps and not self.use_backend_plugin_system:
             log_rank0(
