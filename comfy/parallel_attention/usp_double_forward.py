@@ -28,6 +28,9 @@ def usp_double_forward(
     **kwargs,
 ) -> tuple[Tensor, Tensor]:
     """Sequence-parallel double-stream forward pass."""
+    
+    print(f"🔥🔥🔥 XFUSER USP DOUBLE FORWARD CALLED: img.shape={img.shape}, txt.shape={txt.shape}, vec={'None' if vec is None else vec.shape}")
+    print(f"🔥🔥🔥 self type: {type(self).__name__}, has img_mod: {hasattr(self, 'img_mod')}")
 
     img_local = img
     txt_local = txt

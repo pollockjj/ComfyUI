@@ -55,21 +55,8 @@ class FSDP2Worker:
         self.usp_enabled = False
         self._usp_parallel_initialized = False
 
-        self.use_backend_plugin_system = (
-            os.getenv("USE_BACKEND_PLUGIN_SYSTEM", "false").lower() == "true"
-        )
-        if self.use_backend_plugin_system:
-            log_rank0(
-                rank,
-                "info",
-                f"{LOG_PREFIX} Worker-{rank} Backend Plugin System feature flag enabled",
-            )
-        else:
-            log_rank0(
-                rank,
-                "debug",
-                f"{LOG_PREFIX} Worker-{rank} Backend Plugin System feature flag disabled",
-            )
+        # DO NOT set use_backend_plugin_system here - it comes from args in initialize_fsdp2_from_checkpoint
+        self.use_backend_plugin_system = False  # Default, will be overridden by args
 
         # Create DeviceMesh (ARCHITECTURE.md requirement)
         from torch.distributed.device_mesh import init_device_mesh
@@ -327,18 +314,21 @@ class FSDP2Worker:
         
         checkpoint_path = args["checkpoint_path"]
         model_type = args["model_type"]
-        requested_bps = bool(args.get("use_backend_plugin_system", False))
-        if requested_bps and not self.use_backend_plugin_system:
+        
+        # Set use_backend_plugin_system from args (overrides __init__ default)
+        self.use_backend_plugin_system = bool(args.get("use_backend_plugin_system", False))
+        
+        if self.use_backend_plugin_system:
             log_rank0(
                 self.rank,
-                "warning",
-                f"{LOG_PREFIX} Requested Backend Plugin System but feature flag disabled for worker",
+                "info",
+                f"{LOG_PREFIX} Backend Plugin System enabled via args",
             )
-        elif self.use_backend_plugin_system and not requested_bps:
+        else:
             log_rank0(
                 self.rank,
                 "debug",
-                f"{LOG_PREFIX} Worker feature flag enabled; upstream request did not opt-in",
+                f"{LOG_PREFIX} Backend Plugin System disabled",
             )
         
         # Get policy from registry (don't pass through pipe - dataclass serialization issues)
@@ -461,9 +451,12 @@ class FSDP2Worker:
             usp_config = args.get("usp_config")
             attention_impl = args.get("attention_impl", "xfuser")  # Default to xFuser for backward compat
             
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 PATH SELECTION: usp_config={usp_config is not None}, use_backend_plugin_system={self.use_backend_plugin_system}, attention_impl={attention_impl}")
+            
             if usp_config:
                 if self.use_backend_plugin_system:
                     # Use Backend Plugin System for attention
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING BPS PATH")
                     ulysses_degree = int(usp_config.get("ulysses_degree", 1))
                     ring_degree = int(usp_config.get("ring_degree", 1))
                     attention_backend = usp_config.get("attention_backend", "FLASH_ATTN")
@@ -475,11 +468,13 @@ class FSDP2Worker:
                     )
                 elif attention_impl == "fastvideo":
                     # Use FastVideo-style pure Ulysses implementation
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING FASTVIDEO PATH")
                     ulysses_degree = int(usp_config.get("ulysses_degree", 2))
                     attention_backend = usp_config.get("attention_backend", "sdpa")
                     self._apply_fastvideo_ulysses_patches(fsdp_model, ulysses_degree, attention_backend)
                 else:
                     # Use xFuser USP implementation (default)
+                    log_rank0(self.rank, 'info', f"{LOG_PREFIX} 🔥🔥🔥 TAKING XFUSER USP PATH")
                     self._patch_usp_forwards_after_load(fsdp_model, usp_config)
             
             # CRITICAL: Enable comfy_cast_weights on ALL modules (multi-GPU pattern)
@@ -638,6 +633,9 @@ class FSDP2Worker:
                 **kwargs,
             ):
                 """Backend Plugin System double-stream forward."""
+                print(f"🔥🔥🔥 BPS DOUBLE FORWARD CALLED: img.shape={img.shape}, txt.shape={txt.shape}, vec={'None' if vec is None else vec.shape}")
+                print(f"🔥🔥🔥 self type: {type(self).__name__}, has img_mod: {hasattr(self, 'img_mod')}, has _distributed_attn: {hasattr(self, '_distributed_attn')}")
+                
                 img_mod1, img_mod2 = self.img_mod(vec)
                 txt_mod1, txt_mod2 = self.txt_mod(vec)
 
@@ -724,6 +722,7 @@ class FSDP2Worker:
                 return img_updated, txt_updated
 
             block.forward = types.MethodType(bps_double_forward, block)
+            log_rank0(self.rank, "info", f"{LOG_PREFIX} BPS patched block {id(block)}: type={type(block).__name__}, forward={block.forward}")
 
         log_rank0(self.rank, "info", f"{LOG_PREFIX} Patched {len(double_blocks)} double blocks")
 
@@ -981,6 +980,7 @@ class FSDP2Worker:
         for block in double_blocks:
             block.forward = types.MethodType(usp_double_forward, block)
             patched_double += 1
+            log_rank0(self.rank, 'info', f"{LOG_PREFIX} xFuser USP patched block {patched_double}: id={id(block)}, type={type(block).__name__}, forward={block.forward}")
 
         patched_single = 0
         for block in single_blocks:

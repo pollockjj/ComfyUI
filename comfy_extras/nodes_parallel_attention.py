@@ -216,8 +216,12 @@ class ParallelAttentionConfig:
                 attention_backend = config.get("attention", "sdpa")  # "flash", "sdpa", or "math"
                 attention_impl = config.get("impl", "xfuser")  # "xfuser" or "fastvideo"
                 
+                # Allow expert config to override use_backend_plugin_system
+                if "use_bps" in config:
+                    use_backend_plugin_system = config["use_bps"]
+                
                 logging.info(f"{LOG_PREFIX} ⚙️  EXPERT MODE: {config}")
-                logging.info(f"{LOG_PREFIX} ⚙️  Parsed: impl={attention_impl}, ulysses={ulysses_degree}, ring={ring_degree}, backend={backend}, attention={attention_backend}")
+                logging.info(f"{LOG_PREFIX} ⚙️  Parsed: impl={attention_impl}, use_bps={use_backend_plugin_system}, ulysses={ulysses_degree}, ring={ring_degree}, backend={backend}, attention={attention_backend}")
                 
                 # Validate FastVideo constraints
                 if attention_impl == "fastvideo":
