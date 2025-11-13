@@ -101,6 +101,14 @@ def execute_prestartup_script():
         logging.info("")
 
 apply_custom_paths()
+
+# PyIsolate: Initialize isolation system (for custom nodes + future DP/SP workers)
+try:
+    import comfy.isolation
+    logging.info("PyIsolate isolation system available")
+except ImportError:
+    logging.debug("PyIsolate not installed, isolation disabled")
+
 execute_prestartup_script()
 
 
