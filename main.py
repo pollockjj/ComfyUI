@@ -155,6 +155,16 @@ import comfyui_version
 import app.logger
 import hook_breaker_ac10a0
 
+# PyIsolate: Initialize AFTER torch imports (for custom nodes + future DP/SP workers)
+try:
+    import comfy.isolation
+    comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe
+    logging.info(f"{comfy.isolation.LOG_PREFIX}[System] Isolation system available")
+except ImportError as e:
+    logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
+except Exception as e:
+    logging.error(f"PyIsolate initialization failed: {e}")
+
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
     device_name = comfy.model_management.get_torch_device_name(device)
