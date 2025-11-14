@@ -16,13 +16,23 @@ from importlib.metadata import version
 import requests
 from typing_extensions import NotRequired
 
-from utils.install_util import get_missing_requirements_message, requirements_path
+IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
+
+if not IS_PYISOLATE_CHILD:
+    from utils.install_util import get_missing_requirements_message, requirements_path
+else:  # pragma: no cover - only hit inside isolated child processes
+    def get_missing_requirements_message():
+        raise RuntimeError("frontend_management accessed install_util inside PyIsolate child")
+
+    requirements_path = None
 
 from comfy.cli_args import DEFAULT_VERSION_STRING
 import app.logger
 
 
 def frontend_install_warning_message():
+    if requirements_path is None:
+        raise RuntimeError("frontend_install_warning_message invoked inside PyIsolate child")
     return f"""
 {get_missing_requirements_message()}
 
@@ -45,6 +55,8 @@ def get_installed_frontend_version():
 
 def get_required_frontend_version():
     """Get the required frontend version from requirements.txt."""
+    if requirements_path is None:
+        raise RuntimeError("requirements_path unavailable inside PyIsolate child")
     try:
         with open(requirements_path, "r", encoding="utf-8") as f:
             for line in f:

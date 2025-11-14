@@ -12,6 +12,7 @@ import math
 import time
 import random
 import logging
+from pathlib import Path
 
 from PIL import Image, ImageOps, ImageSequence
 from PIL.PngImagePlugin import PngInfo
@@ -40,6 +41,7 @@ from comfy.cli_args import args
 import importlib
 
 import folder_paths
+from comfy.isolation import initialize_isolation_nodes
 import latent_preview
 import node_helpers
 
@@ -2213,6 +2215,14 @@ async def init_external_custom_nodes():
     Returns:
         None
     """
+    isolated_specs = await initialize_isolation_nodes()
+    logging.info("� [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
+    for spec in isolated_specs:
+        NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
+        NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)
+
+    isolated_module_paths = {spec.module_path.resolve() for spec in isolated_specs}
+
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_import_times = []
@@ -2223,6 +2233,9 @@ async def init_external_custom_nodes():
 
         for possible_module in possible_modules:
             module_path = os.path.join(custom_node_path, possible_module)
+            if Path(module_path).resolve() in isolated_module_paths:
+                logging.info("Skipping %s; loaded via PyIsolate", module_path)
+                continue
             if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": continue
             if module_path.endswith(".disabled"): continue
             if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:

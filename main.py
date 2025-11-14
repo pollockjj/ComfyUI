@@ -3,34 +3,43 @@ comfy.options.enable_args_parsing()
 
 import os
 import importlib.util
+import sys
+
+CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
+IS_PRIMARY_PROCESS = (not IS_PYISOLATE_CHILD) and __name__ == "__main__"
+
 import folder_paths
 import time
 from comfy.cli_args import args
 from app.logger import setup_logger
 import itertools
-import utils.extra_config
 import logging
-import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
 
-if __name__ == "__main__":
+if IS_PRIMARY_PROCESS:
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
-setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
+if not IS_PYISOLATE_CHILD:
+    setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
 
 def apply_custom_paths():
+    from utils import extra_config
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
     if os.path.isfile(extra_model_paths_config_path):
-        utils.extra_config.load_extra_path_config(extra_model_paths_config_path)
+        extra_config.load_extra_path_config(extra_model_paths_config_path)
 
     if args.extra_model_paths_config:
         for config_path in itertools.chain(*args.extra_model_paths_config):
-            utils.extra_config.load_extra_path_config(config_path)
+            extra_config.load_extra_path_config(config_path)
 
     # --output-directory, --input-directory, --user-directory
     if args.output_directory:
@@ -100,8 +109,11 @@ def execute_prestartup_script():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
-apply_custom_paths()
-execute_prestartup_script()
+if IS_PRIMARY_PROCESS:
+    apply_custom_paths()
+    execute_prestartup_script()
+else:
+    logging.debug("Skipping ComfyUI main prestartup hooks inside child process (%s)", __name__)
 
 
 # Main code
@@ -114,7 +126,7 @@ import gc
 if os.name == "nt":
     os.environ['MIMALLOC_PURGE_DELAY'] = '0'
 
-if __name__ == "__main__":
+if IS_PRIMARY_PROCESS:
     os.environ['TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL'] = '1'
     if args.default_device is not None:
         default_dev = args.default_device
@@ -371,7 +383,7 @@ def start_comfyui(asyncio_loop=None):
     return asyncio_loop, prompt_server, start_all
 
 
-if __name__ == "__main__":
+if IS_PRIMARY_PROCESS:
     # Running directly, just start ComfyUI.
     logging.info("Python version: {}".format(sys.version))
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
