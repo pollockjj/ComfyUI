@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 
 from .extension_wrapper import ComfyNodeExtension
 
-LOG_PREFIX = "� [PyIsolate]"
+LOG_PREFIX = "🔒 [PyIsolate]"
 PYISOLATE_EDITABLE_PATH = Path("/home/johnj/pyisolate")
 
 

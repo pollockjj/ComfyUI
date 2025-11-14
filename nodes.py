@@ -2216,7 +2216,7 @@ async def init_external_custom_nodes():
         None
     """
     isolated_specs = await initialize_isolation_nodes()
-    logging.info("� [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
+    logging.info("🔒 [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
     for spec in isolated_specs:
         NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
         NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)

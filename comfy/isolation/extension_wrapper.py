@@ -7,7 +7,7 @@ from typing import Any, Dict, Tuple
 
 from pyisolate import ExtensionBase
 
-LOG_PREFIX = "� [PyIsolate]"
+LOG_PREFIX = "🔒 [PyIsolate]"
 
 logger = logging.getLogger(__name__)
 
