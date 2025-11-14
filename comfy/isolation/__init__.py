@@ -16,6 +16,8 @@ from typing import Dict, List, Optional
 
 import yaml
 
+import folder_paths
+
 try:
     import pyisolate
     from pyisolate import ExtensionManager, ExtensionManagerConfig
@@ -26,8 +28,10 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 
 from .extension_wrapper import ComfyNodeExtension
 
-LOG_PREFIX = "🔒 [PyIsolate]"
-PYISOLATE_EDITABLE_PATH = Path("/home/johnj/pyisolate")
+LOG_PREFIX = "📚 [PyIsolate]"
+PYISOLATE_EDITABLE_PATH = Path("/mnt/ai/pyisolate")
+PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
+PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def get_isolation_logger(name: str) -> logging.Logger:
@@ -140,10 +144,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     extension_name = manifest.get("name", node_dir.name)
     dependencies = _augment_dependencies_with_pyisolate(dependencies, extension_name)
 
-    venv_root = node_dir / ".venv"
-    venv_root.mkdir(parents=True, exist_ok=True)
-
-    manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
+    manager_config = ExtensionManagerConfig(venv_root_path=str(PYISOLATE_VENV_ROOT))
     logger.info(
         "%s[Loader] Using manager config: venv_root=%s",
         LOG_PREFIX,
@@ -232,6 +233,9 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
             LOG_PREFIX,
             PYISOLATE_EDITABLE_PATH,
             extension_name,
+        )
+        raise RuntimeError(
+            f"PyIsolate source missing at {PYISOLATE_EDITABLE_PATH}; cannot load isolated node {extension_name}"
         )
     return deps
 
