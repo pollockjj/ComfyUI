@@ -37,6 +37,24 @@ class FolderPathsProxy:
         result = folder_paths.exists_annotated_filepath(name)
         logger.debug(f"{LOG_PREFIX}[FolderPathsProxy] exists_annotated_filepath({name}) → {result}")
         return result
+    
+    @property
+    def models_dir(self) -> str:
+        """Get base models directory path."""
+        result = folder_paths.models_dir
+        logger.debug(f"{LOG_PREFIX}[FolderPathsProxy] models_dir → {result}")
+        return result
+    
+    def add_model_folder_path(self, folder_name: str, full_folder_path: str, is_default: bool = False) -> None:
+        """Register a model folder path with ComfyUI."""
+        logger.debug(f"{LOG_PREFIX}[FolderPathsProxy] add_model_folder_path({folder_name}, {full_folder_path}, {is_default})")
+        return folder_paths.add_model_folder_path(folder_name, full_folder_path, is_default)
+    
+    def get_folder_paths(self, folder_name: str) -> list:
+        """Get all registered paths for a folder type."""
+        result = folder_paths.get_folder_paths(folder_name)
+        logger.debug(f"{LOG_PREFIX}[FolderPathsProxy] get_folder_paths({folder_name}) → {len(result)} paths")
+        return result
 
 
 def run_tests():

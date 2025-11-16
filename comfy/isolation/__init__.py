@@ -10,6 +10,8 @@ Provides process isolation for custom_nodes via PyIsolate, enabling:
 from __future__ import annotations
 
 import logging
+import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -29,7 +31,20 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "📚 [PyIsolate]"
-PYISOLATE_EDITABLE_PATH = Path("/mnt/ai/pyisolate")
+
+
+def _get_user_pyisolate_path() -> Path:
+    target = Path(folder_paths.base_path) / "user" / "pyisolate"
+    if not target.exists():
+        raise RuntimeError(
+            f"PyIsolate source missing at {target}; clone or move pyisolate into ComfyUI/user/pyisolate"
+        )
+
+    logging.getLogger(__name__).info("%s[System] Using pyisolate source at %s", LOG_PREFIX, target)
+    return target
+
+
+PYISOLATE_EDITABLE_PATH = _get_user_pyisolate_path()
 PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
 PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -45,9 +60,25 @@ logger.info(f"{LOG_PREFIX}[System] Isolation system initialized")
 
 
 def initialize_proxies() -> None:
-    """Placeholder until ProxiedSingletons are required for active nodes."""
+    """Initialize ProxiedSingletons for isolated nodes.
+    
+    Registers all proxy classes so they're available to isolated nodes via RPC.
+    Actual RPC binding happens when extensions load.
+    """
+    from .proxies.folder_paths_proxy import FolderPathsProxy
+    from .proxies.model_management_proxy import ModelManagementProxy
+    from .proxies.nodes_proxy import NodesProxy
+    from .proxies.utils_proxy import UtilsProxy
 
-    logger.info(f"{LOG_PREFIX}[System] ProxiedSingleton initialization skipped (bootstrap mode)")
+    logger.info(f"{LOG_PREFIX}[System] Registering ProxiedSingletons...")
+    
+    # Instantiate singletons to register them
+    FolderPathsProxy()
+    ModelManagementProxy()
+    NodesProxy()
+    UtilsProxy()
+    
+    logger.info(f"{LOG_PREFIX}[System] ProxiedSingletons registered (4 classes)")
 
 
 @dataclass(frozen=True)
@@ -178,6 +209,23 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
             exc,
         )
         raise
+    
+    # Register a dummy module in sys.modules so pickle can find classes from the isolated module
+    # The normalized extension name is used as the module name in the isolated process
+    normalized_name = extension_name.replace("-", "_").replace(".", "_")
+    if normalized_name not in sys.modules:
+        # Create a minimal dummy module that will satisfy pickle's import requirements
+        dummy_module = types.ModuleType(normalized_name)
+        dummy_module.__file__ = str(node_dir / "__init__.py")
+        dummy_module.__path__ = [str(node_dir)]  # Make it a package so submodules can be imported
+        dummy_module.__package__ = normalized_name
+        sys.modules[normalized_name] = dummy_module
+        logger.debug(
+            "%s[Loader] Registered dummy module %s in sys.modules for pickle compatibility",
+            LOG_PREFIX,
+            normalized_name,
+        )
+    
     logger.info(
         "%s[Loader] Loading isolated node %s from %s",
         LOG_PREFIX,
@@ -199,8 +247,11 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         list(remote_nodes.keys()),
     )
     for node_name, display_name in remote_nodes.items():
-        info = await extension.get_node_info(node_name)
-        stub_cls = _build_stub_class(node_name, info, extension)
+        # Get full node details - the isolated process will serialize everything to JSON
+        details = await extension.get_node_details(node_name)
+        details["display_name"] = display_name
+        
+        stub_cls = _build_stub_class(node_name, details, extension)
         specs.append(
             IsolatedNodeSpec(
                 node_name=node_name,
