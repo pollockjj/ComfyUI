@@ -2312,6 +2312,7 @@ async def init_builtin_extra_nodes():
         "nodes_lotus.py",
         "nodes_hunyuan3d.py",
         "nodes_primitive.py",
+        "nodes_split_q.py",
         "nodes_cfg.py",
         "nodes_optimalsteps.py",
         "nodes_hidream.py",
