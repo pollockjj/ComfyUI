@@ -66,7 +66,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     modifier = 3
     mem_required = tensor_size * modifier
     steps = 2
-    _log_once(f"\n⚡ [split-q]  = {steps}")
+    # Removed split-q log - this is standard attention_split, not dual-GPU Split-Q
 
     if mask is not None:
         if len(mask.shape) == 2:
@@ -81,7 +81,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     while True:
         try:
             slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
-            _log_once(f"\n⚡ [split-q] slice_size = {slice_size}")
+            # Removed split-q log - this is standard attention_split, not dual-GPU Split-Q
             for i in range(0, q.shape[1], slice_size):
                 end = i + slice_size
                 if upcast:

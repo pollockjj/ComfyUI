@@ -980,6 +980,98 @@ class CFGGuider:
         samples = executor.execute(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
         return self.inner_model.process_latent_out(samples.to(torch.float32))
 
+    def _split_q_inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
+        """Split-Q dual-GPU sampling - clones CFGGuider state and runs both models sequentially"""
+        import logging
+        _logger = logging.getLogger(__name__)
+        
+        _logger.info("⚡ [split-q][CFGGuider] Split-Q enabled, cloning guider state")
+        
+        # Process conditions once (shared by both)
+        if latent_image is not None and torch.count_nonzero(latent_image) > 0:
+            latent_image = self.inner_model.process_latent_in(latent_image)
+        
+        self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed, latent_shapes=latent_shapes)
+        
+        # Get replica model from inner_model
+        if not hasattr(self.inner_model, 'split_q_replica') or not hasattr(self.inner_model, 'split_q_device_replica'):
+            raise RuntimeError("Split-Q enabled but replica model not configured")
+        
+        replica_model = self.inner_model.split_q_replica
+        replica_device = self.inner_model.split_q_device_replica
+        
+        _logger.info(f"⚡ [split-q][CFGGuider] Cloning model to {replica_device}")
+        
+        # Clone the replica model's UNet to the target device
+        import copy
+        replica_unet = copy.deepcopy(replica_model).to(replica_device)
+        torch.cuda.synchronize(replica_device)
+        
+        # Create guider 0 (cuda:0)
+        extra_model_options_0 = comfy.model_patcher.create_model_options_clone(self.model_options)
+        extra_model_options_0.setdefault("transformer_options", {})["sample_sigmas"] = sigmas
+        extra_args_0 = {"model_options": extra_model_options_0, "seed": seed}
+        
+        executor_0 = comfy.patcher_extension.WrapperExecutor.new_class_executor(
+            sampler.sample,
+            sampler,
+            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE, extra_args_0["model_options"], is_model_options=True)
+        )
+        
+        _logger.info(f"⚡ [split-q][CFGGuider] Running sampler on cuda:0")
+        samples_0 = executor_0.execute(self, sigmas, extra_args_0, callback, noise, latent_image, denoise_mask, disable_pbar)
+        samples_0 = self.inner_model.process_latent_out(samples_0.to(torch.float32))
+        
+        # Create guider 1 (cuda:1) - clone the current guider state
+        _logger.info(f"⚡ [split-q][CFGGuider] Setting up guider for {replica_device}")
+        
+        # Temporarily swap inner_model's diffusion_model to replica
+        orig_inner_model = self.inner_model
+        orig_diffusion_model = self.inner_model.diffusion_model
+        
+        # Swap to replica diffusion_model on cuda:1
+        self.inner_model.diffusion_model = replica_unet
+        
+        extra_model_options_1 = comfy.model_patcher.create_model_options_clone(self.model_options)
+        extra_model_options_1.setdefault("transformer_options", {})["sample_sigmas"] = sigmas
+        extra_args_1 = {"model_options": extra_model_options_1, "seed": seed}
+        
+        executor_1 = comfy.patcher_extension.WrapperExecutor.new_class_executor(
+            sampler.sample,
+            sampler,
+            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE, extra_args_1["model_options"], is_model_options=True)
+        )
+        
+        # Move inputs to replica device
+        noise_1 = noise.to(replica_device)
+        latent_image_1 = latent_image.to(replica_device) if latent_image is not None else None
+        sigmas_1 = sigmas.to(replica_device)
+        
+        _logger.info(f"⚡ [split-q][CFGGuider] Running sampler on {replica_device}")
+        samples_1 = executor_1.execute(self, sigmas_1, extra_args_1, callback, noise_1, latent_image_1, denoise_mask, disable_pbar)
+        samples_1 = self.inner_model.process_latent_out(samples_1.to(torch.float32))
+        
+        # Restore original diffusion_model
+        self.inner_model.diffusion_model = orig_diffusion_model
+        
+        _logger.info(f"⚡ [split-q][CFGGuider] Both samplers complete")
+        
+        # Compare byte-accuracy between cuda:0 and cuda:1 samples
+        samples_1_cpu = samples_1.cpu()
+        samples_0_cpu = samples_0.cpu()
+        
+        max_diff = torch.max(torch.abs(samples_0_cpu - samples_1_cpu)).item()
+        mean_diff = torch.mean(torch.abs(samples_0_cpu - samples_1_cpu)).item()
+        allclose = torch.allclose(samples_0_cpu, samples_1_cpu, rtol=1e-5, atol=1e-8)
+        
+        _logger.info(f"⚡ [split-q][CFGGuider][VALIDATION] cuda:0 vs cuda:1 samples:")
+        _logger.info(f"⚡ [split-q][CFGGuider][VALIDATION]   max_diff={max_diff:.2e}, mean_diff={mean_diff:.2e}, allclose={allclose}")
+        
+        if not allclose:
+            _logger.warning(f"⚡ [split-q][CFGGuider][VALIDATION] WARNING: Samples differ beyond tolerance!")
+        
+        return samples_0
+
     def outer_sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None, latent_shapes=None):
         self.inner_model, self.conds, self.loaded_models = comfy.sampler_helpers.prepare_sampling(self.model_patcher, noise.shape, self.conds, self.model_options)
         device = self.model_patcher.load_device
@@ -994,7 +1086,28 @@ class CFGGuider:
 
         try:
             self.model_patcher.pre_run()
-            output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+            
+            # Post-pre_run() Split-Q runtime attachment
+            split_q_requested = self.model_options.get("transformer_options", {}).get("split_q_requested", False)
+            if split_q_requested:
+                import torch
+                _logger = logging.getLogger(__name__)
+                _logger.info("⚡ [split-q][CFGGuider] Enabling Split-Q runtime attributes")
+                
+                # Set runtime flags on inner_model (now fully patched)
+                self.inner_model.split_q_enabled = True
+                self.inner_model.split_q_device_replica = torch.device("cuda:1")
+                # Use diffusion_model (UNet) - correct attribute for ComfyUI models
+                self.inner_model.split_q_replica = self.inner_model.diffusion_model
+                
+                _logger.info("⚡ [split-q][CFGGuider] runtime attrs attached | inner_id=%s, replica_id=%s",
+                           id(self.inner_model), id(self.inner_model.split_q_replica))
+            
+            # Check if Split-Q is enabled
+            if hasattr(self.inner_model, 'split_q_enabled') and self.inner_model.split_q_enabled:
+                output = self._split_q_inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+            else:
+                output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
         finally:
             self.model_patcher.cleanup()
 
