@@ -35,22 +35,16 @@ def split_q_ksampler(model_0, model_1, seed, steps, cfg, sampler_name, scheduler
     callback = latent_preview.prepare_callback(model_0, steps)
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
     
-    samples_0 = comfy.sample.sample(model_0, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image_0,
-                                  denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
-                                  force_full_denoise=force_full_denoise, noise_mask=noise_mask, sigmas=None, callback=callback, disable_pbar=disable_pbar, seed=seed)
-
-    samples_1 = split_q_sample(model_1, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image_1,
+    samples_0, samples_1 = split_q_sample(model_0, model_1, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image_0,
                                   denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
                                   force_full_denoise=force_full_denoise, noise_mask=noise_mask, sigmas=None, callback=callback, disable_pbar=disable_pbar, seed=seed)
     
     out_0 = latent.copy()
     out_0["samples"] = samples_0
-    out_split_0 = latent.copy()
-    out_split_0["samples"] = samples_0
-    out_split_1 = latent.copy()
-    out_split_1["samples"] = samples_1
+    out_1 = latent.copy()
+    out_1["samples"] = samples_1
     
-    _logger.info("⚡ [split-q][split_q_ksampler] RETURN: control.shape=%s split_0.shape=%s split_1.shape=%s", 
-                 samples_0.shape, samples_0.shape, samples_1.shape)
+    _logger.info("⚡ [split-q][split_q_ksampler] RETURN: split_0.shape=%s split_1.shape=%s", 
+                 samples_0.shape, samples_1.shape)
     
-    return (out_split_0, out_split_1)
+    return (out_0, out_1)
