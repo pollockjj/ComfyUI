@@ -1087,27 +1087,8 @@ class CFGGuider:
         try:
             self.model_patcher.pre_run()
             
-            # Post-pre_run() Split-Q runtime attachment
-            split_q_requested = self.model_options.get("transformer_options", {}).get("split_q_requested", False)
-            if split_q_requested:
-                import torch
-                _logger = logging.getLogger(__name__)
-                _logger.info("⚡ [split-q][CFGGuider] Enabling Split-Q runtime attributes")
-                
-                # Set runtime flags on inner_model (now fully patched)
-                self.inner_model.split_q_enabled = True
-                self.inner_model.split_q_device_replica = torch.device("cuda:1")
-                # Use diffusion_model (UNet) - correct attribute for ComfyUI models
-                self.inner_model.split_q_replica = self.inner_model.diffusion_model
-                
-                _logger.info("⚡ [split-q][CFGGuider] runtime attrs attached | inner_id=%s, replica_id=%s",
-                           id(self.inner_model), id(self.inner_model.split_q_replica))
-            
-            # Check if Split-Q is enabled
-            if hasattr(self.inner_model, 'split_q_enabled') and self.inner_model.split_q_enabled:
-                output = self._split_q_inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
-            else:
-                output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+            # Run normal sampling (Split-Q executes via optimized_attention_override)
+            output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
         finally:
             self.model_patcher.cleanup()
 
@@ -1134,6 +1115,30 @@ class CFGGuider:
         try:
             orig_model_options = self.model_options
             self.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
+            
+            # Post-clone Split-Q hook installation (Blueprint Section 2.2)
+            # CRITICAL: Must modify self.model_options AFTER clone, not model_patcher.model_options
+            split_q_requested = self.model_options.get("transformer_options", {}).get("split_q_requested", False)
+            if split_q_requested:
+                _logger = logging.getLogger(__name__)
+                _logger.info("⚡ [split-q][CFGGuider] Split-Q requested, installing hooks (post-clone)")
+                
+                # Create a temporary model_patcher-like object that references the cloned options
+                class ModelOptionsWrapper:
+                    def __init__(self, model_options):
+                        self.model_options = model_options
+                
+                # Install Split-Q hooks on the CLONED model_options
+                from comfy.split_q.hooks import hook_into_modelpatcher
+                wrapper = ModelOptionsWrapper(self.model_options)
+                hook_into_modelpatcher(
+                    wrapper,
+                    split_q_enabled=True,
+                    validation_mode=False
+                )
+                
+                _logger.info("⚡ [split-q][CFGGuider] Hooks installed on cloned model_options")
+            
             # if one hook type (or just None), then don't bother caching weights for hooks (will never change after first step)
             orig_hook_mode = self.model_patcher.hook_mode
             if get_total_hook_groups_in_conds(self.conds) <= 1:
