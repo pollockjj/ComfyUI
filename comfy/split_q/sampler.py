@@ -60,6 +60,124 @@ def _extract_samples(latent_result: Tuple[dict]) -> torch.Tensor:
     return samples
 
 
+def execute_single_step(
+    model,
+    sampler,
+    current_latent,
+    initial_latent_image,
+    step_index,
+    total_steps,
+    cfg,
+    scheduler,
+    positive,
+    negative,
+    seed,
+    denoise=1.0,
+):
+    """
+    Execute a single denoising step using sigma scheduling.
+    
+    CRITICAL: The sampler object MUST be persistent across all steps to maintain state.
+    Do NOT create a new sampler inside this function.
+    
+    Args:
+        model: ComfyUI model (ModelPatcher) on specific GPU
+        sampler: Persistent sampler object (KSAMPLER instance, created ONCE outside loop)
+        current_latent: Latent tensor from previous step (or initial noise for step 0)
+        initial_latent_image: Original starting latent (unchanged across all steps)
+        step_index: Current step index (0 to total_steps-1)
+        total_steps: Total number of denoising steps
+        cfg: CFG scale
+        scheduler: Scheduler name
+        positive: Positive conditioning
+        negative: Negative conditioning
+        seed: Random seed
+        denoise: Denoising strength (default 1.0)
+    
+    Returns:
+        Denoised latent tensor for this step (output becomes input to next step)
+    """
+    import comfy.samplers
+    import comfy.sample
+    
+    device = current_latent.device
+    
+    _logger.info(
+        f"⚡ [split-q][SingleStep] step={step_index}/{total_steps} "
+        f"current_latent.shape={current_latent.shape} device={device}"
+    )
+    
+    # Get full sigma schedule for the total steps
+    model_sampling = model.get_model_object("model_sampling")
+    sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, total_steps)
+    
+    # Extract sigma range for this single step [step_index, step_index+1]
+    sigma_start = sigmas[step_index]
+    sigma_end = sigmas[step_index + 1]
+    single_step_sigmas = torch.tensor([sigma_start, sigma_end], device=device)
+    
+    _logger.info(
+        f"⚡ [split-q][SingleStep] step={step_index} "
+        f"sigma_start={sigma_start:.6f} sigma_end={sigma_end:.6f}"
+    )
+    
+    # Capture denoised output via callback (matches golden reference capture)
+    captured_denoised = {}
+    def capture_callback(substep_i, denoised, x, total_substeps):
+        # Save denoised prediction (fully denoised estimate at this timestep)
+        # NOTE: substep_i is always 0 for single-step execution (only one substep per call)
+        captured_denoised[substep_i] = denoised.clone().detach()
+        _logger.info(
+            f"⚡ [split-q][SingleStep] Captured denoised at substep {substep_i} "
+            f"(global step {step_index}), shape={denoised.shape}, device={denoised.device}"
+        )
+    
+    # Execute single step using sample_custom with restricted sigmas
+    # Key semantics:
+    #   - noise: The current noisy latent being denoised (changes each step)
+    #   - latent_image: The original starting latent (constant across all steps)
+    #   - callback: Captures denoised prediction (for validation)
+    output_latent = comfy.sample.sample_custom(
+        model=model,
+        noise=current_latent,           # Current step's noisy input
+        cfg=cfg,
+        sampler=sampler,                # PERSISTENT sampler object (maintains state)
+        sigmas=single_step_sigmas,
+        positive=positive,
+        negative=negative,
+        latent_image=initial_latent_image,  # Original latent (unchanged)
+        noise_mask=None,
+        callback=capture_callback,      # Capture denoised for validation
+        disable_pbar=True,  # Disable progress bar for single step
+        seed=seed
+    )
+    
+    _logger.info(
+        f"⚡ [split-q][SingleStep] step={step_index} complete, "
+        f"output_shape={output_latent.shape} device={output_latent.device}"
+    )
+    
+    # Return BOTH the next-step input (output_latent) AND the denoised prediction (for validation)
+    # The denoised prediction is what we compare against golden
+    # For single-step execution, substep is always 0
+    if 0 not in captured_denoised:
+        _logger.error(f"⚡ [split-q][SingleStep] FATAL: No denoised captured for step {step_index} (substep 0)")
+        _logger.error(f"⚡ [split-q][SingleStep] captured_denoised keys: {list(captured_denoised.keys())}")
+        raise ValueError(f"Callback did not capture denoised for step {step_index}")
+    
+    denoised_prediction = captured_denoised[0]  # Always substep 0 for single-step execution
+    
+    # CRITICAL: sample_custom moves result to CPU, but we need it on GPU for next step
+    # Move output_latent back to the model's device for chaining
+    output_latent = output_latent.to(device)
+    
+    _logger.info(
+        f"⚡ [split-q][SingleStep] step={step_index} output moved back to {device} for chaining"
+    )
+    
+    return output_latent, denoised_prediction
+
+
 def serial_split_q_sample(
     model_primary,
     model_secondary,
@@ -193,69 +311,118 @@ def interleaved_split_q_sample(
     denoise=1.0,
     **kwargs,
 ):
-    """ISOLATED-INTERLEAVED: Run both models independently, validate in interleaved order."""
+    """Execute TRUE interleaved sampling: 0/0/1/1/2/2/.../29/29."""
     from comfy.split_q.golden_reference import validate_against_golden
     import comfy.sample
-    import comfy.utils
+    import comfy.samplers
     
-    _logger.info("⚡ [split-q][Sampler] ISOLATED-INTERLEAVED: Starting dual execution")
+    _logger.info("⚡ [split-q][Sampler] ISOLATED-INTERLEAVED: TRUE interleaved execution starting")
     
-    # Prepare inputs (shared initial conditions)
+    # Prepare initial latent (shared seed, different GPUs)
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(model_primary, latent_image)
     batch_inds = latent.get("batch_index", None)
-    noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
-    noise_mask = latent.get("noise_mask", None)
-    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
     
-    # Interceptor for model_0
-    class StepInterceptor:
-        def __init__(self, name):
-            self.name = name
-            self.step_latents = {}
-        
-        def callback(self, step_i, denoised, x, total_steps):
-            self.step_latents[step_i] = denoised.clone().detach()
-            _logger.info(f"⚡ [split-q][{self.name}] Captured step {step_i}/{total_steps}")
+    # Generate initial noise on CPU first, then clone to each GPU
+    initial_noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
     
-    # Execute model_0 (cuda:0)
-    _logger.info("⚡ [split-q][Sampler] Executing model_0 on cuda:0")
-    interceptor_0 = StepInterceptor("model_0")
-    samples_0 = comfy.sample.sample(
-        model_primary, noise, steps, cfg, sampler_name, scheduler,
-        positive, negative, latent_image,
-        denoise=denoise, disable_noise=False, start_step=None, last_step=None,
-        force_full_denoise=False, noise_mask=noise_mask,
-        callback=interceptor_0.callback, disable_pbar=disable_pbar, seed=seed
+    # Clone initial noise to each GPU's VRAM (TOTAL ISOLATION starts here)
+    latent_0 = initial_noise.clone().to(model_primary.load_device)
+    latent_1 = initial_noise.clone().to(model_secondary.load_device)
+    
+    _logger.info(
+        f"⚡ [split-q][Sampler] Initial latents prepared: "
+        f"latent_0.device={latent_0.device} latent_1.device={latent_1.device} "
+        f"shape={latent_0.shape}"
     )
     
-    # Execute model_1 (cuda:1)
-    _logger.info("⚡ [split-q][Sampler] Executing model_1 on cuda:1")
-    interceptor_1 = StepInterceptor("model_1")
-    samples_1 = comfy.sample.sample(
-        model_secondary, noise, steps, cfg, sampler_name, scheduler,
-        positive, negative, latent_image,
-        denoise=denoise, disable_noise=False, start_step=None, last_step=None,
-        force_full_denoise=False, noise_mask=noise_mask,
-        callback=interceptor_1.callback, disable_pbar=disable_pbar, seed=seed
+    # Create PERSISTENT sampler objects (CRITICAL: reused across all steps for state)
+    sampler_0 = comfy.samplers.sampler_object(sampler_name)
+    sampler_1 = comfy.samplers.sampler_object(sampler_name)
+    
+    _logger.info(
+        f"⚡ [split-q][Sampler] Persistent samplers created: "
+        f"sampler_0={type(sampler_0).__name__} sampler_1={type(sampler_1).__name__}"
     )
     
-    # Interleaved validation
-    _logger.info("⚡ [split-q][Sampler] Starting interleaved validation (0/0/1/1/2/2/.../29/29)")
+    # Preserve initial latent for latent_image parameter (constant across all steps)
+    initial_latent_0 = latent_0.clone()
+    initial_latent_1 = latent_1.clone()
+    
+    # TRUE INTERLEAVED LOOP: Execute one step at a time, alternating GPUs
     for step_i in range(steps):
-        # Validate model_0 step
+        _logger.info(f"⚡ [split-q][Sampler] === STEP {step_i}/{steps} ===")
+        
+        # PHASE 3.0: Test model_0 ONLY first (validate single-step mechanism)
+        _logger.info(f"⚡ [split-q][Sampler] Executing model_0 step {step_i}")
+        latent_0, denoised_0 = execute_single_step(
+            model=model_primary,
+            sampler=sampler_0,              # Persistent sampler (maintains state)
+            current_latent=latent_0,        # Uses model_0's previous output
+            initial_latent_image=initial_latent_0,  # Constant reference
+            step_index=step_i,
+            total_steps=steps,
+            cfg=cfg,
+            scheduler=scheduler,
+            positive=positive,
+            negative=negative,
+            seed=seed,
+            denoise=denoise,
+        )
+        
+        # Validate model_0 step IMMEDIATELY (using denoised prediction, not noisy output)
         _logger.info(f"⚡ [split-q][Sampler] Validating model_0 step {step_i}")
-        validate_against_golden(step_i, interceptor_0.step_latents[step_i], label="golden", halt_on_mismatch=True)
+        validate_against_golden(
+            step_i, 
+            denoised_0,  # Validate the denoised prediction, not the noisy latent
+            label="golden", 
+            halt_on_mismatch=True
+        )
+        _logger.info(f"⚡ [split-q][Sampler] ✅ model_0 step {step_i} PASSED")
         
-        # Validate model_1 step
+        # TEMPORARY: Phase 3.1 - Test model_0 through steps 0-2 (chain verification)
+        if step_i == 2:
+            _logger.warning("⚡ [split-q][Sampler] PHASE 3.1: Exiting after model_0 step 2 (chain test)")
+            out = latent.copy()
+            out["samples"] = latent_0
+            return (out,), None
+        
+        # Execute step_i on model_1 (cuda:1)
+        _logger.info(f"⚡ [split-q][Sampler] Executing model_1 step {step_i}")
+        latent_1, denoised_1 = execute_single_step(
+            model=model_secondary,
+            sampler=sampler_1,              # Persistent sampler (maintains state)
+            current_latent=latent_1,        # Uses model_1's previous output
+            initial_latent_image=initial_latent_1,  # Constant reference
+            step_index=step_i,
+            total_steps=steps,
+            cfg=cfg,
+            scheduler=scheduler,
+            positive=positive,
+            negative=negative,
+            seed=seed,
+            denoise=denoise,
+        )
+        
+        # Validate model_1 step IMMEDIATELY (using denoised prediction)
         _logger.info(f"⚡ [split-q][Sampler] Validating model_1 step {step_i}")
-        validate_against_golden(step_i, interceptor_1.step_latents[step_i], label="golden", halt_on_mismatch=True)
+        validate_against_golden(
+            step_i, 
+            denoised_1,  # Validate the denoised prediction
+            label="golden", 
+            halt_on_mismatch=True
+        )
+        _logger.info(f"⚡ [split-q][Sampler] ✅ model_1 step {step_i} PASSED")
         
-        _logger.info(f"⚡ [split-q][Sampler] ✅ Step {step_i}: BOTH models match golden")
+        _logger.info(f"⚡ [split-q][Sampler] ✅ Step {step_i}: BOTH models validated")
     
     # Return model_0 result
     out = latent.copy()
-    out["samples"] = samples_0
+    out["samples"] = latent_0
     
-    _logger.info("⚡ [split-q][Sampler] ✅ All 60 validations passed (30 steps × 2 models)")
+    _logger.info(
+        f"⚡ [split-q][Sampler] ✅ All {steps * 2} executions complete "
+        f"(interleaved order: 0/0/1/1/2/2/.../29/29)"
+    )
+    
     return (out,), None

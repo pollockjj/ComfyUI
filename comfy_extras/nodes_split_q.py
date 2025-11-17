@@ -103,11 +103,12 @@ class KSamplerSplitQ:
 				"scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"tooltip": "Noise schedule."}),
 				"positive": ("CONDITIONING", {"tooltip": "Positive conditioning to include."}),
 				"negative": ("CONDITIONING", {"tooltip": "Negative conditioning to exclude."}),
-				"latent_image": ("LATENT", {"tooltip": "Latent to denoise."}),
-				"denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Denoising strength."}),
-				"capture_golden": ("BOOLEAN", {"default": False, "tooltip": "Capture golden reference from serial run."}),
-			}
+			"latent_image": ("LATENT", {"tooltip": "Latent to denoise."}),
+			"denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Denoising strength."}),
+			"capture_golden": ("BOOLEAN", {"default": False, "tooltip": "Capture golden reference from serial run."}),
+			"use_serial_validation": ("BOOLEAN", {"default": True, "tooltip": "Use WORKING serial validation (0-29, 0-29). Set to False for experimental interleaved mode."}),
 		}
+	}
 
 	RETURN_TYPES = ("LATENT",)
 	OUTPUT_TOOLTIPS = ("The denoised latent computed with model_0.",)
@@ -115,7 +116,7 @@ class KSamplerSplitQ:
 	CATEGORY = "sampling"
 	DESCRIPTION = "Standard KSampler behavior with Split-Q dual-model validation."
 
-	def sample(self, model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, capture_golden=False):
+	def sample(self, model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, capture_golden=False, use_serial_validation=True):
 		meta0 = _collect_model_metadata(model_0)
 		meta1 = _collect_model_metadata(model_1)
 		uuid0 = meta0["patches_uuid"]
@@ -170,8 +171,24 @@ class KSamplerSplitQ:
 				denoise=denoise,
 				capture_golden=True,
 			)
+		elif use_serial_validation:
+			logging.info("⚡ [split-q][KSamplerSplitQ] MODE: Serial validation (WORKING 0-29, 0-29)")
+			result_0, _ = serial_split_q_sample(
+				model_0,
+				model_1,
+				seed=seed,
+				steps=steps,
+				cfg=cfg,
+				sampler_name=sampler_name,
+				scheduler=scheduler,
+				positive=positive,
+				negative=negative,
+				latent=latent_image,
+				denoise=denoise,
+				capture_golden=False,
+			)
 		else:
-			logging.info("⚡ [split-q][KSamplerSplitQ] MODE: Interleaved (validate against golden)")
+			logging.info("⚡ [split-q][KSamplerSplitQ] MODE: Interleaved (EXPERIMENTAL - validate against golden)")
 			result_0, _ = interleaved_split_q_sample(
 				model_0,
 				model_1,
