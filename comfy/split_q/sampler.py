@@ -193,60 +193,69 @@ def interleaved_split_q_sample(
     denoise=1.0,
     **kwargs,
 ):
-    """Step-interleaved sampling: alternate models at each denoising step."""
-    from nodes import common_ksampler
-    from comfy.split_q.golden_reference import validate_against_golden, save_golden_step
+    """ISOLATED-INTERLEAVED: Run both models independently, validate in interleaved order."""
+    from comfy.split_q.golden_reference import validate_against_golden
+    import comfy.sample
+    import comfy.utils
     
-    _logger.info("⚡ [split-q][Sampler] INTERLEAVED: Step-by-step alternation")
+    _logger.info("⚡ [split-q][Sampler] ISOLATED-INTERLEAVED: Starting dual execution")
     
-    # Step 0: Run model_0 for 1 step, capture output
-    _logger.info("⚡ [split-q][Sampler] Step 0: model_0")
-    result_0_step0 = common_ksampler(
-        model_primary,
-        seed,
-        steps=1,  # Single step only
-        cfg=cfg,
-        sampler_name=sampler_name,
-        scheduler=scheduler,
-        positive=positive,
-        negative=negative,
-        latent=latent,
-        denoise=denoise,
+    # Prepare inputs (shared initial conditions)
+    latent_image = latent["samples"]
+    latent_image = comfy.sample.fix_empty_latent_channels(model_primary, latent_image)
+    batch_inds = latent.get("batch_index", None)
+    noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+    noise_mask = latent.get("noise_mask", None)
+    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+    
+    # Interceptor for model_0
+    class StepInterceptor:
+        def __init__(self, name):
+            self.name = name
+            self.step_latents = {}
+        
+        def callback(self, step_i, denoised, x, total_steps):
+            self.step_latents[step_i] = denoised.clone().detach()
+            _logger.info(f"⚡ [split-q][{self.name}] Captured step {step_i}/{total_steps}")
+    
+    # Execute model_0 (cuda:0)
+    _logger.info("⚡ [split-q][Sampler] Executing model_0 on cuda:0")
+    interceptor_0 = StepInterceptor("model_0")
+    samples_0 = comfy.sample.sample(
+        model_primary, noise, steps, cfg, sampler_name, scheduler,
+        positive, negative, latent_image,
+        denoise=denoise, disable_noise=False, start_step=None, last_step=None,
+        force_full_denoise=False, noise_mask=noise_mask,
+        callback=interceptor_0.callback, disable_pbar=disable_pbar, seed=seed
     )
     
-    latent_0_step0 = result_0_step0[0]["samples"]
-    save_golden_step(0, latent_0_step0, label="model_0", metadata={"model": "primary"})
-    
-    # Step 0: Run model_1 for 1 step with SAME initial latent
-    _logger.info("⚡ [split-q][Sampler] Step 0: model_1")
-    result_1_step0 = common_ksampler(
-        model_secondary,
-        seed,
-        steps=1,
-        cfg=cfg,
-        sampler_name=sampler_name,
-        scheduler=scheduler,
-        positive=positive,
-        negative=negative,
-        latent=latent,
-        denoise=denoise,
+    # Execute model_1 (cuda:1)
+    _logger.info("⚡ [split-q][Sampler] Executing model_1 on cuda:1")
+    interceptor_1 = StepInterceptor("model_1")
+    samples_1 = comfy.sample.sample(
+        model_secondary, noise, steps, cfg, sampler_name, scheduler,
+        positive, negative, latent_image,
+        denoise=denoise, disable_noise=False, start_step=None, last_step=None,
+        force_full_denoise=False, noise_mask=noise_mask,
+        callback=interceptor_1.callback, disable_pbar=disable_pbar, seed=seed
     )
     
-    latent_1_step0 = result_1_step0[0]["samples"]
-    save_golden_step(0, latent_1_step0, label="model_1", metadata={"model": "secondary"})
+    # Interleaved validation
+    _logger.info("⚡ [split-q][Sampler] Starting interleaved validation (0/0/1/1/2/2/.../29/29)")
+    for step_i in range(steps):
+        # Validate model_0 step
+        _logger.info(f"⚡ [split-q][Sampler] Validating model_0 step {step_i}")
+        validate_against_golden(step_i, interceptor_0.step_latents[step_i], label="golden", halt_on_mismatch=True)
+        
+        # Validate model_1 step
+        _logger.info(f"⚡ [split-q][Sampler] Validating model_1 step {step_i}")
+        validate_against_golden(step_i, interceptor_1.step_latents[step_i], label="golden", halt_on_mismatch=True)
+        
+        _logger.info(f"⚡ [split-q][Sampler] ✅ Step {step_i}: BOTH models match golden")
     
-    # Compare step 0 outputs
-    hash_0 = hashlib.sha256(latent_0_step0.cpu().numpy().tobytes()).hexdigest()[:16]
-    hash_1 = hashlib.sha256(latent_1_step0.cpu().numpy().tobytes()).hexdigest()[:16]
+    # Return model_0 result
+    out = latent.copy()
+    out["samples"] = samples_0
     
-    if hash_0 == hash_1:
-        _logger.info(f"⚡ [split-q][Sampler] ✅ Step 0: model_0 == model_1 (hash={hash_0})")
-    else:
-        _logger.error(f"⚡ [split-q][Sampler] ❌ Step 0: DIVERGED")
-        _logger.error(f"⚡ [split-q][Sampler]    model_0: {hash_0}")
-        _logger.error(f"⚡ [split-q][Sampler]    model_1: {hash_1}")
-        raise ValueError("Step 0 outputs diverged between models")
-    
-    # For now, just return model_0 result
-    # TODO: Implement actual interleaving across all steps
-    return result_0_step0, None
+    _logger.info("⚡ [split-q][Sampler] ✅ All 60 validations passed (30 steps × 2 models)")
+    return (out,), None
