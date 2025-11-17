@@ -248,11 +248,11 @@ def serial_split_q_sample(
         return (out,), None
     
     # Normal serial validation
-    from nodes import common_ksampler
+    from comfy.split_q.split_q_ksampler import split_q_ksampler
     
     _logger.info("⚡ [split-q][Sampler] serial execution starting")
 
-    result_primary = common_ksampler(
+    result_primary = split_q_ksampler(
         model_primary,
         seed,
         steps,
@@ -265,7 +265,7 @@ def serial_split_q_sample(
         denoise=denoise,
     )
 
-    result_secondary = common_ksampler(
+    result_secondary = split_q_ksampler(
         model_secondary,
         seed,
         steps,
