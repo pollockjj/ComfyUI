@@ -10,6 +10,64 @@ from nodes import common_ksampler
 from comfy.split_q.split_q_ksampler import split_q_ksampler
 
 
+class SplitQAttentionConfig:
+    """
+    Configure a model for Split-Q parallel attention across two GPUs.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL", {"tooltip": "Model to configure for Split-Q parallel attention"}),
+                "enable_split_q": ("BOOLEAN", {"default": True, "tooltip": "Enable Split-Q parallel attention"}),
+                "device_primary": (["cuda:0"], {"default": "cuda:0", "tooltip": "Primary GPU device"}),
+                "device_replica": (["cuda:1"], {"default": "cuda:1", "tooltip": "Secondary GPU device for replica"}),
+            }
+        }
+    
+    RETURN_TYPES = ("MODEL",)
+    OUTPUT_TOOLTIPS = ("Model configured for Split-Q parallel attention",)
+    FUNCTION = "configure"
+    CATEGORY = "advanced/split_q"
+    DESCRIPTION = "Enables Split-Q parallel attention: model stays on primary GPU, replica created on secondary GPU, both used for parallel inference."
+    
+    def configure(self, model, enable_split_q, device_primary, device_replica):
+        if not enable_split_q:
+            logging.info("⚡ [SplitQAttentionConfig] Split-Q disabled, returning original model")
+            return (model,)
+        
+        logging.info("⚡ [SplitQAttentionConfig] Configuring Split-Q on %s + %s", device_primary, device_replica)
+        
+        # Verify CUDA available and 2+ GPUs
+        if not torch.cuda.is_available():
+            raise RuntimeError("⚡ [SplitQAttentionConfig][FATAL] CUDA not available")
+        
+        device_count = torch.cuda.device_count()
+        if device_count < 2:
+            raise RuntimeError(f"⚡ [SplitQAttentionConfig][FATAL] Need 2 GPUs, found {device_count}")
+        
+        logging.info("⚡ [SplitQAttentionConfig] Detected %d CUDA devices", device_count)
+        logging.info("⚡ [SplitQAttentionConfig] Primary: %s (%s)", device_primary, torch.cuda.get_device_name(0))
+        logging.info("⚡ [SplitQAttentionConfig] Replica: %s (%s)", device_replica, torch.cuda.get_device_name(1))
+        
+        # Clone model for replica (will be deep-copied to device_replica in split_q_sample)
+        model_replica = model.clone()
+        logging.info("⚡ [SplitQAttentionConfig] Model replica cloned (lightweight metadata copy)")
+        
+        # Attach split-q metadata to INNER MODEL (like DisTorch does)
+        inner_model = model.model
+        inner_model.split_q_replica = model_replica
+        inner_model.split_q_enabled = True
+        inner_model.split_q_device_primary = torch.device(device_primary)
+        inner_model.split_q_device_replica = torch.device(device_replica)
+        
+        logging.info("⚡ [SplitQAttentionConfig] Split-Q configuration attached to inner model")
+        logging.info("⚡ [SplitQAttentionConfig] Primary device: %s | Replica device: %s", device_primary, device_replica)
+        
+        return (model,)
+
+
 class KSamplerSplitQ:
     @classmethod
     def INPUT_TYPES(cls):
@@ -66,9 +124,11 @@ class KSamplerSplitQ:
 
 
 NODE_CLASS_MAPPINGS = {
+    "SplitQAttentionConfig": SplitQAttentionConfig,
     "KSamplerSplitQ": KSamplerSplitQ,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "SplitQAttentionConfig": "Split-Q Attention Config",
     "KSamplerSplitQ": "KSampler (Split-Q)",
 }
