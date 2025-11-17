@@ -37,19 +37,32 @@ class KSamplerSplitQ:
 
     def sample(self, model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0):
         
-        logging.info("⚡ [split-q][KSamplerSplitQ] First standard model run, then return from split_q_ksampler.")
+        logging.info("⚡ [split-q][KSamplerSplitQ] Running: common_ksampler(model_0), split_q_ksampler(model_0, model_1)")
         result_0 = common_ksampler(model_0, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
-        result_1 = split_q_ksampler(model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
+        result_split_0, result_split_1 = split_q_ksampler(model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
 
         samples_0 = result_0[0]["samples"].to("cpu")
-        samples_1 = result_1[0]["samples"].to("cpu")
-        if not torch.equal(samples_0, samples_1):
-            delta = (samples_0 - samples_1).abs().max().item()
-            logging.info("⚡ [split-q][KSamplerSplitQ][FAIL] replica outputs diverged: max_abs_diff=%.6f", delta)
-            raise ValueError("Split-Q replicas produced different latents")
-        logging.info("⚡ [split-q][KSamplerSplitQ][PASS] replica outputs are byte-identical")
+        samples_split_0 = result_split_0["samples"].to("cpu")
+        samples_split_1 = result_split_1["samples"].to("cpu")
         
-        return result_1
+        if not torch.equal(samples_0, samples_split_0):
+            delta = (samples_0 - samples_split_0).abs().max().item()
+            logging.error("⚡ [split-q][KSamplerSplitQ][FAIL] common vs split_0 diverged: max_abs_diff=%.6f", delta)
+            raise ValueError("common_ksampler and split_q_ksampler model_0 produced different latents")
+        
+        if not torch.equal(samples_0, samples_split_1):
+            delta = (samples_0 - samples_split_1).abs().max().item()
+            logging.error("⚡ [split-q][KSamplerSplitQ][FAIL] common vs split_1 diverged: max_abs_diff=%.6f", delta)
+            raise ValueError("common_ksampler and split_q_ksampler model_1 produced different latents")
+        
+        if not torch.equal(samples_split_0, samples_split_1):
+            delta = (samples_split_0 - samples_split_1).abs().max().item()
+            logging.error("⚡ [split-q][KSamplerSplitQ][FAIL] split_0 vs split_1 diverged: max_abs_diff=%.6f", delta)
+            raise ValueError("split_q_ksampler model_0 and model_1 produced different latents")
+        
+        logging.info("⚡ [split-q][KSamplerSplitQ][PASS] All three outputs are byte-identical")
+        
+        return (result_split_1,)
 
 
 NODE_CLASS_MAPPINGS = {
