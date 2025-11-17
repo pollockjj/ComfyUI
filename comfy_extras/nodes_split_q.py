@@ -105,6 +105,7 @@ class KSamplerSplitQ:
 				"negative": ("CONDITIONING", {"tooltip": "Negative conditioning to exclude."}),
 				"latent_image": ("LATENT", {"tooltip": "Latent to denoise."}),
 				"denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Denoising strength."}),
+				"capture_golden": ("BOOLEAN", {"default": False, "tooltip": "Capture golden reference from serial run."}),
 			}
 		}
 
@@ -114,7 +115,7 @@ class KSamplerSplitQ:
 	CATEGORY = "sampling"
 	DESCRIPTION = "Standard KSampler behavior with Split-Q dual-model validation."
 
-	def sample(self, model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0):
+	def sample(self, model_0, model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, capture_golden=False):
 		meta0 = _collect_model_metadata(model_0)
 		meta1 = _collect_model_metadata(model_1)
 		uuid0 = meta0["patches_uuid"]
@@ -153,19 +154,37 @@ class KSamplerSplitQ:
 		_attach_peer_reference(model_0, model_1, "split_q_model_1")
 		_attach_peer_reference(model_1, model_0, "split_q_model_0")
 
-		result_0, _ = serial_split_q_sample(
-			model_0,
-			model_1,
-			seed=seed,
-			steps=steps,
-			cfg=cfg,
-			sampler_name=sampler_name,
-			scheduler=scheduler,
-			positive=positive,
-			negative=negative,
-			latent=latent_image,
-			denoise=denoise,
-		)
+		if capture_golden:
+			logging.info("⚡ [split-q][KSamplerSplitQ] MODE: Capture golden reference")
+			result_0, _ = serial_split_q_sample(
+				model_0,
+				model_1,
+				seed=seed,
+				steps=steps,
+				cfg=cfg,
+				sampler_name=sampler_name,
+				scheduler=scheduler,
+				positive=positive,
+				negative=negative,
+				latent=latent_image,
+				denoise=denoise,
+				capture_golden=True,
+			)
+		else:
+			logging.info("⚡ [split-q][KSamplerSplitQ] MODE: Interleaved (validate against golden)")
+			result_0, _ = interleaved_split_q_sample(
+				model_0,
+				model_1,
+				seed=seed,
+				steps=steps,
+				cfg=cfg,
+				sampler_name=sampler_name,
+				scheduler=scheduler,
+				positive=positive,
+				negative=negative,
+				latent=latent_image,
+				denoise=denoise,
+			)
 
 		return result_0
 
