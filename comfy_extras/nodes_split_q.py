@@ -7,7 +7,7 @@ import logging
 import torch
 
 import comfy.samplers
-from nodes import common_ksampler
+from comfy.split_q.sampler import serial_split_q_sample
 
 
 def _summarize_model_options(model):
@@ -76,16 +76,17 @@ def _format_metadata_table(meta0, meta1):
 	return "\n".join(lines)
 
 
-def _clone_latent(latent):
-	if latent is None:
-		return None
-	cloned = {}
-	for key, value in latent.items():
-		if torch.is_tensor(value):
-			cloned[key] = value.clone()
-		else:
-			cloned[key] = value
-	return cloned
+def _attach_peer_reference(primary_model, secondary_model, attr_name):
+	inner = getattr(primary_model, "model", None)
+	if inner is None:
+		logging.warning("⚡ [split-q][KSamplerSplitQ] inner model missing for peer attachment: %s", attr_name)
+		return
+	setattr(inner, attr_name, secondary_model)
+	logging.info(
+		"⚡ [split-q][KSamplerSplitQ] attached %s -> ModelPatcher(id=%s)",
+		attr_name,
+		hex(id(secondary_model)),
+	)
 
 
 class KSamplerSplitQ:
@@ -149,23 +150,23 @@ class KSamplerSplitQ:
 			table,
 		)
 
-		latent_0 = _clone_latent(latent_image)
-		latent_1 = _clone_latent(latent_image)
+		_attach_peer_reference(model_0, model_1, "split_q_model_1")
+		_attach_peer_reference(model_1, model_0, "split_q_model_0")
 
-		result_0 = common_ksampler(model_0, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_0, denoise=denoise)
-		result_1 = common_ksampler(model_1, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_1, denoise=denoise)
+		result_0, _ = serial_split_q_sample(
+			model_0,
+			model_1,
+			seed=seed,
+			steps=steps,
+			cfg=cfg,
+			sampler_name=sampler_name,
+			scheduler=scheduler,
+			positive=positive,
+			negative=negative,
+			latent=latent_image,
+			denoise=denoise,
+		)
 
-		samples_0 = result_0[0]["samples"]
-		samples_1 = result_1[0]["samples"]
-		if not torch.equal(samples_0, samples_1):
-			delta = (samples_0 - samples_1).abs().max().item()
-			logging.error(
-				"⚡ [split-q][KSamplerSplitQ][FAIL] replica outputs diverged: max_abs_diff=%.6f",
-				delta,
-			)
-			raise ValueError("Split-Q replicas produced different latents")
-
-		logging.info("⚡ [split-q][KSamplerSplitQ][PASS] replica outputs are byte-identical")
 		return result_0
 
 
