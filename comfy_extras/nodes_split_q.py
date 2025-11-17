@@ -7,7 +7,7 @@ import logging
 import torch
 
 import comfy.samplers
-from comfy.split_q.sampler import serial_split_q_sample
+from comfy.split_q.sampler import serial_split_q_sample, interleaved_split_q_sample
 
 
 def _summarize_model_options(model):

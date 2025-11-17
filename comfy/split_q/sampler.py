@@ -122,3 +122,36 @@ def serial_split_q_sample(
 
     _logger.info("⚡ [split-q][Sampler][PASS] replica outputs are byte-identical")
     return result_primary, result_secondary
+
+
+def interleaved_split_q_sample(
+    model_primary,
+    model_secondary,
+    *,
+    seed,
+    steps,
+    cfg,
+    sampler_name,
+    scheduler,
+    positive,
+    negative,
+    latent,
+    denoise=1.0,
+    **kwargs,
+):
+    """Placeholder for future interleaved implementation."""
+    _logger.info("⚡ [split-q][Sampler] interleaved mode not yet implemented, falling back to serial")
+    return serial_split_q_sample(
+        model_primary,
+        model_secondary,
+        seed=seed,
+        steps=steps,
+        cfg=cfg,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        positive=positive,
+        negative=negative,
+        latent=latent,
+        denoise=denoise,
+        **kwargs,
+    )
