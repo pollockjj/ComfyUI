@@ -12,60 +12,29 @@ from .state import SplitQState
 _logger = logging.getLogger('comfy')
 
 
-def _attention_compute_kernel(q, k, v, heads, mask=None):
+def _attention_compute_kernel(state, q, k, v, heads, mask=None, **kwargs):
     """
     Core attention computation kernel (single-device).
-    Re-implements attention_split logic to operate on split Q tensors.
+    Calls the original attention function to ensure correctness.
     
-    This is the actual math: Q @ K^T @ V with softmax.
-    Called twice per attention block (once on cuda:0, once on cuda:1).
+    This is a wrapper that delegates to state.original_attn_func,
+    ensuring we use the exact same attention implementation as baseline.
     
     Args:
+        state: SplitQState with original_attn_func reference
         q: Query tensor [batch, seq_len_split, dim] (ALREADY SPLIT)
         k: Key tensor [batch, seq_len_full, dim] (FULL, replicated)
         v: Value tensor [batch, seq_len_full, dim] (FULL, replicated)
         heads: Number of attention heads
         mask: Optional attention mask
+        **kwargs: Pass-through to original function
         
     Returns:
-        Attention output [batch, seq_len_split, dim]
+        Attention output [batch, seq_len_split, heads*dim_head]
     """
-    batch, seq_len, dim = q.shape
-    dim_head = dim // heads
-    
-    # Reshape to multi-head format: [batch*heads, seq_len, dim_head]
-    q = q.reshape(batch * heads, seq_len, dim_head)
-    k = k.reshape(batch * heads, k.shape[1], dim_head)  # k.shape[1] is FULL seq_len
-    v = v.reshape(batch * heads, v.shape[1], dim_head)
-    
-    # Compute attention with memory-efficient slicing (from attention_split)
-    # This slices Q to avoid OOM, not for parallelism
-    out = torch.zeros_like(q)
-    scale = dim_head ** -0.5
-    slice_size = seq_len  # Use full split size (Phase 1 simplification)
-    
-    for i in range(0, seq_len, slice_size):
-        # Q @ K^T
-        s1 = einsum('b i d, b j d -> b i j', q[:, i:i+slice_size], k) * scale
-        
-        # Apply mask if provided
-        if mask is not None:
-            if len(mask.shape) == 2:
-                s1 += mask[i:i+slice_size]
-            else:
-                if mask.shape[1] == 1:
-                    s1 += mask
-                else:
-                    s1 += mask[:, i:i+slice_size]
-        
-        # Softmax + V
-        s2 = F.softmax(s1, dim=-1)
-        out[:, i:i+slice_size] = einsum('b i j, b j d -> b i d', s2, v)
-        
-        del s1, s2
-    
-    # Reshape back to [batch, seq_len, dim]
-    return out.reshape(batch, seq_len, dim)
+    # CRITICAL: Call the ORIGINAL attention function to ensure byte-accuracy
+    # Do NOT reimplement - just call what works
+    return state.original_attn_func(q, k, v, heads, mask, **kwargs)
 
 
 def _serial_attention_compute(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
@@ -132,12 +101,12 @@ def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, *
     
     # STEP 3: Compute attention on cuda:0 (BLOCKING in Phase 1)
     _logger.info(f"⚡ [split-q][attention] Computing attention on cuda:0")
-    out_0 = _attention_compute_kernel(q0, k, v, heads, mask)
+    out_0 = _attention_compute_kernel(state, q0, k, v, heads, mask, **kwargs)
     
     # STEP 4: Compute attention on cuda:1 (BLOCKING in Phase 1)
     _logger.info(f"⚡ [split-q][attention] Computing attention on cuda:1")
     q1_dev1 = q1.to(state.device_1, non_blocking=False)  # Move q1 to cuda:1
-    out_1 = _attention_compute_kernel(q1_dev1, k_1, v_1, heads, mask_1)
+    out_1 = _attention_compute_kernel(state, q1_dev1, k_1, v_1, heads, mask_1, **kwargs)
     
     # STEP 5: Synchronize (BLOCKING in Phase 1)
     # Blueprint Section 8.1: Use torch.cuda.synchronize() for correctness
