@@ -167,7 +167,9 @@ def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, *
         _logger.info(f"⚡ [split-q][attention][NO-OVERLAP] Sequential stream execution for binary search")
     
     # STEP 1: Split Q (runs on DEFAULT stream)
-    q0, q1 = torch.tensor_split(q, 2, dim=1)
+    # Detect sequence dimension: dim=1 for 3D [b, s, d], dim=2 for 4D [b, h, s, d]
+    split_dim = 2 if q.ndim == 4 else 1
+    q0, q1 = torch.tensor_split(q, 2, dim=split_dim)
     
     # *** PRIMARY FIX: Get default stream (producer of q, k, v) ***
     default_stream = torch.cuda.current_stream(state.device_0)

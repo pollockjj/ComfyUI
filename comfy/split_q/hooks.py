@@ -122,12 +122,23 @@ def split_q_attention_wrapper(original_func, *args, **kwargs):
     
     q, k, v = args[0], args[1], args[2]
     # _logger.info(f"⚡ [split-q][wrapper] Extracted q/k/v: shapes={q.shape},{k.shape},{v.shape}")
-    heads = kwargs.get('heads')
-    mask = kwargs.get('mask', None)
+    
+    # Handle 'heads' (arg 3 or kwarg)
+    if len(args) > 3:
+        heads = args[3]
+    else:
+        heads = kwargs.get('heads')
+        
+    # Handle 'mask' (arg 4 or kwarg)
+    if len(args) > 4:
+        mask = args[4]
+    else:
+        mask = kwargs.get('mask', None)
+    
     # _logger.info(f"⚡ [split-q][wrapper] heads={heads}, mask={'present' if mask is not None else 'None'}")
     
     if heads is None:
-        _logger.error("⚡ [split-q][wrapper] 'heads' parameter missing in kwargs")
+        _logger.error("⚡ [split-q][wrapper] 'heads' parameter missing in args/kwargs")
         return original_func(*args, **kwargs)
     
     # _logger.info("⚡ [split-q][wrapper] Filtering kwargs and calling parallel compute")
