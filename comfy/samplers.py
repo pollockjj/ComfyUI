@@ -1147,10 +1147,33 @@ class CFGGuider:
             
             # Post-clone Split-Q hook installation (Blueprint Section 2.2)
             # CRITICAL: Must modify self.model_options AFTER clone, not model_patcher.model_options
+            _logger = logging.getLogger(__name__)
+            
+            # Check for SplitQOverride node configuration (Priority 1)
+            split_q_override = self.model_options.get("transformer_options", {}).get("split_q_override")
             split_q_requested = self.model_options.get("transformer_options", {}).get("split_q_requested", False)
-            if split_q_requested:
-                _logger = logging.getLogger(__name__)
-                _logger.info("⚡ [split-q][CFGGuider] Split-Q requested, installing hooks (post-clone)")
+            
+            if split_q_override is not None and split_q_override.get("enable"):
+                _logger.info("⚡ [split-q][CFGGuider] SplitQOverride node detected, installing hooks (post-clone)")
+                
+                # Create a temporary model_patcher-like object that references the cloned options
+                class ModelOptionsWrapper:
+                    def __init__(self, model_options):
+                        self.model_options = model_options
+                
+                # Install Split-Q hooks on the CLONED model_options
+                from comfy.split_q.hooks import hook_into_modelpatcher
+                wrapper = ModelOptionsWrapper(self.model_options)
+                hook_into_modelpatcher(
+                    wrapper,
+                    split_q_enabled=True,
+                    validation_mode=False
+                )
+                
+                _logger.info("⚡ [split-q][CFGGuider] Hooks installed from SplitQOverride node")
+            
+            elif split_q_requested:
+                _logger.info("⚡ [split-q][CFGGuider] Split-Q requested (legacy), installing hooks (post-clone)")
                 
                 # Create a temporary model_patcher-like object that references the cloned options
                 class ModelOptionsWrapper:
