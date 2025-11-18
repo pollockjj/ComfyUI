@@ -145,19 +145,18 @@ def _serial_attention_compute(state: SplitQState, q, k, v, heads, mask=None, **k
 
 def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
     """
-    Phase 1: Blocking parallel execution (FINAL - async not viable).
+    Phase 1.5: Blocking parallel execution with direct attention math (COMPLETE).
+    Phase 2: Ready for async CUDA streams - primitives are stream-aware.
     
-    Strategy:
+    Strategy (Phase 1.5 - blocking):
     1. Split Q along sequence dimension (dim=1)
     2. Replicate K/V to cuda:1 (blocking)
-    3. Compute attention on both GPUs (sequential due to original_attn_func limitations)
+    3. Compute attention on both GPUs using direct einsum operations
     4. Gather results back to cuda:0
     5. Use torch.cuda.synchronize() for correctness
     
-    Note: Attempted Phase 2 async streams but original_attn_func is not stream-aware.
-    Calling it from within a CUDA stream context produces corrupted output because
-    the wrapped attention function doesn't respect the stream context. Would require
-    reimplementing attention math (rejected due to correctness risk) or deeper hooks.
+    Phase 2 will replace blocking transfers/sync with async streams + events.
+    Direct implementation of attention math (not wrapper) enables stream context.
     
     Args:
         state: SplitQState with CUDA streams/events
@@ -208,5 +207,16 @@ def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, *
     out = torch.cat([out_0, out_1_dev0], dim=1)
     
     _logger.info(f"⚡ [split-q][attention] Gather complete: out.shape={out.shape}, device={out.device}")
+    
+    # Validation checkpoint: detect divergence and trigger fallback
+    # Only in validation_mode or if debugging enabled
+    if state.validation_mode and hasattr(state, '_validation_reference'):
+        max_diff = torch.max(torch.abs(out - state._validation_reference)).item()
+        if max_diff > 1e-4:  # Tolerance for fp16 precision
+            from .state import disable_async_mode
+            disable_async_mode(f"Output divergence detected: max_diff={max_diff:.2e}")
+            _logger.error(f"⚡ [split-q][attention][FATAL] Divergence: max_diff={max_diff:.2e}")
+            # Return blocking result for safety
+            return state._validation_reference
     
     return out

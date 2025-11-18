@@ -10,6 +10,25 @@ from typing import Callable, Optional, List
 
 _logger = logging.getLogger('comfy')
 
+# Automatic async fallback: disable async after first mismatch
+_ASYNC_ENABLED = True
+_ASYNC_FALLBACK_TRIGGERED = False
+
+
+def disable_async_mode(reason: str):
+    """Disable async streams and fall back to blocking mode."""
+    global _ASYNC_ENABLED, _ASYNC_FALLBACK_TRIGGERED
+    if not _ASYNC_FALLBACK_TRIGGERED:
+        _ASYNC_ENABLED = False
+        _ASYNC_FALLBACK_TRIGGERED = True
+        _logger.warning(f"⚡ [split-q][FALLBACK] Async disabled: {reason}")
+        _logger.warning("⚡ [split-q][FALLBACK] Reverting to blocking mode for remainder of session")
+
+
+def is_async_enabled() -> bool:
+    """Check if async mode is still enabled."""
+    return _ASYNC_ENABLED
+
 
 @dataclass
 class SplitQState:
