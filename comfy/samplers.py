@@ -747,7 +747,36 @@ class KSAMPLER(Sampler):
         k_callback = None
         total_steps = len(sigmas) - 1
         if callback is not None:
-            k_callback = lambda x: callback(x["i"], x["denoised"], x["x"], total_steps)
+            def vram_monitored_callback(x):
+                step = x["i"]
+                try:
+                    import pynvml
+                    # Initialize if not already done
+                    try:
+                        pynvml.nvmlInit()
+                    except:
+                        pass
+                    
+                    # Get VRAM for cuda:0
+                    handle0 = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    mem0 = pynvml.nvmlDeviceGetMemoryInfo(handle0)
+                    vram_used_0 = mem0.used / (1024**3)
+                    vram_total_0 = mem0.total / (1024**3)
+                    
+                    # Try cuda:1
+                    try:
+                        handle1 = pynvml.nvmlDeviceGetHandleByIndex(1)
+                        mem1 = pynvml.nvmlDeviceGetMemoryInfo(handle1)
+                        vram_used_1 = mem1.used / (1024**3)
+                        vram_total_1 = mem1.total / (1024**3)
+                        logging.info(f"⚡ [VRAM] Step {step}/{total_steps}: cuda:0={vram_used_0:.2f}GB/{vram_total_0:.2f}GB, cuda:1={vram_used_1:.2f}GB/{vram_total_1:.2f}GB")
+                    except:
+                        logging.info(f"⚡ [VRAM] Step {step}/{total_steps}: cuda:0={vram_used_0:.2f}GB/{vram_total_0:.2f}GB")
+                except Exception as e:
+                    pass  # Silently fail if pynvml not available
+                
+                return callback(x["i"], x["denoised"], x["x"], total_steps)
+            k_callback = vram_monitored_callback
 
         samples = self.sampler_function(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar, **self.extra_options)
         samples = model_wrap.inner_model.model_sampling.inverse_noise_scaling(sigmas[-1], samples)

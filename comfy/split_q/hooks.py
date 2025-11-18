@@ -7,6 +7,7 @@ import torch
 import logging
 import comfy.ldm.modules.attention
 from .state import SplitQState
+from .attention import _parallel_attention_compute, _serial_attention_compute
 
 _logger = logging.getLogger('comfy')
 
@@ -95,53 +96,48 @@ def split_q_attention_wrapper(original_func, *args, **kwargs):
         Attention output tensor [batch, seq_len, heads*dim_head]
     """
     # CHECKPOINT: Log entry IMMEDIATELY (first thing, no conditions)
-    _logger.info("⚡ [split-q][wrapper] ENTRY - Override function called")
-    _logger.info(f"⚡ [split-q][wrapper] args length={len(args)}, kwargs keys={list(kwargs.keys())}")
+    # _logger.info("⚡ [split-q][wrapper] ENTRY - Override function called")
+    # _logger.info(f"⚡ [split-q][wrapper] args length={len(args)}, kwargs keys={list(kwargs.keys())}")
     
     # CHECKPOINT: Extract state from kwargs
     transformer_options = kwargs.get("transformer_options", {})
     state = transformer_options.get("split_q_state")
-    _logger.info(f"⚡ [split-q][wrapper] transformer_options present={bool(transformer_options)}, state present={bool(state)}")
+    # _logger.info(f"⚡ [split-q][wrapper] transformer_options present={bool(transformer_options)}, state present={bool(state)}")
     
     # FALLBACK PATH: No state or not ready
     if not state or not state.is_ready():
-        _logger.info(f"⚡ [split-q][wrapper] FALLBACK - state={'present' if state else 'None'}, ready={state.is_ready() if state else 'N/A'}")
+        # _logger.info(f"⚡ [split-q][wrapper] FALLBACK - state={'present' if state else 'None'}, ready={state.is_ready() if state else 'N/A'}")
         # Call the original wrapped function
         return original_func(*args, **kwargs)
     
-    _logger.info("⚡ [split-q][wrapper] State ready, proceeding to parallel path")
-    
-    # PARALLEL PATH: Import here to avoid circular dependency
-    _logger.info("⚡ [split-q][wrapper] Importing parallel attention functions")
-    from .attention import _parallel_attention_compute, _serial_attention_compute
-    _logger.info("⚡ [split-q][wrapper] Import successful")
+    # _logger.info("⚡ [split-q][wrapper] State ready, proceeding to parallel path")
     
     # Extract attention arguments
     # Signature: attention_func(q, k, v, heads=X, mask=None, **kwargs)
     # Per logs: args=(q,k,v), kwargs={'heads':X, 'mask':Y, 'transformer_options':{...}}
-    _logger.info(f"⚡ [split-q][wrapper] Extracting args: len={len(args)}")
+    # _logger.info(f"⚡ [split-q][wrapper] Extracting args: len={len(args)}")
     if len(args) < 3:
         _logger.error(f"⚡ [split-q][wrapper] Invalid args length={len(args)}, expected >=3")
         return original_func(*args, **kwargs)
     
     q, k, v = args[0], args[1], args[2]
-    _logger.info(f"⚡ [split-q][wrapper] Extracted q/k/v: shapes={q.shape},{k.shape},{v.shape}")
+    # _logger.info(f"⚡ [split-q][wrapper] Extracted q/k/v: shapes={q.shape},{k.shape},{v.shape}")
     heads = kwargs.get('heads')
     mask = kwargs.get('mask', None)
-    _logger.info(f"⚡ [split-q][wrapper] heads={heads}, mask={'present' if mask is not None else 'None'}")
+    # _logger.info(f"⚡ [split-q][wrapper] heads={heads}, mask={'present' if mask is not None else 'None'}")
     
     if heads is None:
         _logger.error("⚡ [split-q][wrapper] 'heads' parameter missing in kwargs")
         return original_func(*args, **kwargs)
     
-    _logger.info("⚡ [split-q][wrapper] Filtering kwargs and calling parallel compute")
+    # _logger.info("⚡ [split-q][wrapper] Filtering kwargs and calling parallel compute")
     
     # Remove heads and mask from kwargs before passing to parallel compute
     # (we'll pass them as positional args to avoid "multiple values" error)
     kwargs_filtered = {k: v for k, v in kwargs.items() if k not in ['heads', 'mask']}
     
     try:
-        _logger.info(f"⚡ [split-q][wrapper] Entering try block, validation_mode={state.validation_mode}")
+        # _logger.info(f"⚡ [split-q][wrapper] Entering try block, validation_mode={state.validation_mode}")
         if state.validation_mode:
             # VALIDATION MODE (Phase 3)
             # Run both parallel and serial, compare results
@@ -170,7 +166,7 @@ def split_q_attention_wrapper(original_func, *args, **kwargs):
         
         else:
             # PRODUCTION MODE (Phase 1)
-            _logger.info("⚡ [split-q][wrapper] Production mode - calling _parallel_attention_compute")
+            # _logger.info("⚡ [split-q][wrapper] Production mode - calling _parallel_attention_compute")
             return _parallel_attention_compute(state, q, k, v, heads, mask, **kwargs_filtered)
     
     except RuntimeError as e:
