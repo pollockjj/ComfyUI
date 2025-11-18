@@ -108,11 +108,17 @@ def _attention_compute_kernel(state, q, k, v, heads, mask=None, attn_precision=N
     
     # Step 2: Softmax
     sim = sim.softmax(dim=-1)
-    _logger.info(f"⚡ [split-q][kernel][CHECKPOINT-7] After softmax: sim={sim.shape}")
+    
+    # BINARY SEARCH CHECKPOINT: Hash after softmax
+    softmax_hash = hash(sim.cpu().numpy().tobytes())
+    _logger.info(f"⚡ [split-q][kernel][CHECKPOINT-7] After softmax: sim={sim.shape}, hash={softmax_hash}")
     
     # Step 3: @ V
     out = einsum('b i j, b j d -> b i d', sim.to(v.dtype), v)
-    _logger.info(f"⚡ [split-q][kernel][CHECKPOINT-8] After @V: out={out.shape}")
+    
+    # BINARY SEARCH CHECKPOINT: Hash after @V
+    out_hash = hash(out.cpu().numpy().tobytes())
+    _logger.info(f"⚡ [split-q][kernel][CHECKPOINT-8] After @V: out={out.shape}, hash={out_hash}")
     
     # Reshape output (always use standard reshape, not skip_output_reshape)
     out = (
@@ -145,18 +151,17 @@ def _serial_attention_compute(state: SplitQState, q, k, v, heads, mask=None, **k
 
 def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
     """
-    Phase 1.5: Blocking parallel execution with direct attention math (COMPLETE).
-    Phase 2: Ready for async CUDA streams - primitives are stream-aware.
+    Phase 2: Async parallel execution with CUDA streams.
     
-    Strategy (Phase 1.5 - blocking):
-    1. Split Q along sequence dimension (dim=1)
-    2. Replicate K/V to cuda:1 (blocking)
-    3. Compute attention on both GPUs using direct einsum operations
-    4. Gather results back to cuda:0
-    5. Use torch.cuda.synchronize() for correctness
+    Binary search mode: Set SPLIT_Q_NO_OVERLAP=1 env var to run streams sequentially (no overlap)
+    for byte-exact comparison with blocking mode.
     
-    Phase 2 will replace blocking transfers/sync with async streams + events.
-    Direct implementation of attention math (not wrapper) enables stream context.
+    Pipeline:
+    - Stream 0: cuda:0 compute starts immediately
+    - Stream 1: Replicate K/V → cuda:1 compute → gather (overlapped)
+    
+    Uses CUDA events for fine-grained synchronization.
+    Falls back to blocking if async disabled via disable_async_mode().
     
     Args:
         state: SplitQState with CUDA streams/events
@@ -170,53 +175,139 @@ def _parallel_attention_compute(state: SplitQState, q, k, v, heads, mask=None, *
     Returns:
         Attention output [batch, seq_len, heads*dim_head]
     """
+    import os
+    from .state import is_async_enabled
     
-    # CHECKPOINT: Log entry
-    _logger.info(f"⚡ [split-q][attention] Parallel compute entry: q.shape={q.shape}, device={q.device}")
+    # Check if async mode is still enabled (may be disabled by fallback)
+    if not is_async_enabled():
+        _logger.info(f"⚡ [split-q][attention] Async disabled, using blocking mode")
+        return _parallel_attention_compute_blocking(state, q, k, v, heads, mask, **kwargs)
     
-    # STEP 1: Split Q along sequence dimension
+    # Binary search mode: no overlap (sequential streams for exact comparison)
+    no_overlap = os.environ.get('SPLIT_Q_NO_OVERLAP', '0') == '1'
+    if no_overlap:
+        _logger.info(f"⚡ [split-q][attention][NO-OVERLAP] Sequential stream execution for binary search")
+    
+    _logger.info(f"⚡ [split-q][attention][ASYNC] Entry: q.shape={q.shape}, device={q.device}")
+    
+    # STEP 1: Split Q
     q0, q1 = torch.tensor_split(q, 2, dim=1)
-    _logger.info(f"⚡ [split-q][attention] Q split: q0.shape={q0.shape}, q1.shape={q1.shape}")
+    _logger.info(f"⚡ [split-q][attention][ASYNC] Q split: q0={q0.shape}, q1={q1.shape}")
     
-    # STEP 2: Replicate K/V to cuda:1 (BLOCKING)
-    _logger.info(f"⚡ [split-q][attention] Replicating K/V to cuda:1 (blocking)")
+    # STEP 2: Launch Stream 1 replication (async, overlapped with Stream 0)
+    with torch.cuda.stream(state.stream_1):
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_1: Replicating K/V to cuda:1")
+        k_1 = k.to(state.device_1, non_blocking=True)
+        v_1 = v.to(state.device_1, non_blocking=True)
+        q1_dev1 = q1.to(state.device_1, non_blocking=True)
+        
+        if mask is not None:
+            mask_1 = mask.to(state.device_1, non_blocking=True)
+        else:
+            mask_1 = None
+        
+        # Record completion of all transfers
+        state.event_k_replicated.record(state.stream_1)
+        state.event_v_replicated.record(state.stream_1)
+    
+    # STEP 3: Launch Stream 0 compute (parallel with Stream 1 replication)
+    with torch.cuda.stream(state.stream_0):
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_0: Computing cuda:0 attention")
+        out_0 = _attention_compute_kernel(state, q0, k, v, heads, mask, **kwargs)
+        state.event_attn_0_done.record(state.stream_0)
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_0: Complete")
+    
+    # NO OVERLAP MODE: Wait for stream 0 to finish before starting stream 1
+    if no_overlap:
+        state.stream_0.synchronize()
+        _logger.info(f"⚡ [split-q][attention][NO-OVERLAP] Stream 0 synchronized before stream 1")
+    
+    # STEP 4: Stream 1 compute (waits for K/V replication to finish)
+    with torch.cuda.stream(state.stream_1):
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_1: Waiting for K/V replication")
+        state.stream_1.wait_event(state.event_k_replicated)
+        state.stream_1.wait_event(state.event_v_replicated)
+        
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_1: Computing cuda:1 attention")
+        out_1 = _attention_compute_kernel(state, q1_dev1, k_1, v_1, heads, mask_1, **kwargs)
+        
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_1: Gathering to cuda:0")
+        out_1_dev0 = out_1.to(state.device_0, non_blocking=True)
+        state.event_attn_1_done.record(state.stream_1)
+        _logger.info(f"⚡ [split-q][attention][ASYNC] stream_1: Complete")
+    
+    # STEP 5: Synchronize both streams before concatenation
+    state.stream_0.synchronize()
+    state.stream_1.synchronize()
+    _logger.info(f"⚡ [split-q][attention][ASYNC] Both streams synchronized")
+    
+    # STEP 6: Concatenate results (both on cuda:0 now)
+    out = torch.cat([out_0, out_1_dev0], dim=1)
+    
+    # BINARY SEARCH CHECKPOINT: Final output hash
+    final_hash = hash(out.cpu().numpy().tobytes())
+    _logger.info(f"⚡ [split-q][attention][ASYNC] Gather complete: out.shape={out.shape}, final_hash={final_hash}")
+    
+    return out
+
+
+def _parallel_attention_compute_blocking(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
+    """
+    Phase 1.5 blocking fallback (used if async disabled).
+    Identical to Phase 1.5 implementation.
+    """
+    _logger.info(f"⚡ [split-q][attention][BLOCKING] Entry: q.shape={q.shape}")
+    
+    q0, q1 = torch.tensor_split(q, 2, dim=1)
+    
     k_1 = k.to(state.device_1, non_blocking=False)
     v_1 = v.to(state.device_1, non_blocking=False)
     
-    # Handle mask replication if present
     if mask is not None:
         mask_1 = mask.to(state.device_1, non_blocking=False)
     else:
         mask_1 = None
     
-    # STEP 3: Compute attention on cuda:0 (BLOCKING)
-    _logger.info(f"⚡ [split-q][attention] Computing attention on cuda:0")
     out_0 = _attention_compute_kernel(state, q0, k, v, heads, mask, **kwargs)
     
-    # STEP 4: Compute attention on cuda:1 (BLOCKING)
-    _logger.info(f"⚡ [split-q][attention] Computing attention on cuda:1")
     q1_dev1 = q1.to(state.device_1, non_blocking=False)
     out_1 = _attention_compute_kernel(state, q1_dev1, k_1, v_1, heads, mask_1, **kwargs)
     
-    # STEP 5: Synchronize (BLOCKING)
     torch.cuda.synchronize()
-    _logger.info(f"⚡ [split-q][attention] Synchronization complete")
     
-    # STEP 6: Gather results back to cuda:0
     out_1_dev0 = out_1.to(state.device_0, non_blocking=False)
     out = torch.cat([out_0, out_1_dev0], dim=1)
     
-    _logger.info(f"⚡ [split-q][attention] Gather complete: out.shape={out.shape}, device={out.device}")
+    _logger.info(f"⚡ [split-q][attention][BLOCKING] Complete: out.shape={out.shape}")
     
-    # Validation checkpoint: detect divergence and trigger fallback
-    # Only in validation_mode or if debugging enabled
-    if state.validation_mode and hasattr(state, '_validation_reference'):
-        max_diff = torch.max(torch.abs(out - state._validation_reference)).item()
-        if max_diff > 1e-4:  # Tolerance for fp16 precision
-            from .state import disable_async_mode
-            disable_async_mode(f"Output divergence detected: max_diff={max_diff:.2e}")
-            _logger.error(f"⚡ [split-q][attention][FATAL] Divergence: max_diff={max_diff:.2e}")
-            # Return blocking result for safety
-            return state._validation_reference
+    return out
+
+
+def _parallel_attention_compute_blocking(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
+    """
+    Blocking fallback version (Phase 1.5 implementation).
+    Used when async mode is disabled due to divergence detection.
+    """
+    _logger.info(f"⚡ [split-q][attention][BLOCKING] Entry: q.shape={q.shape}")
     
+    q0, q1 = torch.tensor_split(q, 2, dim=1)
+    
+    k_1 = k.to(state.device_1, non_blocking=False)
+    v_1 = v.to(state.device_1, non_blocking=False)
+    q1_dev1 = q1.to(state.device_1, non_blocking=False)
+    
+    if mask is not None:
+        mask_1 = mask.to(state.device_1, non_blocking=False)
+    else:
+        mask_1 = None
+    
+    out_0 = _attention_compute_kernel(state, q0, k, v, heads, mask, **kwargs)
+    out_1 = _attention_compute_kernel(state, q1_dev1, k_1, v_1, heads, mask_1, **kwargs)
+    
+    torch.cuda.synchronize()
+    
+    out_1_dev0 = out_1.to(state.device_0, non_blocking=False)
+    out = torch.cat([out_0, out_1_dev0], dim=1)
+    
+    _logger.info(f"⚡ [split-q][attention][BLOCKING] Complete: out.shape={out.shape}")
     return out

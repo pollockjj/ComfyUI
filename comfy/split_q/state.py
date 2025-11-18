@@ -11,7 +11,7 @@ from typing import Callable, Optional, List
 _logger = logging.getLogger('comfy')
 
 # Automatic async fallback: disable async after first mismatch
-_ASYNC_ENABLED = True
+_ASYNC_ENABLED = True  # Re-enabled for binary search debugging
 _ASYNC_FALLBACK_TRIGGERED = False
 
 
