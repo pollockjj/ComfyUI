@@ -1024,6 +1024,21 @@ class CFGGuider:
         try:
             self.model_patcher.pre_run()
             
+            # CGDP hook: Wrap inner_model if requested
+            cgdp_requested = self.model_options.get("transformer_options", {}).get("cgdp_requested", False)
+            if cgdp_requested:
+                _logger = logging.getLogger(__name__)
+                _logger.info("⚡ [cgdp] CGDP requested, wrapping model with ParallelUnetWrapper")
+                
+                from comfy.cgdp.parallel_wrapper import ParallelUnetWrapper
+                
+                # Wrap the inner_model's apply_model method
+                # Pass model_patcher (not inner_model) to get load_device
+                wrapper = ParallelUnetWrapper(self.inner_model, device_primary=device)
+                self.inner_model.apply_model = wrapper.apply_model_wrapped
+                
+                _logger.info("⚡ [cgdp] Model wrapped, proceeding with sampling")
+            
             output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
         finally:
             self.model_patcher.cleanup()
