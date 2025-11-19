@@ -126,7 +126,11 @@ def wrap_attn(func):
                 kwargs["_inside_attn_wrapper"] = True
                 if transformer_options is not None:
                     if "optimized_attention_override" in transformer_options:
-                        return transformer_options["optimized_attention_override"](func, *args, **kwargs)
+                        import logging
+                        _logger = logging.getLogger('comfy')
+                        override_func = transformer_options["optimized_attention_override"]
+                        _logger.info(f"⚡ [attention] Calling override: {override_func.__name__ if hasattr(override_func, '__name__') else str(override_func)}")
+                        return override_func(func, *args, **kwargs)
             return func(*args, **kwargs)
         finally:
             if remove_attn_wrapper_key:

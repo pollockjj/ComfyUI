@@ -100,14 +100,47 @@ class CGDPStepSyncWrapper:
     
     def predict_noise_with_sync(self, model, x, timestep, negative, positive, cfg, model_options, seed):
         """
-        FALLBACK: Spatial parallelism is fundamentally incompatible with self-attention.
-        Reverting to simple replication - both GPUs process full latent with different noise.
-        This achieves NO SPEEDUP but validates the infrastructure.
-        """
-        logger.info(f"⚡ [cgdp] FALLBACK MODE: Running full latent on both GPUs (no spatial split)")
+        Ulysses-style sequence parallelism using Split-Q attention implementation.
         
-        # Just run on GPU 0 - spatial split is broken for diffusion models
-        return comfy.samplers.sampling_function(model, x, timestep, negative, positive, cfg, model_options=model_options, seed=seed)
+        Hooks into attention layer to split Q and replicate K/V across GPUs.
+        """
+        logger.info(f"⚡ [cgdp] Enabling Split-Q attention hook")
+        
+        # Import Split-Q attention system
+        from comfy.split_q.hooks import hook_into_modelpatcher
+        from comfy.split_q.state import SplitQState
+        
+        # Create Split-Q state (persistent CUDA streams/events)
+        split_q_state = SplitQState(
+            device_0=self.device_0,
+            device_1=self.device_1,
+        )
+        
+        # Hook into model's attention via model_options
+        if model_options is None:
+            model_options = {}
+        if "transformer_options" not in model_options:
+            model_options["transformer_options"] = {}
+        
+        model_options["transformer_options"]["split_q_state"] = split_q_state
+        model_options["transformer_options"]["split_q_enabled"] = True
+        
+        # Actually hook into the attention system
+        # Create a minimal model_patcher-like object for hook_into_modelpatcher
+        class FakeModelPatcher:
+            def __init__(self, model_options):
+                self.model_options = model_options
+        
+        fake_patcher = FakeModelPatcher(model_options)
+        hook_into_modelpatcher(fake_patcher, split_q_enabled=True, validation_mode=False)
+        
+        logger.info(f"⚡ [cgdp] Split-Q attention override installed, running sampling")
+        
+        # Run sampling with Split-Q attention active
+        result = comfy.samplers.sampling_function(model, x, timestep, negative, positive, cfg, model_options=model_options, seed=seed)
+        
+        logger.info(f"⚡ [cgdp] Sampling complete with Split-Q attention")
+        return result
         
         # Parallel execution with streams
         result_0 = None
