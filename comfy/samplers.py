@@ -989,6 +989,14 @@ class CFGGuider:
         ).execute(x, timestep, model_options, seed)
 
     def predict_noise(self, x, timestep, model_options={}, seed=None):
+        # CGDP per-step synchronization wrapper
+        if hasattr(self, '_cgdp_wrapper') and self._cgdp_wrapper is not None:
+            return self._cgdp_wrapper.predict_noise_with_sync(
+                self.inner_model, x, timestep, 
+                self.conds.get("negative", None), 
+                self.conds.get("positive", None), 
+                self.cfg, model_options, seed
+            )
         return sampling_function(self.inner_model, x, timestep, self.conds.get("negative", None), self.conds.get("positive", None), self.cfg, model_options=model_options, seed=seed)
 
     def inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
@@ -1024,20 +1032,18 @@ class CFGGuider:
         try:
             self.model_patcher.pre_run()
             
-            # CGDP hook: Wrap inner_model if requested
+            # CGDP hook: Wrap CFGGuider for per-step synchronization
             cgdp_requested = self.model_options.get("transformer_options", {}).get("cgdp_requested", False)
             if cgdp_requested:
                 _logger = logging.getLogger(__name__)
-                _logger.info("⚡ [cgdp] CGDP requested, wrapping model with ParallelUnetWrapper")
+                _logger.info("⚡ [cgdp] CGDP requested, installing per-step sync wrapper")
                 
-                from comfy.cgdp.parallel_wrapper import ParallelUnetWrapper
+                from comfy.cgdp.parallel_wrapper import CGDPStepSyncWrapper
                 
-                # Wrap the inner_model's apply_model method
-                # Pass model_patcher (not inner_model) to get load_device
-                wrapper = ParallelUnetWrapper(self.inner_model, device_primary=device)
-                self.inner_model.apply_model = wrapper.apply_model_wrapped
+                # Create wrapper that handles per-step synchronization
+                self._cgdp_wrapper = CGDPStepSyncWrapper(self.inner_model, device_primary=device)
                 
-                _logger.info("⚡ [cgdp] Model wrapped, proceeding with sampling")
+                _logger.info("⚡ [cgdp] Per-step sync wrapper installed")
             
             output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
         finally:
