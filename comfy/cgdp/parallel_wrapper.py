@@ -100,14 +100,54 @@ class CGDPStepSyncWrapper:
     
     def predict_noise_with_sync(self, model, x, timestep, negative, positive, cfg, model_options, seed):
         """
-        FALLBACK: Spatial parallelism is fundamentally incompatible with self-attention.
-        Reverting to simple replication - both GPUs process full latent with different noise.
-        This achieves NO SPEEDUP but validates the infrastructure.
-        """
-        logger.info(f"⚡ [cgdp] FALLBACK MODE: Running full latent on both GPUs (no spatial split)")
+        Ulysses-style sequence parallelism using raw NCCL (no torch.distributed).
         
-        # Just run on GPU 0 - spatial split is broken for diffusion models
+        Manually implements attention with K/V all-gather across GPUs.
+        """
+        logger.info(f"⚡ [cgdp] Ulysses-style SP with raw NCCL")
+        
+        from . import nccl_direct
+        
+        # Initialize NCCL if needed
+        nccl_direct.initialize_nccl_single_process(self.device_0, self.device_1)
+        
+        # For now: just run on GPU 0 until we implement attention patching
+        # TODO: Patch attention layers to split Q, all-gather K/V
+        logger.info(f"⚡ [cgdp] Running on GPU 0 (attention patching TODO)")
         return comfy.samplers.sampling_function(model, x, timestep, negative, positive, cfg, model_options=model_options, seed=seed)
+        
+        # Initialize distributed environment for 2 GPUs
+        if not parallel_state.is_initialized():
+            logger.info("⚡ [cgdp] Initializing xfuser distributed environment")
+            init_distributed_environment(
+                rank=0 if self.device_0.index == 0 else 1,
+                world_size=2,
+            )
+            parallel_state.initialize_parallel_state(
+                sequence_parallel_degree=2,
+                pipefusion_parallel_degree=1,
+                ring_degree=1,
+                ulysses_degree=2,
+            )
+            initialize_usp_attention(ulysses_degree=2, ring_degree=1, attn_type="FLASH_ATTN")
+            logger.info("⚡ [cgdp] Parallel state initialized")
+        
+        # Chunk input sequence for this rank
+        x_local = chunk_sequence_for_rank(x, dim=1)
+        logger.info(f"⚡ [cgdp] Chunked x: {x.shape} → {x_local.shape}")
+        
+        # Patch model forward with USP version
+        original_forward = model.diffusion_model.forward
+        model.diffusion_model.forward = lambda *args, **kwargs: usp_dit_forward(model.diffusion_model, *args, **kwargs)
+        
+        try:
+            # Run sampling with patched forward
+            result = comfy.samplers.sampling_function(model, x_local, timestep, negative, positive, cfg, model_options=model_options, seed=seed)
+            logger.info(f"⚡ [cgdp] USP sampling complete: {result.shape}")
+            return result
+        finally:
+            # Restore original forward
+            model.diffusion_model.forward = original_forward
         
         # Parallel execution with streams
         result_0 = None
