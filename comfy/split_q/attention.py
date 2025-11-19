@@ -270,33 +270,3 @@ def _parallel_attention_compute_blocking(state: SplitQState, q, k, v, heads, mas
     _logger.info(f"⚡ [split-q][attention][BLOCKING] Complete: out.shape={out.shape}")
     
     return out
-
-
-def _parallel_attention_compute_blocking(state: SplitQState, q, k, v, heads, mask=None, **kwargs):
-    """
-    Blocking fallback version (Phase 1.5 implementation).
-    Used when async mode is disabled due to divergence detection.
-    """
-    _logger.info(f"⚡ [split-q][attention][BLOCKING] Entry: q.shape={q.shape}")
-    
-    q0, q1 = torch.tensor_split(q, 2, dim=1)
-    
-    k_1 = k.to(state.device_1, non_blocking=False)
-    v_1 = v.to(state.device_1, non_blocking=False)
-    q1_dev1 = q1.to(state.device_1, non_blocking=False)
-    
-    if mask is not None:
-        mask_1 = mask.to(state.device_1, non_blocking=False)
-    else:
-        mask_1 = None
-    
-    out_0 = _attention_compute_kernel(state, q0, k, v, heads, mask, **kwargs)
-    out_1 = _attention_compute_kernel(state, q1_dev1, k_1, v_1, heads, mask_1, **kwargs)
-    
-    torch.cuda.synchronize()
-    
-    out_1_dev0 = out_1.to(state.device_0, non_blocking=False)
-    out = torch.cat([out_0, out_1_dev0], dim=1)
-    
-    _logger.info(f"⚡ [split-q][attention][BLOCKING] Complete: out.shape={out.shape}")
-    return out

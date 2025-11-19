@@ -1141,8 +1141,9 @@ class CFGGuider:
             self.conds[k] = list(map(lambda a: a.copy(), self.original_conds[k]))
         preprocess_conds_hooks(self.conds)
 
+        orig_model_options = self.model_options
+        orig_hook_mode = self.model_patcher.hook_mode
         try:
-            orig_model_options = self.model_options
             self.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
             
             # Post-clone Split-Q hook installation (Blueprint Section 2.2)
