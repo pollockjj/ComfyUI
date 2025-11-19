@@ -114,7 +114,7 @@ attn_group.add_argument("--use-pytorch-cross-attention", action="store_true", he
 attn_group.add_argument("--use-sage-attention", action="store_true", help="Use sage attention.")
 attn_group.add_argument("--use-flash-attention", action="store_true", help="Use FlashAttention.")
 
-parser.add_argument("--use-split-q-multigpu", action="store_true", help="Enable Split-Q multi-GPU parallel attention. Auto-detects cuda:0 and cuda:1 if compatible.")
+
 parser.add_argument("--disable-xformers", action="store_true", help="Disable xformers.")
 
 upcast = parser.add_mutually_exclusive_group()
