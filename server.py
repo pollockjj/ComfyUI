@@ -163,8 +163,27 @@ def create_origin_only_middleware():
 
     return origin_only_middleware
 
-class PromptServer():
-    def __init__(self, loop):
+try:
+    from pyisolate import ProxiedSingleton
+except ImportError:
+    # Fallback if pyisolate is not installed
+    class ProxiedSingleton:
+        pass
+
+class PromptServer(ProxiedSingleton):
+    def __init__(self, loop=None):
+        # Initialize ProxiedSingleton if available
+        if hasattr(ProxiedSingleton, "__init__") and ProxiedSingleton is not object:
+             super().__init__()
+        
+        # Use provided loop or get current event loop
+        if loop is None:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+             
         PromptServer.instance = self
 
         mimetypes.init()
@@ -208,58 +227,6 @@ class PromptServer():
         self.client_id = None
 
         self.on_prompt_handlers = []
-
-    def register_route(self, method, path, handler, source="local"):
-        """
-        Register a route with the server.
-        
-        Args:
-            method (str): HTTP method (GET, POST, etc.)
-            path (str): URL path
-            handler (callable): Async function to handle the request
-            source (str): Origin of the registration ("local" or remote ID)
-        """
-        if source == "local":
-            # Standard local registration
-            if method.upper() == "GET":
-                self.routes.get(path)(handler)
-            elif method.upper() == "POST":
-                self.routes.post(path)(handler)
-            elif method.upper() == "PUT":
-                self.routes.put(path)(handler)
-            elif method.upper() == "DELETE":
-                self.routes.delete(path)(handler)
-            elif method.upper() == "PATCH":
-                self.routes.patch(path)(handler)
-            else:
-                logging.error(f"[PromptServer] Unsupported method {method} for path {path}")
-        else:
-            # Remote registration (for isolated nodes)
-            # We wrap the handler to forward the request via RPC if needed
-            # But for now, we assume the 'handler' passed here is already a proxy 
-            # that knows how to talk to the remote process.
-            # The 'source' arg is mainly for logging/debugging/security.
-            logging.info(f"[PromptServer] Registering remote route {method} {path} from {source}")
-            
-            # We still register it with aiohttp, but the handler is special
-            if method.upper() == "GET":
-                self.routes.get(path)(handler)
-            elif method.upper() == "POST":
-                self.routes.post(path)(handler)
-            # ... add others as needed
-
-    def publish_event(self, event, data, source="local"):
-        """
-        Publish a WebSocket event.
-        
-        Args:
-            event (str): Event name
-            data (dict): Event payload
-            source (str): Origin of the event
-        """
-        # For now, just forward to send_sync
-        # In the future, we can add source tracking/filtering
-        self.send_sync(event, data)
 
         @routes.get('/ws')
         async def websocket_handler(request):
@@ -873,6 +840,18 @@ class PromptServer():
     async def setup(self):
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
         self.client_session = aiohttp.ClientSession(timeout=timeout)
+
+    def register_route(self, method, path, handler, source="local"):
+        if method == "GET":
+            self.routes.get(path)(handler)
+        elif method == "POST":
+            self.routes.post(path)(handler)
+        elif method == "PUT":
+            self.routes.put(path)(handler)
+        elif method == "DELETE":
+            self.routes.delete(path)(handler)
+        else:
+            logging.warning(f"[PromptServer] Unsupported method {method} for route {path}")
 
     def add_routes(self):
         self.user_manager.add_routes(self.routes)
