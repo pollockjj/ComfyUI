@@ -219,3 +219,12 @@ class ComfyNodeExtension(ExtensionBase):
                 raise KeyError(f"Unknown node: {node_name}")
             self.node_instances[node_name] = self.node_classes[node_name]()
         return self.node_instances[node_name]
+
+    async def before_module_loaded(self) -> None:
+        """Patch ComfyUI singletons before loading the user module."""
+        await super().before_module_loaded()
+        
+        # No patching needed for PromptServer anymore!
+        # It is now a native ProxiedSingleton.
+        # When server.py is imported in the isolated process, PromptServer will be a proxy.
+        pass

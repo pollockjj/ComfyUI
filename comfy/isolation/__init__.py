@@ -69,6 +69,7 @@ def initialize_proxies() -> None:
     from .proxies.model_management_proxy import ModelManagementProxy
     from .proxies.nodes_proxy import NodesProxy
     from .proxies.utils_proxy import UtilsProxy
+    from .proxies.prompt_server_proxy import PromptServerProxy
 
     logger.info(f"{LOG_PREFIX}[System] Registering ProxiedSingletons...")
     
@@ -77,6 +78,7 @@ def initialize_proxies() -> None:
     ModelManagementProxy()
     NodesProxy()
     UtilsProxy()
+    PromptServerProxy()
     
     logger.info(f"{LOG_PREFIX}[System] ProxiedSingletons registered (4 classes)")
 
@@ -184,12 +186,19 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     _EXTENSION_MANAGERS.append(manager)
 
+    # Import server only when needed, not at module level
+    # This prevents spawn context from importing server before path unification
+    import server
+    
+    # Import server here (not at module level) to avoid import during multiprocessing spawn
+    import server
+    
     extension_config = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
         "dependencies": dependencies,
-        "apis": [],
+        "apis": [server.PromptServer],
         "share_torch": share_torch,
     }
 
