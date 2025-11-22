@@ -14,6 +14,43 @@ LOG_PREFIX = "📚 [PyIsolate]"
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_for_transport(value):
+    """Convert arbitrary node metadata into transport-safe primitives."""
+    primitives = (str, int, float, bool, type(None))
+    if isinstance(value, primitives):
+        return value
+    if isinstance(value, dict):
+        return {k: _sanitize_for_transport(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return {"__pyisolate_tuple__": [_sanitize_for_transport(v) for v in value]}
+    if isinstance(value, list):
+        return [_sanitize_for_transport(v) for v in value]
+
+    cls_name = value.__class__.__name__
+    if cls_name == "FlexibleOptionalInputType":
+        base_data = getattr(value, "data", None)
+        sanitized_data = (
+            {k: _sanitize_for_transport(v) for k, v in base_data.items()}
+            if isinstance(base_data, dict)
+            else None
+        )
+        flex_type = _sanitize_for_transport(getattr(value, "type", "*"))
+        return {
+            "__pyisolate_flexible_optional__": True,
+            "type": flex_type,
+            "data": sanitized_data,
+        }
+    if cls_name == "AnyType":
+        return {"__pyisolate_any_type__": True, "value": str(value)}
+    if cls_name == "ByPassTypeTuple":
+        return {
+            "__pyisolate_bypass_tuple__": [_sanitize_for_transport(v) for v in tuple(value)]
+        }
+
+    # Fallback: best-effort string conversion
+    return str(value)
+
+
 class RemoteObjectHandle:
     """Lightweight handle for objects kept in the isolated process."""
     # Explicitly set module for pickle compatibility
@@ -92,16 +129,8 @@ class ComfyNodeExtension(ExtensionBase):
         """Get full node details - called during loading, must return JSON-serializable data."""
         node_cls = self._get_node_class(node_name)
         
-        # Call INPUT_TYPES() - this WILL cause imports but we're in the isolated process where imports work
         input_types_raw = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
-        
-        # Force serialization to JSON and back to ensure NO object references remain
-        import json
-        
-        # Convert to JSON string (this will call str() on any non-serializable objects)
-        input_types_json_str = json.dumps(input_types_raw, default=str)
-        # Parse back to get fresh Python objects with no references to original
-        input_types_safe = json.loads(input_types_json_str)
+        input_types_safe = _sanitize_for_transport(input_types_raw)
         
         logger.info("%s[ExtensionWrapper] INPUT_TYPES for %s converted successfully", LOG_PREFIX, node_name)
         

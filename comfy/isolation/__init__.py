@@ -32,6 +32,87 @@ from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "📚 [PyIsolate]"
 
+
+class _AnyTypeProxy(str):
+    """Replacement for custom AnyType objects used by some nodes."""
+
+    def __new__(cls, value: str = "*"):
+        return super().__new__(cls, value)
+
+    def __ne__(self, other):  # type: ignore[override]
+        return False
+
+
+class _FlexibleOptionalInputProxy(dict):
+    """Replacement for FlexibleOptionalInputType to allow dynamic inputs."""
+
+    def __init__(self, flex_type, data: Optional[Dict[str, object]] = None):
+        super().__init__()
+        self.type = flex_type
+        self.data = data or {}
+        for key, value in self.data.items():
+            self[key] = value
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if key in self.data:
+            return self.data[key]
+        value = self.type
+        if isinstance(value, tuple):
+            return value
+        return (value,)
+
+    def __contains__(self, key):  # type: ignore[override]
+        return True
+
+
+class _ByPassTypeTupleProxy(tuple):
+    """Replacement for ByPassTypeTuple to mirror wildcard fallback behavior."""
+
+    def __new__(cls, values):
+        return super().__new__(cls, values)
+
+    def __getitem__(self, index):  # type: ignore[override]
+        if index >= len(self):
+            return _AnyTypeProxy("*")
+        return super().__getitem__(index)
+
+
+def _restore_special_value(value):
+    if isinstance(value, dict):
+        if value.get("__pyisolate_any_type__"):
+            return _AnyTypeProxy(value.get("value", "*"))
+        if value.get("__pyisolate_flexible_optional__"):
+            flex_type = _restore_special_value(value.get("type"))
+            data_raw = value.get("data")
+            data = (
+                {k: _restore_special_value(v) for k, v in data_raw.items()}
+                if isinstance(data_raw, dict)
+                else {}
+            )
+            return _FlexibleOptionalInputProxy(flex_type, data)
+        if value.get("__pyisolate_tuple__") is not None:
+            return tuple(_restore_special_value(v) for v in value["__pyisolate_tuple__"])
+        if value.get("__pyisolate_bypass_tuple__") is not None:
+            return _ByPassTypeTupleProxy(
+                tuple(_restore_special_value(v) for v in value["__pyisolate_bypass_tuple__"])
+            )
+        return {k: _restore_special_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_restore_special_value(v) for v in value]
+    return value
+
+
+def _restore_input_types(raw: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(raw, dict):
+        return raw
+    restored: Dict[str, object] = {}
+    for section, entries in raw.items():
+        if isinstance(entries, dict):
+            restored[section] = {k: _restore_special_value(v) for k, v in entries.items()}
+        else:
+            restored[section] = _restore_special_value(entries)
+    return restored
+
 BLACKLISTED_NODES: dict[str, str] = {
     # https://github.com/pollockjj/ComfyUI-MultiGPU relies on direct CUDA context reuse + custom scheduler
     "ComfyUI-MultiGPU": (
@@ -341,13 +422,20 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
 
 def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyNodeExtension) -> type:
     function_name = "_pyisolate_execute"
+    restored_input_types = _restore_input_types(info.get("input_types", {}))
+    logger.debug(
+        "%s[Loader] Restored INPUT_TYPES for %s: %s",
+        LOG_PREFIX,
+        node_name,
+        restored_input_types,
+    )
 
     async def _execute(self, **inputs):
         result = await extension.execute_node(node_name, **inputs)
         return result
 
     def _input_types(cls):
-        return info.get("input_types", {})
+        return restored_input_types
 
     attributes: Dict[str, object] = {
         "FUNCTION": function_name,
