@@ -32,6 +32,24 @@ from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "📚 [PyIsolate]"
 
+BLACKLISTED_NODES: dict[str, str] = {
+    # https://github.com/pollockjj/ComfyUI-MultiGPU relies on direct CUDA context reuse + custom scheduler
+    "ComfyUI-MultiGPU": (
+        "This extension requires direct GPU process management and hooks into ComfyUI's main event loop. "
+        "Running it inside PyIsolate would break GPU synchronization and create undefined behavior."
+    ),
+    # Crystools pulls in jetson-stats which demands a privileged host install and cannot be vendored
+    "ComfyUI-Crystools": (
+        "Depends on jetson-stats, which refuses to install inside sandboxed environments. "
+        "Please remove the jetson-stats dependency or provide an alternate implementation before enabling isolation."
+    ),
+    # GGUF loaders must extend ModelPatcher inside the host process to share CUDA tensors
+    "ComfyUI-GGUF": (
+        "GGUF loaders subclass ModelPatcher and expect to run inside the main process to patch CUDA modules. "
+        "Keeping them in an isolated process prevents samplers from calling get_model_object()."
+    ),
+}
+
 
 def _get_user_pyisolate_path() -> Path:
     target = Path(folder_paths.base_path) / "user" / "pyisolate"
@@ -118,6 +136,7 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
         return []
 
     manifest_entries = _find_manifest_directories()
+    manifest_entries = _filter_blacklisted_entries(manifest_entries)
     if not manifest_entries:
         logger.info(f"{LOG_PREFIX}[Loader] No pyisolate manifests detected under custom_nodes")
         return []
@@ -158,6 +177,21 @@ def _find_manifest_directories() -> List[tuple[Path, Path]]:
                 logger.info("%s[Loader] Found pyisolate manifest: %s", LOG_PREFIX, manifest)
                 manifest_dirs.append((entry, manifest))
     return manifest_dirs
+
+
+def _filter_blacklisted_entries(entries: List[tuple[Path, Path]]):
+    filtered: List[tuple[Path, Path]] = []
+    for node_dir, manifest in entries:
+        reason = BLACKLISTED_NODES.get(node_dir.name)
+        if reason:
+            message = (
+                f"{LOG_PREFIX}[Loader] Blocking {node_dir} from isolation: {reason}"
+                " Node authors must remove the manifest or ship a compliant version before retrying."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+        filtered.append((node_dir, manifest))
+    return filtered
 
 
 async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[IsolatedNodeSpec]:
@@ -326,7 +360,7 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     stub_cls = type(class_name, (), attributes)
     stub_cls.__doc__ = f"PyIsolate proxy node for {display_name}"
-    logger.info(
+    logger.debug(
         "%s[Loader] Built stub class %s for node %s (display=%s)",
         LOG_PREFIX,
         class_name,

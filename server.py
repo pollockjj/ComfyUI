@@ -842,6 +842,15 @@ class PromptServer(ProxiedSingleton):
         self.client_session = aiohttp.ClientSession(timeout=timeout)
 
     def register_route(self, method, path, handler, source="local"):
+        # If the app is already running (has a router), add directly to it
+        if hasattr(self, 'app') and hasattr(self.app, 'router') and not self.app.frozen:
+             # Note: aiohttp applications are frozen after startup, so adding routes might fail
+             # if not done carefully. However, ComfyUI's app might not be strictly frozen?
+             # Actually, aiohttp forbids adding routes after startup.
+             # But we can try.
+             pass
+
+        # Always add to the definition list for startup/restart
         if method == "GET":
             self.routes.get(path)(handler)
         elif method == "POST":
@@ -852,6 +861,23 @@ class PromptServer(ProxiedSingleton):
             self.routes.delete(path)(handler)
         else:
             logging.warning(f"[PromptServer] Unsupported method {method} for route {path}")
+            return
+
+        # Attempt runtime registration if app exists
+        if hasattr(self, 'app') and self.app:
+            try:
+                if method == "GET":
+                    self.app.router.add_get(path, handler)
+                elif method == "POST":
+                    self.app.router.add_post(path, handler)
+                elif method == "PUT":
+                    self.app.router.add_put(path, handler)
+                elif method == "DELETE":
+                    self.app.router.add_delete(path, handler)
+                logging.info(f"[PromptServer] Registered dynamic route: {method} {path}")
+            except Exception as e:
+                logging.warning(f"[PromptServer] Failed to register dynamic route {path}: {e}")
+
 
     def add_routes(self):
         self.user_manager.add_routes(self.routes)
