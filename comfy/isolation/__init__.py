@@ -212,7 +212,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     dependencies = _augment_dependencies_with_pyisolate(dependencies, extension_name)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(PYISOLATE_VENV_ROOT))
-    logger.info(
+    logger.debug(
         "%s[Loader] Using manager config: venv_root=%s",
         LOG_PREFIX,
         manager_config["venv_root_path"],
@@ -236,7 +236,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         "share_torch": share_torch,
     }
 
-    logger.info(
+    logger.debug(
         "%s[Loader] Invoking ExtensionManager.load_extension with config=%s",
         LOG_PREFIX,
         extension_config,
@@ -283,10 +283,15 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
             f"{LOG_PREFIX}[Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
         )
     logger.info(
-        "%s[Loader] %s reported %d node(s): %s",
+        "%s[Loader] %s reported %d node(s)",
         LOG_PREFIX,
         extension_name,
         len(remote_nodes),
+    )
+    logger.debug(
+        "%s[Loader] %s nodes: %s",
+        LOG_PREFIX,
+        extension_name,
         list(remote_nodes.keys()),
     )
     for node_name, display_name in remote_nodes.items():
@@ -316,7 +321,7 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
                 break
         if needs_injection:
             deps = ["-e", str(PYISOLATE_EDITABLE_PATH)] + deps
-            logger.info(
+            logger.debug(
                 "%s[Loader] Injected pyisolate editable dependency for %s",
                 LOG_PREFIX,
                 extension_name,
@@ -360,13 +365,6 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     stub_cls = type(class_name, (), attributes)
     stub_cls.__doc__ = f"PyIsolate proxy node for {display_name}"
-    logger.debug(
-        "%s[Loader] Built stub class %s for node %s (display=%s)",
-        LOG_PREFIX,
-        class_name,
-        node_name,
-        display_name,
-    )
     return stub_cls
 
 
