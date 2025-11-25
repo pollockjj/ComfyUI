@@ -55,7 +55,3 @@ class FolderPathsProxy:
         result = folder_paths.get_folder_paths(folder_name)
         logger.debug(f"{LOG_PREFIX}[FolderPathsProxy] get_folder_paths({folder_name}) → {len(result)} paths")
         return result
-
-    
-    if failed > 0:
-        raise RuntimeError(f"FolderPathsProxy self-tests failed: {failed}/{total}")
