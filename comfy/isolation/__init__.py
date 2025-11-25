@@ -255,7 +255,7 @@ def _find_manifest_directories() -> List[tuple[Path, Path]]:
             if not manifest.exists():
                 manifest = entry / "pyisolate.yml"
             if manifest.exists():
-                logger.info("%s[Loader] Found pyisolate manifest: %s", LOG_PREFIX, manifest)
+                logger.debug("%s[Loader] Found pyisolate manifest: %s", LOG_PREFIX, manifest)
                 manifest_dirs.append((entry, manifest))
     return manifest_dirs
 
@@ -350,7 +350,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
             normalized_name,
         )
     
-    logger.info(
+    logger.debug(
         "%s[Loader] Loading isolated node %s from %s",
         LOG_PREFIX,
         extension_name,
@@ -363,7 +363,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         raise RuntimeError(
             f"{LOG_PREFIX}[Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
         )
-    logger.info(
+    logger.debug(
         "%s[Loader] %s reported %d node(s)",
         LOG_PREFIX,
         extension_name,
