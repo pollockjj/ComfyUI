@@ -18,6 +18,8 @@ from comfy.cli_args import args
 from app.logger import setup_logger
 import itertools
 import logging
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
@@ -171,7 +173,7 @@ import hook_breaker_ac10a0
 try:
     import comfy.isolation
     comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe
-    logging.info(f"{comfy.isolation.LOG_PREFIX}[System] Isolation system available")
+    logging.info(f"{comfy.isolation.LOG_PREFIX}[System] Isolation system available: 4 classes of ProxiedSingletons registered")
 except ImportError as e:
     logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
 except Exception as e:

@@ -2216,7 +2216,7 @@ async def init_external_custom_nodes():
         None
     """
     isolated_specs = await initialize_isolation_nodes()
-    logging.info("📚 [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
+    logging.debug("📚 [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
     for spec in isolated_specs:
         NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
         NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)
@@ -2253,6 +2253,14 @@ async def init_external_custom_nodes():
             else:
                 import_message = " (IMPORT FAILED)"
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
+        logging.info("")
+    
+    # Report isolated node timing in same format
+    from comfy.isolation import isolated_node_timings
+    if isolated_node_timings:
+        logging.info("\nImport times for isolated custom nodes:")
+        for timing, path in sorted(isolated_node_timings):
+            logging.info("{:6.1f} seconds: {}".format(timing, path))
         logging.info("")
 
 async def init_builtin_extra_nodes():

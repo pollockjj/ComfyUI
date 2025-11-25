@@ -220,7 +220,7 @@ class PromptServer(ProxiedSingleton):
             if args.front_end_root is None
             else args.front_end_root
         )
-        logging.info(f"[Prompt Server] web root: {self.web_root}")
+        logging.debug(f"[Prompt Server] web root: {self.web_root}")
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None

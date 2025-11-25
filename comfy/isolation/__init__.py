@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,9 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "📚 [PyIsolate]"
+
+# Module-level list to store timing data for ComfyManager-style report
+isolated_node_timings: List[tuple[float, Path]] = []
 
 
 class _AnyTypeProxy(str):
@@ -139,7 +143,7 @@ def _get_user_pyisolate_path() -> Path:
             f"PyIsolate source missing at {target}; clone or move pyisolate into ComfyUI/user/pyisolate"
         )
 
-    logging.getLogger(__name__).info("%s[System] Using pyisolate source at %s", LOG_PREFIX, target)
+    logging.getLogger(__name__).debug("%s[System] Using pyisolate source at %s", LOG_PREFIX, target)
     return target
 
 
@@ -155,7 +159,6 @@ def get_isolation_logger(name: str) -> logging.Logger:
 
 
 logger = get_isolation_logger(__name__)
-logger.info(f"{LOG_PREFIX}[System] Isolation system initialized")
 
 
 def initialize_proxies() -> None:
@@ -169,8 +172,6 @@ def initialize_proxies() -> None:
     from .proxies.nodes_proxy import NodesProxy
     from .proxies.utils_proxy import UtilsProxy
     from .proxies.prompt_server_proxy import PromptServerProxy
-
-    logger.info(f"{LOG_PREFIX}[System] Registering ProxiedSingletons...")
     
     # Instantiate singletons to register them
     FolderPathsProxy()
@@ -178,8 +179,6 @@ def initialize_proxies() -> None:
     NodesProxy()
     UtilsProxy()
     PromptServerProxy()
-    
-    logger.info(f"{LOG_PREFIX}[System] ProxiedSingletons registered (4 classes)")
 
 
 @dataclass(frozen=True)
@@ -225,7 +224,11 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     specs: List[IsolatedNodeSpec] = []
     for node_dir, manifest in manifest_entries:
         try:
+            load_start = time.perf_counter()
             spec_list = await _load_isolated_node(node_dir, manifest)
+            load_time = time.perf_counter() - load_start
+            if spec_list:
+                isolated_node_timings.append((load_time, node_dir))
         except Exception as exc:  # pragma: no cover - defensive logging only
             logger.error(
                 "%s[Loader] Failed to initialize isolated node at %s: %s",
@@ -359,6 +362,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
 
     specs: List[IsolatedNodeSpec] = []
     remote_nodes: Dict[str, str] = await extension.list_nodes()
+    
     if not remote_nodes:
         raise RuntimeError(
             f"{LOG_PREFIX}[Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
@@ -375,6 +379,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         extension_name,
         list(remote_nodes.keys()),
     )
+    
     for node_name, display_name in remote_nodes.items():
         # Get full node details - the isolated process will serialize everything to JSON
         details = await extension.get_node_details(node_name)

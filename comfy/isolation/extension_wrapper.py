@@ -132,8 +132,6 @@ class ComfyNodeExtension(ExtensionBase):
         input_types_raw = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
         input_types_safe = _sanitize_for_transport(input_types_raw)
         
-        logger.info("%s[ExtensionWrapper] INPUT_TYPES for %s converted successfully", LOG_PREFIX, node_name)
-        
         return {
             "input_types": input_types_safe,
             "return_types": tuple(str(t) for t in getattr(node_cls, "RETURN_TYPES", ())),
