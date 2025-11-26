@@ -284,23 +284,38 @@ class ComfyNodeExtension(ExtensionBase):
         """
         import asyncio
         import importlib
+        import importlib.util
+        import sys
+        import os
         
         # Get or cache handler function
         cache_key = f"{handler_module}.{handler_func}"
         if cache_key not in self._route_handlers:
             try:
+                # Get node directory from loaded module
+                if self._module is not None and hasattr(self._module, '__file__'):
+                    node_dir = os.path.dirname(self._module.__file__)
+                    # Add node directory to sys.path temporarily
+                    if node_dir not in sys.path:
+                        sys.path.insert(0, node_dir)
+                        logger.debug(
+                            "%s[RouteHandler] Added %s to sys.path",
+                            LOG_PREFIX,
+                            node_dir,
+                        )
+                
                 # Try to import the module
                 module = importlib.import_module(handler_module)
                 handler = getattr(module, handler_func)
                 self._route_handlers[cache_key] = handler
-                logger.debug(
-                    "%s[RouteHandler] Cached handler %s",
+                logger.info(
+                    "%s[RouteHandler] ✅ Cached handler %s",
                     LOG_PREFIX,
                     cache_key,
                 )
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    "%s[RouteHandler] Failed to load handler %s: %s",
+                    "%s[RouteHandler] ❌ Failed to load handler %s: %s",
                     LOG_PREFIX,
                     cache_key,
                     e,

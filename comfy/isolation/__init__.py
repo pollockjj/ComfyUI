@@ -337,6 +337,44 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         )
         raise
     
+    # === ROUTE INJECTION START ===
+    # Check for route_manifest.json and inject routes if present
+    manifest_path = node_dir / "route_manifest.json"
+    if manifest_path.exists():
+        logger.info(
+            "%s[Loader] Found route_manifest.json for %s, injecting routes...",
+            LOG_PREFIX,
+            extension_name,
+        )
+        try:
+            from .route_injector import inject_routes
+            import server
+            num_routes = inject_routes(
+                prompt_server=server.PromptServer.instance,
+                extension=extension,
+                manifest_path=manifest_path,
+            )
+            logger.info(
+                "%s[Loader] ✅ Injected %d routes for %s",
+                LOG_PREFIX,
+                num_routes,
+                extension_name,
+            )
+        except Exception as e:
+            logger.error(
+                "%s[Loader] ❌ Route injection failed for %s: %s",
+                LOG_PREFIX,
+                extension_name,
+                e,
+            )
+    else:
+        logger.debug(
+            "%s[Loader] No route_manifest.json for %s",
+            LOG_PREFIX,
+            extension_name,
+        )
+    # === ROUTE INJECTION END ===
+    
     # Register a dummy module in sys.modules so pickle can find classes from the isolated module
     # The normalized extension name is used as the module name in the isolated process
     normalized_name = extension_name.replace("-", "_").replace(".", "_")
