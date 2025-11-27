@@ -1,7 +1,24 @@
+# ============================================================================
+# PyIsolate: Disable cudaMallocAsync for MODEL isolation support
+# MUST BE FIRST - before ANY imports that could trigger torch
+# 
+# FEATURE FLAG: Set PYISOLATE_DISABLE_CUDAMALLOCASYNC=0 to revert to default
+# NOTE: Allocator is set in launch_comfy.sh, this is backup/documentation
+# ============================================================================
+import os
+
+# Feature flag for rollback (default: enabled)
+if os.environ.get('PYISOLATE_DISABLE_CUDAMALLOCASYNC', '1') == '1':
+    # Ensure legacy allocator if not already set by launch script
+    if 'PYTORCH_ALLOC_CONF' not in os.environ:
+        os.environ['PYTORCH_ALLOC_CONF'] = 'backend:native'
+# Note: logging not available yet, message will appear after logger setup
+
+# ============================================================================
+
 import comfy.options
 comfy.options.enable_args_parsing()
 
-import os
 import importlib.util
 import sys
 
@@ -31,6 +48,12 @@ if IS_PRIMARY_PROCESS:
 
 if not IS_PYISOLATE_CHILD:
     setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
+    
+    # Log PyIsolate CUDA allocator configuration
+    if os.environ.get('PYISOLATE_DISABLE_CUDAMALLOCASYNC', '1') == '1':
+        logging.info("📚 [PyIsolate] Disabled cudaMallocAsync, using legacy CUDA allocator for MODEL isolation")
+    else:
+        logging.info("📚 [PyIsolate] Feature flag disabled, keeping default CUDA allocator")
 
 def apply_custom_paths():
     from utils import extra_config
