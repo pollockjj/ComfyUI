@@ -20,6 +20,7 @@ import comfy.ldm.hunyuan3dv2_1
 import comfy.ldm.hunyuan3dv2_1.hunyuandit
 import torch
 import logging
+import os
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
 from comfy.ldm.cascade.stage_c import StageC
 from comfy.ldm.cascade.stage_b import StageB
@@ -108,7 +109,35 @@ def model_sampling(model_config, model_type):
     class ModelSampling(s, c):
         pass
 
-    return ModelSampling(model_config)
+    instance = ModelSampling(model_config)
+    
+    # DISABLED: ModelSampling proxy causes nested event loop errors
+    # TODO: Fix async/await pattern or make proxy synchronous
+    if False and (os.environ.get("PYISOLATE_CHILD") != "1" and 
+        os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1"):
+        try:
+            # Deferred import to avoid circular dependencies
+            from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+            
+            # Register instance and get proxy (synchronous - no event loop needed)
+            registry = ModelSamplingRegistry()
+            instance_id = registry.register(instance)
+            
+            logging.debug(
+                "📚 [PyIsolate][ModelSampling] Wrapped instance %s for serialization",
+                instance_id
+            )
+            
+            # Return proxy instead of raw instance
+            return ModelSamplingProxy(instance_id, registry)
+        except (ImportError, RuntimeError) as e:
+            # PyIsolate not available or not initialized - return raw instance
+            logging.debug(
+                "📚 [PyIsolate][ModelSampling] Proxy unavailable (%s), returning raw instance",
+                type(e).__name__
+            )
+    
+    return instance
 
 
 def convert_tensor(extra, dtype, device):

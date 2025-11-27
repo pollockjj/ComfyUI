@@ -10,8 +10,8 @@ import os
 # Feature flag for rollback (default: enabled)
 if os.environ.get('PYISOLATE_DISABLE_CUDAMALLOCASYNC', '1') == '1':
     # Ensure legacy allocator if not already set by launch script
-    if 'PYTORCH_ALLOC_CONF' not in os.environ:
-        os.environ['PYTORCH_ALLOC_CONF'] = 'backend:native'
+    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
 # Note: logging not available yet, message will appear after logger setup
 
 # ============================================================================
@@ -195,8 +195,7 @@ import hook_breaker_ac10a0
 # PyIsolate: Initialize AFTER torch imports (for custom nodes + future DP/SP workers)
 try:
     import comfy.isolation
-    comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe
-    logging.info(f"{comfy.isolation.LOG_PREFIX}[System] Isolation system available: 4 classes of ProxiedSingletons registered")
+    comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe + register ProxiedSingletons
 except ImportError as e:
     logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
 except Exception as e:

@@ -29,6 +29,37 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
     ExtensionManager = None  # type: ignore
     ExtensionManagerConfig = None  # type: ignore
 
+
+def initialize_proxies():
+    """
+    Initialize PyIsolate ProxiedSingleton instances for ComfyUI services.
+    
+    This makes core ComfyUI services available to isolated nodes via RPC,
+    including the new ModelSamplingRegistry for pickle-safe model sampling.
+    """
+    # Import here to avoid circular dependencies and ensure torch is loaded
+    from server import PromptServer
+    import comfy.model_management as model_management
+    from comfy.utils import ProgressBar
+    from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
+    
+    # Register all ProxiedSingleton classes
+    # These will be accessible in isolated processes via RPC
+    apis = [
+        PromptServer,
+        folder_paths,
+        model_management,
+        ProgressBar,
+        ModelSamplingRegistry,
+    ]
+    
+    # No explicit registration needed - ProxiedSingleton auto-registers
+    # Just instantiating them makes them available
+    logger.info(
+        "📚 [PyIsolate][System] Isolation system available: %d classes of ProxiedSingletons registered",
+        len(apis)
+    )
+
 from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "📚 [PyIsolate]"
@@ -221,6 +252,11 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     if not manifest_entries:
         logger.info(f"{LOG_PREFIX}[Loader] No pyisolate manifests detected under custom_nodes")
         return []
+    
+    # Set flag to enable ModelSampling proxy (only when isolated nodes exist)
+    import os
+    os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
+    logger.debug(f"{LOG_PREFIX}[Loader] Isolation active: ModelSampling proxy enabled")
 
     specs: List[IsolatedNodeSpec] = []
     for node_dir, manifest in manifest_entries:

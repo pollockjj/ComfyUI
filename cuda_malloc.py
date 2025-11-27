@@ -84,9 +84,13 @@ if not args.cuda_malloc:
 
 if args.cuda_malloc and not args.disable_cuda_malloc:
     env_var = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', None)
-    if env_var is None:
+    
+    # PyIsolate: Respect backend:native if already set (for MODEL isolation)
+    if env_var is not None and 'backend:native' in env_var:
+        pass  # Don't override PyIsolate's legacy allocator
+    elif env_var is None:
         env_var = "backend:cudaMallocAsync"
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = env_var
     else:
         env_var += ",backend:cudaMallocAsync"
-
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = env_var
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = env_var
