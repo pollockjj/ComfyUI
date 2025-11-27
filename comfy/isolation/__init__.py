@@ -167,17 +167,25 @@ def initialize_proxies() -> None:
     Registers all proxy classes so they're available to isolated nodes via RPC.
     Actual RPC binding happens when extensions load.
     """
+    import os
+    
     from .proxies.folder_paths_proxy import FolderPathsProxy
     from .proxies.model_management_proxy import ModelManagementProxy
     from .proxies.nodes_proxy import NodesProxy
     from .proxies.utils_proxy import UtilsProxy
     from .proxies.prompt_server_proxy import PromptServerProxy
+    from .proxies.model_patcher_rpc import ModelPatcherRPC
     
-    # Instantiate singletons to register them
-    FolderPathsProxy()
-    ModelManagementProxy()
-    NodesProxy()
-    UtilsProxy()
+    # Instantiate singletons to register them (host side only)
+    is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+    
+    if not is_child:
+        FolderPathsProxy()
+        ModelManagementProxy()
+        NodesProxy()
+        UtilsProxy()
+        ModelPatcherRPC()  # Host-side RPC endpoint
+    # In child processes, these will be injected as proxies via use_remote()
     PromptServerProxy()
 
 
@@ -307,16 +315,14 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     # Import server only when needed, not at module level
     # This prevents spawn context from importing server before path unification
     import server
-    
-    # Import server here (not at module level) to avoid import during multiprocessing spawn
-    import server
+    from .proxies.model_patcher_rpc import ModelPatcherRPC
     
     extension_config = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
         "dependencies": dependencies,
-        "apis": [server.PromptServer],
+        "apis": [server.PromptServer, ModelPatcherRPC],
         "share_torch": share_torch,
     }
 
@@ -474,8 +480,23 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     )
 
     async def _execute(self, **inputs):
-        result = await extension.execute_node(node_name, **inputs)
-        return result
+        # Create scoped registry and pre-serialize MODEL inputs
+        from comfy.isolation.model_registry import ScopedModelRegistry, set_current_registry
+        from pyisolate._internal.shared import _tensor_to_cpu
+        
+        registry = ScopedModelRegistry()
+        set_current_registry(registry)
+        
+        try:
+            # Pre-serialize inputs to convert ModelPatcher to refs
+            # This must happen in THIS thread before RPC marshalling
+            serialized_inputs = _tensor_to_cpu(inputs)
+            
+            result = await extension.execute_node(node_name, **serialized_inputs)
+            return result
+        finally:
+            # Clear registry context
+            set_current_registry(None)
 
     def _input_types(cls):
         return restored_input_types
