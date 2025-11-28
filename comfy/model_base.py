@@ -111,25 +111,36 @@ def model_sampling(model_config, model_type):
 
     instance = ModelSampling(model_config)
     
-    # DISABLED: ModelSampling proxy causes nested event loop errors
-    # TODO: Fix async/await pattern or make proxy synchronous
-    if False and (os.environ.get("PYISOLATE_CHILD") != "1" and 
+    # PyIsolate ModelSampling proxy: Enables cross-process MODEL serialization
+    # When PYISOLATE_ISOLATION_ACTIVE is set, wrap ModelSampling in a picklable
+    # proxy that forwards calls via RPC. This solves the "can't pickle local object"
+    # error for dynamically-generated ModelSampling classes.
+    #
+    # Architecture: Stateless RPC pattern with Registry + Handle
+    # - Host registers instance, returns ID
+    # - Proxy contains only ID (picklable)
+    # - All method calls forwarded via RpcBridge to host
+    #
+    # Skip in child processes - they receive the proxy via pickle reconstruction
+    if (os.environ.get("PYISOLATE_CHILD") != "1" and 
         os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1"):
         try:
-            # Deferred import to avoid circular dependencies
+            # Deferred import to avoid circular dependencies at module load time
             from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
             
-            # Register instance and get proxy (synchronous - no event loop needed)
+            # Register instance and get unique ID (thread-safe)
             registry = ModelSamplingRegistry()
             instance_id = registry.register(instance)
             
+            # Return proxy with lifecycle management (host-side cleans up on GC)
+            proxy = ModelSamplingProxy(instance_id, registry, manage_lifecycle=True)
+            
             logging.debug(
-                "📚 [PyIsolate][ModelSampling] Wrapped instance %s for serialization",
+                "📚 [PyIsolate][ModelSampling] Created proxy %s for cross-process serialization",
                 instance_id
             )
             
-            # Return proxy instead of raw instance
-            return ModelSamplingProxy(instance_id, registry)
+            return proxy
         except (ImportError, RuntimeError) as e:
             # PyIsolate not available or not initialized - return raw instance
             logging.debug(
