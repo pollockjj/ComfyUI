@@ -30,37 +30,8 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
     ExtensionManagerConfig = None  # type: ignore
 
 
-def initialize_proxies():
-    """
-    Initialize PyIsolate ProxiedSingleton instances for ComfyUI services.
-    
-    This makes core ComfyUI services available to isolated nodes via RPC,
-    including the new ModelSamplingRegistry for pickle-safe model sampling.
-    """
-    # Import here to avoid circular dependencies and ensure torch is loaded
-    from server import PromptServer
-    import comfy.model_management as model_management
-    from comfy.utils import ProgressBar
-    from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
-    
-    # Register all ProxiedSingleton classes
-    # These will be accessible in isolated processes via RPC
-    apis = [
-        PromptServer,
-        folder_paths,
-        model_management,
-        ProgressBar,
-        ModelSamplingRegistry,
-    ]
-    
-    # No explicit registration needed - ProxiedSingleton auto-registers
-    # Just instantiating them makes them available
-    logger.info(
-        "📚 [PyIsolate][System] Isolation system available: %d classes of ProxiedSingletons registered",
-        len(apis)
-    )
-
 from .extension_wrapper import ComfyNodeExtension
+from .clip_proxy import CLIPRegistry, CLIPProxy, maybe_wrap_clip_for_isolation
 
 LOG_PREFIX = "📚 [PyIsolate]"
 
@@ -200,6 +171,8 @@ def initialize_proxies() -> None:
     from .proxies.nodes_proxy import NodesProxy
     from .proxies.utils_proxy import UtilsProxy
     from .proxies.prompt_server_proxy import PromptServerProxy
+    from .model_sampling_proxy import ModelSamplingRegistry
+    from .clip_proxy import CLIPRegistry
     
     # Instantiate singletons to register them (host side only)
     is_child = os.environ.get("PYISOLATE_CHILD") == "1"
@@ -209,6 +182,9 @@ def initialize_proxies() -> None:
         ModelManagementProxy()
         NodesProxy()
         UtilsProxy()
+        ModelSamplingRegistry()  # Register ModelSampling proxy
+        CLIPRegistry()  # Register CLIP proxy
+        logger.debug("📚 [PyIsolate][Init] CLIPRegistry registered on host")
     # In child processes, these will be injected as proxies via use_remote()
     PromptServerProxy()
 
@@ -344,13 +320,15 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     # Import server only when needed, not at module level
     # This prevents spawn context from importing server before path unification
     import server
+    from comfy.isolation.clip_proxy import CLIPRegistry
+    from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
     
     extension_config = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
         "dependencies": dependencies,
-        "apis": [server.PromptServer],
+        "apis": [server.PromptServer, CLIPRegistry, ModelSamplingRegistry],
         "share_torch": share_torch,
     }
 
@@ -508,8 +486,59 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     )
 
     async def _execute(self, **inputs):
-        result = await extension.execute_node(node_name, **inputs)
-        return result
+        # Create scoped registry for this execution
+        try:
+            from comfy.isolation.model_registry import (
+                ScopedModelRegistry,
+                set_current_registry,
+                get_current_registry_if_exists,
+            )
+            from pyisolate._internal.model_serialization import serialize_for_isolation
+            
+            # Check if registry already exists (from outer scope)
+            registry = get_current_registry_if_exists()
+            registry_created = False
+            
+            if registry is None:
+                # Create new registry for this execution
+                registry = ScopedModelRegistry()
+                set_current_registry(registry)
+                registry_created = True
+                logger.debug(
+                    "%s[Loader] Created execution registry for %s",
+                    LOG_PREFIX,
+                    node_name,
+                )
+            
+            try:
+                # Serialize inputs (CLIP, ModelPatcher, etc. → Refs)
+                inputs = serialize_for_isolation(inputs, registry)
+                logger.debug(
+                    "%s[Loader] Serialized inputs for %s",
+                    LOG_PREFIX,
+                    node_name,
+                )
+                
+                result = await extension.execute_node(node_name, **inputs)
+                return result
+            finally:
+                # Clean up registry if we created it
+                if registry_created:
+                    set_current_registry(None)
+                    logger.debug(
+                        "%s[Loader] Cleaned up execution registry for %s",
+                        LOG_PREFIX,
+                        node_name,
+                    )
+        except ImportError as e:
+            logger.warning(
+                "%s[Serialization] Serialization not available: %s",
+                LOG_PREFIX,
+                e,
+            )
+            # Fallback: execute without serialization
+            result = await extension.execute_node(node_name, **inputs)
+            return result
 
     def _input_types(cls):
         return restored_input_types
@@ -539,4 +568,7 @@ __all__ = [
     "initialize_proxies",
     "initialize_isolation_nodes",
     "IsolatedNodeSpec",
+    "CLIPRegistry",
+    "CLIPProxy",
+    "maybe_wrap_clip_for_isolation",
 ]

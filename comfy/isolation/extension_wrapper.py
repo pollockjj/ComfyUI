@@ -219,13 +219,32 @@ class ComfyNodeExtension(ExtensionBase):
         return RemoteObjectHandle(object_id, type_name)
 
     def _resolve_remote_objects(self, data: Any) -> Any:
-        """Recursively replace RemoteObjectHandles with actual objects."""
+        """Recursively replace RemoteObjectHandles and serialized refs with actual objects."""
+        # Handle old RemoteObjectHandle format
         if isinstance(data, RemoteObjectHandle):
             if data.object_id not in self.remote_objects:
                 raise KeyError(f"Remote object {data.object_id} not found in cache")
             return self.remote_objects[data.object_id]
         
+        # Handle new serialization format (CLIPRef, ModelPatcherRef)
         if isinstance(data, dict):
+            ref_type = data.get("__type__")
+            
+            if ref_type in ("CLIPRef", "ModelPatcherRef"):
+                # Use pyisolate's deserialization to create proxy
+                try:
+                    from pyisolate._internal.model_serialization import deserialize_proxy_result
+                    # This will create CLIPProxy or ModelPatcherProxy
+                    return deserialize_proxy_result(data, rpc_client=None)  # RPC handled by proxy
+                except ImportError:
+                    logger.error(
+                        "%s[ExtensionWrapper] Cannot deserialize %s: pyisolate not available",
+                        LOG_PREFIX,
+                        ref_type,
+                    )
+                    raise
+            
+            # Regular dict - recurse
             return {
                 key: self._resolve_remote_objects(value)
                 for key, value in data.items()
