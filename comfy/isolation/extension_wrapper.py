@@ -268,7 +268,7 @@ class ComfyNodeExtension(ExtensionBase):
                 try:
                     from pyisolate._internal.model_serialization import deserialize_proxy_result
                     # This will create CLIPProxy or ModelPatcherProxy
-                    return deserialize_proxy_result(data, rpc_client=None)  # RPC handled by proxy
+                    return deserialize_proxy_result(data)
                 except ImportError:
                     logger.error(
                         "%s[ExtensionWrapper] Cannot deserialize %s: pyisolate not available",

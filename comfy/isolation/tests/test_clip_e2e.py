@@ -14,19 +14,11 @@ class MockCLIP:
 
 def test_clip_execution_flow():
     """Test that CLIP objects are serialized during execution."""
-    from comfy.isolation.model_registry import (
-        ScopedModelRegistry,
-        set_current_registry,
-    )
     from pyisolate._internal.model_serialization import serialize_for_isolation
     
     # Create mock CLIP
     clip = MockCLIP()
     clip.__class__.__name__ = "CLIP"
-    
-    # Simulate execution flow
-    registry = ScopedModelRegistry()
-    set_current_registry(registry)
     
     try:
         # Simulate node inputs
@@ -37,7 +29,7 @@ def test_clip_execution_flow():
         }
         
         # Serialize (this is what _execute does)
-        serialized = serialize_for_isolation(inputs, registry)
+        serialized = serialize_for_isolation(inputs)
         
         # Verify CLIP was converted to ref
         assert isinstance(serialized["clip"], dict)
@@ -47,9 +39,6 @@ def test_clip_execution_flow():
         # Other inputs unchanged
         assert serialized["text"] == "hello world"
         assert serialized["strength"] == 1.0
-        
-        # Verify CLIP is in registry
-        assert registry.count() == 0  # CLIPRegistry is separate!
         
         # Verify CLIPRegistry has it
         from comfy.isolation.clip_proxy import CLIPRegistry
@@ -61,15 +50,11 @@ def test_clip_execution_flow():
         print(f"✅ CLIP execution flow works! ref={clip_id}")
         
     finally:
-        set_current_registry(None)
+        pass
 
 
 def test_nested_clip_in_execution():
     """Test nested CLIP objects in complex structures."""
-    from comfy.isolation.model_registry import (
-        ScopedModelRegistry,
-        set_current_registry,
-    )
     from pyisolate._internal.model_serialization import serialize_for_isolation
     
     # Create mock CLIPs
@@ -77,10 +62,6 @@ def test_nested_clip_in_execution():
     clip1.__class__.__name__ = "CLIP"
     clip2 = MockCLIP()
     clip2.__class__.__name__ = "CLIP"
-    
-    # Simulate execution flow
-    registry = ScopedModelRegistry()
-    set_current_registry(registry)
     
     try:
         # Complex nested structure
@@ -94,7 +75,7 @@ def test_nested_clip_in_execution():
         }
         
         # Serialize
-        serialized = serialize_for_isolation(inputs, registry)
+        serialized = serialize_for_isolation(inputs)
         
         # Verify all CLIPs converted
         assert serialized["primary_clip"]["__type__"] == "CLIPRef"

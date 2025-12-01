@@ -504,8 +504,7 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
             )
             
             # Serialize inputs (CLIP, ModelPatcher, etc. → Refs)
-            # Note: serialize_for_isolation uses ModelPatcherRegistry ProxiedSingleton internally
-            inputs = serialize_for_isolation(inputs, registry=None)
+            inputs = serialize_for_isolation(inputs)
             
             logger.debug(
                 "%s[Loader] Serialized inputs for %s",
@@ -517,7 +516,7 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
             
             # Deserialize result (Refs → real objects)
             # This converts ModelPatcherRef back to actual ModelPatcher on host
-            result = deserialize_from_isolation(result, registry=None)
+            result = deserialize_from_isolation(result)
             logger.debug(
                 "%s[Loader] Deserialized result for %s",
                 LOG_PREFIX,

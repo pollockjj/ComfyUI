@@ -14,7 +14,6 @@ class MockCLIP:
 
 def test_clip_serialization():
     """Test that CLIP objects are serialized to CLIPRef."""
-    from comfy.isolation.model_registry import ScopedModelRegistry
     from pyisolate._internal.model_serialization import serialize_for_isolation
     
     # Create mock CLIP
@@ -22,11 +21,8 @@ def test_clip_serialization():
     # Fake the type name
     clip.__class__.__name__ = "CLIP"
     
-    # Create registry
-    registry = ScopedModelRegistry()
-    
     # Serialize
-    result = serialize_for_isolation(clip, registry)
+    result = serialize_for_isolation(clip)
     
     # Should be a ref
     assert isinstance(result, dict)
@@ -38,7 +34,6 @@ def test_clip_serialization():
 
 def test_nested_clip_serialization():
     """Test that CLIP objects in nested structures are serialized."""
-    from comfy.isolation.model_registry import ScopedModelRegistry
     from pyisolate._internal.model_serialization import serialize_for_isolation
     
     # Create mock CLIP
@@ -52,11 +47,8 @@ def test_nested_clip_serialization():
         "nested": {"inner_clip": clip, "value": 42}
     }
     
-    # Create registry
-    registry = ScopedModelRegistry()
-    
     # Serialize
-    result = serialize_for_isolation(data, registry)
+    result = serialize_for_isolation(data)
     
     # Check structure
     assert result["text"] == "hello"

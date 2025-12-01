@@ -8,17 +8,11 @@ import sys
 sys.path.insert(0, '/home/johnj/ComfyUI')
 sys.path.insert(0, '/home/johnj/ComfyUI/user/pyisolate')
 
-from comfy.isolation.model_registry import ScopedModelRegistry
 from pyisolate._internal.model_serialization import (
     serialize_for_isolation,
     deserialize_from_isolation,
     deserialize_proxy_result,
 )
-
-
-class MockRPCClient:
-    def call_sync(self, *args, **kwargs):
-        return None
 
 
 def test_serialization():
@@ -33,15 +27,14 @@ def test_serialization():
         print(f"❌ Failed to import dependencies: {e}")
         return False
     
-    # Create registry and patcher
-    print("  Creating ModelPatcher and registry...")
-    registry = ScopedModelRegistry()
+    # Create patcher
+    print("  Creating ModelPatcher...")
     model = torch.nn.Linear(10, 10)
     patcher = ModelPatcher(model, torch.device('cpu'), torch.device('cpu'))
     
     # Test 1: Serialize ModelPatcher → ref
     print("  Test 1: Serialize ModelPatcher → ModelPatcherRef...")
-    serialized = serialize_for_isolation(patcher, registry)
+    serialized = serialize_for_isolation(patcher)
     
     if not isinstance(serialized, dict):
         print(f"❌ Expected dict, got {type(serialized)}")
@@ -60,7 +53,7 @@ def test_serialization():
     
     # Test 2: Deserialize ref → ModelPatcher (host-side)
     print("  Test 2: Deserialize ModelPatcherRef → ModelPatcher (host)...")
-    deserialized = deserialize_from_isolation(serialized, registry)
+    deserialized = deserialize_from_isolation(serialized)
     
     if deserialized is not patcher:
         print(f"❌ Expected same object, got different instance")
@@ -70,10 +63,9 @@ def test_serialization():
     
     # Test 3: Deserialize ref → Proxy (child-side)
     print("  Test 3: Deserialize ModelPatcherRef → ModelPatcherProxy (child)...")
-    rpc_client = MockRPCClient()
-    proxy = deserialize_proxy_result(serialized, rpc_client)
+    proxy = deserialize_proxy_result(serialized)
     
-    from comfy.isolation.model_proxy import ModelPatcherProxy
+    from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
     if not isinstance(proxy, ModelPatcherProxy):
         print(f"❌ Expected ModelPatcherProxy, got {type(proxy)}")
         return False
@@ -88,7 +80,7 @@ def test_serialization():
         "list": [patcher, "text", 123]
     }
     
-    serialized_nested = serialize_for_isolation(nested, registry)
+    serialized_nested = serialize_for_isolation(nested)
     
     if serialized_nested["model"].get("__type__") != "ModelPatcherRef":
         print("❌ Nested ModelPatcher not serialized")

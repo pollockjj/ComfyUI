@@ -145,7 +145,7 @@ async def rpc_execute_model_method(
     
     # Result Handling: Serialize the result
     # If it's a ModelPatcher (e.g., from clone()), it gets registered and an ID is returned
-    serialized_result = serialize_for_isolation(result, registry)
+    serialized_result = serialize_for_isolation(result)
     
     return serialized_result
 
