@@ -181,25 +181,29 @@ if IS_PRIMARY_PROCESS:
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
-import comfy.utils
+# Guard heavy imports for multiprocessing spawn compatibility
+# On Windows spawn, this file is re-executed for Manager/Process creation
+# PyIsolate child processes skip these imports since they're not needed
+if not IS_PYISOLATE_CHILD:
+    import comfy.utils
 
-import execution
-import server
-from protocol import BinaryEventTypes
-import nodes
-import comfy.model_management
-import comfyui_version
-import app.logger
-import hook_breaker_ac10a0
+    import execution
+    import server
+    from protocol import BinaryEventTypes
+    import nodes
+    import comfy.model_management
+    import comfyui_version
+    import app.logger
+    import hook_breaker_ac10a0
 
-# PyIsolate: Initialize AFTER torch imports (for custom nodes + future DP/SP workers)
-try:
-    import comfy.isolation
-    comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe + register ProxiedSingletons
-except ImportError as e:
-    logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
-except Exception as e:
-    logging.error(f"PyIsolate initialization failed: {e}")
+    # PyIsolate: Initialize AFTER torch imports (for custom nodes + future DP/SP workers)
+    try:
+        import comfy.isolation
+        comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe + register ProxiedSingletons
+    except ImportError as e:
+        logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
+    except Exception as e:
+        logging.error(f"PyIsolate initialization failed: {e}")
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
