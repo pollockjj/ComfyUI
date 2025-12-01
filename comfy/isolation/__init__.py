@@ -554,6 +554,11 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
         "_pyisolate_node_name": node_name,
         "INPUT_TYPES": classmethod(_input_types),
     }
+    
+    # Add OUTPUT_IS_LIST if present
+    output_is_list = info.get("output_is_list")
+    if output_is_list is not None:
+        attributes["OUTPUT_IS_LIST"] = tuple(output_is_list)
 
     display_name = info.get("display_name") or node_name
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")

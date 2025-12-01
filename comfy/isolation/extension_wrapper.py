@@ -135,6 +135,12 @@ class ComfyNodeExtension(ExtensionBase):
         input_types_raw = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
         input_types_safe = _sanitize_for_transport(input_types_raw)
         
+        # Handle OUTPUT_IS_LIST
+        output_is_list = getattr(node_cls, "OUTPUT_IS_LIST", None)
+        if output_is_list is not None:
+            # Convert to tuple of bools for JSON serialization
+            output_is_list = tuple(bool(x) for x in output_is_list)
+        
         return {
             "input_types": input_types_safe,
             "return_types": tuple(str(t) for t in getattr(node_cls, "RETURN_TYPES", ())),
@@ -142,6 +148,7 @@ class ComfyNodeExtension(ExtensionBase):
             "function": str(getattr(node_cls, "FUNCTION", "execute")),
             "category": str(getattr(node_cls, "CATEGORY", "")),
             "output_node": bool(getattr(node_cls, "OUTPUT_NODE", False)),
+            "output_is_list": output_is_list,
         }
     
     async def get_input_types(self, node_name: str) -> Dict[str, Any]:
