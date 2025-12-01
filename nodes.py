@@ -665,6 +665,16 @@ class LoraLoader:
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
 
+        # PyIsolate intercept: If model is a ModelPatcherProxy, use proxy's load_lora
+        # This routes the entire LoRA loading operation through RPC to the host
+        model_type = type(model).__name__
+        if model_type == 'ModelPatcherProxy':
+            from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
+            if isinstance(model, ModelPatcherProxy):
+                import logging
+                logging.debug(f"📚 [PyIsolate] LoraLoader: Using proxy load_lora for {lora_name}")
+                return model.load_lora(lora_name, strength_model, clip, strength_clip)
+
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         lora = None
         if self.loaded_lora is not None:

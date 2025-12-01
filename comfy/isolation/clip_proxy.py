@@ -208,7 +208,6 @@ class CLIPRegistry(ProxiedSingleton):
         result = instance.encode_from_tokens_scheduled(
             tokens, unprojected=unprojected, add_dict=add_dict, show_pbar=show_pbar
         )
-        # share_torch=true handles nested tensors in lists/tuples
         return result
     
     # RPC Methods (async) - Clone (Deep Remote Copy)
@@ -397,9 +396,10 @@ class CLIPProxy:
         """Scheduled encoding."""
         if add_dict is None:
             add_dict = {}
-        return self._call_registry(
+        result = self._call_registry(
             'encode_from_tokens_scheduled', tokens, unprojected, add_dict, show_pbar
         )
+        return result
     
     # Clone (Deep Remote Copy)
     

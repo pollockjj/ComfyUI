@@ -32,6 +32,11 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 
 from .extension_wrapper import ComfyNodeExtension
 from .clip_proxy import CLIPRegistry, CLIPProxy, maybe_wrap_clip_for_isolation
+from .model_patcher_proxy import (
+    ModelPatcherRegistry,
+    ModelPatcherProxy,
+    maybe_wrap_model_for_isolation,
+)
 
 LOG_PREFIX = "📚 [PyIsolate]"
 
@@ -50,22 +55,20 @@ class _AnyTypeProxy(str):
 
 
 class _FlexibleOptionalInputProxy(dict):
-    """Replacement for FlexibleOptionalInputType to allow dynamic inputs."""
+    """Replacement for FlexibleOptionalInputType to allow dynamic inputs.
+    
+    This mirrors the behavior of FlexibleOptionalInputType from rgthree/ComfyUI-Lora-Manager:
+    - __contains__ always returns True (accept any input key)
+    - __getitem__ always returns (self.type,) - a tuple with the type
+    """
 
     def __init__(self, flex_type, data: Optional[Dict[str, object]] = None):
         super().__init__()
         self.type = flex_type
-        self.data = data or {}
-        for key, value in self.data.items():
-            self[key] = value
 
     def __getitem__(self, key):  # type: ignore[override]
-        if key in self.data:
-            return self.data[key]
-        value = self.type
-        if isinstance(value, tuple):
-            return value
-        return (value,)
+        # Always return a tuple with the type, matching original behavior
+        return (self.type,)
 
     def __contains__(self, key):  # type: ignore[override]
         return True
@@ -113,7 +116,12 @@ def _restore_input_types(raw: Dict[str, object]) -> Dict[str, object]:
         return raw
     restored: Dict[str, object] = {}
     for section, entries in raw.items():
-        if isinstance(entries, dict):
+        # First check if the entire section is a special value (like FlexibleOptionalInputType)
+        if isinstance(entries, dict) and entries.get("__pyisolate_flexible_optional__"):
+            # The whole 'optional' section is a FlexibleOptionalInputType
+            restored[section] = _restore_special_value(entries)
+        elif isinstance(entries, dict):
+            # Normal dict of entries
             restored[section] = {k: _restore_special_value(v) for k, v in entries.items()}
         else:
             restored[section] = _restore_special_value(entries)
@@ -321,14 +329,14 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     # This prevents spawn context from importing server before path unification
     import server
     from comfy.isolation.clip_proxy import CLIPRegistry
-    from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
+    from comfy.isolation.model_patcher_proxy import ModelPatcherRegistry
     
     extension_config = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
         "dependencies": dependencies,
-        "apis": [server.PromptServer, CLIPRegistry, ModelSamplingRegistry],
+        "apis": [server.PromptServer, CLIPRegistry, ModelPatcherRegistry],
         "share_torch": share_torch,
     }
 
@@ -478,6 +486,7 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
 def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyNodeExtension) -> type:
     function_name = "_pyisolate_execute"
     restored_input_types = _restore_input_types(info.get("input_types", {}))
+    # INSTRUMENTATION: Trace INPUT_TYPES
     logger.debug(
         "%s[Loader] Restored INPUT_TYPES for %s: %s",
         LOG_PREFIX,
@@ -486,50 +495,36 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     )
 
     async def _execute(self, **inputs):
-        # Create scoped registry for this execution
+        # ModelPatcher/CLIP serialization now uses ProxiedSingleton registries
+        # No scoped registry needed - the singletons handle lifecycle
         try:
-            from comfy.isolation.model_registry import (
-                ScopedModelRegistry,
-                set_current_registry,
-                get_current_registry_if_exists,
+            from pyisolate._internal.model_serialization import (
+                serialize_for_isolation,
+                deserialize_from_isolation,
             )
-            from pyisolate._internal.model_serialization import serialize_for_isolation
             
-            # Check if registry already exists (from outer scope)
-            registry = get_current_registry_if_exists()
-            registry_created = False
+            # Serialize inputs (CLIP, ModelPatcher, etc. → Refs)
+            # Note: serialize_for_isolation uses ModelPatcherRegistry ProxiedSingleton internally
+            inputs = serialize_for_isolation(inputs, registry=None)
             
-            if registry is None:
-                # Create new registry for this execution
-                registry = ScopedModelRegistry()
-                set_current_registry(registry)
-                registry_created = True
-                logger.debug(
-                    "%s[Loader] Created execution registry for %s",
-                    LOG_PREFIX,
-                    node_name,
-                )
+            logger.debug(
+                "%s[Loader] Serialized inputs for %s",
+                LOG_PREFIX,
+                node_name,
+            )
             
-            try:
-                # Serialize inputs (CLIP, ModelPatcher, etc. → Refs)
-                inputs = serialize_for_isolation(inputs, registry)
-                logger.debug(
-                    "%s[Loader] Serialized inputs for %s",
-                    LOG_PREFIX,
-                    node_name,
-                )
-                
-                result = await extension.execute_node(node_name, **inputs)
-                return result
-            finally:
-                # Clean up registry if we created it
-                if registry_created:
-                    set_current_registry(None)
-                    logger.debug(
-                        "%s[Loader] Cleaned up execution registry for %s",
-                        LOG_PREFIX,
-                        node_name,
-                    )
+            result = await extension.execute_node(node_name, **inputs)
+            
+            # Deserialize result (Refs → real objects)
+            # This converts ModelPatcherRef back to actual ModelPatcher on host
+            result = deserialize_from_isolation(result, registry=None)
+            logger.debug(
+                "%s[Loader] Deserialized result for %s",
+                LOG_PREFIX,
+                node_name,
+            )
+            
+            return result
         except ImportError as e:
             logger.warning(
                 "%s[Serialization] Serialization not available: %s",
@@ -576,4 +571,7 @@ __all__ = [
     "CLIPRegistry",
     "CLIPProxy",
     "maybe_wrap_clip_for_isolation",
+    "ModelPatcherRegistry",
+    "ModelPatcherProxy",
+    "maybe_wrap_model_for_isolation",
 ]

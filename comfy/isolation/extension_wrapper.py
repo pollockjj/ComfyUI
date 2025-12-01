@@ -19,26 +19,16 @@ def _sanitize_for_transport(value):
     primitives = (str, int, float, bool, type(None))
     if isinstance(value, primitives):
         return value
-    if isinstance(value, dict):
-        return {k: _sanitize_for_transport(v) for k, v in value.items()}
-    if isinstance(value, tuple):
-        return {"__pyisolate_tuple__": [_sanitize_for_transport(v) for v in value]}
-    if isinstance(value, list):
-        return [_sanitize_for_transport(v) for v in value]
-
+    
+    # Check for special types BEFORE dict (since they may be dict subclasses)
     cls_name = value.__class__.__name__
     if cls_name == "FlexibleOptionalInputType":
-        base_data = getattr(value, "data", None)
-        sanitized_data = (
-            {k: _sanitize_for_transport(v) for k, v in base_data.items()}
-            if isinstance(base_data, dict)
-            else None
-        )
+        # FlexibleOptionalInputType is a dict subclass that accepts any key
+        # We need to preserve this behavior across the process boundary
         flex_type = _sanitize_for_transport(getattr(value, "type", "*"))
         return {
             "__pyisolate_flexible_optional__": True,
             "type": flex_type,
-            "data": sanitized_data,
         }
     if cls_name == "AnyType":
         return {"__pyisolate_any_type__": True, "value": str(value)}
@@ -46,6 +36,14 @@ def _sanitize_for_transport(value):
         return {
             "__pyisolate_bypass_tuple__": [_sanitize_for_transport(v) for v in tuple(value)]
         }
+    
+    # Now check standard containers
+    if isinstance(value, dict):
+        return {k: _sanitize_for_transport(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return {"__pyisolate_tuple__": [_sanitize_for_transport(v) for v in value]}
+    if isinstance(value, list):
+        return [_sanitize_for_transport(v) for v in value]
 
     # Fallback: best-effort string conversion
     return str(value)
@@ -193,6 +191,8 @@ class ComfyNodeExtension(ExtensionBase):
         """Recursively replace non-primitive objects with RemoteObjectHandles."""
         import torch
         
+        type_name = type(data).__name__
+        
         # Primitives: pass through
         if isinstance(data, (str, int, float, bool, type(None))):
             return data
@@ -200,6 +200,32 @@ class ComfyNodeExtension(ExtensionBase):
         # Torch tensors: pass through (handled by share_torch)
         if isinstance(data, torch.Tensor):
             return data
+        
+        # ModelPatcherProxy: convert to ref (child returning to host)
+        if type_name == 'ModelPatcherProxy':
+            model_id = data._instance_id
+            logger.info(
+                "%s[RemoteObject] ModelPatcherProxy → ModelPatcherRef(%s)",
+                LOG_PREFIX,
+                model_id,
+            )
+            return {
+                "__type__": "ModelPatcherRef",
+                "model_id": model_id,
+            }
+        
+        # CLIPProxy: convert to ref (child returning to host)
+        if type_name == 'CLIPProxy':
+            clip_id = data._instance_id
+            logger.info(
+                "%s[RemoteObject] CLIPProxy → CLIPRef(%s)",
+                LOG_PREFIX,
+                clip_id,
+            )
+            return {
+                "__type__": "CLIPRef",
+                "clip_id": clip_id,
+            }
         
         # Lists/tuples: recursively wrap contents
         if isinstance(data, (list, tuple)):
