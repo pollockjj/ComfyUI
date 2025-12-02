@@ -13,9 +13,10 @@ import logging
 import sys
 import time
 import types
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import yaml
 
@@ -209,6 +210,7 @@ class IsolatedNodeSpec:
 _ISOLATED_NODE_SPECS: List[IsolatedNodeSpec] = []
 _ISOLATION_SCAN_ATTEMPTED = False
 _EXTENSION_MANAGERS: List[ExtensionManager] = []  # Keep alive so subprocesses persist
+_RUNNING_EXTENSIONS: Dict[str, "Extension"] = {}  # Track running extensions for eviction
 
 # Phase 2: Early orchestration - background task for parallel startup
 _ISOLATION_BACKGROUND_TASK: Optional["asyncio.Task[List[IsolatedNodeSpec]]"] = None
@@ -394,6 +396,32 @@ def _filter_blacklisted_entries(entries: List[tuple[Path, Path]]):
     return filtered
 
 
+CACHE_DIR_NAME = ".pyisolate_cache"
+CACHE_FILE_NAME = "node_info.json"
+
+def _get_cache_path(node_dir: Path) -> Path:
+    return node_dir / CACHE_DIR_NAME / CACHE_FILE_NAME
+
+def _is_cache_valid(node_dir: Path, manifest_path: Path) -> bool:
+    cache_path = _get_cache_path(node_dir)
+    if not cache_path.exists():
+        return False
+    # Cache valid if newer than manifest
+    return cache_path.stat().st_mtime > manifest_path.stat().st_mtime
+
+def _load_from_cache(node_dir: Path) -> Optional[Dict[str, Dict]]:
+    cache_path = _get_cache_path(node_dir)
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def _save_to_cache(node_dir: Path, node_data: Dict[str, Dict]) -> None:
+    cache_path = _get_cache_path(node_dir)
+    cache_path.parent.mkdir(exist_ok=True)
+    cache_path.write_text(json.dumps(node_data, indent=2), encoding="utf-8")
+
+
 async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[IsolatedNodeSpec]:
     with manifest_path.open("r", encoding="utf-8") as handle:
         manifest = yaml.safe_load(handle) or {}
@@ -438,15 +466,15 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     
     # === ROUTE INJECTION START ===
     # Check for route_manifest.json and inject routes if present
-    manifest_path = node_dir / "route_manifest.json"
-    if manifest_path.exists():
+    route_manifest_path = node_dir / "route_manifest.json"
+    if route_manifest_path.exists():
         try:
             from .route_injector import inject_routes
             import server
             num_routes = inject_routes(
                 prompt_server=server.PromptServer.instance,
                 extension=extension,
-                manifest_path=manifest_path,
+                manifest_path=route_manifest_path,
             )
         except Exception as e:
             logger.error(
@@ -469,6 +497,25 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         sys.modules[normalized_name] = dummy_module
     
     specs: List[IsolatedNodeSpec] = []
+    
+    # Try cache first
+    if _is_cache_valid(node_dir, manifest_path):
+        cached_data = _load_from_cache(node_dir)
+        if cached_data:
+            logger.info(f"{LOG_PREFIX}[Loader] Loaded {extension_name} from cache (lazy spawn)")
+            for node_name, details in cached_data.items():
+                stub_cls = _build_stub_class(node_name, details, extension)
+                specs.append(
+                    IsolatedNodeSpec(
+                        node_name=node_name,
+                        display_name=details.get("display_name", node_name),
+                        stub_class=stub_cls,
+                        module_path=node_dir,
+                    )
+                )
+            return specs
+
+    # Cache miss or invalid - full load (triggers spawn)
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     
     if not remote_nodes:
@@ -476,10 +523,14 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
             f"{LOG_PREFIX}[Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
         )
     
+    cache_data_to_save = {}
+    
     for node_name, display_name in remote_nodes.items():
         # Get full node details - the isolated process will serialize everything to JSON
         details = await extension.get_node_details(node_name)
         details["display_name"] = display_name
+        
+        cache_data_to_save[node_name] = details
         
         stub_cls = _build_stub_class(node_name, details, extension)
         specs.append(
@@ -490,6 +541,10 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
                 module_path=node_dir,
             )
         )
+    
+    # Save to cache
+    _save_to_cache(node_dir, cache_data_to_save)
+    
     return specs
 
 
@@ -521,6 +576,10 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     restored_input_types = _restore_input_types(info.get("input_types", {}))
 
     async def _execute(self, **inputs):
+        # Lazy spawn: ensure process is running before RPC
+        extension.ensure_process_started()
+        _RUNNING_EXTENSIONS[extension.name] = extension
+
         # ModelPatcher/CLIP serialization now uses ProxiedSingleton registries
         # No scoped registry needed - the singletons handle lifecycle
         try:
@@ -576,6 +635,45 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
     return stub_cls
 
 
+def _get_class_types_for_extension(extension_name: str) -> Set[str]:
+    """Get all node class types (node names) belonging to an extension."""
+    # Find the extension object to get its module path
+    extension = _RUNNING_EXTENSIONS.get(extension_name)
+    if not extension:
+        return set()
+    
+    ext_path = Path(extension.module_path)
+    
+    class_types = set()
+    for spec in _ISOLATED_NODE_SPECS:
+        # Compare paths (resolve to be safe)
+        if spec.module_path.resolve() == ext_path.resolve():
+            class_types.add(spec.node_name)
+            
+    return class_types
+
+
+async def notify_execution_graph(needed_class_types: Set[str]) -> None:
+    """Called before execution with the set of node class_types that will run.
+    
+    Evicts any running isolated processes whose nodes are NOT in the graph.
+    This frees resources (RAM, potential VRAM) for the current execution.
+    """
+    # Find running processes not needed for this execution
+    for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
+        ext_class_types = _get_class_types_for_extension(ext_name)
+        
+        # If NONE of this extension's nodes are in the execution graph → evict
+        if not ext_class_types.intersection(needed_class_types):
+            logger.info(
+                "%s[Lifecycle] ♻️ Evicting %s (not in execution graph)",
+                LOG_PREFIX,
+                ext_name,
+            )
+            extension.stop()
+            del _RUNNING_EXTENSIONS[ext_name]
+
+
 __all__ = [
     "LOG_PREFIX",
     "get_isolation_logger",
@@ -583,6 +681,7 @@ __all__ = [
     "initialize_isolation_nodes",
     "start_isolation_loading_early",
     "await_isolation_loading",
+    "notify_execution_graph",
     "IsolatedNodeSpec",
     "CLIPRegistry",
     "CLIPProxy",

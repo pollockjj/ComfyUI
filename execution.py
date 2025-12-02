@@ -701,6 +701,19 @@ class PromptExecutor:
             for node_id in list(execute_outputs):
                 execution_list.add_node(node_id)
 
+            # NEW: Notify isolation system of execution graph
+            try:
+                from comfy.isolation import notify_execution_graph
+                pending_class_types = set()
+                for node_id in execution_list.pendingNodes.keys():
+                    class_type = dynamic_prompt.get_node(node_id)["class_type"]
+                    pending_class_types.add(class_type)
+                await notify_execution_graph(pending_class_types)
+            except ImportError:
+                pass
+            except Exception as e:
+                logging.error(f"PyIsolate notification failed: {e}")
+
             while not execution_list.is_empty():
                 node_id, error, ex = await execution_list.stage_node_execution()
                 if error is not None:
