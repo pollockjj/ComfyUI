@@ -237,25 +237,71 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     
     # Set flag to enable ModelSampling proxy (only when isolated nodes exist)
     import os
+    import asyncio
     os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
 
-    specs: List[IsolatedNodeSpec] = []
-    for node_dir, manifest in manifest_entries:
-        try:
+    total_nodes = len(manifest_entries)
+    batch_start = time.perf_counter()
+    
+    # Parallel loading with throttling to prevent thundering herd
+    concurrency_limit = max(1, (os.cpu_count() or 4) // 2)
+    semaphore = asyncio.Semaphore(concurrency_limit)
+    
+    logger.info(
+        "%s[Startup] === PARALLEL LOAD BEGIN: %d isolated node(s) (concurrency=%d) ===",
+        LOG_PREFIX,
+        total_nodes,
+        concurrency_limit,
+    )
+    
+    async def load_with_semaphore(node_dir: Path, manifest: Path) -> List[IsolatedNodeSpec]:
+        """Load a single node with semaphore throttling."""
+        async with semaphore:
             load_start = time.perf_counter()
-            spec_list = await _load_isolated_node(node_dir, manifest)
-            load_time = time.perf_counter() - load_start
-            if spec_list:
-                isolated_node_timings.append((load_time, node_dir))
-        except Exception as exc:  # pragma: no cover - defensive logging only
-            logger.error(
-                "%s[Loader] Failed to initialize isolated node at %s: %s",
-                LOG_PREFIX,
-                node_dir,
-                exc,
-            )
-            raise
-        specs.extend(spec_list)
+            try:
+                spec_list = await _load_isolated_node(node_dir, manifest)
+                load_time = time.perf_counter() - load_start
+                
+                logger.info(
+                    "%s[Startup] Parallel Load: Node [%s] took %.2fs",
+                    LOG_PREFIX,
+                    node_dir.name,
+                    load_time,
+                )
+                
+                if spec_list:
+                    isolated_node_timings.append((load_time, node_dir))
+                return spec_list
+            except Exception as exc:
+                logger.error(
+                    "%s[Loader] Failed to initialize isolated node at %s: %s",
+                    LOG_PREFIX,
+                    node_dir,
+                    exc,
+                )
+                raise
+    
+    # Launch all loads in parallel (throttled by semaphore)
+    tasks = [
+        load_with_semaphore(node_dir, manifest)
+        for node_dir, manifest in manifest_entries
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Collect specs and handle any exceptions
+    specs: List[IsolatedNodeSpec] = []
+    for result in results:
+        if isinstance(result, Exception):
+            raise result  # Re-raise first exception
+        specs.extend(result)
+    
+    batch_time = time.perf_counter() - batch_start
+    logger.info(
+        "%s[Startup] === PARALLEL LOAD COMPLETE: %d node(s) in %.2fs ===",
+        LOG_PREFIX,
+        total_nodes,
+        batch_time,
+    )
 
     _ISOLATED_NODE_SPECS = specs
     return list(_ISOLATED_NODE_SPECS)
