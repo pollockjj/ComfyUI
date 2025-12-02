@@ -210,6 +210,59 @@ _ISOLATED_NODE_SPECS: List[IsolatedNodeSpec] = []
 _ISOLATION_SCAN_ATTEMPTED = False
 _EXTENSION_MANAGERS: List[ExtensionManager] = []  # Keep alive so subprocesses persist
 
+# Phase 2: Early orchestration - background task for parallel startup
+_ISOLATION_BACKGROUND_TASK: Optional["asyncio.Task[List[IsolatedNodeSpec]]"] = None
+_EARLY_START_TIME: Optional[float] = None
+
+
+def start_isolation_loading_early(loop: "asyncio.AbstractEventLoop") -> None:
+    """Start isolated node loading in the background BEFORE nodes.py needs them.
+    
+    Called from main.py immediately after PromptServer creation to maximize
+    parallelism with builtin node loading.
+    """
+    global _ISOLATION_BACKGROUND_TASK, _EARLY_START_TIME
+    
+    if _ISOLATION_BACKGROUND_TASK is not None:
+        logger.debug("%s[Orchestration] Background task already started, skipping", LOG_PREFIX)
+        return
+    
+    if pyisolate is None:
+        logger.debug("%s[Orchestration] pyisolate not available, skipping early start", LOG_PREFIX)
+        return
+    
+    _EARLY_START_TIME = time.perf_counter()
+    logger.info("%s[Orchestration] 🚀 Starting early background loading", LOG_PREFIX)
+    
+    # Create the task but don't await it yet
+    _ISOLATION_BACKGROUND_TASK = loop.create_task(initialize_isolation_nodes())
+
+
+async def await_isolation_loading() -> List[IsolatedNodeSpec]:
+    """Await the background isolation loading task, or start loading if not already started.
+    
+    Returns the list of isolated node specs.
+    """
+    global _ISOLATION_BACKGROUND_TASK, _EARLY_START_TIME
+    
+    if _ISOLATION_BACKGROUND_TASK is not None:
+        # Early start was triggered - await the existing task
+        specs = await _ISOLATION_BACKGROUND_TASK
+        
+        if _EARLY_START_TIME is not None:
+            overlap_time = time.perf_counter() - _EARLY_START_TIME
+            logger.info(
+                "%s[Orchestration] ✅ Early loading completed (wall time since early start: %.2fs)",
+                LOG_PREFIX,
+                overlap_time,
+            )
+        
+        return specs
+    else:
+        # No early start - fall back to direct loading
+        logger.debug("%s[Orchestration] No early start, loading synchronously", LOG_PREFIX)
+        return await initialize_isolation_nodes()
+
 
 async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     """Discover isolated custom nodes via pyisolate.yaml manifests."""
@@ -528,6 +581,8 @@ __all__ = [
     "get_isolation_logger",
     "initialize_proxies",
     "initialize_isolation_nodes",
+    "start_isolation_loading_early",
+    "await_isolation_loading",
     "IsolatedNodeSpec",
     "CLIPRegistry",
     "CLIPProxy",

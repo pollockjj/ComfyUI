@@ -2225,7 +2225,9 @@ async def init_external_custom_nodes():
     Returns:
         None
     """
-    isolated_specs = await initialize_isolation_nodes()
+    # Phase 2: Await background task if early start was triggered, else start now
+    from comfy.isolation import await_isolation_loading
+    isolated_specs = await await_isolation_loading()
     logging.debug("📚 [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
     for spec in isolated_specs:
         NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
@@ -2416,6 +2418,9 @@ async def init_public_apis():
     ])
 
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
+    import time as _time
+    _builtin_start = _time.perf_counter()
+    
     await init_public_apis()
 
     import_failed = await init_builtin_extra_nodes()
@@ -2423,6 +2428,9 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
     import_failed_api = []
     if init_api_nodes:
         import_failed_api = await init_builtin_api_nodes()
+    
+    _builtin_time = _time.perf_counter() - _builtin_start
+    logging.info("📚 [PyIsolate][Orchestration] Builtin nodes loaded in %.2fs (overlapped with isolation)", _builtin_time)
 
     if init_custom_nodes:
         await init_external_custom_nodes()

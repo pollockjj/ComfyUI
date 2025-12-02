@@ -373,6 +373,10 @@ def start_comfyui(asyncio_loop=None):
         asyncio.set_event_loop(asyncio_loop)
     prompt_server = server.PromptServer(asyncio_loop)
 
+    # Phase 2: Start isolated node loading early (runs in background during builtin init)
+    from comfy.isolation import start_isolation_loading_early
+    start_isolation_loading_early(asyncio_loop)
+
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
