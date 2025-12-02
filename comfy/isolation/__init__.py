@@ -192,7 +192,6 @@ def initialize_proxies() -> None:
         UtilsProxy()
         ModelSamplingRegistry()  # Register ModelSampling proxy
         CLIPRegistry()  # Register CLIP proxy
-        logger.debug("📚 [PyIsolate][Init] CLIPRegistry registered on host")
     # In child processes, these will be injected as proxies via use_remote()
     PromptServerProxy()
 
@@ -228,7 +227,6 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     _ISOLATION_SCAN_ATTEMPTED = True
 
     if pyisolate is None:
-        logger.debug(f"{LOG_PREFIX}[Loader] pyisolate unavailable, skipping isolated nodes")
         return []
 
     manifest_entries = _find_manifest_directories()
@@ -240,7 +238,6 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     # Set flag to enable ModelSampling proxy (only when isolated nodes exist)
     import os
     os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
-    logger.debug(f"{LOG_PREFIX}[Loader] Isolation active: ModelSampling proxy enabled")
 
     specs: List[IsolatedNodeSpec] = []
     for node_dir, manifest in manifest_entries:
@@ -279,7 +276,6 @@ def _find_manifest_directories() -> List[tuple[Path, Path]]:
             if not manifest.exists():
                 manifest = entry / "pyisolate.yml"
             if manifest.exists():
-                logger.debug("%s[Loader] Found pyisolate manifest: %s", LOG_PREFIX, manifest)
                 manifest_dirs.append((entry, manifest))
     return manifest_dirs
 
@@ -304,11 +300,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         manifest = yaml.safe_load(handle) or {}
 
     if not manifest.get("isolated", False):
-        logger.debug(
-            "%s[Loader] %s manifest present but isolation disabled",
-            LOG_PREFIX,
-            node_dir,
-        )
         return []
 
     dependencies = list(manifest.get("dependencies", []) or [])
@@ -317,11 +308,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     dependencies = _augment_dependencies_with_pyisolate(dependencies, extension_name)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(PYISOLATE_VENV_ROOT))
-    logger.debug(
-        "%s[Loader] Using manager config: venv_root=%s",
-        LOG_PREFIX,
-        manager_config["venv_root_path"],
-    )
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     _EXTENSION_MANAGERS.append(manager)
 
@@ -340,12 +326,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         "share_torch": share_torch,
     }
 
-    logger.debug(
-        "%s[Loader] Invoking ExtensionManager.load_extension with config=%s",
-        LOG_PREFIX,
-        extension_config,
-    )
-
     try:
         extension = manager.load_extension(extension_config)
     except Exception as exc:
@@ -361,11 +341,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     # Check for route_manifest.json and inject routes if present
     manifest_path = node_dir / "route_manifest.json"
     if manifest_path.exists():
-        logger.info(
-            "%s[Loader] Found route_manifest.json for %s, injecting routes...",
-            LOG_PREFIX,
-            extension_name,
-        )
         try:
             from .route_injector import inject_routes
             import server
@@ -374,12 +349,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
                 extension=extension,
                 manifest_path=manifest_path,
             )
-            logger.info(
-                "%s[Loader] ✅ Injected %d routes for %s",
-                LOG_PREFIX,
-                num_routes,
-                extension_name,
-            )
         except Exception as e:
             logger.error(
                 "%s[Loader] ❌ Route injection failed for %s: %s",
@@ -387,12 +356,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
                 extension_name,
                 e,
             )
-    else:
-        logger.debug(
-            "%s[Loader] No route_manifest.json for %s",
-            LOG_PREFIX,
-            extension_name,
-        )
     # === ROUTE INJECTION END ===
     
     # Register a dummy module in sys.modules so pickle can find classes from the isolated module
@@ -405,19 +368,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         dummy_module.__path__ = [str(node_dir)]  # Make it a package so submodules can be imported
         dummy_module.__package__ = normalized_name
         sys.modules[normalized_name] = dummy_module
-        logger.debug(
-            "%s[Loader] Registered dummy module %s in sys.modules for pickle compatibility",
-            LOG_PREFIX,
-            normalized_name,
-        )
     
-    logger.debug(
-        "%s[Loader] Loading isolated node %s from %s",
-        LOG_PREFIX,
-        extension_name,
-        node_dir,
-    )
-
     specs: List[IsolatedNodeSpec] = []
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     
@@ -425,18 +376,6 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
         raise RuntimeError(
             f"{LOG_PREFIX}[Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
         )
-    logger.debug(
-        "%s[Loader] %s reported %d node(s)",
-        LOG_PREFIX,
-        extension_name,
-        len(remote_nodes),
-    )
-    logger.debug(
-        "%s[Loader] %s nodes: %s",
-        LOG_PREFIX,
-        extension_name,
-        list(remote_nodes.keys()),
-    )
     
     for node_name, display_name in remote_nodes.items():
         # Get full node details - the isolated process will serialize everything to JSON
@@ -465,11 +404,6 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
                 break
         if needs_injection:
             deps = ["-e", str(PYISOLATE_EDITABLE_PATH)] + deps
-            logger.debug(
-                "%s[Loader] Injected pyisolate editable dependency for %s",
-                LOG_PREFIX,
-                extension_name,
-            )
     else:
         logger.error(
             "%s[Loader] Missing pyisolate source at %s; isolated node %s cannot mirror host runtime",
@@ -486,13 +420,6 @@ def _augment_dependencies_with_pyisolate(dependencies: List[str], extension_name
 def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyNodeExtension) -> type:
     function_name = "_pyisolate_execute"
     restored_input_types = _restore_input_types(info.get("input_types", {}))
-    # INSTRUMENTATION: Trace INPUT_TYPES
-    logger.debug(
-        "%s[Loader] Restored INPUT_TYPES for %s: %s",
-        LOG_PREFIX,
-        node_name,
-        restored_input_types,
-    )
 
     async def _execute(self, **inputs):
         # ModelPatcher/CLIP serialization now uses ProxiedSingleton registries
@@ -506,22 +433,11 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
             # Serialize inputs (CLIP, ModelPatcher, etc. → Refs)
             inputs = serialize_for_isolation(inputs)
             
-            logger.debug(
-                "%s[Loader] Serialized inputs for %s",
-                LOG_PREFIX,
-                node_name,
-            )
-            
             result = await extension.execute_node(node_name, **inputs)
             
             # Deserialize result (Refs → real objects)
             # This converts ModelPatcherRef back to actual ModelPatcher on host
             result = deserialize_from_isolation(result)
-            logger.debug(
-                "%s[Loader] Deserialized result for %s",
-                LOG_PREFIX,
-                node_name,
-            )
             
             return result
         except ImportError as e:

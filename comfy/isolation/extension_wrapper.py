@@ -88,21 +88,15 @@ class ComfyNodeExtension(ExtensionBase):
             if hasattr(node_cls, '__module__') and '/' in str(node_cls.__module__):
                 # Path detected in __module__, fix it
                 node_cls.__module__ = module_name
-                logger.debug(
-                    "%s[ExtensionWrapper] Fixed __module__ for %s",
-                    LOG_PREFIX,
-                    node_name,
-                )
 
         # Don't instantiate yet - wait until execution time
         # This avoids pickle issues with classes that have bad __module__ attributes
         self.node_instances = {}
         
         logger.info(
-            "%s[ExtensionWrapper] Loaded %d nodes: %s",
+            "%s[ExtensionWrapper] Loaded %d nodes",
             LOG_PREFIX,
             len(self.node_classes),
-            list(self.node_classes.keys()),
         )
 
     async def list_nodes(self) -> Dict[str, str]:
@@ -204,11 +198,6 @@ class ComfyNodeExtension(ExtensionBase):
         # ModelPatcherProxy: convert to ref (child returning to host)
         if type_name == 'ModelPatcherProxy':
             model_id = data._instance_id
-            logger.info(
-                "%s[RemoteObject] ModelPatcherProxy → ModelPatcherRef(%s)",
-                LOG_PREFIX,
-                model_id,
-            )
             return {
                 "__type__": "ModelPatcherRef",
                 "model_id": model_id,
@@ -217,11 +206,6 @@ class ComfyNodeExtension(ExtensionBase):
         # CLIPProxy: convert to ref (child returning to host)
         if type_name == 'CLIPProxy':
             clip_id = data._instance_id
-            logger.info(
-                "%s[RemoteObject] CLIPProxy → CLIPRef(%s)",
-                LOG_PREFIX,
-                clip_id,
-            )
             return {
                 "__type__": "CLIPRef",
                 "clip_id": clip_id,
@@ -243,12 +227,6 @@ class ComfyNodeExtension(ExtensionBase):
         object_id = str(uuid.uuid4())
         self.remote_objects[object_id] = data
         type_name = type(data).__name__
-        logger.info(
-            "%s[RemoteObject] Stored %s as remote object %s",
-            LOG_PREFIX,
-            type_name,
-            object_id[:8],
-        )
         return RemoteObjectHandle(object_id, type_name)
 
     def _resolve_remote_objects(self, data: Any) -> Any:
@@ -350,21 +328,11 @@ class ComfyNodeExtension(ExtensionBase):
                     # Add node directory to sys.path temporarily
                     if node_dir not in sys.path:
                         sys.path.insert(0, node_dir)
-                        logger.debug(
-                            "%s[RouteHandler] Added %s to sys.path",
-                            LOG_PREFIX,
-                            node_dir,
-                        )
                 
                 # Try to import the module
                 module = importlib.import_module(handler_module)
                 handler = getattr(module, handler_func)
                 self._route_handlers[cache_key] = handler
-                logger.info(
-                    "%s[RouteHandler] ✅ Cached handler %s",
-                    LOG_PREFIX,
-                    cache_key,
-                )
             except (ImportError, AttributeError) as e:
                 logger.error(
                     "%s[RouteHandler] ❌ Failed to load handler %s: %s",
