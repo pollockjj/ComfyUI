@@ -1,70 +1,42 @@
-# ============================================================================
-# PyIsolate: Disable cudaMallocAsync for MODEL isolation support
-# MUST BE FIRST - before ANY imports that could trigger torch
-# 
-# FEATURE FLAG: Set PYISOLATE_DISABLE_CUDAMALLOCASYNC=0 to revert to default
-# NOTE: Allocator is set in launch_comfy.sh, this is backup/documentation
-# ============================================================================
 import os
+import sys
 
-# Feature flag for rollback (default: enabled)
-if os.environ.get('PYISOLATE_DISABLE_CUDAMALLOCASYNC', '1') == '1':
-    # Ensure legacy allocator if not already set by launch script
+# Process isolation requires native CUDA allocator for multi-process tensor sharing
+if '--use-process-isolation' in sys.argv:
     if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
-# Note: logging not available yet, message will appear after logger setup
-
-# ============================================================================
 
 import comfy.options
 comfy.options.enable_args_parsing()
-
 import importlib.util
-import sys
-
-CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
-
-IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
-IS_PRIMARY_PROCESS = (not IS_PYISOLATE_CHILD) and __name__ == "__main__"
-
 import folder_paths
 import time
 from comfy.cli_args import args
 from app.logger import setup_logger
 import itertools
+import utils.extra_config
 import logging
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
+import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
 
-if IS_PRIMARY_PROCESS:
+if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
-if not IS_PYISOLATE_CHILD:
-    setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
-    
-    # Log PyIsolate CUDA allocator configuration
-    if os.environ.get('PYISOLATE_DISABLE_CUDAMALLOCASYNC', '1') == '1':
-        logging.info("📚 [PyIsolate] Disabled cudaMallocAsync, using legacy CUDA allocator for MODEL isolation")
-    else:
-        logging.info("📚 [PyIsolate] Feature flag disabled, keeping default CUDA allocator")
+setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
 
 def apply_custom_paths():
-    from utils import extra_config
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
     if os.path.isfile(extra_model_paths_config_path):
-        extra_config.load_extra_path_config(extra_model_paths_config_path)
+        utils.extra_config.load_extra_path_config(extra_model_paths_config_path)
 
     if args.extra_model_paths_config:
         for config_path in itertools.chain(*args.extra_model_paths_config):
-            extra_config.load_extra_path_config(config_path)
+            utils.extra_config.load_extra_path_config(config_path)
 
     # --output-directory, --input-directory, --user-directory
     if args.output_directory:
@@ -134,11 +106,8 @@ def execute_prestartup_script():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
-if IS_PRIMARY_PROCESS:
-    apply_custom_paths()
-    execute_prestartup_script()
-else:
-    logging.debug("Skipping ComfyUI main prestartup hooks inside child process (%s)", __name__)
+apply_custom_paths()
+execute_prestartup_script()
 
 
 # Main code
@@ -151,7 +120,7 @@ import gc
 if os.name == "nt":
     os.environ['MIMALLOC_PURGE_DELAY'] = '0'
 
-if IS_PRIMARY_PROCESS:
+if __name__ == "__main__":
     os.environ['TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL'] = '1'
     if args.default_device is not None:
         default_dev = args.default_device
@@ -181,29 +150,20 @@ if IS_PRIMARY_PROCESS:
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
-# Guard heavy imports for multiprocessing spawn compatibility
-# On Windows spawn, this file is re-executed for Manager/Process creation
-# PyIsolate child processes skip these imports since they're not needed
-if not IS_PYISOLATE_CHILD:
-    import comfy.utils
+import comfy.utils
 
-    import execution
-    import server
-    from protocol import BinaryEventTypes
-    import nodes
-    import comfy.model_management
-    import comfyui_version
-    import app.logger
-    import hook_breaker_ac10a0
+import execution
+import server
+from protocol import BinaryEventTypes
+import nodes
+import comfy.model_management
+import comfyui_version
+import app.logger
+import hook_breaker_ac10a0
 
-    # PyIsolate: Initialize AFTER torch imports (for custom nodes + future DP/SP workers)
-    try:
-        import comfy.isolation
-        comfy.isolation.initialize_proxies()  # Tests run here, after torch is safe + register ProxiedSingletons
-    except ImportError as e:
-        logging.debug(f"PyIsolate not installed, isolation disabled: {e}")
-    except Exception as e:
-        logging.error(f"PyIsolate initialization failed: {e}")
+if args.use_process_isolation:
+    import comfy.isolation
+    comfy.isolation.initialize_proxies()
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
@@ -373,9 +333,9 @@ def start_comfyui(asyncio_loop=None):
         asyncio.set_event_loop(asyncio_loop)
     prompt_server = server.PromptServer(asyncio_loop)
 
-    # Phase 2: Start isolated node loading early (runs in background during builtin init)
-    from comfy.isolation import start_isolation_loading_early
-    start_isolation_loading_early(asyncio_loop)
+    if args.use_process_isolation:
+        from comfy.isolation import start_isolation_loading_early
+        start_isolation_loading_early(asyncio_loop)
 
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
@@ -415,7 +375,7 @@ def start_comfyui(asyncio_loop=None):
     return asyncio_loop, prompt_server, start_all
 
 
-if IS_PRIMARY_PROCESS:
+if __name__ == "__main__":
     # Running directly, just start ComfyUI.
     logging.info("Python version: {}".format(sys.version))
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))

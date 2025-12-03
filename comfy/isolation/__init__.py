@@ -183,31 +183,17 @@ logger = get_isolation_logger(__name__)
 def initialize_proxies() -> None:
     """Initialize ProxiedSingletons for isolated nodes.
     
-    Registers all proxy classes so they're available to isolated nodes via RPC.
-    Actual RPC binding happens when extensions load.
+    Detects host vs child process and runs appropriate initialization.
+    All child-specific logic is in child_hooks.py, not in core files.
     """
-    import os
+    from .child_hooks import is_child_process
     
-    from .proxies.folder_paths_proxy import FolderPathsProxy
-    from .proxies.model_management_proxy import ModelManagementProxy
-    from .proxies.nodes_proxy import NodesProxy
-    from .proxies.utils_proxy import UtilsProxy
-    from .proxies.prompt_server_proxy import PromptServerProxy
-    from .model_sampling_proxy import ModelSamplingRegistry
-    from .clip_proxy import CLIPRegistry
-    
-    # Instantiate singletons to register them (host side only)
-    is_child = os.environ.get("PYISOLATE_CHILD") == "1"
-    
-    if not is_child:
-        FolderPathsProxy()
-        ModelManagementProxy()
-        NodesProxy()
-        UtilsProxy()
-        ModelSamplingRegistry()  # Register ModelSampling proxy
-        CLIPRegistry()  # Register CLIP proxy
-    # In child processes, these will be injected as proxies via use_remote()
-    PromptServerProxy()
+    if is_child_process():
+        from .child_hooks import initialize_child_process
+        initialize_child_process()
+    else:
+        from .host_hooks import initialize_host_process
+        initialize_host_process()
 
 
 @dataclass(frozen=True)

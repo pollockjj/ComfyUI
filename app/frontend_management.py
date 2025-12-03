@@ -16,25 +16,13 @@ from importlib.metadata import version
 import requests
 from typing_extensions import NotRequired
 
-IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
-
-if not IS_PYISOLATE_CHILD:
-    from utils.install_util import get_missing_requirements_message, requirements_path
-else:  # pragma: no cover - only hit inside isolated child processes
-    def get_missing_requirements_message():
-        raise RuntimeError("frontend_management accessed install_util inside PyIsolate child")
-
-    requirements_path = None
+from utils.install_util import get_missing_requirements_message, requirements_path
 
 from comfy.cli_args import DEFAULT_VERSION_STRING
 import app.logger
 
 
 def frontend_install_warning_message():
-    if IS_PYISOLATE_CHILD:
-        raise RuntimeError("📚 [PyIsolate][FrontendMgmt] FAIL-LOUD: Warning message accessed in child")
-    if requirements_path is None:
-        raise RuntimeError("frontend_install_warning_message invoked inside PyIsolate child")
     return f"""
 {get_missing_requirements_message()}
 
@@ -57,11 +45,6 @@ def get_installed_frontend_version():
 
 def get_required_frontend_version():
     """Get the required frontend version from requirements.txt."""
-    if IS_PYISOLATE_CHILD:
-        logging.debug("📚 [PyIsolate][FrontendMgmt] Skipping requirements_path access in child")
-        return None
-    if requirements_path is None:
-        raise RuntimeError("requirements_path unavailable inside PyIsolate child")
     try:
         with open(requirements_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -84,9 +67,6 @@ def get_required_frontend_version():
 
 def check_frontend_version():
     """Check if the frontend version is up to date."""
-    if IS_PYISOLATE_CHILD:
-        logging.debug("📚 [PyIsolate][FrontendMgmt] Skipping version check in child process")
-        return
 
     try:
         frontend_version_str = get_installed_frontend_version()
@@ -237,9 +217,6 @@ class FrontendManager:
     @classmethod
     def get_required_templates_version(cls) -> str:
         """Get the required workflow templates version from requirements.txt."""
-        if IS_PYISOLATE_CHILD:
-            logging.debug("📚 [PyIsolate][FrontendMgmt] Skipping templates version in child")
-            return None
         try:
             with open(requirements_path, "r", encoding="utf-8") as f:
                 for line in f:
