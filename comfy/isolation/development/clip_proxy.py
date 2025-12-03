@@ -49,7 +49,7 @@ class CLIPRegistry(ProxiedSingleton):
         self._id_map: Dict[int, str] = {}  # id(clip) → instance_id (identity preservation)
         self._counter = 0
         self._lock = threading.Lock()
-        logger.debug("📚 [PyIsolate][CLIPRegistry] Initialized")
+        logger.debug("[I][CLIPRegistry] Initialized")
     
     def register(self, clip_instance) -> str:
         """
@@ -69,7 +69,7 @@ class CLIPRegistry(ProxiedSingleton):
         """
         if IS_CHILD_PROCESS:
             raise RuntimeError(
-                "📚 [PyIsolate][CLIPRegistry] FAIL-LOUD: "
+                "[I][CLIPRegistry] FAIL-LOUD: "
                 "Cannot register CLIP in child process"
             )
         
@@ -79,7 +79,7 @@ class CLIPRegistry(ProxiedSingleton):
             if obj_id in self._id_map:
                 existing_id = self._id_map[obj_id]
                 logger.debug(
-                    f"📚 [PyIsolate][CLIPRegistry] Re-using {existing_id} for object {obj_id}"
+                    f"[I][CLIPRegistry] Re-using {existing_id} for object {obj_id}"
                 )
                 return existing_id
             
@@ -89,7 +89,7 @@ class CLIPRegistry(ProxiedSingleton):
             self._registry[instance_id] = clip_instance
             self._id_map[obj_id] = instance_id
             logger.debug(
-                f"📚 [PyIsolate][CLIPRegistry] Registered {instance_id}"
+                f"[I][CLIPRegistry] Registered {instance_id}"
             )
         
         return instance_id
@@ -109,11 +109,11 @@ class CLIPRegistry(ProxiedSingleton):
                 if instance_id in self._registry:
                     del self._registry[instance_id]
                     logger.debug(
-                        f"📚 [PyIsolate][CLIPRegistry] Unregistered {instance_id}"
+                        f"[I][CLIPRegistry] Unregistered {instance_id}"
                     )
         except Exception as e:
             logger.error(
-                f"📚 [PyIsolate][CLIPRegistry] Unregister failed for {instance_id}: {e}"
+                f"[I][CLIPRegistry] Unregister failed for {instance_id}: {e}"
             )
     
     def _get_instance(self, instance_id: str):
@@ -132,7 +132,7 @@ class CLIPRegistry(ProxiedSingleton):
         instance = self._registry.get(instance_id)
         if instance is None:
             raise ValueError(
-                f"📚 [PyIsolate][CLIPRegistry] FAIL-LOUD: "
+                f"[I][CLIPRegistry] FAIL-LOUD: "
                 f"Instance {instance_id} not found in registry"
             )
         return instance
@@ -229,7 +229,7 @@ class CLIPRegistry(ProxiedSingleton):
         new_clip = instance.clone()
         new_id = self.register(new_clip)
         logger.debug(
-            f"📚 [PyIsolate][CLIPRegistry] Cloned {instance_id} → {new_id}"
+            f"[I][CLIPRegistry] Cloned {instance_id} → {new_id}"
         )
         return new_id
     
@@ -306,7 +306,7 @@ class CLIPProxy:
                 self, self._registry.unregister_sync, instance_id
             )
             logger.debug(
-                f"📚 [PyIsolate][CLIPProxy] Lifecycle management enabled for {instance_id}"
+                f"[I][CLIPProxy] Lifecycle management enabled for {instance_id}"
             )
     
     def __reduce__(self):
@@ -540,5 +540,5 @@ def maybe_wrap_clip_for_isolation(clip):
     
     registry = CLIPRegistry()
     clip_id = registry.register(clip)
-    logger.debug(f"📚 [PyIsolate][CLIPProxy] Wrapped CLIP as {clip_id}")
+    logger.debug(f"[I][CLIPProxy] Wrapped CLIP as {clip_id}")
     return CLIPProxy(clip_id, registry, manage_lifecycle=True)

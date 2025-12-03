@@ -30,20 +30,20 @@ def run_tests():
     # Test 1: ProgressBar is correct class
     try:
         assert proxy.ProgressBar == ProgressBar, "ProgressBar class mismatch"
-        logger.info(f"{LOG_PREFIX}[Test] ✅ UtilsProxy.ProgressBar exposed correctly")
+        logger.info(f"{LOG_PREFIX}[Test]  UtilsProxy.ProgressBar exposed correctly")
         passed += 1
     except Exception as e:
-        logger.error(f"{LOG_PREFIX}[Test] ❌ UtilsProxy.ProgressBar failed: {e}")
+        logger.error(f"{LOG_PREFIX}[Test]  UtilsProxy.ProgressBar failed: {e}")
         failed += 1
     
     # Test 2: ProgressBar can be instantiated
     try:
         pbar = proxy.ProgressBar(total=100)
         assert pbar is not None, "ProgressBar instance is None"
-        logger.info(f"{LOG_PREFIX}[Test] ✅ UtilsProxy.ProgressBar instantiable")
+        logger.info(f"{LOG_PREFIX}[Test]  UtilsProxy.ProgressBar instantiable")
         passed += 1
     except Exception as e:
-        logger.error(f"{LOG_PREFIX}[Test] ❌ UtilsProxy.ProgressBar instantiation failed: {e}")
+        logger.error(f"{LOG_PREFIX}[Test]  UtilsProxy.ProgressBar instantiation failed: {e}")
         failed += 1
     
     # Summary

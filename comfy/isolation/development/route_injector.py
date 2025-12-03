@@ -17,7 +17,7 @@ from aiohttp import web
 if TYPE_CHECKING:
     from pyisolate import Extension
 
-LOG_PREFIX = "📚 [PyIsolate]"
+LOG_PREFIX = "[I]"
 logger = logging.getLogger(__name__)
 
 

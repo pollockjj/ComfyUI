@@ -15,7 +15,7 @@ except ImportError:
     class ProxiedSingleton:
         pass
 
-LOG_PREFIX = "📚 [PyIsolate]"
+LOG_PREFIX = "[I]"
 logger = logging.getLogger(__name__)
 
 

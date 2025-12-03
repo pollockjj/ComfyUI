@@ -4,6 +4,10 @@ import sys
 if '--use-process-isolation' in sys.argv:
     if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
+    
+    # Initialize proxies early - determines host vs child and routes accordingly
+    import comfy.isolation
+    comfy.isolation.initialize_proxies()
 
 import comfy.options
 comfy.options.enable_args_parsing()
@@ -186,10 +190,6 @@ import comfy.model_management
 import comfyui_version
 import app.logger
 import hook_breaker_ac10a0
-
-if args.use_process_isolation:
-    import comfy.isolation
-    comfy.isolation.initialize_proxies()
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()

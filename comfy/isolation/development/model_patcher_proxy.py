@@ -57,14 +57,14 @@ def _timing_decorator(func):
             result = await func(*args, **kwargs)
             duration_ms = (time.perf_counter() - start) * 1000
             logger.debug(
-                f"📚 [PyIsolate][ModelPatcherRegistry] "
+                f"[I][ModelPatcherRegistry] "
                 f"{method_name}({instance_id}) completed in {duration_ms:.2f}ms"
             )
             return result
         except Exception as e:
             duration_ms = (time.perf_counter() - start) * 1000
             logger.error(
-                f"📚 [PyIsolate][ModelPatcherRegistry] "
+                f"[I][ModelPatcherRegistry] "
                 f"{method_name}({instance_id}) FAILED in {duration_ms:.2f}ms: {e}"
             )
             raise
@@ -104,7 +104,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         self._register_count = 0
         self._id_map_hits = 0
         
-        logger.debug("📚 [PyIsolate][ModelPatcherRegistry] Initialized")
+        logger.debug("[I][ModelPatcherRegistry] Initialized")
     
     def register(self, model_patcher) -> str:
         """
@@ -129,7 +129,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """
         if IS_CHILD_PROCESS:
             raise RuntimeError(
-                "📚 [PyIsolate][ModelPatcherRegistry] FAIL-LOUD: "
+                "[I][ModelPatcherRegistry] FAIL-LOUD: "
                 "Cannot register ModelPatcher in child process"
             )
         
@@ -140,7 +140,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
                 existing_id = self._id_map[obj_id]
                 self._id_map_hits += 1
                 logger.debug(
-                    f"📚 [PyIsolate][ModelPatcherRegistry] Identity hit: "
+                    f"[I][ModelPatcherRegistry] Identity hit: "
                     f"Re-using {existing_id} for object {obj_id} "
                     f"(total hits: {self._id_map_hits})"
                 )
@@ -154,7 +154,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
             self._register_count += 1
             
             logger.debug(
-                f"📚 [PyIsolate][ModelPatcherRegistry] Registered {instance_id} "
+                f"[I][ModelPatcherRegistry] Registered {instance_id} "
                 f"(id={obj_id}, total registered: {self._register_count})"
             )
         
@@ -182,11 +182,11 @@ class ModelPatcherRegistry(ProxiedSingleton):
                         del self._id_map[obj_id]
                     del self._registry[instance_id]
                     logger.debug(
-                        f"📚 [PyIsolate][ModelPatcherRegistry] Unregistered {instance_id}"
+                        f"[I][ModelPatcherRegistry] Unregistered {instance_id}"
                     )
         except Exception as e:
             logger.error(
-                f"📚 [PyIsolate][ModelPatcherRegistry] Unregister failed for {instance_id}: {e}"
+                f"[I][ModelPatcherRegistry] Unregister failed for {instance_id}: {e}"
             )
     
     def _get_instance(self, instance_id: str):
@@ -205,7 +205,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._registry.get(instance_id)
         if instance is None:
             raise ValueError(
-                f"📚 [PyIsolate][ModelPatcherRegistry] FAIL-LOUD: "
+                f"[I][ModelPatcherRegistry] FAIL-LOUD: "
                 f"Instance {instance_id} not found in registry "
                 f"(registry size: {len(self._registry)})"
             )
@@ -249,7 +249,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         new_model = instance.clone()
         new_id = self.register(new_model)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] Cloned {instance_id} → {new_id}"
+            f"[I][ModelPatcherRegistry] Cloned {instance_id} → {new_id}"
         )
         return new_id
     
@@ -270,7 +270,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         result = instance.get_model_object(name)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_model_object({instance_id}, '{name}') "
+            f"[I][ModelPatcherRegistry] get_model_object({instance_id}, '{name}') "
             f"returned type: {type(result).__name__}"
         )
         return result
@@ -294,7 +294,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         import copy
         options = copy.deepcopy(instance.model_options)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_model_options({instance_id}) "
+            f"[I][ModelPatcherRegistry] get_model_options({instance_id}) "
             f"keys: {list(options.keys())}"
         )
         return options
@@ -315,7 +315,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance.model_options = options
         new_keys = set(options.keys())
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] set_model_options({instance_id}) "
+            f"[I][ModelPatcherRegistry] set_model_options({instance_id}) "
             f"old_keys: {old_keys}, new_keys: {new_keys}"
         )
     
@@ -333,7 +333,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         device = instance.load_device
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_load_device({instance_id}) = {device}"
+            f"[I][ModelPatcherRegistry] get_load_device({instance_id}) = {device}"
         )
         return device
     
@@ -351,7 +351,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         device = instance.offload_device
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_offload_device({instance_id}) = {device}"
+            f"[I][ModelPatcherRegistry] get_offload_device({instance_id}) = {device}"
         )
         return device
     
@@ -372,7 +372,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         size = instance.size
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_size({instance_id}) = {size} bytes"
+            f"[I][ModelPatcherRegistry] get_size({instance_id}) = {size} bytes"
         )
         return size
     
@@ -386,7 +386,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         new_model = instance.clone()
         new_id = self.register(new_model)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] Cloned {instance_id} → {new_id} (sync)"
+            f"[I][ModelPatcherRegistry] Cloned {instance_id} → {new_id} (sync)"
         )
         return new_id
     
@@ -435,7 +435,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         config = instance.model.model_config
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_inner_model_config({instance_id}) "
+            f"[I][ModelPatcherRegistry] get_inner_model_config({instance_id}) "
             f"type: {type(config).__name__}"
         )
         return config
@@ -455,7 +455,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         attr = getattr(instance.model, name)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] get_inner_model_attr({instance_id}, '{name}') "
+            f"[I][ModelPatcherRegistry] get_inner_model_attr({instance_id}, '{name}') "
             f"type: {type(attr).__name__}"
         )
         return attr
@@ -479,7 +479,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         instance.add_object_patch(name, obj)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] add_object_patch({instance_id}, '{name}')"
+            f"[I][ModelPatcherRegistry] add_object_patch({instance_id}, '{name}')"
         )
     
     def add_object_patch_sync(self, instance_id: str, name: str, obj: Any) -> None:
@@ -509,7 +509,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         model_sampling = instance.get_model_object("model_sampling")
         result = model_sampling.percent_to_sigma(percent)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] model_sampling_percent_to_sigma"
+            f"[I][ModelPatcherRegistry] model_sampling_percent_to_sigma"
             f"({instance_id}, {percent}) = {result}"
         )
         return float(result)
@@ -542,7 +542,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._get_instance(instance_id)
         instance.set_model_patch_replace(patch, name, block_name, number, transformer_index)
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherRegistry] set_model_patch_replace"
+            f"[I][ModelPatcherRegistry] set_model_patch_replace"
             f"({instance_id}, '{name}', {block_name}, {number})"
         )
     
@@ -629,7 +629,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
             new_clip_id = clip_registry.register(new_clip)
         
         logger.info(
-            f"📚 [PyIsolate][ModelPatcherRegistry] load_lora({instance_id}, '{lora_path}') "
+            f"[I][ModelPatcherRegistry] load_lora({instance_id}, '{lora_path}') "
             f"→ model={new_model_id}, clip={new_clip_id}"
         )
         
@@ -681,7 +681,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
             new_clip_id = clip_registry.register(new_clip)
         
         logger.info(
-            f"📚 [PyIsolate][ModelPatcherRegistry] load_lora_sync({instance_id}, '{lora_path}') "
+            f"[I][ModelPatcherRegistry] load_lora_sync({instance_id}, '{lora_path}') "
             f"→ model={new_model_id}, clip={new_clip_id}"
         )
         
@@ -778,7 +778,7 @@ class ModelPatcherProxy:
                 self, self._registry.unregister_sync, instance_id
             )
             logger.debug(
-                f"📚 [PyIsolate][ModelPatcherProxy] Lifecycle management enabled for {instance_id}"
+                f"[I][ModelPatcherProxy] Lifecycle management enabled for {instance_id}"
             )
     
     def __reduce__(self):
@@ -834,7 +834,7 @@ class ModelPatcherProxy:
             
             duration_ms = (time.perf_counter() - start) * 1000
             logger.debug(
-                f"📚 [PyIsolate][ModelPatcherProxy] "
+                f"[I][ModelPatcherProxy] "
                 f"{method_name}() completed in {duration_ms:.2f}ms "
                 f"(child={self._is_child})"
             )
@@ -843,7 +843,7 @@ class ModelPatcherProxy:
         except Exception as e:
             duration_ms = (time.perf_counter() - start) * 1000
             logger.error(
-                f"📚 [PyIsolate][ModelPatcherProxy] "
+                f"[I][ModelPatcherProxy] "
                 f"{method_name}() FAILED in {duration_ms:.2f}ms: {e}"
             )
             raise
@@ -960,7 +960,7 @@ class ModelPatcherProxy:
     def patches(self):
         """Property guard: patches access not supported in Phase 1."""
         raise AttributeError(
-            "📚 [PyIsolate][ModelPatcherProxy] Direct access to 'patches' is not supported "
+            "[I][ModelPatcherProxy] Direct access to 'patches' is not supported "
             "in isolated mode Phase 1. This will be added in Phase 2/3."
         )
     
@@ -968,14 +968,14 @@ class ModelPatcherProxy:
     def object_patches(self):
         """Property guard: object_patches access not supported in Phase 1."""
         raise AttributeError(
-            "📚 [PyIsolate][ModelPatcherProxy] Direct access to 'object_patches' is not supported "
+            "[I][ModelPatcherProxy] Direct access to 'object_patches' is not supported "
             "in isolated mode Phase 1. This will be added in Phase 2/3."
         )
     
     def add_patches(self, *args, **kwargs):
         """Method guard: add_patches not supported in Phase 1."""
         raise NotImplementedError(
-            "📚 [PyIsolate][ModelPatcherProxy] add_patches() is not supported "
+            "[I][ModelPatcherProxy] add_patches() is not supported "
             "in isolated mode Phase 1. Use load_lora() instead for LoRA loading."
         )
     
@@ -1011,7 +1011,7 @@ class ModelPatcherProxy:
                 clip_id = getattr(clip, '_clip_id', None)
         
         logger.debug(
-            f"📚 [PyIsolate][ModelPatcherProxy] load_lora: clip={type(clip).__name__ if clip else None}, "
+            f"[I][ModelPatcherProxy] load_lora: clip={type(clip).__name__ if clip else None}, "
             f"clip_id={clip_id}"
         )
         
@@ -1042,14 +1042,14 @@ class ModelPatcherProxy:
     def patch_model(self, *args, **kwargs):
         """Method guard: patch_model not supported in Phase 1."""
         raise NotImplementedError(
-            "📚 [PyIsolate][ModelPatcherProxy] patch_model() is not supported "
+            "[I][ModelPatcherProxy] patch_model() is not supported "
             "in isolated mode Phase 1. This will be added in Phase 4."
         )
     
     def unpatch_model(self, *args, **kwargs):
         """Method guard: unpatch_model not supported in Phase 1."""
         raise NotImplementedError(
-            "📚 [PyIsolate][ModelPatcherProxy] unpatch_model() is not supported "
+            "[I][ModelPatcherProxy] unpatch_model() is not supported "
             "in isolated mode Phase 1. This will be added in Phase 4."
         )
 
@@ -1112,10 +1112,10 @@ class _InnerModelProxy:
         
         # For other attributes, log and raise
         logger.warning(
-            f"📚 [PyIsolate][_InnerModelProxy] Unsupported attribute access: model.{name}"
+            f"[I][_InnerModelProxy] Unsupported attribute access: model.{name}"
         )
         raise AttributeError(
-            f"📚 [PyIsolate][_InnerModelProxy] Access to 'model.{name}' is not yet supported. "
+            f"[I][_InnerModelProxy] Access to 'model.{name}' is not yet supported. "
             f"Please file an issue if you need this."
         )
     
@@ -1156,32 +1156,32 @@ def maybe_wrap_model_for_isolation(model_patcher):
     
     # Always log wrapper calls at INFO level for debugging
     logger.info(
-        f"📚 [PyIsolate][ModelPatcherProxy] maybe_wrap called: "
+        f"[I][ModelPatcherProxy] maybe_wrap called: "
         f"isolation_active={isolation_active}, is_child={is_child}, "
         f"type={type(model_patcher).__name__}"
     )
     
     if not isolation_active:
         logger.debug(
-            "📚 [PyIsolate][ModelPatcherProxy] MODEL wrapping: disabled (isolation not active)"
+            "[I][ModelPatcherProxy] MODEL wrapping: disabled (isolation not active)"
         )
         return model_patcher
     
     if is_child:
         logger.debug(
-            "📚 [PyIsolate][ModelPatcherProxy] MODEL wrapping: disabled (in child process)"
+            "[I][ModelPatcherProxy] MODEL wrapping: disabled (in child process)"
         )
         return model_patcher
     
     if isinstance(model_patcher, ModelPatcherProxy):
         logger.debug(
-            "📚 [PyIsolate][ModelPatcherProxy] MODEL wrapping: skipped (already proxied)"
+            "[I][ModelPatcherProxy] MODEL wrapping: skipped (already proxied)"
         )
         return model_patcher
     
     registry = ModelPatcherRegistry()
     model_id = registry.register(model_patcher)
     logger.debug(
-        f"📚 [PyIsolate][ModelPatcherProxy] MODEL wrapping: enabled → {model_id}"
+        f"[I][ModelPatcherProxy] MODEL wrapping: enabled → {model_id}"
     )
     return ModelPatcherProxy(model_id, registry, manage_lifecycle=True)

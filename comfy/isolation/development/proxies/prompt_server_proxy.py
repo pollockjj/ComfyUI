@@ -22,7 +22,7 @@ except ImportError:
         pass
     current_rpc_context = None
 
-LOG_PREFIX = "📚 [PyIsolate]"
+LOG_PREFIX = "[I]"
 logger = logging.getLogger(__name__)
 
 

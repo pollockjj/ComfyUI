@@ -9,7 +9,7 @@ from typing import Any, Dict, Tuple
 
 from pyisolate import ExtensionBase
 
-LOG_PREFIX = "📚 [PyIsolate]"
+LOG_PREFIX = "[I]"
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ class ComfyNodeExtension(ExtensionBase):
                 self._route_handlers[cache_key] = handler
             except (ImportError, AttributeError) as e:
                 logger.error(
-                    "%s[RouteHandler] ❌ Failed to load handler %s: %s",
+                    "%s[RouteHandler]  Failed to load handler %s: %s",
                     LOG_PREFIX,
                     cache_key,
                     e,

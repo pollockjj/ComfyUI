@@ -32,14 +32,28 @@ except ImportError:  # pragma: no cover - pyisolate always available in target e
 
 
 from .extension_wrapper import ComfyNodeExtension
-from .clip_proxy import CLIPRegistry, CLIPProxy, maybe_wrap_clip_for_isolation
-from .model_patcher_proxy import (
-    ModelPatcherRegistry,
-    ModelPatcherProxy,
-    maybe_wrap_model_for_isolation,
-)
 
-LOG_PREFIX = "📚 [PyIsolate]"
+# Conditional imports for experimental features (gated behind PYISOLATE_DEV=1)
+import os
+IS_DEV = os.environ.get("PYISOLATE_DEV") == "1"
+
+if IS_DEV:
+    from .development.clip_proxy import CLIPRegistry, CLIPProxy, maybe_wrap_clip_for_isolation
+    from .development.model_patcher_proxy import (
+        ModelPatcherRegistry,
+        ModelPatcherProxy,
+        maybe_wrap_model_for_isolation,
+    )
+else:
+    # Stub exports for V1.0 (no advanced serialization)
+    CLIPRegistry = None  # type: ignore
+    CLIPProxy = None  # type: ignore
+    maybe_wrap_clip_for_isolation = lambda x: x  # type: ignore
+    ModelPatcherRegistry = None  # type: ignore
+    ModelPatcherProxy = None  # type: ignore
+    maybe_wrap_model_for_isolation = lambda x: x  # type: ignore
+
+LOG_PREFIX = "[I]"
 
 # Module-level list to store timing data for ComfyManager-style report
 isolated_node_timings: List[tuple[float, Path]] = []
@@ -233,7 +247,7 @@ def start_isolation_loading_early(loop: "asyncio.AbstractEventLoop") -> None:
         return
     
     _EARLY_START_TIME = time.perf_counter()
-    logger.info("%s[Orchestration] 🚀 Starting early background loading", LOG_PREFIX)
+    logger.info("%s[Orchestration]  Starting early background loading", LOG_PREFIX)
     
     # Create the task but don't await it yet
     _ISOLATION_BACKGROUND_TASK = loop.create_task(initialize_isolation_nodes())
@@ -253,7 +267,7 @@ async def await_isolation_loading() -> List[IsolatedNodeSpec]:
         if _EARLY_START_TIME is not None:
             overlap_time = time.perf_counter() - _EARLY_START_TIME
             logger.info(
-                "%s[Orchestration] ✅ Early loading completed (wall time since early start: %.2fs)",
+                "%s[Orchestration]  Early loading completed (wall time since early start: %.2fs)",
                 LOG_PREFIX,
                 overlap_time,
             )
@@ -437,18 +451,22 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     _EXTENSION_MANAGERS.append(manager)
 
-    # Import server only when needed, not at module level
-    # This prevents spawn context from importing server before path unification
-    import server
-    from comfy.isolation.clip_proxy import CLIPRegistry
-    from comfy.isolation.model_patcher_proxy import ModelPatcherRegistry
+    # Build APIs list based on IS_DEV flag
+    # V1.0: No advanced proxies needed for basic dependency isolation
+    apis = []
+    if IS_DEV:
+        # Only import and register advanced proxies when IS_DEV enabled
+        import server
+        from comfy.isolation.development.clip_proxy import CLIPRegistry
+        from comfy.isolation.development.model_patcher_proxy import ModelPatcherRegistry
+        apis = [server.PromptServer, CLIPRegistry, ModelPatcherRegistry]
     
     extension_config = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
         "dependencies": dependencies,
-        "apis": [server.PromptServer, CLIPRegistry, ModelPatcherRegistry],
+        "apis": apis,
         "share_torch": share_torch,
     }
 
@@ -477,7 +495,7 @@ async def _load_isolated_node(node_dir: Path, manifest_path: Path) -> List[Isola
             )
         except Exception as e:
             logger.error(
-                "%s[Loader] ❌ Route injection failed for %s: %s",
+                "%s[Loader]  Route injection failed for %s: %s",
                 LOG_PREFIX,
                 extension_name,
                 e,
@@ -665,7 +683,7 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
         # If NONE of this extension's nodes are in the execution graph → evict
         if not ext_class_types.intersection(needed_class_types):
             logger.info(
-                "%s[Lifecycle] ♻️ Evicting %s (not in execution graph)",
+                "%s[Lifecycle]  Evicting %s (not in execution graph)",
                 LOG_PREFIX,
                 ext_name,
             )

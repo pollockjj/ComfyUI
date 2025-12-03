@@ -98,22 +98,22 @@ async def rpc_execute_model_method(
     try:
         registry = get_current_registry()
     except RuntimeError as e:
-        logger.error(f"📚 [RPC] No registry in context: {e}")
+        logger.error(f" [RPC] No registry in context: {e}")
         raise ValueError(f"RPC called outside execution scope") from e
     
     # Retrieve the ModelPatcher
     patcher = registry.get(model_id)
     if patcher is None:
-        logger.error(f"📚 [RPC] ModelPatcher {model_id} not found in registry")
+        logger.error(f" [RPC] ModelPatcher {model_id} not found in registry")
         raise ValueError(f"ModelPatcher {model_id} not found or execution scope expired")
     
     # Security: Validate method is whitelisted
     if method_name.startswith("_"):
-        logger.error(f"📚 [RPC] Attempted access to private method: {method_name}")
+        logger.error(f" [RPC] Attempted access to private method: {method_name}")
         raise AttributeError(f"Access denied for private method: {method_name}")
     
     if method_name not in ALLOWED_METHODS:
-        logger.error(f"📚 [RPC] Method not in whitelist: {method_name}")
+        logger.error(f" [RPC] Method not in whitelist: {method_name}")
         raise AttributeError(
             f"Method '{method_name}' not in whitelist. "
             f"If this is a legitimate ModelPatcher method, add it to ALLOWED_METHODS in rpc_handlers.py"
@@ -123,7 +123,7 @@ async def rpc_execute_model_method(
     try:
         method = getattr(patcher, method_name)
     except AttributeError as e:
-        logger.error(f"📚 [RPC] Method {method_name} not found on ModelPatcher")
+        logger.error(f" [RPC] Method {method_name} not found on ModelPatcher")
         raise AttributeError(f"Method '{method_name}' does not exist on ModelPatcher") from e
     
     # Argument Preparation: Move tensors from CPU shared memory to correct device
@@ -132,15 +132,15 @@ async def rpc_execute_model_method(
     if target_device is not None:
         args = move_tensors_to_device(args, target_device)
         kwargs = move_tensors_to_device(kwargs, target_device)
-        logger.debug(f"📚 [RPC] Moved arguments to device: {target_device}")
+        logger.debug(f" [RPC] Moved arguments to device: {target_device}")
     
     # Execute the method
-    logger.info(f"📚 [RPC] Executing {method_name}(*{len(args)} args, **{len(kwargs)} kwargs) on model_id={model_id}")
+    logger.info(f" [RPC] Executing {method_name}(*{len(args)} args, **{len(kwargs)} kwargs) on model_id={model_id}")
     try:
         result = method(*args, **kwargs)
-        logger.debug(f"📚 [RPC] {method_name} completed successfully")
+        logger.debug(f" [RPC] {method_name} completed successfully")
     except Exception as e:
-        logger.error(f"📚 [RPC] {method_name} raised exception: {e}")
+        logger.error(f" [RPC] {method_name} raised exception: {e}")
         raise
     
     # Result Handling: Serialize the result
@@ -168,7 +168,7 @@ def rpc_execute_model_method_sync(model_id: str, method_name: str, args: Tuple, 
     import asyncio
     from comfy.isolation.proxies.model_patcher_rpc import ModelPatcherRPC
     
-    logger.debug(f"📚 [RPC][Sync] Calling {method_name} on model {model_id}")
+    logger.debug(f" [RPC][Sync] Calling {method_name} on model {model_id}")
     
     # Get the RPC endpoint
     rpc_endpoint = ModelPatcherRPC()
@@ -188,11 +188,11 @@ def rpc_execute_model_method_sync(model_id: str, method_name: str, args: Tuple, 
         # Schedule on the running loop and wait
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         result = future.result(timeout=60)  # 60 second timeout for large operations
-        logger.debug(f"📚 [RPC][Sync] {method_name} completed")
+        logger.debug(f" [RPC][Sync] {method_name} completed")
         return result
     except RuntimeError:
         # No running loop (shouldn't happen in isolated node context, but handle it)
-        logger.warning(f"📚 [RPC][Sync] No running loop, creating new one for {method_name}")
+        logger.warning(f" [RPC][Sync] No running loop, creating new one for {method_name}")
         result = asyncio.run(coro)
         return result
 

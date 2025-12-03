@@ -20,10 +20,16 @@ def initialize_child_process() -> None:
     
     Called from initialize_proxies() when PYISOLATE_CHILD=1.
     Sets up proxies for accessing host services via RPC.
+    
+    CRITICAL: Child process must NOT continue executing main.py.
+    PyIsolate's client.py will handle the actual node execution.
+    This function prevents duplicate ComfyUI initialization in children.
     """
+    import sys
     _setup_prompt_server_proxy()
     _setup_logging()
-    logger.debug("Child process initialization complete")
+    logger.debug("Child process initialization complete - exiting main.py")
+    sys.exit(0)
 
 
 def _setup_prompt_server_proxy() -> None:
@@ -31,10 +37,17 @@ def _setup_prompt_server_proxy() -> None:
     
     This allows isolated nodes to use PromptServer.instance.send_sync()
     and other server methods via RPC to the host process.
+    
+    V1.0: Only enabled when PYISOLATE_DEV=1 (experimental feature)
     """
+    IS_DEV = os.environ.get("PYISOLATE_DEV") == "1"
+    if not IS_DEV:
+        logger.debug("PromptServer proxy disabled (V1.0 production mode)")
+        return
+    
     try:
         import server
-        from .proxies.prompt_server_proxy import PromptServerProxy
+        from .development.proxies.prompt_server_proxy import PromptServerProxy
         
         # Create proxy instance that will communicate via RPC
         proxy = PromptServerProxy()
@@ -54,8 +67,9 @@ def _setup_prompt_server_proxy() -> None:
 def _setup_logging() -> None:
     """Configure logging for child process.
     
-    PyIsolate's client.py already configures basic logging.
-    This is a hook for any additional child-specific logging setup.
+    Suppress duplicate INFO logs that echo to both child and host stdout.
+    Child process logging should be minimal - only warnings/errors.
     """
-    # PyIsolate client.py handles this, nothing additional needed
-    pass
+    # Suppress INFO-level duplicate logs in child
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
