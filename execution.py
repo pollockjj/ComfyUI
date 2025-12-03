@@ -14,6 +14,7 @@ import torch
 
 import comfy.model_management
 import nodes
+from comfy.cli_args import args
 from comfy_execution.caching import (
     BasicCache,
     CacheKeySetID,
@@ -706,7 +707,7 @@ class PromptExecutor:
             for node_id in list(execute_outputs):
                 execution_list.add_node(node_id)
 
-            if not args.use_process_isolation:
+            if args.use_process_isolation:
                 from comfy.isolation import notify_execution_graph
                 pending_class_types = set()
                 for node_id in execution_list.pendingNodes.keys():
