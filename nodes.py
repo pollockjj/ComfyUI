@@ -12,7 +12,6 @@ import math
 import time
 import random
 import logging
-from pathlib import Path
 
 from PIL import Image, ImageOps, ImageSequence
 from PIL.PngImagePlugin import PngInfo
@@ -2234,6 +2233,7 @@ async def init_external_custom_nodes():
         None
     """
     if args.use_process_isolation:
+        from pathlib import Path
         from comfy.isolation import await_isolation_loading
         isolated_specs = await await_isolation_loading()
         for spec in isolated_specs:
@@ -2279,13 +2279,13 @@ async def init_external_custom_nodes():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
     
-    # Report isolated node timing in same format
-    from comfy.isolation import isolated_node_timings
-    if isolated_node_timings:
-        logging.info("\nImport times for isolated custom nodes:")
-        for timing, path in sorted(isolated_node_timings):
-            logging.info("{:6.1f} seconds: {}".format(timing, path))
-        logging.info("")
+    if args.use_process_isolation:
+        from comfy.isolation import isolated_node_timings
+        if isolated_node_timings:
+            logging.info("\nImport times for isolated custom nodes:")
+            for timing, path in sorted(isolated_node_timings):
+                logging.info("{:6.1f} seconds: {}".format(timing, path))
+            logging.info("")
 
 async def init_builtin_extra_nodes():
     """

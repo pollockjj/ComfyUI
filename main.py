@@ -1,7 +1,6 @@
 import os
 import sys
 
-# Process isolation requires native CUDA allocator for multi-process tensor sharing
 if '--use-process-isolation' in sys.argv:
     if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
