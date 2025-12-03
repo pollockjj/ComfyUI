@@ -1,0 +1,7 @@
+{
+  "_comment": "Nodes that cannot be isolated due to architectural constraints. Add entries here instead of modifying __init__.py.",
+  "nodes": {
+    "ComfyUI-MultiGPU": "This extension requires direct GPU process management and hooks into ComfyUI's main event loop. Running it inside PyIsolate would break GPU synchronization and create undefined behavior.",
+    "ComfyUI-Crystools": "Depends on jetson-stats, which refuses to install inside sandboxed environments. Please remove the jetson-deps dependency or provide an alternate implementation before enabling isolation."
+  }
+}

@@ -128,18 +128,31 @@ def _restore_input_types(raw: Dict[str, object]) -> Dict[str, object]:
             restored[section] = _restore_special_value(entries)
     return restored
 
-BLACKLISTED_NODES: dict[str, str] = {
-    # https://github.com/pollockjj/ComfyUI-MultiGPU relies on direct CUDA context reuse + custom scheduler
-    "ComfyUI-MultiGPU": (
-        "This extension requires direct GPU process management and hooks into ComfyUI's main event loop. "
-        "Running it inside PyIsolate would break GPU synchronization and create undefined behavior."
-    ),
-    # Crystools pulls in jetson-stats which demands a privileged host install and cannot be vendored
-    "ComfyUI-Crystools": (
-        "Depends on jetson-stats, which refuses to install inside sandboxed environments. "
-        "Please remove the jetson-deps dependency or provide an alternate implementation before enabling isolation."
-    ),
-}
+
+def _load_blacklisted_nodes() -> dict[str, str]:
+    """Load blacklisted nodes from external JSON file.
+    
+    Blacklisted nodes cannot be isolated due to architectural constraints
+    (e.g., direct GPU management, privileged system access).
+    """
+    blacklist_path = Path(__file__).parent / "blacklisted_nodes.json"
+    if not blacklist_path.exists():
+        return {}
+    
+    try:
+        with open(blacklist_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("nodes", {})
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "%s[Config] Failed to load blacklist from %s: %s",
+            LOG_PREFIX, blacklist_path, e
+        )
+        return {}
+
+
+# Load blacklist from external JSON (editable without code changes)
+BLACKLISTED_NODES: dict[str, str] = _load_blacklisted_nodes()
 
 
 def _get_user_pyisolate_path() -> Path:
