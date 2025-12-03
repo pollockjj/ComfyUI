@@ -1,14 +1,5 @@
 import os
 import sys
-
-if '--use-process-isolation' in sys.argv:
-    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
-    
-    # Initialize proxies early - determines host vs child and routes accordingly
-    import comfy.isolation
-    comfy.isolation.initialize_proxies()
-
 import comfy.options
 comfy.options.enable_args_parsing()
 import importlib.util
@@ -19,6 +10,15 @@ from app.logger import setup_logger
 import itertools
 import utils.extra_config
 import logging
+
+if '--use-process-isolation' in sys.argv:
+    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
+    
+    # Initialize proxies early - determines host vs child and routes accordingly
+    import comfy.isolation
+    comfy.isolation.initialize_proxies()
+
 import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
