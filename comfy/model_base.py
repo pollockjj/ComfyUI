@@ -20,7 +20,6 @@ import comfy.ldm.hunyuan3dv2_1
 import comfy.ldm.hunyuan3dv2_1.hunyuandit
 import torch
 import logging
-import os
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
 from comfy.ldm.cascade.stage_c import StageC
 from comfy.ldm.cascade.stage_b import StageB
@@ -109,13 +108,7 @@ def model_sampling(model_config, model_type):
     class ModelSampling(s, c):
         pass
 
-    instance = ModelSampling(model_config)
-    
-    # PyIsolate ModelSampling proxy: DISABLED - Parked for future development
-    # This feature is not ready for production use
-    # TODO: Re-enable after full RPC proxy architecture is validated
-    
-    return instance
+    return ModelSampling(model_config)
 
 
 def convert_tensor(extra, dtype, device):
