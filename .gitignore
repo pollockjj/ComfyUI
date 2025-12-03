@@ -24,5 +24,4 @@ web_custom_versions/
 openapi.yaml
 filtered-openapi.yaml
 uv.lock
-.venv_golden/
 .pyisolate_venvs/

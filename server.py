@@ -3,13 +3,6 @@ import sys
 import asyncio
 import traceback
 import time
-
-try:
-    from pyisolate import ProxiedSingleton
-except ImportError:
-    class ProxiedSingleton:
-        pass
-
 import nodes
 import folder_paths
 import execution
@@ -189,13 +182,11 @@ def create_block_external_middleware():
     return block_external_middleware
 
 
-class PromptServer(ProxiedSingleton):
-    def __init__(self, loop=None):
-        if hasattr(ProxiedSingleton, "__init__") and ProxiedSingleton is not object:
-            super().__init__()
+class PromptServer():
+    def __init__(self, loop):
+        PromptServer.instance = self
         if loop is None:
             loop = asyncio.get_event_loop()
-        PromptServer.instance = self
 
         mimetypes.init()
         mimetypes.add_type('application/javascript; charset=utf-8', '.js')
