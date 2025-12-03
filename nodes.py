@@ -41,7 +41,7 @@ from comfy.cli_args import args
 import importlib
 
 import folder_paths
-from comfy.isolation import initialize_isolation_nodes
+
 import latent_preview
 import node_helpers
 
@@ -667,16 +667,6 @@ class LoraLoader:
     def load_lora(self, model, clip, lora_name, strength_model, strength_clip):
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
-
-        # PyIsolate intercept: If model is a ModelPatcherProxy, use proxy's load_lora
-        # This routes the entire LoRA loading operation through RPC to the host
-        model_type = type(model).__name__
-        if model_type == 'ModelPatcherProxy':
-            from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
-            if isinstance(model, ModelPatcherProxy):
-                import logging
-                logging.debug(f"📚 [PyIsolate] LoraLoader: Using proxy load_lora for {lora_name}")
-                return model.load_lora(lora_name, strength_model, clip, strength_clip)
 
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         lora = None
@@ -2243,15 +2233,13 @@ async def init_external_custom_nodes():
     Returns:
         None
     """
-    # Phase 2: Await background task if early start was triggered, else start now
-    from comfy.isolation import await_isolation_loading
-    isolated_specs = await await_isolation_loading()
-    logging.debug("📚 [PyIsolate][Loader] Registered %d isolated node stubs", len(isolated_specs))
-    for spec in isolated_specs:
-        NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
-        NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)
-
-    isolated_module_paths = {spec.module_path.resolve() for spec in isolated_specs}
+    if args.use_process_isolation:
+        from comfy.isolation import await_isolation_loading
+        isolated_specs = await await_isolation_loading()
+        for spec in isolated_specs:
+            NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
+            NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)
+        isolated_module_paths = {spec.module_path.resolve() for spec in isolated_specs}
 
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
     node_paths = folder_paths.get_folder_paths("custom_nodes")
@@ -2263,8 +2251,8 @@ async def init_external_custom_nodes():
 
         for possible_module in possible_modules:
             module_path = os.path.join(custom_node_path, possible_module)
-            if Path(module_path).resolve() in isolated_module_paths:
-                logging.info("Skipping %s; loaded via PyIsolate", module_path)
+            if args.use_process_isolation and Path(module_path).resolve() in isolated_module_paths:
+                logging.info("Skipping %s; will be isolated and just-in-time loaded", module_path)
                 continue
             if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": continue
             if module_path.endswith(".disabled"): continue
@@ -2458,7 +2446,6 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
         import_failed_api = await init_builtin_api_nodes()
     
     _builtin_time = _time.perf_counter() - _builtin_start
-    logging.info("📚 [PyIsolate][Orchestration] Builtin nodes loaded in %.2fs (overlapped with isolation)", _builtin_time)
 
     if init_custom_nodes:
         await init_external_custom_nodes()
