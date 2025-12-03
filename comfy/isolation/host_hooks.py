@@ -17,6 +17,19 @@ def initialize_host_process() -> None:
     V1.0: Only core proxies (folder_paths, model_management)
     Advanced proxies (CLIP, ModelPatcher, PromptServer, etc.) require PYISOLATE_DEV=1
     """
+    # CRITICAL: Clear any default logging handlers that might have been created
+    # by imported modules (like pyisolate) before ComfyUI's setup_logger runs.
+    # This prevents duplicate logs with "INFO:root:" prefix.
+    root = logging.getLogger()
+    if root.handlers:
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+    
+    # Add a NullHandler to prevent Python from automatically adding a default
+    # handler (StreamHandler) if logging occurs before setup_logger is called.
+    # This ensures we don't get "INFO:root:" logs if something logs early.
+    root.addHandler(logging.NullHandler())
+    
     import os
     IS_DEV = os.environ.get("PYISOLATE_DEV") == "1"
     
