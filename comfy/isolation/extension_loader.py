@@ -84,6 +84,7 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
+        "apis": [],  # ProxiedSingletons to share with isolated process
     }
 
     extension = manager.load_extension(extension_config)
