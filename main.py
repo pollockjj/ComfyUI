@@ -1,36 +1,46 @@
 import os
 import sys
-import logging
 
-if '--use-process-isolation' in sys.argv:
-    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
-    
-    # Initialize proxies early - determines host vs child and routes accordingly
-    import comfy.isolation
-    comfy.isolation.initialize_proxies()
+# Detect PyIsolate child FIRST - before any heavy imports
+IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
+
+# CRITICAL: Ensure ComfyUI root is in sys.path BEFORE any ComfyUI imports.
+CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+IS_PRIMARY_PROCESS = (not IS_PYISOLATE_CHILD) and __name__ == "__main__"
 
 import comfy.options
 comfy.options.enable_args_parsing()
+
 import importlib.util
 import folder_paths
 import time
+
 from comfy.cli_args import args
+
 from app.logger import setup_logger
 import itertools
-import utils.extra_config
+import logging
 
-from comfy_execution.progress import get_progress_state
-from comfy_execution.utils import get_executing_context
-from comfy_api import feature_flags
+if '--use-process-isolation' in sys.argv and not IS_PYISOLATE_CHILD:
+    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
 
+# Skip heavy imports in PyIsolate child processes (Manager subprocess)
+if not IS_PYISOLATE_CHILD:
+    from comfy_execution.progress import get_progress_state
+    from comfy_execution.utils import get_executing_context
+    from comfy_api import feature_flags
 
-if __name__ == "__main__":
+if IS_PRIMARY_PROCESS:
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
-setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
+if not IS_PYISOLATE_CHILD:
+    setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
 
 
 def handle_comfyui_manager_unavailable():
@@ -50,14 +60,15 @@ if args.enable_manager:
 
 
 def apply_custom_paths():
+    from utils import extra_config  # Deferred import - spawn re-runs main.py
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
     if os.path.isfile(extra_model_paths_config_path):
-        utils.extra_config.load_extra_path_config(extra_model_paths_config_path)
+        extra_config.load_extra_path_config(extra_model_paths_config_path)
 
     if args.extra_model_paths_config:
         for config_path in itertools.chain(*args.extra_model_paths_config):
-            utils.extra_config.load_extra_path_config(config_path)
+            extra_config.load_extra_path_config(config_path)
 
     # --output-directory, --input-directory, --user-directory
     if args.output_directory:
@@ -134,10 +145,11 @@ def execute_prestartup_script():
 
 apply_custom_paths()
 
-if args.enable_manager:
+if args.enable_manager and not IS_PYISOLATE_CHILD:
     comfyui_manager.prestartup()
 
-execute_prestartup_script()
+if not IS_PYISOLATE_CHILD:
+    execute_prestartup_script()
 
 
 # Main code
