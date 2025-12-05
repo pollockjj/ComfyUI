@@ -84,6 +84,43 @@ class ComfyNodeExtension(ExtensionBase):
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
 
+        # --- V3 Extension Support ---
+        try:
+            from comfy_api.latest import ComfyExtension
+            import inspect
+            
+            # Find all ComfyExtension subclasses in the module
+            for name, obj in inspect.getmembers(module):
+                if inspect.isclass(obj) and issubclass(obj, ComfyExtension) and obj is not ComfyExtension:
+                    # Check if it's defined in this module (optional, but good practice)
+                    # We relax this check slightly to allow for split files, but ensure it's from the same package
+                    if not obj.__module__.startswith(module.__name__):
+                        continue
+                        
+                    logger.info(f"{LOG_PREFIX} Found V3 Extension: {name}")
+                    try:
+                        ext_instance = obj()
+                        await ext_instance.on_load()
+                        v3_nodes = await ext_instance.get_node_list()
+                        
+                        for node_cls in v3_nodes:
+                            # Get schema to find node_id
+                            if hasattr(node_cls, "GET_SCHEMA"):
+                                schema = node_cls.GET_SCHEMA()
+                                node_id = schema.node_id
+                                self.node_classes[node_id] = node_cls
+                                if schema.display_name:
+                                    self.display_names[node_id] = schema.display_name
+                                logger.info(f"{LOG_PREFIX} Registered V3 Node: {node_id}")
+                    except Exception as e:
+                        logger.error(f"{LOG_PREFIX} Failed to initialize V3 Extension {name}: {e}")
+                        
+        except ImportError:
+            pass  # comfy_api not available
+        except Exception as e:
+            logger.error(f"{LOG_PREFIX} Error during V3 extension discovery: {e}")
+        # ----------------------------
+
         # Fix __module__ for all node classes to avoid pickle issues
         # When PyIsolate loads modules, __module__ can be set to the file path
         # instead of a proper module name, breaking pickle

@@ -80,6 +80,7 @@ class IsolatedNodeSpec:
 
 
 _ISOLATED_NODE_SPECS: List[IsolatedNodeSpec] = []
+_CLAIMED_PATHS: Set[Path] = set()
 _ISOLATION_SCAN_ATTEMPTED = False
 _EXTENSION_MANAGERS: List["ExtensionManager"] = []  # Keep alive so subprocesses persist
 _RUNNING_EXTENSIONS: Dict[str, "Extension"] = {}  # Track running extensions for eviction
@@ -143,6 +144,10 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
 
     manifest_entries = find_manifest_directories()
     manifest_entries = filter_blacklisted_entries(manifest_entries, BLACKLISTED_NODES)
+    
+    global _CLAIMED_PATHS
+    _CLAIMED_PATHS = {entry[0].resolve() for entry in manifest_entries}
+
     if not manifest_entries:
         logger.info(f"{LOG_PREFIX}[Loader] No pyisolate manifests detected under custom_nodes")
         return []
@@ -189,8 +194,7 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
                 ]
                 load_time = time.perf_counter() - load_start
                 
-                if spec_list:
-                    isolated_node_timings.append((load_time, node_dir))
+                isolated_node_timings.append((load_time, node_dir))
                 return spec_list
             except Exception as exc:
                 logger.error(
@@ -235,6 +239,10 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             _ISOLATED_NODE_SPECS,
         )
         
+        # If extension has NO nodes, assume it's a service extension and keep it alive
+        if not ext_class_types:
+            continue
+
         # If NONE of this extension's nodes are in the execution graph → evict
         if not ext_class_types.intersection(needed_class_types):
             logger.info(
@@ -246,6 +254,11 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             del _RUNNING_EXTENSIONS[ext_name]
 
 
+def get_claimed_paths() -> Set[Path]:
+    """Return the set of paths claimed by isolation, even if they failed to load."""
+    return _CLAIMED_PATHS
+
+
 __all__ = [
     "LOG_PREFIX",
     "get_isolation_logger",
@@ -254,5 +267,6 @@ __all__ = [
     "start_isolation_loading_early",
     "await_isolation_loading",
     "notify_execution_graph",
+    "get_claimed_paths",
     "IsolatedNodeSpec",
 ]

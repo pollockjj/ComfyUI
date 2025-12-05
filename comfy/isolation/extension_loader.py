@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+import logging
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -12,6 +13,8 @@ from pyisolate import ExtensionManager, ExtensionManagerConfig
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
+
+logger = logging.getLogger(__name__)
 
 
 class ExtensionLoadError(RuntimeError):
@@ -121,9 +124,10 @@ async def load_isolated_node(
 
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     if not remote_nodes:
-        raise ExtensionLoadError(
-            f"[I][Loader] Isolated node {extension_name} at {node_dir} reported zero NODE_CLASS_MAPPINGS"
-        )
+        # Keep extension alive even if no nodes (e.g. service extensions)
+        from comfy.isolation import _RUNNING_EXTENSIONS
+        _RUNNING_EXTENSIONS[extension_name] = extension
+        return []
 
     cache_data_to_save = {}
 

@@ -2234,12 +2234,12 @@ async def init_external_custom_nodes():
     """
     if args.use_process_isolation:
         from pathlib import Path
-        from comfy.isolation import await_isolation_loading
+        from comfy.isolation import await_isolation_loading, get_claimed_paths
         isolated_specs = await await_isolation_loading()
         for spec in isolated_specs:
             NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
             NODE_DISPLAY_NAME_MAPPINGS.setdefault(spec.node_name, spec.display_name)
-        isolated_module_paths = {spec.module_path.resolve() for spec in isolated_specs}
+        isolated_module_paths = get_claimed_paths()
 
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
     node_paths = folder_paths.get_folder_paths("custom_nodes")
