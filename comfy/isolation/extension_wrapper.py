@@ -222,6 +222,12 @@ class ComfyNodeExtension(ExtensionBase):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
         method = getattr(instance, function_name)
         result = method(**resolved_inputs)
+        
+        # Unwrap V3 API NodeOutput to its underlying tuple
+        type_name = type(result).__name__
+        if type_name == 'NodeOutput':
+            result = result.args
+        
         if not isinstance(result, tuple):
             result = (result,)
         
