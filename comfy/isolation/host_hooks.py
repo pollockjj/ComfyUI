@@ -36,11 +36,13 @@ def initialize_host_process() -> None:
     # V1.0 Production Proxies (always enabled)
     from .proxies.folder_paths_proxy import FolderPathsProxy
     from .proxies.model_management_proxy import ModelManagementProxy
+    from .proxies.progress_proxy import ProgressProxy
     
     FolderPathsProxy()
     ModelManagementProxy()
+    ProgressProxy()
     
-    logger.debug("Host process V1.0 proxies registered (folder_paths, model_management)")
+    logger.debug("Host process V1.0 proxies registered (folder_paths, model_management, progress)")
     
     # Experimental Proxies (PYISOLATE_DEV=1 only)
     if IS_DEV:

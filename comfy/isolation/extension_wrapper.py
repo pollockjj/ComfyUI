@@ -5,9 +5,13 @@ from __future__ import annotations
 import logging
 import pickle
 import uuid
-from typing import Any, Dict, Tuple
+from dataclasses import asdict
+from typing import Any, Dict, Tuple, List
 
 from pyisolate import ExtensionBase
+
+from comfy_api.internal import _ComfyNodeInternal
+from comfy_api.latest import _io as latest_io
 
 LOG_PREFIX = "[I]"
 
@@ -107,33 +111,24 @@ class ComfyNodeExtension(ExtensionBase):
         }
 
     async def get_node_info(self, node_name: str) -> Dict[str, Any]:
-        """Return metadata required by ComfyUI for a named node."""
-        # This is called during loading - must return only JSON-serializable primitives
-        # All complex objects must be converted to strings/primitives HERE in the isolated process
-        return {
-            "input_types": {},  # Will be populated by get_node_details
-            "return_types": (),
-            "return_names": None,
-            "function": "execute",
-            "category": "",
-            "output_node": False,
-            "display_name": self.display_names.get(node_name, node_name),
-        }
-    
+        """Return minimal metadata; kept for backward compatibility."""
+        return await self.get_node_details(node_name)
+
     async def get_node_details(self, node_name: str) -> Dict[str, Any]:
         """Get full node details - called during loading, must return JSON-serializable data."""
         node_cls = self._get_node_class(node_name)
-        
+        is_v3 = issubclass(node_cls, _ComfyNodeInternal)
+
         input_types_raw = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
         input_types_safe = _sanitize_for_transport(input_types_raw)
-        
+
         # Handle OUTPUT_IS_LIST
         output_is_list = getattr(node_cls, "OUTPUT_IS_LIST", None)
         if output_is_list is not None:
             # Convert to tuple of bools for JSON serialization
             output_is_list = tuple(bool(x) for x in output_is_list)
-        
-        return {
+
+        details: Dict[str, Any] = {
             "input_types": input_types_safe,
             "return_types": tuple(str(t) for t in getattr(node_cls, "RETURN_TYPES", ())),
             "return_names": getattr(node_cls, "RETURN_NAMES", None),
@@ -141,6 +136,71 @@ class ComfyNodeExtension(ExtensionBase):
             "category": str(getattr(node_cls, "CATEGORY", "")),
             "output_node": bool(getattr(node_cls, "OUTPUT_NODE", False)),
             "output_is_list": output_is_list,
+            "is_v3": is_v3,
+        }
+
+        if is_v3:
+            try:
+                schema = node_cls.GET_SCHEMA()
+                schema_v1 = asdict(schema.get_v1_info(node_cls))
+                try:
+                    schema_v3 = asdict(schema.get_v3_info(node_cls))
+                except TypeError:
+                    # Fallback: build minimal v3 info without python_module bug
+                    schema_v3 = self._build_schema_v3_fallback(schema)
+
+                details.update(
+                    {
+                        "schema_v1": schema_v1,
+                        "schema_v3": schema_v3,
+                        "hidden": [h.value for h in (schema.hidden or [])],
+                        "deprecated": bool(getattr(node_cls, "DEPRECATED", False)),
+                        "experimental": bool(getattr(node_cls, "EXPERIMENTAL", False)),
+                        "api_node": bool(getattr(node_cls, "API_NODE", False)),
+                        "input_is_list": bool(getattr(node_cls, "INPUT_IS_LIST", False)),
+                        "not_idempotent": bool(getattr(node_cls, "NOT_IDEMPOTENT", False)),
+                    }
+                )
+            except Exception as exc:  # pragma: no cover - defensive serialization path
+                logger.warning(
+                    "%s[ExtensionWrapper] Failed to serialize V3 schema for %s: %s",
+                    LOG_PREFIX,
+                    node_name,
+                    exc,
+                )
+        return details
+
+    def _build_schema_v3_fallback(self, schema) -> Dict[str, Any]:
+        """Reconstruct v3 schema dict without using NodeInfoV3 constructor.
+
+        This avoids upstream bugs when python_module is passed to NodeInfoV3.
+        """
+        input_dict: Dict[str, Any] = {}
+        output_dict: Dict[str, Any] = {}
+        hidden_list: List[str] = []
+
+        if getattr(schema, "inputs", None):
+            for input_obj in schema.inputs:
+                latest_io.add_to_dict_v3(input_obj, input_dict)
+        if getattr(schema, "outputs", None):
+            for output_obj in schema.outputs:
+                latest_io.add_to_dict_v3(output_obj, output_dict)
+        if getattr(schema, "hidden", None):
+            for hidden in schema.hidden:
+                hidden_list.append(getattr(hidden, "value", str(hidden)))
+
+        return {
+            "input": input_dict,
+            "output": output_dict,
+            "hidden": hidden_list,
+            "name": getattr(schema, "node_id", None),
+            "display_name": getattr(schema, "display_name", None),
+            "description": getattr(schema, "description", None),
+            "category": getattr(schema, "category", None),
+            "output_node": getattr(schema, "is_output_node", False),
+            "deprecated": getattr(schema, "is_deprecated", False),
+            "experimental": getattr(schema, "is_experimental", False),
+            "api_node": getattr(schema, "is_api_node", False),
         }
     
     async def get_input_types(self, node_name: str) -> Dict[str, Any]:
@@ -283,11 +343,24 @@ class ComfyNodeExtension(ExtensionBase):
     async def before_module_loaded(self) -> None:
         """Patch ComfyUI singletons before loading the user module."""
         await super().before_module_loaded()
-        
-        # No patching needed for PromptServer anymore!
-        # It is now a native ProxiedSingleton.
-        # When server.py is imported in the isolated process, PromptServer will be a proxy.
-        pass
+        # Progress proxy wiring for isolated children
+        try:
+            from comfy_api.latest import ComfyAPI_latest
+            from .proxies.progress_proxy import ProgressProxy
+            from .proxies.folder_paths_proxy import FolderPathsProxy
+            import comfy_api.latest._ui as latest_ui
+            import comfy_api.latest._resources as latest_resources
+
+            # Replace Execution singleton with host-backed proxy
+            ComfyAPI_latest.Execution = ProgressProxy
+            ComfyAPI_latest.execution = ProgressProxy()
+            # Align folder_paths usage for V3 helpers
+            fp_proxy = FolderPathsProxy()
+            latest_ui.folder_paths = fp_proxy
+            latest_resources.folder_paths = fp_proxy
+            logger.debug("%s[ExtensionWrapper] Progress proxy wired for ComfyAPI_latest", LOG_PREFIX)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("%s[ExtensionWrapper] Progress proxy not applied: %s", LOG_PREFIX, exc)
 
     # =========================================================================
     # Route Handler Support (Rev 1.0)
