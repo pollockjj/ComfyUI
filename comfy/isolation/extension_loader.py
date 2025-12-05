@@ -74,6 +74,35 @@ async def load_isolated_node(
         dependencies, pyisolate_editable_path, extension_name, logger
     )
 
+    specs: List[Tuple[str, str, type]] = []
+
+    # Check cache FIRST - if valid, build stubs without spawning process
+    if is_cache_valid(node_dir, manifest_path):
+        cached_data = load_from_cache(node_dir)
+        if cached_data:
+            # Lazy setup: create Extension object but don't start process yet
+            manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
+            manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
+            extension_managers.append(manager)
+
+            extension_config = {
+                "name": extension_name,
+                "module_path": str(node_dir),
+                "isolated": True,
+                "dependencies": dependencies,
+                "share_torch": share_torch,
+                "apis": [],
+            }
+
+            extension = manager.load_extension(extension_config)
+            register_dummy_module(extension_name, node_dir)
+
+            for node_name, details in cached_data.items():
+                stub_cls = build_stub_class(node_name, details, extension)
+                specs.append((node_name, details.get("display_name", node_name), stub_cls))
+            return specs
+
+    # Cache miss - need to spawn process and interrogate
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
@@ -84,21 +113,11 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
-        "apis": [],  # ProxiedSingletons to share with isolated process
+        "apis": [],
     }
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
-
-    specs: List[Tuple[str, str, type]] = []
-
-    if is_cache_valid(node_dir, manifest_path):
-        cached_data = load_from_cache(node_dir)
-        if cached_data:
-            for node_name, details in cached_data.items():
-                stub_cls = build_stub_class(node_name, details, extension)
-                specs.append((node_name, details.get("display_name", node_name), stub_cls))
-            return specs
 
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     if not remote_nodes:

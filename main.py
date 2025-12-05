@@ -140,10 +140,11 @@ def execute_prestartup_script():
                 import_message = ""
             else:
                 import_message = " (PRESTARTUP FAILED)"
-            logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
-        logging.info("")
+        logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
+    logging.info("")
 
-apply_custom_paths()
+if not IS_PYISOLATE_CHILD:
+    apply_custom_paths()
 
 if args.enable_manager and not IS_PYISOLATE_CHILD:
     comfyui_manager.prestartup()
@@ -194,14 +195,15 @@ if 'torch' in sys.modules:
 
 import comfy.utils
 
-import execution
-import server
-from protocol import BinaryEventTypes
-import nodes
-import comfy.model_management
-import comfyui_version
-import app.logger
-import hook_breaker_ac10a0
+if not IS_PYISOLATE_CHILD:
+    import execution
+    import server
+    from protocol import BinaryEventTypes
+    import nodes
+    import comfy.model_management
+    import comfyui_version
+    import app.logger
+    import hook_breaker_ac10a0
 
 def cuda_malloc_warning():
     device = comfy.model_management.get_torch_device()
