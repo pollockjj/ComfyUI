@@ -75,6 +75,16 @@ def build_stub_class(
 
         return inputs_copy
 
+    # --- Phase 2: V3 Compliance Methods ---
+    def _validate_class(cls):
+        """No-op: Isolated stubs trust child process validation."""
+        return True
+
+    def _get_node_info_v1(cls):
+        """Return cached V1 info from child, bypass schema generation."""
+        # Return the schema_v1 data captured from the child process
+        return info.get("schema_v1", {})
+
     attributes: Dict[str, object] = {
         "FUNCTION": function_name,
         "CATEGORY": info.get("category", ""),
@@ -91,11 +101,32 @@ def build_stub_class(
     if output_is_list is not None:
         attributes["OUTPUT_IS_LIST"] = tuple(output_is_list)
 
+    # --- Phase 2 & 3: Add V3 compliance methods for isolated stubs ---
+    if is_v3:
+        attributes["VALIDATE_CLASS"] = classmethod(_validate_class)
+        attributes["GET_NODE_INFO_V1"] = classmethod(_get_node_info_v1)
+        # Phase 4: Shadow V3 descriptors to prevent lazy schema generation
+        attributes["DESCRIPTION"] = info.get("description", "")
+        attributes["EXPERIMENTAL"] = info.get("experimental", False)
+        attributes["DEPRECATED"] = info.get("deprecated", False)
+        attributes["API_NODE"] = info.get("api_node", False)
+        attributes["NOT_IDEMPOTENT"] = info.get("not_idempotent", False)
+        attributes["INPUT_IS_LIST"] = info.get("input_is_list", False)
+
     display_name = info.get("display_name") or node_name
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     bases = (_ComfyNodeInternal,) if is_v3 else ()
     stub_cls = type(class_name, bases, attributes)
     stub_cls.__doc__ = f"PyIsolate proxy node for {display_name}"
+
+    # Phase 1: Detection logging - confirm VALIDATE_CLASS failure is root cause
+    if is_v3:
+        try:
+            stub_cls.VALIDATE_CLASS()
+            logger.info("%s[V3-DEBUG] VALIDATE_CLASS succeeded for %s", LOG_PREFIX, node_name)
+        except Exception as e:
+            logger.error("%s[V3-DEBUG] VALIDATE_CLASS failed for %s: %s", LOG_PREFIX, node_name, e)
+
     return stub_cls
 
 

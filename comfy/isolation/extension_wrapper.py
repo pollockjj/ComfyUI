@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import pickle
+import traceback
 import uuid
 from dataclasses import asdict
 from typing import Any, Dict, Tuple, List
@@ -14,6 +17,7 @@ from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
 
 LOG_PREFIX = "[I]"
+V3_DISCOVERY_TIMEOUT = 30  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +91,6 @@ class ComfyNodeExtension(ExtensionBase):
         # --- V3 Extension Support ---
         try:
             from comfy_api.latest import ComfyExtension
-            import inspect
             
             # Find all ComfyExtension subclasses in the module
             for name, obj in inspect.getmembers(module):
@@ -100,8 +103,20 @@ class ComfyNodeExtension(ExtensionBase):
                     logger.info(f"{LOG_PREFIX} Found V3 Extension: {name}")
                     try:
                         ext_instance = obj()
-                        await ext_instance.on_load()
-                        v3_nodes = await ext_instance.get_node_list()
+                        
+                        # Call on_load with timeout
+                        try:
+                            await asyncio.wait_for(ext_instance.on_load(), timeout=V3_DISCOVERY_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            logger.error(f"{LOG_PREFIX}[Loader] V3 Extension {name} timed out during on_load() after {V3_DISCOVERY_TIMEOUT}s")
+                            continue
+                        
+                        # Call get_node_list with timeout
+                        try:
+                            v3_nodes = await asyncio.wait_for(ext_instance.get_node_list(), timeout=V3_DISCOVERY_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            logger.error(f"{LOG_PREFIX}[Loader] V3 Extension {name} timed out during get_node_list() after {V3_DISCOVERY_TIMEOUT}s")
+                            continue
                         
                         for node_cls in v3_nodes:
                             # Get schema to find node_id
@@ -114,11 +129,13 @@ class ComfyNodeExtension(ExtensionBase):
                                 logger.info(f"{LOG_PREFIX} Registered V3 Node: {node_id}")
                     except Exception as e:
                         logger.error(f"{LOG_PREFIX} Failed to initialize V3 Extension {name}: {e}")
+                        logger.error(f"{LOG_PREFIX} Traceback:\n{traceback.format_exc()}")
                         
         except ImportError:
             pass  # comfy_api not available
         except Exception as e:
             logger.error(f"{LOG_PREFIX} Error during V3 extension discovery: {e}")
+            logger.error(f"{LOG_PREFIX} Traceback:\n{traceback.format_exc()}")
         # ----------------------------
 
         # Fix __module__ for all node classes to avoid pickle issues
@@ -191,6 +208,7 @@ class ComfyNodeExtension(ExtensionBase):
                         "schema_v1": schema_v1,
                         "schema_v3": schema_v3,
                         "hidden": [h.value for h in (schema.hidden or [])],
+                        "description": getattr(schema, "description", ""),
                         "deprecated": bool(getattr(node_cls, "DEPRECATED", False)),
                         "experimental": bool(getattr(node_cls, "EXPERIMENTAL", False)),
                         "api_node": bool(getattr(node_cls, "API_NODE", False)),
