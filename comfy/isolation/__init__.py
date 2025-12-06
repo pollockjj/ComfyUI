@@ -228,30 +228,11 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Called before execution with the set of node class_types that will run.
     
-    Evicts any running isolated processes whose nodes are NOT in the graph.
-    This frees resources (RAM, potential VRAM) for the current execution.
+    BACKOUT: Eviction disabled - all extensions stay alive for lifetime of ComfyUI.
+    This simplifies debugging and ensures V3 nodes work correctly.
     """
-    # Find running processes not needed for this execution
-    for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
-        ext_class_types = get_class_types_for_extension(
-            ext_name,
-            _RUNNING_EXTENSIONS,
-            _ISOLATED_NODE_SPECS,
-        )
-        
-        # If extension has NO nodes, assume it's a service extension and keep it alive
-        if not ext_class_types:
-            continue
-
-        # If NONE of this extension's nodes are in the execution graph → evict
-        if not ext_class_types.intersection(needed_class_types):
-            logger.info(
-                "%s[Lifecycle]  Evicting %s (not in execution graph)",
-                LOG_PREFIX,
-                ext_name,
-            )
-            extension.stop()
-            del _RUNNING_EXTENSIONS[ext_name]
+    # BACKOUT: No eviction - extensions stay alive
+    return
 
 
 def get_claimed_paths() -> Set[Path]:

@@ -85,6 +85,10 @@ def build_stub_class(
         # Return the schema_v1 data captured from the child process
         return info.get("schema_v1", {})
 
+    def _get_base_class(cls):
+        """Return ComfyNode as the base class for first_real_override checks."""
+        return latest_io.ComfyNode
+
     attributes: Dict[str, object] = {
         "FUNCTION": function_name,
         "CATEGORY": info.get("category", ""),
@@ -105,6 +109,7 @@ def build_stub_class(
     if is_v3:
         attributes["VALIDATE_CLASS"] = classmethod(_validate_class)
         attributes["GET_NODE_INFO_V1"] = classmethod(_get_node_info_v1)
+        attributes["GET_BASE_CLASS"] = classmethod(_get_base_class)
         # Phase 4: Shadow V3 descriptors to prevent lazy schema generation
         attributes["DESCRIPTION"] = info.get("description", "")
         attributes["EXPERIMENTAL"] = info.get("experimental", False)

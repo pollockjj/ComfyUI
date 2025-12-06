@@ -12,7 +12,8 @@ import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 
 from .extension_wrapper import ComfyNodeExtension
-from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
+# BACKOUT: Cache functions disabled - not imported
+# from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
 
 logger = logging.getLogger(__name__)
 
@@ -79,33 +80,8 @@ async def load_isolated_node(
 
     specs: List[Tuple[str, str, type]] = []
 
-    # Check cache FIRST - if valid, build stubs without spawning process
-    if is_cache_valid(node_dir, manifest_path):
-        cached_data = load_from_cache(node_dir)
-        if cached_data:
-            # Lazy setup: create Extension object but don't start process yet
-            manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
-            manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
-            extension_managers.append(manager)
-
-            extension_config = {
-                "name": extension_name,
-                "module_path": str(node_dir),
-                "isolated": True,
-                "dependencies": dependencies,
-                "share_torch": share_torch,
-                "apis": [],
-            }
-
-            extension = manager.load_extension(extension_config)
-            register_dummy_module(extension_name, node_dir)
-
-            for node_name, details in cached_data.items():
-                stub_cls = build_stub_class(node_name, details, extension)
-                specs.append((node_name, details.get("display_name", node_name), stub_cls))
-            return specs
-
-    # Cache miss - need to spawn process and interrogate
+    # BACKOUT: Always spawn fresh - no cache checking
+    # Spawn extension process and keep it alive for the lifetime of ComfyUI
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
@@ -122,24 +98,23 @@ async def load_isolated_node(
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
 
+    # BACKOUT: Track extension immediately - keep alive, no JIT
+    from comfy.isolation import _RUNNING_EXTENSIONS
+    _RUNNING_EXTENSIONS[extension_name] = extension
+
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     if not remote_nodes:
-        # Keep extension alive even if no nodes (e.g. service extensions)
-        from comfy.isolation import _RUNNING_EXTENSIONS
-        _RUNNING_EXTENSIONS[extension_name] = extension
+        # Extension has no nodes (service extension) - already tracked above
         return []
-
-    cache_data_to_save = {}
 
     for node_name, display_name in remote_nodes.items():
         details = await extension.get_node_details(node_name)
         details["display_name"] = display_name
-        cache_data_to_save[node_name] = details
 
         stub_cls = build_stub_class(node_name, details, extension)
         specs.append((node_name, display_name, stub_cls))
 
-    save_to_cache(node_dir, cache_data_to_save)
+    # BACKOUT: No caching - do not save to disk
     return specs
 
 

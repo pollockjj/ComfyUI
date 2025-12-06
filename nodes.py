@@ -2251,9 +2251,10 @@ async def init_external_custom_nodes():
 
         for possible_module in possible_modules:
             module_path = os.path.join(custom_node_path, possible_module)
-            if args.use_process_isolation and Path(module_path).resolve() in isolated_module_paths:
-                logging.info("Skipping %s; will be isolated and just-in-time loaded", module_path)
-                continue
+            if args.use_process_isolation:
+                if Path(module_path).resolve() in isolated_module_paths:
+                    logging.info("Skipping %s; already loaded via process isolation", module_path)
+                    continue
             if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": continue
             if module_path.endswith(".disabled"): continue
             if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:

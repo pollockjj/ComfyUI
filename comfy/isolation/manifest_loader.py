@@ -74,24 +74,18 @@ def get_cache_path(node_dir: Path) -> Path:
 
 
 def is_cache_valid(node_dir: Path, manifest_path: Path) -> bool:
-    cache_path = get_cache_path(node_dir)
-    if not cache_path.exists():
-        return False
-    return cache_path.stat().st_mtime > manifest_path.stat().st_mtime
+    # BACKOUT: Caching disabled - always return False to force fresh spawn
+    return False
 
 
 def load_from_cache(node_dir: Path) -> Optional[Dict[str, Dict]]:
-    cache_path = get_cache_path(node_dir)
-    try:
-        return json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    # BACKOUT: Caching disabled - always return None to force fresh spawn
+    return None
 
 
 def save_to_cache(node_dir: Path, node_data: Dict[str, Dict]) -> None:
-    cache_path = get_cache_path(node_dir)
-    cache_path.parent.mkdir(exist_ok=True)
-    cache_path.write_text(json.dumps(node_data, indent=2), encoding="utf-8")
+    # BACKOUT: Caching disabled - no-op, do not write cache files
+    return
 
 
 __all__ = [

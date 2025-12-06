@@ -258,20 +258,28 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 pre_execute_cb(index)
             # V3
             if isinstance(obj, _ComfyNodeInternal) or (is_class(obj) and issubclass(obj, _ComfyNodeInternal)):
-                # if is just a class, then assign no resources or state, just create clone
-                if is_class(obj):
-                    type_obj = obj
-                    obj.VALIDATE_CLASS()
-                    class_clone = obj.PREPARE_CLASS_CLONE(v3_data)
-                # otherwise, use class instance to populate/reuse some fields
+                # Check for isolated node - skip validation and class cloning
+                if hasattr(obj, "_pyisolate_extension"):
+                    # Isolated Node: The stub is just a proxy; real validation happens in child process
+                    if v3_data is not None:
+                        inputs = _io.build_nested_inputs(inputs, v3_data)
+                    f = getattr(obj, func)
+                # Standard V3 Node (Existing Logic)
                 else:
-                    type_obj = type(obj)
-                    type_obj.VALIDATE_CLASS()
-                    class_clone = type_obj.PREPARE_CLASS_CLONE(v3_data)
-                f = make_locked_method_func(type_obj, func, class_clone)
-                # in case of dynamic inputs, restructure inputs to expected nested dict
-                if v3_data is not None:
-                    inputs = _io.build_nested_inputs(inputs, v3_data)
+                    # if is just a class, then assign no resources or state, just create clone
+                    if is_class(obj):
+                        type_obj = obj
+                        obj.VALIDATE_CLASS()
+                        class_clone = obj.PREPARE_CLASS_CLONE(v3_data)
+                    # otherwise, use class instance to populate/reuse some fields
+                    else:
+                        type_obj = type(obj)
+                        type_obj.VALIDATE_CLASS()
+                        class_clone = type_obj.PREPARE_CLASS_CLONE(v3_data)
+                    f = make_locked_method_func(type_obj, func, class_clone)
+                    # in case of dynamic inputs, restructure inputs to expected nested dict
+                    if v3_data is not None:
+                        inputs = _io.build_nested_inputs(inputs, v3_data)
             # V1
             else:
                 f = getattr(obj, func)
