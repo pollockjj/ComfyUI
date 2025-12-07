@@ -7,7 +7,7 @@ import pytest
 def test_log_prefix():
     """Verify LOG_PREFIX constant is correctly defined."""
     from comfy.isolation import LOG_PREFIX
-    assert LOG_PREFIX == "📚[I]"
+    assert LOG_PREFIX == "📚]["
     assert isinstance(LOG_PREFIX, str)
 
 

@@ -49,7 +49,7 @@ class RpcBridge:
                 instance = super().__new__(cls)
                 instance._initialize()
                 cls._instance = instance
-                logger.debug("[I][RpcBridge] Singleton created")
+                logger.debug("][[RpcBridge] Singleton created")
         return cls._instance
     
     def _initialize(self) -> None:
@@ -70,13 +70,13 @@ class RpcBridge:
         # Wait for loop to be ready (with timeout to detect startup failures)
         if not self._started.wait(timeout=5.0):
             raise RuntimeError(
-                "[I][RpcBridge] FAIL-LOUD: Event loop thread failed to start"
+                "][[RpcBridge] FAIL-LOUD: Event loop thread failed to start"
             )
         
         # Register shutdown handler
         atexit.register(self._shutdown_loop)
         
-        logger.debug("[I][RpcBridge] Background thread started")
+        logger.debug("][[RpcBridge] Background thread started")
     
     def _run_loop(self) -> None:
         """Background thread entry point - runs the asyncio event loop."""
@@ -90,12 +90,12 @@ class RpcBridge:
             # Run forever until shutdown
             self._loop.run_forever()
         except Exception as e:
-            logger.error("[I][RpcBridge] Loop error: %s", e)
+            logger.error("][[RpcBridge] Loop error: %s", e)
             self._started.set()  # Unblock waiters even on failure
         finally:
             if self._loop is not None:
                 self._loop.close()
-            logger.debug("[I][RpcBridge] Background thread exited")
+            logger.debug("][[RpcBridge] Background thread exited")
     
     def _shutdown_loop(self) -> None:
         """Clean shutdown of the event loop (called at process exit)."""
@@ -109,7 +109,7 @@ class RpcBridge:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         
-        logger.debug("[I][RpcBridge] Shutdown complete")
+        logger.debug("][[RpcBridge] Shutdown complete")
     
     def run_sync(self, coro: Coroutine[Any, Any, T], timeout: Optional[float] = None) -> T:
         """
@@ -132,12 +132,12 @@ class RpcBridge:
         """
         if self._loop is None or not self._loop.is_running():
             raise RuntimeError(
-                "[I][RpcBridge] FAIL-LOUD: Event loop not running"
+                "][[RpcBridge] FAIL-LOUD: Event loop not running"
             )
         
         if self._shutdown:
             raise RuntimeError(
-                "[I][RpcBridge] FAIL-LOUD: Bridge is shutting down"
+                "][[RpcBridge] FAIL-LOUD: Bridge is shutting down"
             )
         
         # Submit coroutine to the background loop
@@ -149,11 +149,11 @@ class RpcBridge:
         except TimeoutError:
             future.cancel()
             raise TimeoutError(
-                f"[I][RpcBridge] RPC call timed out after {timeout}s"
+                f"][[RpcBridge] RPC call timed out after {timeout}s"
             )
         except Exception as e:
             # Propagate the original exception with full traceback
-            raise RuntimeError(f"[I][RpcBridge] RPC call failed: {e}") from e
+            raise RuntimeError(f"][[RpcBridge] RPC call failed: {e}") from e
     
     @property
     def is_running(self) -> bool:

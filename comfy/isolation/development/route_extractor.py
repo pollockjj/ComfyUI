@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 logger = logging.getLogger(__name__)
 
 

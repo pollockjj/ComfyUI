@@ -34,7 +34,7 @@ else:
     ModelPatcherProxy = None  # type: ignore
     maybe_wrap_model_for_isolation = lambda x: x  # type: ignore
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 
 # Module-level list to store timing data for ComfyManager-style report
 isolated_node_timings: List[tuple[float, Path]] = []

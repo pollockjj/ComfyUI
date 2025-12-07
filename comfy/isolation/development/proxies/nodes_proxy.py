@@ -15,7 +15,7 @@ except ImportError:
     class ProxiedSingleton:
         pass
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 logger = logging.getLogger(__name__)
 
 

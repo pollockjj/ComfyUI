@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - fallback when pyisolate unavailable
 
 from comfy_execution.progress import get_progress_state
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 logger = logging.getLogger(__name__)
 
 

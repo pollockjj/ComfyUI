@@ -22,7 +22,7 @@ except ImportError:
         pass
     current_rpc_context = None
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 logger = logging.getLogger(__name__)
 
 

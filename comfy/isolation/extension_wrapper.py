@@ -16,7 +16,7 @@ from pyisolate import ExtensionBase
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 V3_DISCOVERY_TIMEOUT = 30  # seconds
 
 logger = logging.getLogger(__name__)

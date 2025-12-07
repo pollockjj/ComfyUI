@@ -12,7 +12,7 @@ from comfy_api.latest import _io as latest_io
 if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 
 
 def build_stub_class(
