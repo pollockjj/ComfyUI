@@ -112,9 +112,8 @@ def build_stub_class(
     if is_v3:
         try:
             stub_cls.VALIDATE_CLASS()
-            logger.info("%s[Loader] VALIDATE_CLASS succeeded for %s", LOG_PREFIX, node_name)
         except Exception as e:
-            logger.error("%s[Loader] VALIDATE_CLASS failed for %s: %s", LOG_PREFIX, node_name, e)
+            logger.error("%s VALIDATE_CLASS failed: %s - %s", LOG_PREFIX, node_name, e)
 
     return stub_cls
 

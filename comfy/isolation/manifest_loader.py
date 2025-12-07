@@ -87,7 +87,7 @@ def is_cache_valid(node_dir: Path, manifest_path: Path, venv_root: Path) -> bool
         stored_key = cache_key_file.read_text(encoding="utf-8").strip()
         return current_key == stored_key
     except Exception as e:
-        logger.debug(f"{LOG_PREFIX}[Cache] Validation error for {node_dir.name}: {e}")
+        logger.debug("%s Cache validation error for %s: %s", LOG_PREFIX, node_dir.name, e)
         return False
 
 
@@ -144,9 +144,8 @@ def save_to_cache(
                 pass
             raise
 
-        logger.debug(f"{LOG_PREFIX}[Cache] Saved for {node_dir.name} (key: {cache_key})")
     except Exception as e:
-        logger.warning(f"{LOG_PREFIX}[Cache] Save failed for {node_dir.name}: {e}")
+        logger.warning("%s Cache save failed for %s: %s", LOG_PREFIX, node_dir.name, e)
 
 
 __all__ = [

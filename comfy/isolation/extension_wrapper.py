@@ -87,12 +87,12 @@ class ComfyNodeExtension(ExtensionBase):
                     try:
                         await asyncio.wait_for(ext_instance.on_load(), timeout=V3_DISCOVERY_TIMEOUT)
                     except asyncio.TimeoutError:
-                        logger.error("%s[Loader] V3 Extension %s timed out in on_load()", LOG_PREFIX, name)
+                        logger.error("%s V3 Extension %s timed out in on_load()", LOG_PREFIX, name)
                         continue
                     try:
                         v3_nodes = await asyncio.wait_for(ext_instance.get_node_list(), timeout=V3_DISCOVERY_TIMEOUT)
                     except asyncio.TimeoutError:
-                        logger.error("%s[Loader] V3 Extension %s timed out in get_node_list()", LOG_PREFIX, name)
+                        logger.error("%s V3 Extension %s timed out in get_node_list()", LOG_PREFIX, name)
                         continue
                     for node_cls in v3_nodes:
                         if hasattr(node_cls, "GET_SCHEMA"):
@@ -101,7 +101,7 @@ class ComfyNodeExtension(ExtensionBase):
                             if schema.display_name:
                                 self.display_names[schema.node_id] = schema.display_name
                 except Exception as e:
-                    logger.error("%s[Loader] V3 Extension %s failed: %s", LOG_PREFIX, name, e)
+                    logger.error("%s V3 Extension %s failed: %s", LOG_PREFIX, name, e)
         except ImportError:
             pass
 
@@ -158,7 +158,7 @@ class ComfyNodeExtension(ExtensionBase):
                     "not_idempotent": bool(getattr(node_cls, "NOT_IDEMPOTENT", False)),
                 })
             except Exception as exc:
-                logger.warning("%s[Loader] V3 schema serialization failed for %s: %s", LOG_PREFIX, node_name, exc)
+                logger.warning("%s V3 schema serialization failed for %s: %s", LOG_PREFIX, node_name, exc)
         return details
 
     def _build_schema_v3_fallback(self, schema) -> Dict[str, Any]:
