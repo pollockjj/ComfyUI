@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,28 +18,14 @@ if TYPE_CHECKING:
 LOG_PREFIX = "]["
 isolated_node_timings: List[tuple[float, Path]] = []
 
-
 PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
 PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
-
-def get_isolation_logger(name: str) -> logging.Logger:
-    """Get logger with PyIsolate prefix for consistent log formatting."""
-
-    return logging.getLogger(name)
-
-
-logger = get_isolation_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def initialize_proxies() -> None:
-    """Initialize ProxiedSingletons for isolated nodes.
-    
-    Detects host vs child process and runs appropriate initialization.
-    All child-specific logic is in child_hooks.py, not in core files.
-    """
     from .child_hooks import is_child_process
-    
     if is_child_process():
         from .child_hooks import initialize_child_process
         initialize_child_process()
@@ -49,8 +36,6 @@ def initialize_proxies() -> None:
 
 @dataclass(frozen=True)
 class IsolatedNodeSpec:
-    """Description of a node exposed through a PyIsolate extension."""
-
     node_name: str
     display_name: str
     stub_class: type
@@ -60,165 +45,96 @@ class IsolatedNodeSpec:
 _ISOLATED_NODE_SPECS: List[IsolatedNodeSpec] = []
 _CLAIMED_PATHS: Set[Path] = set()
 _ISOLATION_SCAN_ATTEMPTED = False
-_EXTENSION_MANAGERS: List["ExtensionManager"] = []  # Keep alive so subprocesses persist
-_RUNNING_EXTENSIONS: Dict[str, "Extension"] = {}  # Track running extensions for eviction
-
-# Phase 2: Early orchestration - background task for parallel startup
+_EXTENSION_MANAGERS: List["ExtensionManager"] = []
+_RUNNING_EXTENSIONS: Dict[str, "ComfyNodeExtension"] = {}
 _ISOLATION_BACKGROUND_TASK: Optional["asyncio.Task[List[IsolatedNodeSpec]]"] = None
 _EARLY_START_TIME: Optional[float] = None
 
 
 def start_isolation_loading_early(loop: "asyncio.AbstractEventLoop") -> None:
-    """Start isolated node loading in the background BEFORE nodes.py needs them.
-    
-    Called from main.py immediately after PromptServer creation to maximize
-    parallelism with builtin node loading.
-    """
     global _ISOLATION_BACKGROUND_TASK, _EARLY_START_TIME
-
     if _ISOLATION_BACKGROUND_TASK is not None:
         return
-
-
     _EARLY_START_TIME = time.perf_counter()
-
-    # Create the task but don't await it yet
     _ISOLATION_BACKGROUND_TASK = loop.create_task(initialize_isolation_nodes())
 
 
 async def await_isolation_loading() -> List[IsolatedNodeSpec]:
-    """Await the background isolation loading task, or start loading if not already started.
-    
-    Returns the list of isolated node specs.
-    """
     global _ISOLATION_BACKGROUND_TASK, _EARLY_START_TIME
-    
     if _ISOLATION_BACKGROUND_TASK is not None:
-        # Early start was triggered - await the existing task
         specs = await _ISOLATION_BACKGROUND_TASK
-        
-        if _EARLY_START_TIME is not None:
-            overlap_time = time.perf_counter() - _EARLY_START_TIME
-        
         return specs
-    else:
-        return await initialize_isolation_nodes()
+    return await initialize_isolation_nodes()
 
 
 async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
-    """Discover isolated custom nodes via pyisolate.yaml manifests."""
-
-    global _ISOLATED_NODE_SPECS, _ISOLATION_SCAN_ATTEMPTED
+    global _ISOLATED_NODE_SPECS, _ISOLATION_SCAN_ATTEMPTED, _CLAIMED_PATHS
 
     if _ISOLATED_NODE_SPECS:
-        logger.info(f"{LOG_PREFIX}[Loader] Returning cached isolated node specs (%d entries)", len(_ISOLATED_NODE_SPECS))
         return _ISOLATED_NODE_SPECS
 
     if _ISOLATION_SCAN_ATTEMPTED:
-        logger.warning(f"{LOG_PREFIX}[Loader] initialize_isolation_nodes already attempted; skipping re-scan")
         return []
 
     _ISOLATION_SCAN_ATTEMPTED = True
-
     manifest_entries = find_manifest_directories()
-    
-    global _CLAIMED_PATHS
     _CLAIMED_PATHS = {entry[0].resolve() for entry in manifest_entries}
 
     if not manifest_entries:
-        logger.info(f"{LOG_PREFIX}[Loader] No pyisolate manifests detected under custom_nodes")
         return []
-    
-    # Set flag to enable ModelSampling proxy (only when isolated nodes exist)
-    import os
-    os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
 
-    total_nodes = len(manifest_entries)
-    batch_start = time.perf_counter()
-    
-    # Parallel loading with throttling to prevent thundering herd
+    os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
     concurrency_limit = max(1, (os.cpu_count() or 4) // 2)
     semaphore = asyncio.Semaphore(concurrency_limit)
-    
+
     async def load_with_semaphore(node_dir: Path, manifest: Path) -> List[IsolatedNodeSpec]:
-        """Load a single node with semaphore throttling."""
         async with semaphore:
             load_start = time.perf_counter()
-            try:
-                spec_list = await load_isolated_node(
-                    node_dir,
-                    manifest,
-                    logger,
-                    lambda name, info, extension: build_stub_class(
-                        name,
-                        info,
-                        extension,
-                        _RUNNING_EXTENSIONS,
-                        logger,
-                    ),
-                    PYISOLATE_VENV_ROOT,
-                    _EXTENSION_MANAGERS,
+            spec_list = await load_isolated_node(
+                node_dir,
+                manifest,
+                logger,
+                lambda name, info, extension: build_stub_class(
+                    name, info, extension, _RUNNING_EXTENSIONS, logger,
+                ),
+                PYISOLATE_VENV_ROOT,
+                _EXTENSION_MANAGERS,
+            )
+            spec_list = [
+                IsolatedNodeSpec(
+                    node_name=node_name,
+                    display_name=display_name,
+                    stub_class=stub_cls,
+                    module_path=node_dir,
                 )
-                spec_list = [
-                    IsolatedNodeSpec(
-                        node_name=node_name,
-                        display_name=display_name,
-                        stub_class=stub_cls,
-                        module_path=node_dir,
-                    )
-                    for node_name, display_name, stub_cls in spec_list
-                ]
-                load_time = time.perf_counter() - load_start
-                
-                isolated_node_timings.append((load_time, node_dir))
-                return spec_list
-            except Exception as exc:
-                logger.error(
-                    "%s[Loader] Failed to initialize isolated node at %s: %s",
-                    LOG_PREFIX,
-                    node_dir,
-                    exc,
-                )
-                raise
-    
-    # Launch all loads in parallel (throttled by semaphore)
-    tasks = [
-        load_with_semaphore(node_dir, manifest)
-        for node_dir, manifest in manifest_entries
-    ]
+                for node_name, display_name, stub_cls in spec_list
+            ]
+            isolated_node_timings.append((time.perf_counter() - load_start, node_dir))
+            return spec_list
+
+    tasks = [load_with_semaphore(node_dir, manifest) for node_dir, manifest in manifest_entries]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Collect specs and handle any exceptions
+
     specs: List[IsolatedNodeSpec] = []
     for result in results:
         if isinstance(result, Exception):
-            raise result  # Re-raise first exception
+            raise result
         specs.extend(result)
-    
-    batch_time = time.perf_counter() - batch_start
 
     _ISOLATED_NODE_SPECS = specs
     return list(_ISOLATED_NODE_SPECS)
 
 
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
-    """Called before execution with the set of node class_types that will run.
-    
-    BACKOUT: Eviction disabled - all extensions stay alive for lifetime of ComfyUI.
-    This simplifies debugging and ensures V3 nodes work correctly.
-    """
-    # BACKOUT: No eviction - extensions stay alive
-    return
+    pass
 
 
 def get_claimed_paths() -> Set[Path]:
-    """Return the set of paths claimed by isolation, even if they failed to load."""
     return _CLAIMED_PATHS
 
 
 __all__ = [
     "LOG_PREFIX",
-    "get_isolation_logger",
     "initialize_proxies",
     "initialize_isolation_nodes",
     "start_isolation_loading_early",

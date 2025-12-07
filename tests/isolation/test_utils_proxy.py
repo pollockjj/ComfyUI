@@ -2,7 +2,7 @@
 
 import pytest
 
-from comfy.isolation.proxies.utils_proxy import UtilsProxy
+from comfy.isolation.development.proxies.utils_proxy import UtilsProxy
 from comfy.utils import ProgressBar
 
 

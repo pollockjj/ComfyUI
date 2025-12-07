@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
 import copy
+import logging
 from pathlib import Path
-from typing import Dict, List, Set, TYPE_CHECKING, Any
+from typing import Any, Dict, List, Set, TYPE_CHECKING
 
 from .proxies.helper_proxies import restore_input_types
 from comfy_api.internal import _ComfyNodeInternal
@@ -29,28 +29,22 @@ def build_stub_class(
     async def _execute(self, **inputs):
         extension.ensure_process_started()
         running_extensions[extension.name] = extension
-
         try:
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,
                 deserialize_from_isolation,
             )
-
             serialized = serialize_for_isolation(inputs)
             result = await extension.execute_node(node_name, **serialized)
             return deserialize_from_isolation(result)
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            logger.warning("%s[Serialization] Serialization not available: %s", LOG_PREFIX, exc)
+        except ImportError:
             return await extension.execute_node(node_name, **inputs)
 
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
             return restored_input_types
 
-        # V3 path: mimic _ComfyNodeBaseInternal.INPUT_TYPES
         inputs_copy = copy.deepcopy(restored_input_types)
-
-        # remove hidden if requested
         if not include_hidden:
             inputs_copy.pop("hidden", None)
 
@@ -72,21 +66,15 @@ def build_stub_class(
                 hidden = hidden_enums
 
             return inputs_copy, SchemaProxy, v3_data
-
         return inputs_copy
 
-    # --- Phase 2: V3 Compliance Methods ---
     def _validate_class(cls):
-        """No-op: Isolated stubs trust child process validation."""
         return True
 
     def _get_node_info_v1(cls):
-        """Return cached V1 info from child, bypass schema generation."""
-        # Return the schema_v1 data captured from the child process
         return info.get("schema_v1", {})
 
     def _get_base_class(cls):
-        """Return ComfyNode as the base class for first_real_override checks."""
         return latest_io.ComfyNode
 
     attributes: Dict[str, object] = {
@@ -105,12 +93,10 @@ def build_stub_class(
     if output_is_list is not None:
         attributes["OUTPUT_IS_LIST"] = tuple(output_is_list)
 
-    # --- Phase 2 & 3: Add V3 compliance methods for isolated stubs ---
     if is_v3:
         attributes["VALIDATE_CLASS"] = classmethod(_validate_class)
         attributes["GET_NODE_INFO_V1"] = classmethod(_get_node_info_v1)
         attributes["GET_BASE_CLASS"] = classmethod(_get_base_class)
-        # Phase 4: Shadow V3 descriptors to prevent lazy schema generation
         attributes["DESCRIPTION"] = info.get("description", "")
         attributes["EXPERIMENTAL"] = info.get("experimental", False)
         attributes["DEPRECATED"] = info.get("deprecated", False)
@@ -122,15 +108,13 @@ def build_stub_class(
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     bases = (_ComfyNodeInternal,) if is_v3 else ()
     stub_cls = type(class_name, bases, attributes)
-    stub_cls.__doc__ = f"PyIsolate proxy node for {display_name}"
 
-    # Phase 1: Detection logging - confirm VALIDATE_CLASS failure is root cause
     if is_v3:
         try:
             stub_cls.VALIDATE_CLASS()
-            logger.info("%s[V3-DEBUG] VALIDATE_CLASS succeeded for %s", LOG_PREFIX, node_name)
+            logger.info("%s[Loader] VALIDATE_CLASS succeeded for %s", LOG_PREFIX, node_name)
         except Exception as e:
-            logger.error("%s[V3-DEBUG] VALIDATE_CLASS failed for %s: %s", LOG_PREFIX, node_name, e)
+            logger.error("%s[Loader] VALIDATE_CLASS failed for %s: %s", LOG_PREFIX, node_name, e)
 
     return stub_cls
 

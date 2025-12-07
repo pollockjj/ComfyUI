@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import sys
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import folder_paths
 
 LOG_PREFIX = "]["
+logger = logging.getLogger(__name__)
+
+CACHE_SUBDIR = "cache"
+CACHE_KEY_FILE = "cache_key"
+CACHE_DATA_FILE = "node_info.json"
+CACHE_KEY_LENGTH = 16  # 64-bit hex, ~10^-19 collision probability per pair
 
 
 def find_manifest_directories() -> List[Tuple[Path, Path]]:
@@ -27,32 +37,122 @@ def find_manifest_directories() -> List[Tuple[Path, Path]]:
     return manifest_dirs
 
 
-CACHE_DIR_NAME = ".pyisolate_cache"
-CACHE_FILE_NAME = "node_info.json"
+def compute_cache_key(node_dir: Path, manifest_path: Path) -> str:
+    """Hash manifest + .py mtimes + Python version + PyIsolate version."""
+    hasher = hashlib.sha256()
+
+    try:
+        hasher.update(manifest_path.read_bytes())
+    except OSError:
+        hasher.update(b"__manifest_read_error__")
+
+    try:
+        py_files = sorted(node_dir.rglob("*.py"))
+        for py_file in py_files:
+            rel_path = py_file.relative_to(node_dir)
+            if "__pycache__" in str(rel_path) or ".venv" in str(rel_path):
+                continue
+            hasher.update(str(rel_path).encode("utf-8"))
+            try:
+                hasher.update(str(py_file.stat().st_mtime).encode("utf-8"))
+            except OSError:
+                hasher.update(b"__file_stat_error__")
+    except OSError:
+        hasher.update(b"__dir_scan_error__")
+
+    hasher.update(sys.version.encode("utf-8"))
+
+    try:
+        import pyisolate
+        hasher.update(pyisolate.__version__.encode("utf-8"))
+    except (ImportError, AttributeError):
+        hasher.update(b"__pyisolate_unknown__")
+
+    return hasher.hexdigest()[:CACHE_KEY_LENGTH]
 
 
-def get_cache_path(node_dir: Path) -> Path:
-    return node_dir / CACHE_DIR_NAME / CACHE_FILE_NAME
+def get_cache_path(node_dir: Path, venv_root: Path) -> Tuple[Path, Path]:
+    """Return (cache_key_file, cache_data_file) in venv_root/{node}/cache/."""
+    cache_dir = venv_root / node_dir.name / CACHE_SUBDIR
+    return (cache_dir / CACHE_KEY_FILE, cache_dir / CACHE_DATA_FILE)
 
 
-def is_cache_valid(node_dir: Path, manifest_path: Path) -> bool:
-    # BACKOUT: Caching disabled - always return False to force fresh spawn
-    return False
+def is_cache_valid(node_dir: Path, manifest_path: Path, venv_root: Path) -> bool:
+    """Return True only if stored cache key matches current computed key."""
+    try:
+        cache_key_file, cache_data_file = get_cache_path(node_dir, venv_root)
+        if not cache_key_file.exists() or not cache_data_file.exists():
+            return False
+        current_key = compute_cache_key(node_dir, manifest_path)
+        stored_key = cache_key_file.read_text(encoding="utf-8").strip()
+        return current_key == stored_key
+    except Exception as e:
+        logger.debug(f"{LOG_PREFIX}[Cache] Validation error for {node_dir.name}: {e}")
+        return False
 
 
-def load_from_cache(node_dir: Path) -> Optional[Dict[str, Dict]]:
-    # BACKOUT: Caching disabled - always return None to force fresh spawn
-    return None
+def load_from_cache(node_dir: Path, venv_root: Path) -> Optional[Dict[str, Any]]:
+    """Load node metadata from cache, return None on any error."""
+    try:
+        _, cache_data_file = get_cache_path(node_dir, venv_root)
+        if not cache_data_file.exists():
+            return None
+        data = json.loads(cache_data_file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
 
 
-def save_to_cache(node_dir: Path, node_data: Dict[str, Dict]) -> None:
-    # BACKOUT: Caching disabled - no-op, do not write cache files
-    return
+def save_to_cache(
+    node_dir: Path,
+    venv_root: Path,
+    node_data: Dict[str, Any],
+    manifest_path: Path
+) -> None:
+    """Save node metadata and cache key atomically."""
+    try:
+        cache_key_file, cache_data_file = get_cache_path(node_dir, venv_root)
+        cache_dir = cache_key_file.parent
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = compute_cache_key(node_dir, manifest_path)
+
+        # Atomic write: data
+        tmp_data_fd, tmp_data_path = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_data_fd, "w", encoding="utf-8") as f:
+                json.dump(node_data, f, indent=2)
+            os.replace(tmp_data_path, cache_data_file)
+        except Exception:
+            try:
+                os.unlink(tmp_data_path)
+            except OSError:
+                pass
+            raise
+
+        # Atomic write: key
+        tmp_key_fd, tmp_key_path = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
+        try:
+            with os.fdopen(tmp_key_fd, "w", encoding="utf-8") as f:
+                f.write(cache_key)
+            os.replace(tmp_key_path, cache_key_file)
+        except Exception:
+            try:
+                os.unlink(tmp_key_path)
+            except OSError:
+                pass
+            raise
+
+        logger.debug(f"{LOG_PREFIX}[Cache] Saved for {node_dir.name} (key: {cache_key})")
+    except Exception as e:
+        logger.warning(f"{LOG_PREFIX}[Cache] Save failed for {node_dir.name}: {e}")
 
 
 __all__ = [
     "LOG_PREFIX",
     "find_manifest_directories",
+    "compute_cache_key",
     "get_cache_path",
     "is_cache_valid",
     "load_from_cache",

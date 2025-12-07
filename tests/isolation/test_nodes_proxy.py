@@ -2,7 +2,7 @@
 
 import pytest
 
-from comfy.isolation.proxies.nodes_proxy import NodesProxy
+from comfy.isolation.development.proxies.nodes_proxy import NodesProxy
 import nodes
 
 
