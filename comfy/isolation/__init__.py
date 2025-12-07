@@ -5,41 +5,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
-
 import folder_paths
-
 from .extension_loader import load_isolated_node
-from .manifest_loader import (
-    find_manifest_directories,
-    filter_blacklisted_entries,
-    load_blacklisted_nodes,
-)
+from .manifest_loader import find_manifest_directories
 from .runtime_helpers import build_stub_class, get_class_types_for_extension
 
 if TYPE_CHECKING:
     from pyisolate import ExtensionManager
     from .extension_wrapper import ComfyNodeExtension
 
-LOG_PREFIX = "[I]"
+LOG_PREFIX = "]["
 isolated_node_timings: List[tuple[float, Path]] = []
 
 
-# Load blacklist from external JSON (editable without code changes)
-BLACKLISTED_NODES: dict[str, str] = load_blacklisted_nodes()
-
-
-def _get_user_pyisolate_path() -> Path:
-    target = Path(folder_paths.base_path) / "user" / "pyisolate"
-    if not target.exists():
-        raise RuntimeError(
-            f"PyIsolate source missing at {target}; clone or move pyisolate into ComfyUI/user/pyisolate"
-        )
-
-    logging.getLogger(__name__).debug("%s[System] Using pyisolate source at %s", LOG_PREFIX, target)
-    return target
-
-
-PYISOLATE_EDITABLE_PATH = _get_user_pyisolate_path()
 PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
 PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +121,6 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     _ISOLATION_SCAN_ATTEMPTED = True
 
     manifest_entries = find_manifest_directories()
-    manifest_entries = filter_blacklisted_entries(manifest_entries, BLACKLISTED_NODES)
     
     global _CLAIMED_PATHS
     _CLAIMED_PATHS = {entry[0].resolve() for entry in manifest_entries}
@@ -179,7 +156,6 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
                         _RUNNING_EXTENSIONS,
                         logger,
                     ),
-                    PYISOLATE_EDITABLE_PATH,
                     PYISOLATE_VENV_ROOT,
                     _EXTENSION_MANAGERS,
                 )

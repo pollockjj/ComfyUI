@@ -22,30 +22,6 @@ class ExtensionLoadError(RuntimeError):
     pass
 
 
-def augment_dependencies_with_pyisolate(
-    dependencies: List[str], editable_path: Path, extension_name: str, logger
-) -> List[str]:
-    deps = list(dependencies)
-    if editable_path.exists():
-        needs_injection = True
-        for idx in range(len(deps) - 1):
-            if deps[idx] == "-e" and deps[idx + 1] == str(editable_path):
-                needs_injection = False
-                break
-        if needs_injection:
-            deps = ["-e", str(editable_path)] + deps
-    else:
-        logger.error(
-            "[I][Loader] Missing pyisolate source at %s; isolated node %s cannot mirror host runtime",
-            editable_path,
-            extension_name,
-        )
-        raise ExtensionLoadError(
-            f"PyIsolate source missing at {editable_path}; cannot load isolated node {extension_name}"
-        )
-    return deps
-
-
 def register_dummy_module(extension_name: str, node_dir: Path) -> None:
     normalized_name = extension_name.replace("-", "_").replace(".", "_")
     if normalized_name not in sys.modules:
@@ -61,7 +37,6 @@ async def load_isolated_node(
     manifest_path: Path,
     logger,
     build_stub_class: Callable[[str, Dict[str, object], ComfyNodeExtension], type],
-    pyisolate_editable_path: Path,
     venv_root: Path,
     extension_managers: List[ExtensionManager],
 ) -> List[Tuple[str, str, type]]:
@@ -74,9 +49,6 @@ async def load_isolated_node(
     dependencies = list(manifest.get("dependencies", []) or [])
     share_torch = manifest.get("share_torch", True)
     extension_name = manifest.get("name", node_dir.name)
-    dependencies = augment_dependencies_with_pyisolate(
-        dependencies, pyisolate_editable_path, extension_name, logger
-    )
 
     specs: List[Tuple[str, str, type]] = []
 
@@ -120,7 +92,6 @@ async def load_isolated_node(
 
 __all__ = [
     "ExtensionLoadError",
-    "augment_dependencies_with_pyisolate",
     "register_dummy_module",
     "load_isolated_node",
 ]
