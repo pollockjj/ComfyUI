@@ -29,16 +29,10 @@ def build_stub_class(
     async def _execute(self, **inputs):
         extension.ensure_process_started()
         running_extensions[extension.name] = extension
-        try:
-            from pyisolate._internal.model_serialization import (
-                serialize_for_isolation,
-                deserialize_from_isolation,
-            )
-            serialized = serialize_for_isolation(inputs)
-            result = await extension.execute_node(node_name, **serialized)
-            return await deserialize_from_isolation(result, extension)
-        except ImportError:
-            return await extension.execute_node(node_name, **inputs)
+        # Direct pass-through for V1 nodes - no serialization needed
+        # Models loaded internally by nodes stay in child process
+        result = await extension.execute_node(node_name, **inputs)
+        return result
 
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
