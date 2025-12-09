@@ -563,7 +563,7 @@ def _build_stub_class(node_name: str, info: Dict[str, object], extension: ComfyN
             
             # Deserialize result (Refs → real objects)
             # This converts ModelPatcherRef back to actual ModelPatcher on host
-            result = deserialize_from_isolation(result)
+            result = await deserialize_from_isolation(result, extension)
             
             return result
         except ImportError as e:

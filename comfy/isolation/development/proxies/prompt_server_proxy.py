@@ -96,6 +96,12 @@ class PromptServerProxy(ProxiedSingleton):
         logger.debug(f"{LOG_PREFIX}[PromptServerProxy] send({event}, sid={sid})")
         return await PromptServer.instance.send(event, data, sid)
     
+    def send_progress_text(self, text: str, node_id: str, sid=None) -> None:
+        """Send progress text to UI (proxied to host)."""
+        from server import PromptServer
+        logger.debug(f"{LOG_PREFIX}[PromptServerProxy] send_progress_text(node_id={node_id}, sid={sid})")
+        return PromptServer.instance.send_progress_text(text, node_id, sid)
+    
     def send_sync_blocking(self, event: str, data: Dict[str, Any], sid: Optional[str] = None) -> None:
         """Synchronous blocking version of send_sync for non-async contexts."""
         loop = asyncio.get_event_loop()

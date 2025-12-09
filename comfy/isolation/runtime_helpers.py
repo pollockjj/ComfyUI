@@ -36,7 +36,7 @@ def build_stub_class(
             )
             serialized = serialize_for_isolation(inputs)
             result = await extension.execute_node(node_name, **serialized)
-            return deserialize_from_isolation(result)
+            return await deserialize_from_isolation(result, extension)
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
 

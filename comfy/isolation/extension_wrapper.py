@@ -197,19 +197,50 @@ class ComfyNodeExtension(ExtensionBase):
         return {}
 
     async def execute_node(self, node_name: str, **inputs: Any) -> Tuple[Any, ...]:
+
         resolved_inputs = self._resolve_remote_objects(inputs)
+
         instance = self._get_node_instance(node_name)
         node_cls = self._get_node_class(node_name)
+        
+        # V3 API nodes expect hidden parameters in cls.hidden, not as kwargs
+        # Hidden params come through as Hidden enum keys, extract them
+        from comfy_api.latest._io import Hidden
+        
+        # Find and extract hidden parameters (keep as Hidden enum keys for HiddenHolder)
+        hidden_found = {}
+        for hidden_enum in [Hidden.unique_id, Hidden.auth_token_comfy_org, Hidden.api_key_comfy_org]:
+            if hidden_enum in resolved_inputs:
+                hidden_found[hidden_enum] = resolved_inputs.pop(hidden_enum)
+        
+        if hidden_found:
+            from comfy_api.latest._io import HiddenHolder
+            if not hasattr(node_cls, 'hidden') or node_cls.hidden is None:
+                node_cls.hidden = HiddenHolder.from_dict(hidden_found)
+            else:
+                # Update existing hidden holder
+                for key, value in hidden_found.items():
+                    setattr(node_cls.hidden, key.value.lower(), value)
+            
         function_name = getattr(node_cls, "FUNCTION", "execute")
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
 
         result = getattr(instance, function_name)(**resolved_inputs)
+        if asyncio.iscoroutine(result):
+            result = await result
         if type(result).__name__ == 'NodeOutput':
             result = result.args
         if not isinstance(result, tuple):
             result = (result,)
         return self._wrap_unpicklable_objects(result)
+
+    async def get_remote_object(self, object_id: str) -> Any:
+        """Retrieve a remote object by ID for host-side deserialization."""
+        if object_id not in self.remote_objects:
+            raise KeyError(f"Remote object {object_id} not found")
+
+        return self.remote_objects[object_id]
 
     def _wrap_unpicklable_objects(self, data: Any) -> Any:
         import torch
