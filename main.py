@@ -1,10 +1,12 @@
 import os
 import sys
 
-# Detect PyIsolate child FIRST - before any heavy imports
 IS_PYISOLATE_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
 
-# CRITICAL: Ensure ComfyUI root is in sys.path BEFORE any ComfyUI imports.
+if __name__ == "__main__" and IS_PYISOLATE_CHILD:
+    del os.environ["PYISOLATE_CHILD"]
+    IS_PYISOLATE_CHILD = False
+
 CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -31,14 +33,12 @@ if '--use-process-isolation' in sys.argv:
         if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
 
-# Skip heavy imports in PyIsolate child processes (Manager subprocess)
 if not IS_PYISOLATE_CHILD:
     from comfy_execution.progress import get_progress_state
     from comfy_execution.utils import get_executing_context
     from comfy_api import feature_flags
 
 if IS_PRIMARY_PROCESS:
-    #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
@@ -424,7 +424,9 @@ def start_comfyui(asyncio_loop=None):
 if __name__ == "__main__":
     # Running directly, just start ComfyUI.
     logging.info("Python version: {}".format(sys.version))
-    logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
+    if not IS_PYISOLATE_CHILD:
+        import comfyui_version
+        logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
 
     if sys.version_info.major == 3 and sys.version_info.minor < 10:
         logging.warning("WARNING: You are using a python version older than 3.10, please upgrade to a newer one. 3.12 and above is recommended.")

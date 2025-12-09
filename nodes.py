@@ -2262,6 +2262,11 @@ async def init_external_custom_nodes():
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
 
+            if args.use_process_isolation:
+                from pathlib import Path
+                if Path(module_path).resolve() in isolated_module_paths:
+                    continue
+
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
