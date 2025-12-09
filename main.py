@@ -24,9 +24,12 @@ from app.logger import setup_logger
 import itertools
 import logging
 
-if '--use-process-isolation' in sys.argv and not IS_PYISOLATE_CHILD:
-    if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
+if '--use-process-isolation' in sys.argv:
+    from comfy.isolation import initialize_proxies
+    initialize_proxies()
+    if not IS_PYISOLATE_CHILD:
+        if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
 
 # Skip heavy imports in PyIsolate child processes (Manager subprocess)
 if not IS_PYISOLATE_CHILD:

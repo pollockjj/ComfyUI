@@ -263,6 +263,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     # Isolated Node: The stub is just a proxy; real validation happens in child process
                     if v3_data is not None:
                         inputs = _io.build_nested_inputs(inputs, v3_data)
+                        # Inject hidden inputs so they're available in the isolated child process
+                        inputs.update(v3_data.get("hidden_inputs", {}))
                     f = getattr(obj, func)
                 # Standard V3 Node (Existing Logic)
                 else:
