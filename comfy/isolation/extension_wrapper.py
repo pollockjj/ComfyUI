@@ -204,17 +204,39 @@ class ComfyNodeExtension(ExtensionBase):
         node_cls = self._get_node_class(node_name)
         
         # V3 API nodes expect hidden parameters in cls.hidden, not as kwargs
-        # Hidden params come through as Hidden enum keys, extract them
-        from comfy_api.latest._io import Hidden
+        # Hidden params come through RPC as string keys like "Hidden.prompt"
+        from comfy_api.latest._io import Hidden, HiddenHolder
         
-        # Find and extract hidden parameters (keep as Hidden enum keys for HiddenHolder)
+        # Map string representations back to Hidden enum keys
+        hidden_string_map = {
+            "Hidden.unique_id": Hidden.unique_id,
+            "Hidden.prompt": Hidden.prompt,
+            "Hidden.extra_pnginfo": Hidden.extra_pnginfo,
+            "Hidden.dynprompt": Hidden.dynprompt,
+            "Hidden.auth_token_comfy_org": Hidden.auth_token_comfy_org,
+            "Hidden.api_key_comfy_org": Hidden.api_key_comfy_org,
+        }
+        
+        # Find and extract hidden parameters (both enum and string form)
         hidden_found = {}
-        for hidden_enum in [Hidden.unique_id, Hidden.auth_token_comfy_org, Hidden.api_key_comfy_org]:
-            if hidden_enum in resolved_inputs:
-                hidden_found[hidden_enum] = resolved_inputs.pop(hidden_enum)
+        keys_to_remove = []
         
+        for key in list(resolved_inputs.keys()):
+            # Check string form first (from RPC serialization)
+            if key in hidden_string_map:
+                hidden_found[hidden_string_map[key]] = resolved_inputs[key]
+                keys_to_remove.append(key)
+            # Also check enum form (direct calls)
+            elif isinstance(key, Hidden):
+                hidden_found[key] = resolved_inputs[key]
+                keys_to_remove.append(key)
+        
+        # Remove hidden params from kwargs
+        for key in keys_to_remove:
+            resolved_inputs.pop(key)
+        
+        # Set hidden on node class if any hidden params found
         if hidden_found:
-            from comfy_api.latest._io import HiddenHolder
             if not hasattr(node_cls, 'hidden') or node_cls.hidden is None:
                 node_cls.hidden = HiddenHolder.from_dict(hidden_found)
             else:
