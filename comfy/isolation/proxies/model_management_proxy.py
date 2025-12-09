@@ -3,6 +3,92 @@ from pyisolate import ProxiedSingleton
 
 
 class ModelManagementProxy(ProxiedSingleton):
+    # Enums
+    @property
+    def VRAMState(self):
+        """Expose VRAMState enum class for isolated nodes."""
+        return mm.VRAMState
+    
+    @property
+    def CPUState(self):
+        """Expose CPUState enum class for isolated nodes."""
+        return mm.CPUState
+    
+    # State variables (current enum values)
+    @property
+    def vram_state(self):
+        """Current VRAM state (VRAMState enum value)."""
+        return mm.vram_state
+    
+    @property
+    def set_vram_to(self):
+        """Target VRAM state (VRAMState enum value)."""
+        return mm.set_vram_to
+    
+    @property
+    def cpu_state(self):
+        """Current CPU state (CPUState enum value)."""
+        return mm.cpu_state
+    
+    # Memory values
+    @property
+    def total_vram(self):
+        """Total VRAM in MB."""
+        return mm.total_vram
+    
+    @property
+    def total_ram(self):
+        """Total RAM in MB."""
+        return mm.total_ram
+    
+    # Availability flags
+    @property
+    def lowvram_available(self):
+        """Whether low VRAM mode is available."""
+        return mm.lowvram_available
+    
+    @property
+    def directml_enabled(self):
+        """Whether DirectML is enabled."""
+        return mm.directml_enabled
+    
+    @property
+    def xpu_available(self):
+        """Whether Intel XPU is available."""
+        return mm.xpu_available
+    
+    @property
+    def npu_available(self):
+        """Whether Ascend NPU is available."""
+        return mm.npu_available
+    
+    @property
+    def mlu_available(self):
+        """Whether MLU is available."""
+        return mm.mlu_available
+    
+    @property
+    def ixuca_available(self):
+        """Whether IXUCA is available."""
+        return mm.ixuca_available
+    
+    # Version info
+    @property
+    def torch_version(self):
+        """Torch version string."""
+        return mm.torch_version
+    
+    @property
+    def torch_version_numeric(self):
+        """Torch version as (major, minor) tuple."""
+        return mm.torch_version_numeric
+    
+    # Optional DirectML device (may not exist in all contexts)
+    @property
+    def directml_device(self):
+        """DirectML device if directml_enabled, else None."""
+        return getattr(mm, 'directml_device', None)
+
     def get_supported_float8_types(self):
         return mm.get_supported_float8_types()
 
