@@ -11,6 +11,7 @@ import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 
 from .extension_wrapper import ComfyNodeExtension
+from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +64,41 @@ async def load_isolated_node(
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
 
-    from comfy.isolation import _RUNNING_EXTENSIONS
-    _RUNNING_EXTENSIONS[extension_name] = extension
+    # Try cache first (lazy spawn)
+    if is_cache_valid(node_dir, manifest_path, venv_root):
+        cached_data = load_from_cache(node_dir, venv_root)
+        if cached_data:
+            logger.info(f"][ {extension_name} loaded from cache")
+            specs: List[Tuple[str, str, type]] = []
+            for node_name, details in cached_data.items():
+                stub_cls = build_stub_class(node_name, details, extension)
+                specs.append((node_name, details.get("display_name", node_name), stub_cls))
+            return specs
+
+    # Cache miss - spawn process and get metadata
+    logger.info(f"][ {extension_name} cache miss, spawning process for metadata")
 
     remote_nodes: Dict[str, str] = await extension.list_nodes()
     if not remote_nodes:
         return []
 
     specs: List[Tuple[str, str, type]] = []
+    cache_data: Dict[str, Dict] = {}
+    
     for node_name, display_name in remote_nodes.items():
         details = await extension.get_node_details(node_name)
         details["display_name"] = display_name
+        cache_data[node_name] = details
         stub_cls = build_stub_class(node_name, details, extension)
         specs.append((node_name, display_name, stub_cls))
+
+    # Save metadata to cache for future runs
+    save_to_cache(node_dir, venv_root, cache_data, manifest_path)
+    logger.info(f"][ {extension_name} metadata cached")
+
+    # EJECT: Kill process after getting metadata (will respawn on first execution)
+    logger.info(f"][ {extension_name} ejecting after metadata extraction")
+    extension.stop()
 
     return specs
 

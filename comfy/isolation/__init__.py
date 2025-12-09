@@ -125,8 +125,33 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     return list(_ISOLATED_NODE_SPECS)
 
 
+def _get_class_types_for_extension(extension_name: str) -> Set[str]:
+    """Get all node class types (node names) belonging to an extension."""
+    extension = _RUNNING_EXTENSIONS.get(extension_name)
+    if not extension:
+        return set()
+    
+    ext_path = Path(extension.module_path)
+    class_types = set()
+    for spec in _ISOLATED_NODE_SPECS:
+        if spec.module_path.resolve() == ext_path.resolve():
+            class_types.add(spec.node_name)
+    
+    return class_types
+
+
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
-    pass
+    """Evict running extensions not needed for current execution."""
+    for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
+        ext_class_types = _get_class_types_for_extension(ext_name)
+        
+        # If NONE of this extension's nodes are in the execution graph → evict
+        if not ext_class_types.intersection(needed_class_types):
+            logger.info(
+                f"][ {ext_name} isolated custom_node not in execution graph, evicting"
+            )
+            extension.stop()
+            del _RUNNING_EXTENSIONS[ext_name]
 
 
 def get_claimed_paths() -> Set[Path]:

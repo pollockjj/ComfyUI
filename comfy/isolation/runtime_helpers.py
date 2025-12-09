@@ -27,7 +27,15 @@ def build_stub_class(
     restored_input_types = restore_input_types(info.get("input_types", {}))
 
     async def _execute(self, **inputs):
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Check if we need to spawn (loud logging)
+        if not extension._process_initialized:
+            logger.warning(f"][ {extension.name} - just-in-time spawning of isolated custom_node")
+        
         extension.ensure_process_started()
+        from comfy.isolation import _RUNNING_EXTENSIONS
         running_extensions[extension.name] = extension
         try:
             from pyisolate._internal.model_serialization import (
