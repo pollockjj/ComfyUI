@@ -15,21 +15,21 @@ def initialize_host_process() -> None:
     from .proxies.model_management_proxy import ModelManagementProxy
     from .proxies.progress_proxy import ProgressProxy
     from .proxies.prompt_server_proxy import PromptServerProxy
+    from .vae_proxy import VAERegistry
 
     FolderPathsProxy()
     ModelManagementProxy()
     ProgressProxy()
     PromptServerProxy()
+    VAERegistry()
 
     if os.environ.get("PYISOLATE_DEV") == "1":
         from .development.proxies.nodes_proxy import NodesProxy
         from .development.proxies.utils_proxy import UtilsProxy
-        from .clip_proxy import CLIPRegistry
         from .development.model_patcher_proxy import ModelPatcherRegistry
-        from .vae_proxy import VAERegistry
+        from .clip_proxy import CLIPRegistry
 
         NodesProxy()
         UtilsProxy()
         CLIPRegistry()
         ModelPatcherRegistry()
-        VAERegistry()

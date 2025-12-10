@@ -1,6 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import torch
+from types import SimpleNamespace
+
+
+class AttrDict(dict):
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError as e:
+            raise AttributeError(item) from e
+
+    def copy(self):
+        return AttrDict(super().copy())
 import importlib
 import inspect
 import json
@@ -265,12 +278,25 @@ class ComfyNodeExtension(ExtensionBase):
         return self.remote_objects[object_id]
 
     def _wrap_unpicklable_objects(self, data: Any) -> Any:
-        import torch
-
         if isinstance(data, (str, int, float, bool, type(None))):
             return data
         if isinstance(data, torch.Tensor):
-            return data
+            return data.detach() if data.requires_grad else data
+
+        # Special-case clip vision outputs: preserve attribute access by packing fields
+        if hasattr(data, "penultimate_hidden_states") or hasattr(data, "last_hidden_state"):
+            fields = {}
+            for attr in ("penultimate_hidden_states", "last_hidden_state", "image_embeds", "text_embeds"):
+                if hasattr(data, attr):
+                    try:
+                        fields[attr] = self._wrap_unpicklable_objects(getattr(data, attr))
+                    except Exception:
+                        pass
+            if fields:
+                return {"__pyisolate_attribute_container__": True, "data": fields}
+
+        # Avoid converting arbitrary objects with stateful methods (models, etc.)
+        # They will be handled via RemoteObjectHandle below.
 
         type_name = type(data).__name__
         if type_name == 'ModelPatcherProxy':
@@ -284,7 +310,8 @@ class ComfyNodeExtension(ExtensionBase):
             wrapped = [self._wrap_unpicklable_objects(item) for item in data]
             return tuple(wrapped) if isinstance(data, tuple) else wrapped
         if isinstance(data, dict):
-            return {k: self._wrap_unpicklable_objects(v) for k, v in data.items()}
+            converted_dict = {k: self._wrap_unpicklable_objects(v) for k, v in data.items()}
+            return {"__pyisolate_attrdict__": True, "data": converted_dict}
 
         object_id = str(uuid.uuid4())
         self.remote_objects[object_id] = data

@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Tuple
 import yaml
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
+from .vae_proxy import VAERegistry
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
@@ -58,7 +59,7 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
-        "apis": [],
+        "apis": [VAERegistry],
     }
 
     extension = manager.load_extension(extension_config)

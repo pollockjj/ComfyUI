@@ -29,6 +29,40 @@ logger = logging.getLogger(__name__)
 # Host/child detection
 IS_CHILD_PROCESS = os.environ.get("PYISOLATE_CHILD") == "1"
 
+_thread_local = threading.local()
+
+
+def _get_thread_loop() -> asyncio.AbstractEventLoop:
+    """Return a per-thread event loop, creating it if missing."""
+    loop = getattr(_thread_local, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _thread_local.loop = loop
+    return loop
+
+
+def _run_coro_in_new_loop(coro):
+    """Execute coroutine in a fresh thread-bound event loop and return result."""
+    result_box = {}
+    exc_box = {}
+
+    def runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result_box["value"] = loop.run_until_complete(coro)
+        except Exception as exc:  # noqa: BLE001
+            exc_box["exc"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join()
+    if "exc" in exc_box:
+        raise exc_box["exc"]
+    return result_box.get("value")
+
 
 def _detach_if_grad(obj):
     """Detach tensors that require grad to make them multiprocess-safe."""
@@ -214,36 +248,60 @@ class VAEProxy:
     def encode(self, pixels):
         """Encode pixels → latent (async via RPC)."""
         rpc = self._get_rpc()
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(rpc.encode(self._instance_id, pixels))
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.encode(self._instance_id, pixels))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.encode(self._instance_id, pixels))
     
     def encode_tiled(self, pixels, tile_x: int = 512, tile_y: int = 512, overlap: int = 64):
         """Tiled encode for large images."""
         rpc = self._get_rpc()
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(
-            rpc.encode_tiled(self._instance_id, pixels, tile_x, tile_y, overlap)
-        )
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.encode_tiled(self._instance_id, pixels, tile_x, tile_y, overlap)
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.encode_tiled(self._instance_id, pixels, tile_x, tile_y, overlap)
+            )
     
     def decode(self, samples):
         """Decode latent → pixels (async via RPC)."""
         rpc = self._get_rpc()
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(rpc.decode(self._instance_id, samples))
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.decode(self._instance_id, samples))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.decode(self._instance_id, samples))
     
     def decode_tiled(self, samples, tile_x: int = 64, tile_y: int = 64, overlap: int = 16):
         """Tiled decode for large latents."""
         rpc = self._get_rpc()
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(
-            rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap)
-        )
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap)
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap)
+            )
     
     def get_sd(self):
         """Get VAE state dict."""
         rpc = self._get_rpc()
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(rpc.get_sd(self._instance_id))
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.get_sd(self._instance_id))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.get_sd(self._instance_id))
     
     def __getstate__(self):
         """Pickle support: only serialize instance_id."""
@@ -257,3 +315,8 @@ class VAEProxy:
     
     def __repr__(self):
         return f"<VAEProxy {self._instance_id}>"
+
+
+# Registry instantiated in host_hooks.initialize_host_process; keep optional safety
+if not IS_CHILD_PROCESS:
+    _VAE_REGISTRY_SINGLETON = VAERegistry()
