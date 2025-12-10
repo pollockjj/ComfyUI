@@ -24,10 +24,12 @@ def initialize_host_process() -> None:
     if os.environ.get("PYISOLATE_DEV") == "1":
         from .development.proxies.nodes_proxy import NodesProxy
         from .development.proxies.utils_proxy import UtilsProxy
-        from .development.clip_proxy import CLIPRegistry
+        from .clip_proxy import CLIPRegistry
         from .development.model_patcher_proxy import ModelPatcherRegistry
+        from .vae_proxy import VAERegistry
 
         NodesProxy()
         UtilsProxy()
         CLIPRegistry()
         ModelPatcherRegistry()
+        VAERegistry()

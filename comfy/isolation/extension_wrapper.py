@@ -277,6 +277,8 @@ class ComfyNodeExtension(ExtensionBase):
             return {"__type__": "ModelPatcherRef", "model_id": data._instance_id}
         if type_name == 'CLIPProxy':
             return {"__type__": "CLIPRef", "clip_id": data._instance_id}
+        if type_name == 'VAEProxy':
+            return {"__type__": "VAERef", "vae_id": data._instance_id}
 
         if isinstance(data, (list, tuple)):
             wrapped = [self._wrap_unpicklable_objects(item) for item in data]
@@ -296,7 +298,7 @@ class ComfyNodeExtension(ExtensionBase):
 
         if isinstance(data, dict):
             ref_type = data.get("__type__")
-            if ref_type in ("CLIPRef", "ModelPatcherRef"):
+            if ref_type in ("CLIPRef", "ModelPatcherRef", "VAERef"):
                 from pyisolate._internal.model_serialization import deserialize_proxy_result
                 return deserialize_proxy_result(data)
             return {k: self._resolve_remote_objects(v) for k, v in data.items()}
