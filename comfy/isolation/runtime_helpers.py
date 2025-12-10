@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Set, TYPE_CHECKING
 
@@ -42,11 +43,20 @@ def build_stub_class(
                 serialize_for_isolation,
                 deserialize_from_isolation,
             )
+            prev_child = os.environ.pop("PYISOLATE_CHILD", None)
             serialized = serialize_for_isolation(inputs)
+            try:
+                model_val = serialized.get("model") if isinstance(serialized, dict) else None
+                logging.warning("[runtime_helpers] serialized model type=%s value=%s", type(model_val), model_val)
+            except Exception:
+                pass
             result = await extension.execute_node(node_name, **serialized)
             return await deserialize_from_isolation(result, extension)
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
+        finally:
+            if prev_child is not None:
+                os.environ["PYISOLATE_CHILD"] = prev_child
 
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:

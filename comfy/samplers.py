@@ -295,9 +295,11 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                 patches = p.patches
 
             batch_chunks = len(cond_or_uncond)
-            input_x = torch.cat(input_x)
+            target_device = model.load_device if hasattr(model, "load_device") else input_x[0].device
+            input_x = torch.cat(input_x).to(target_device)
             c = cond_cat(c)
-            timestep_ = torch.cat([timestep] * batch_chunks)
+            timestep_ = torch.cat([timestep] * batch_chunks).to(target_device)
+            mult = [m.to(target_device) if hasattr(m, "to") else m for m in mult]
 
             transformer_options = model.current_patcher.apply_hooks(hooks=hooks)
             if 'transformer_options' in model_options:
@@ -328,9 +330,16 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
             for o in range(batch_chunks):
                 cond_index = cond_or_uncond[o]
                 a = area[o]
+                target_dev = out_conds[cond_index].device
+                out_t = output[o]
+                if hasattr(out_t, "device") and out_t.device != target_dev:
+                    out_t = out_t.to(target_dev)
+                mult_t = mult[o]
+                if hasattr(mult_t, "device") and mult_t.device != target_dev:
+                    mult_t = mult_t.to(target_dev)
                 if a is None:
-                    out_conds[cond_index] += output[o] * mult[o]
-                    out_counts[cond_index] += mult[o]
+                    out_conds[cond_index] += out_t * mult_t
+                    out_counts[cond_index] += mult_t
                 else:
                     out_c = out_conds[cond_index]
                     out_cts = out_counts[cond_index]
@@ -394,13 +403,24 @@ class KSamplerX0Inpaint:
         self.sigmas = sigmas
     def __call__(self, x, sigma, denoise_mask, model_options={}, seed=None):
         if denoise_mask is not None:
+            if denoise_mask.device != x.device:
+                denoise_mask = denoise_mask.to(x.device)
             if "denoise_mask_function" in model_options:
                 denoise_mask = model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
             latent_mask = 1. - denoise_mask
-            x = x * denoise_mask + self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=self.latent_image) * latent_mask
+            latent_image = self.latent_image
+            if hasattr(latent_image, "device") and latent_image.device != x.device:
+                latent_image = latent_image.to(x.device)
+            scaled = self.inner_model.inner_model.scale_latent_inpaint(x=x, sigma=sigma, noise=self.noise, latent_image=latent_image)
+            if hasattr(scaled, "device") and scaled.device != x.device:
+                scaled = scaled.to(x.device)
+            x = x * denoise_mask + scaled * latent_mask
         out = self.inner_model(x, sigma, model_options=model_options, seed=seed)
         if denoise_mask is not None:
-            out = out * denoise_mask + self.latent_image * latent_mask
+            latent_image = self.latent_image
+            if hasattr(latent_image, "device") and latent_image.device != out.device:
+                latent_image = latent_image.to(out.device)
+            out = out * denoise_mask + latent_image * latent_mask
         return out
 
 def simple_scheduler(model_sampling, steps):

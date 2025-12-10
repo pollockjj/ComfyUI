@@ -106,7 +106,15 @@ def model_sampling(model_config, model_type):
         s = comfy.model_sampling.ModelSamplingCosmosRFlow
 
     class ModelSampling(s, c):
-        pass
+        def __reduce__(self):
+            """Ensure pickling yields a proxy instead of failing on local class."""
+            try:
+                from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+                registry = ModelSamplingRegistry()
+                ms_id = registry.register(self)
+                return (ModelSamplingProxy, (ms_id,))
+            except Exception:
+                return (str, ("ModelSamplingOpaque",))
 
     return ModelSampling(model_config)
 

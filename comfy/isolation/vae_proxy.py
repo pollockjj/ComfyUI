@@ -185,20 +185,20 @@ class VAERegistry(ProxiedSingleton):
             vae.encode_tiled(pixels, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
         )
     
-    async def decode(self, instance_id: str, samples):
+    async def decode(self, instance_id: str, samples, **kwargs):
         """RPC: Decode latent to pixels via VAE.decode()."""
         vae = self._get_instance(instance_id)
         if vae is None:
             raise ValueError(f"VAE {instance_id} not found in registry")
-        return _detach_if_grad(vae.decode(samples))
+        return _detach_if_grad(vae.decode(samples, **kwargs))
     
-    async def decode_tiled(self, instance_id: str, samples, tile_x: int = 64, tile_y: int = 64, overlap: int = 16):
+    async def decode_tiled(self, instance_id: str, samples, tile_x: int = 64, tile_y: int = 64, overlap: int = 16, **kwargs):
         """RPC: Tiled decode for large latents."""
         vae = self._get_instance(instance_id)
         if vae is None:
             raise ValueError(f"VAE {instance_id} not found in registry")
         return _detach_if_grad(
-            vae.decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
+            vae.decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs)
         )
     
     async def get_sd(self, instance_id: str):
@@ -269,28 +269,28 @@ class VAEProxy:
                 rpc.encode_tiled(self._instance_id, pixels, tile_x, tile_y, overlap)
             )
     
-    def decode(self, samples):
+    def decode(self, samples, **kwargs):
         """Decode latent → pixels (async via RPC)."""
         rpc = self._get_rpc()
         try:
             asyncio.get_running_loop()
-            return _run_coro_in_new_loop(rpc.decode(self._instance_id, samples))
+            return _run_coro_in_new_loop(rpc.decode(self._instance_id, samples, **kwargs))
         except RuntimeError:
             loop = _get_thread_loop()
-            return loop.run_until_complete(rpc.decode(self._instance_id, samples))
-    
-    def decode_tiled(self, samples, tile_x: int = 64, tile_y: int = 64, overlap: int = 16):
+            return loop.run_until_complete(rpc.decode(self._instance_id, samples, **kwargs))
+
+    def decode_tiled(self, samples, tile_x: int = 64, tile_y: int = 64, overlap: int = 16, **kwargs):
         """Tiled decode for large latents."""
         rpc = self._get_rpc()
         try:
             asyncio.get_running_loop()
             return _run_coro_in_new_loop(
-                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap)
+                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap, **kwargs)
             )
         except RuntimeError:
             loop = _get_thread_loop()
             return loop.run_until_complete(
-                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap)
+                rpc.decode_tiled(self._instance_id, samples, tile_x, tile_y, overlap, **kwargs)
             )
     
     def get_sd(self):

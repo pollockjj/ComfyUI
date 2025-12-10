@@ -1,4 +1,6 @@
 import math
+import os
+import logging
 from functools import partial
 
 from scipy import integrate
@@ -12,6 +14,8 @@ from . import deis
 from . import sa_solver
 import comfy.model_patcher
 import comfy.model_sampling
+
+logger = logging.getLogger(__name__)
 
 def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
@@ -185,6 +189,29 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
+    target_device = sigmas.device
+    if x.device != target_device:
+        x = x.to(target_device)
+        s_in = s_in.to(target_device)
+    else:
+        s_in = s_in.to(target_device)
+    debug_devices = os.environ.get("PYISOLATE_DEBUG_DEVICES") == "1"
+
+    def _dev(obj):
+        return getattr(obj, "device", None)
+
+    if debug_devices:
+        inner = getattr(model, "inner_model", None)
+        inner_dev = None
+        if inner is not None:
+            inner_dev = getattr(inner, "device", None)
+            if inner_dev is None and hasattr(inner, "model"):
+                inner_dev = getattr(inner.model, "device", None)
+        logger.warning(
+            "[PyIsoDevice] sample_euler start: x=%s sigmas=%s first_sigma=%s inner_dev=%s extra_keys=%s",
+            _dev(x), _dev(sigmas), sigmas[0].device if hasattr(sigmas, "device") else None, inner_dev, list(extra_args.keys()),
+        )
+
     for i in trange(len(sigmas) - 1, disable=disable):
         if s_churn > 0:
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
@@ -192,6 +219,11 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
         else:
             gamma = 0
             sigma_hat = sigmas[i]
+
+        if debug_devices and i == 0:
+            logger.warning(
+                "[PyIsoDevice] iter0: x=%s sigma_hat=%s sigmas[i]=%s s_in=%s", _dev(x), _dev(sigma_hat), _dev(sigmas[i]), _dev(s_in)
+            )
 
         if gamma > 0:
             eps = torch.randn_like(x) * s_noise

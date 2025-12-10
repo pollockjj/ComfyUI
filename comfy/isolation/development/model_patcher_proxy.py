@@ -269,6 +269,18 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """
         instance = self._get_instance(instance_id)
         result = instance.get_model_object(name)
+        # Special-case model_sampling to ensure it goes through ModelSamplingRegistry
+        if name == "model_sampling":
+            from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+            registry = ModelSamplingRegistry()
+            sampling_id = registry.register(result)
+            proxy = ModelSamplingProxy(sampling_id, registry)
+            logger.debug(
+                f"][[ModelPatcherRegistry] get_model_object({instance_id}, '{name}') "
+                f"returned ModelSamplingProxy({sampling_id})"
+            )
+            return proxy
+
         logger.debug(
             f"][[ModelPatcherRegistry] get_model_object({instance_id}, '{name}') "
             f"returned type: {type(result).__name__}"
@@ -354,6 +366,165 @@ class ModelPatcherRegistry(ProxiedSingleton):
             f"][[ModelPatcherRegistry] get_offload_device({instance_id}) = {device}"
         )
         return device
+
+    @_timing_decorator
+    async def get_hook_mode(self, instance_id: str) -> Any:
+        """RPC: Get hook_mode property (used by samplers)."""
+        instance = self._get_instance(instance_id)
+        return getattr(instance, "hook_mode", None)
+
+    @_timing_decorator
+    async def set_hook_mode(self, instance_id: str, value: Any) -> None:
+        """RPC: Set hook_mode property (used by samplers)."""
+        instance = self._get_instance(instance_id)
+        setattr(instance, "hook_mode", value)
+
+    @_timing_decorator
+    async def model_dtype(self, instance_id: str) -> Any:
+        """RPC: Get model dtype (used by sampler helpers)."""
+        instance = self._get_instance(instance_id)
+        return instance.model_dtype()
+
+    @_timing_decorator
+    async def pre_run(self, instance_id: str) -> None:
+        """RPC: Forward pre_run lifecycle hook."""
+        instance = self._get_instance(instance_id)
+        instance.pre_run()
+
+    @_timing_decorator
+    async def cleanup(self, instance_id: str) -> None:
+        """RPC: Forward cleanup lifecycle hook."""
+        instance = self._get_instance(instance_id)
+        instance.cleanup()
+
+    @_timing_decorator
+    async def restore_hook_patches(self, instance_id: str) -> None:
+        """RPC: Forward restore_hook_patches lifecycle hook."""
+        instance = self._get_instance(instance_id)
+        instance.restore_hook_patches()
+
+    @_timing_decorator
+    async def register_all_hook_patches(self, instance_id: str, hooks: Any, target_dict: Any, model_options: Any, registered: Any) -> None:
+        """RPC: Forward register_all_hook_patches used by sampler helpers."""
+        instance = self._get_instance(instance_id)
+        instance.register_all_hook_patches(hooks, target_dict, model_options, registered)
+
+    @_timing_decorator
+    async def get_nested_additional_models(self, instance_id: str) -> Any:
+        """RPC: Return nested additional models list."""
+        instance = self._get_instance(instance_id)
+        return instance.get_nested_additional_models()
+
+    @_timing_decorator
+    async def model_patches_models(self, instance_id: str) -> Any:
+        """RPC: Return list of patched models for loading decisions."""
+        instance = self._get_instance(instance_id)
+        return instance.model_patches_models()
+
+    @_timing_decorator
+    async def get_parent(self, instance_id: str) -> Any:
+        """RPC: Get parent attribute of model patcher (may be None)."""
+        instance = self._get_instance(instance_id)
+        return getattr(instance, "parent", None)
+
+    @_timing_decorator
+    async def current_loaded_device(self, instance_id: str) -> Any:
+        """RPC: Get current_loaded_device() from model patcher."""
+        instance = self._get_instance(instance_id)
+        return instance.current_loaded_device()
+
+    @_timing_decorator
+    async def model_size(self, instance_id: str) -> Any:
+        """RPC: Get model_size() from underlying model patcher."""
+        instance = self._get_instance(instance_id)
+        return instance.model_size()
+
+    @_timing_decorator
+    async def loaded_size(self, instance_id: str) -> Any:
+        """RPC: Get loaded_size() from underlying model patcher."""
+        instance = self._get_instance(instance_id)
+        return instance.loaded_size()
+
+    @_timing_decorator
+    async def model_patches_to(self, instance_id: str, device: Any) -> Any:
+        """RPC: Move model patches to target device."""
+        instance = self._get_instance(instance_id)
+        return instance.model_patches_to(device)
+
+    @_timing_decorator
+    async def partially_load(self, instance_id: str, device: Any, extra_memory: Any, force_patch_weights: bool = False) -> Any:
+        """RPC: Partially load model to device with optional extra memory usage."""
+        instance = self._get_instance(instance_id)
+        return instance.partially_load(device, extra_memory, force_patch_weights=force_patch_weights)
+
+    @_timing_decorator
+    async def process_latent_in(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call model.process_latent_in(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        return instance.model.process_latent_in(*args, **kwargs)
+
+    @_timing_decorator
+    async def process_latent_out(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call model.process_latent_out(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        result = instance.model.process_latent_out(*args, **kwargs)
+        try:
+            target = None
+            if args and hasattr(args[0], "device"):
+                target = args[0].device
+            elif kwargs:
+                for v in kwargs.values():
+                    if hasattr(v, "device"):
+                        target = v.device
+                        break
+            if target is not None and hasattr(result, "to"):
+                return result.to(target)
+        except Exception:
+            pass
+        return result
+
+    @_timing_decorator
+    async def scale_latent_inpaint(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call model.scale_latent_inpaint(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        result = instance.model.scale_latent_inpaint(*args, **kwargs)
+        try:
+            target = None
+            if args and hasattr(args[0], "device"):
+                target = args[0].device
+            elif kwargs:
+                for v in kwargs.values():
+                    if hasattr(v, "device"):
+                        target = v.device
+                        break
+            if target is not None and hasattr(result, "to"):
+                return result.to(target)
+        except Exception:
+            pass
+        return result
+
+    @_timing_decorator
+    async def get_model_sampling(self, instance_id: str) -> Any:
+        """RPC: Return model_sampling via proxy registration."""
+        instance = self._get_instance(instance_id)
+        ms_obj = instance.model.model_sampling
+        from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+        ms_id = ModelSamplingRegistry().register(ms_obj)
+        return ModelSamplingProxy(ms_id)
+
+    @_timing_decorator
+    async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
+        """RPC: Forward prepare_state on current_patcher (scheduler state)."""
+        instance = self._get_instance(instance_id)
+        cp = getattr(instance.model, "current_patcher", instance)
+        return cp.prepare_state(timestep)
+
+    @_timing_decorator
+    async def apply_hooks(self, instance_id: str, hooks: Any) -> Any:
+        """RPC: Forward apply_hooks on current_patcher."""
+        instance = self._get_instance(instance_id)
+        cp = getattr(instance.model, "current_patcher", instance)
+        return cp.apply_hooks(hooks=hooks)
     
     @_timing_decorator
     async def get_size(self, instance_id: str) -> int:
@@ -375,6 +546,20 @@ class ModelPatcherRegistry(ProxiedSingleton):
             f"][[ModelPatcherRegistry] get_size({instance_id}) = {size} bytes"
         )
         return size
+
+    @_timing_decorator
+    async def get_wrappers(self, instance_id: str) -> Any:
+        """RPC: Get wrappers mapping (used by sampler helpers)."""
+        instance = self._get_instance(instance_id)
+        # Wrappers can contain local classes that are not pickleable; return empty
+        return {}
+
+    @_timing_decorator
+    async def get_callbacks(self, instance_id: str) -> Any:
+        """RPC: Get callbacks mapping (used by sampler helpers)."""
+        instance = self._get_instance(instance_id)
+        # Callbacks may capture local objects; avoid sending across the wire
+        return {}
     
     # ============================================================
     # Sync versions for host-side direct calls (avoid async loop issues)
@@ -393,7 +578,13 @@ class ModelPatcherRegistry(ProxiedSingleton):
     def get_model_object_sync(self, instance_id: str, name: str) -> Any:
         """Sync version of get_model_object() for host-side calls."""
         instance = self._get_instance(instance_id)
-        return instance.get_model_object(name)
+        result = instance.get_model_object(name)
+        if name == "model_sampling":
+            from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+            registry = ModelSamplingRegistry()
+            sampling_id = registry.register(result)
+            return ModelSamplingProxy(sampling_id, registry)
+        return result
     
     def get_model_options_sync(self, instance_id: str) -> dict:
         """Sync version of get_model_options() for host-side calls."""
@@ -420,6 +611,129 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """Sync version of get_size() for host-side calls."""
         instance = self._get_instance(instance_id)
         return instance.size
+
+    def get_wrappers_sync(self, instance_id: str) -> Any:
+        return {}
+
+    def get_callbacks_sync(self, instance_id: str) -> Any:
+        return {}
+
+    def get_hook_mode_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return getattr(instance, "hook_mode", None)
+
+    def set_hook_mode_sync(self, instance_id: str, value: Any) -> None:
+        instance = self._get_instance(instance_id)
+        setattr(instance, "hook_mode", value)
+
+    def model_dtype_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model_dtype()
+
+    def pre_run_sync(self, instance_id: str) -> None:
+        instance = self._get_instance(instance_id)
+        instance.pre_run()
+
+    def cleanup_sync(self, instance_id: str) -> None:
+        instance = self._get_instance(instance_id)
+        instance.cleanup()
+
+    def restore_hook_patches_sync(self, instance_id: str) -> None:
+        instance = self._get_instance(instance_id)
+        instance.restore_hook_patches()
+
+    def register_all_hook_patches_sync(self, instance_id: str, hooks: Any, target_dict: Any, model_options: Any, registered: Any) -> None:
+        instance = self._get_instance(instance_id)
+        instance.register_all_hook_patches(hooks, target_dict, model_options, registered)
+
+    def get_nested_additional_models_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.get_nested_additional_models()
+
+    def model_patches_models_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model_patches_models()
+
+    def get_parent_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return getattr(instance, "parent", None)
+
+    def current_loaded_device_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.current_loaded_device()
+
+    def model_size_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model_size()
+
+    def loaded_size_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.loaded_size()
+
+    def model_patches_to_sync(self, instance_id: str, device: Any) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model_patches_to(device)
+
+    def partially_load_sync(self, instance_id: str, device: Any, extra_memory: Any, force_patch_weights: bool = False) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.partially_load(device, extra_memory, force_patch_weights=force_patch_weights)
+
+    def process_latent_in_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model.process_latent_in(*args, **kwargs)
+
+    def process_latent_out_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        instance = self._get_instance(instance_id)
+        result = instance.model.process_latent_out(*args, **kwargs)
+        try:
+            target = None
+            if args and hasattr(args[0], "device"):
+                target = args[0].device
+            elif kwargs:
+                for v in kwargs.values():
+                    if hasattr(v, "device"):
+                        target = v.device
+                        break
+            if target is not None and hasattr(result, "to"):
+                return result.to(target)
+        except Exception:
+            pass
+        return result
+
+    def scale_latent_inpaint_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        instance = self._get_instance(instance_id)
+        result = instance.model.scale_latent_inpaint(*args, **kwargs)
+        try:
+            target = None
+            if args and hasattr(args[0], "device"):
+                target = args[0].device
+            elif kwargs:
+                for v in kwargs.values():
+                    if hasattr(v, "device"):
+                        target = v.device
+                        break
+            if target is not None and hasattr(result, "to"):
+                return result.to(target)
+        except Exception:
+            pass
+        return result
+
+    def get_model_sampling_sync(self, instance_id: str) -> Any:
+        instance = self._get_instance(instance_id)
+        ms_obj = instance.model.model_sampling
+        from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+        ms_id = ModelSamplingRegistry().register(ms_obj)
+        return ModelSamplingProxy(ms_id)
+
+    def prepare_state_sync(self, instance_id: str, timestep: Any) -> Any:
+        instance = self._get_instance(instance_id)
+        cp = getattr(instance.model, "current_patcher", instance)
+        return cp.prepare_state(timestep)
+
+    def apply_hooks_sync(self, instance_id: str, hooks: Any) -> Any:
+        instance = self._get_instance(instance_id)
+        cp = getattr(instance.model, "current_patcher", instance)
+        return cp.apply_hooks(hooks=hooks)
     
     # ============================================================
     # Inner model access (for model.model.model_config patterns)
@@ -453,17 +767,90 @@ class ModelPatcherRegistry(ProxiedSingleton):
         Used for: model.model.latent_format, model.model.model_type, etc.
         """
         instance = self._get_instance(instance_id)
-        attr = getattr(instance.model, name)
-        logger.debug(
-            f"][[ModelPatcherRegistry] get_inner_model_attr({instance_id}, '{name}') "
-            f"type: {type(attr).__name__}"
-        )
-        return attr
+        try:
+            attr = getattr(instance.model, name)
+            logger.debug(
+                f"][[ModelPatcherRegistry] get_inner_model_attr({instance_id}, '{name}') "
+                f"type: {type(attr).__name__}"
+            )
+            return attr
+        except AttributeError:
+            logger.debug(
+                f"][[ModelPatcherRegistry] get_inner_model_attr({instance_id}, '{name}') missing attribute"
+            )
+            return None
+
+    @_timing_decorator
+    async def inner_model_memory_required(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call inner model.memory_required(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        return instance.model.memory_required(*args, **kwargs)
+
+    @_timing_decorator
+    async def inner_model_apply_model(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call inner model.apply_model(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        import torch
+
+        target = getattr(instance, "load_device", None)
+        if target is None and args and hasattr(args[0], "device"):
+            target = args[0].device
+        elif target is None:
+            for v in kwargs.values():
+                if hasattr(v, "device"):
+                    target = v.device
+                    break
+
+        def _move(obj):
+            if target is None:
+                return obj
+            if isinstance(obj, (tuple, list)):
+                return type(obj)(_move(o) for o in obj)
+            if hasattr(obj, "to"):
+                return obj.to(target)
+            return obj
+
+        moved_args = tuple(_move(a) for a in args)
+        moved_kwargs = {k: _move(v) for k, v in kwargs.items()}
+        result = instance.model.apply_model(*moved_args, **moved_kwargs)
+        return _move(result)
     
     def get_inner_model_attr_sync(self, instance_id: str, name: str) -> Any:
         """Sync version of get_inner_model_attr() for host-side calls."""
         instance = self._get_instance(instance_id)
-        return getattr(instance.model, name)
+        try:
+            return getattr(instance.model, name)
+        except AttributeError:
+            return None
+
+    def inner_model_memory_required_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        instance = self._get_instance(instance_id)
+        return instance.model.memory_required(*args, **kwargs)
+
+    def inner_model_apply_model_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        instance = self._get_instance(instance_id)
+        target = getattr(instance, "load_device", None)
+        if target is None and args and hasattr(args[0], "device"):
+            target = args[0].device
+        elif target is None:
+            for v in kwargs.values():
+                if hasattr(v, "device"):
+                    target = v.device
+                    break
+
+        def _move(obj):
+            if target is None:
+                return obj
+            if isinstance(obj, (tuple, list)):
+                return type(obj)(_move(o) for o in obj)
+            if hasattr(obj, "to"):
+                return obj.to(target)
+            return obj
+
+        moved_args = tuple(_move(a) for a in args)
+        moved_kwargs = {k: _move(v) for k, v in kwargs.items()}
+        result = instance.model.apply_model(*moved_args, **moved_kwargs)
+        return _move(result)
     
     # ============================================================
     # Object Patching (for ModelSamplingAdvanced etc)
@@ -916,11 +1303,96 @@ class ModelPatcherProxy:
     def offload_device(self) -> Any:
         """Get offload_device property."""
         return self._call_registry('get_offload_device')
+
+    @property
+    def current_loaded_device(self) -> Any:
+        """Get current_loaded_device() value."""
+        return self._call_registry('current_loaded_device')
+
+    def prepare_state(self, timestep):
+        """Prepare sampler state (delegated to current_patcher)."""
+        return self._call_registry('prepare_state', timestep)
+
+    def apply_hooks(self, hooks):
+        """Apply attention hooks via current_patcher."""
+        return self._call_registry('apply_hooks', hooks)
     
     @property
     def size(self) -> int:
         """Get model size in bytes."""
         return self._call_registry('get_size')
+
+    @property
+    def wrappers(self):
+        """Wrappers mapping used by sampler helpers."""
+        return self._call_registry('get_wrappers')
+
+    @property
+    def callbacks(self):
+        """Callbacks mapping used by sampler helpers."""
+        return self._call_registry('get_callbacks')
+
+    @property
+    def hook_mode(self):
+        """Forward hook_mode property used by samplers."""
+        return self._call_registry('get_hook_mode')
+
+    @hook_mode.setter
+    def hook_mode(self, value) -> None:
+        self._call_registry('set_hook_mode', value)
+
+    def model_dtype(self):
+        """Return model dtype (delegated)."""
+        return self._call_registry('model_dtype')
+
+    def pre_run(self) -> None:
+        """Lifecycle hook before sampling."""
+        return self._call_registry('pre_run')
+
+    def cleanup(self) -> None:
+        """Lifecycle cleanup after sampling."""
+        return self._call_registry('cleanup')
+
+    def restore_hook_patches(self) -> None:
+        """Restore hook patches after sampling."""
+        return self._call_registry('restore_hook_patches')
+
+    def register_all_hook_patches(self, hooks, target_dict, model_options, registered) -> None:
+        """Forward register_all_hook_patches used during sampler prep."""
+        return self._call_registry('register_all_hook_patches', hooks, target_dict, model_options, registered)
+
+    def get_nested_additional_models(self):
+        """Return nested additional models for sampler helpers."""
+        return self._call_registry('get_nested_additional_models')
+
+    def model_patches_models(self):
+        """Return patched models list for model_management.load_models_gpu."""
+        return self._call_registry('model_patches_models')
+
+    @property
+    def parent(self):
+        """Expose parent attribute (may be None)."""
+        return self._call_registry('get_parent')
+
+    def current_loaded_device(self):
+        """Expose current_loaded_device from model patcher."""
+        return self._call_registry('current_loaded_device')
+
+    def model_size(self):
+        """Expose model_size from model patcher."""
+        return self._call_registry('model_size')
+
+    def loaded_size(self):
+        """Expose loaded_size from model patcher."""
+        return self._call_registry('loaded_size')
+
+    def model_patches_to(self, device):
+        """Move model patches to device."""
+        return self._call_registry('model_patches_to', device)
+
+    def partially_load(self, device, extra_memory, force_patch_weights: bool = False):
+        """Partially load model to device."""
+        return self._call_registry('partially_load', device, extra_memory, force_patch_weights)
     
     # ============================================================
     # Object Patching Methods (needed for ModelSamplingAdvanced etc)
@@ -1107,8 +1579,101 @@ class _InnerModelProxy:
             raise AttributeError(name)
         
         # Supported attributes - add more as needed
-        if name in ('model_config', 'latent_format', 'model_type'):
+        if name in ('model_config', 'latent_format', 'model_type', 'extra_conds_shapes'):
             return self._get_inner_model_attr(name)
+
+        if name == 'memory_required':
+            def _memory_required(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'inner_model_memory_required')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'inner_model_memory_required_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _memory_required
+
+        if name == 'apply_model':
+            def _apply_model(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'inner_model_apply_model')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'inner_model_apply_model_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _apply_model
+
+        if name == 'process_latent_in':
+            def _process_latent_in(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'process_latent_in')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'process_latent_in_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _process_latent_in
+
+        if name == 'extra_conds':
+            return self._get_inner_model_attr('extra_conds')
+
+        if name == 'model_sampling':
+            if self._is_child:
+                from comfy.isolation.model_sampling_proxy import ModelSamplingProxy
+                from comfy.isolation.rpc_bridge import RpcBridge
+                bridge = RpcBridge()
+                proxy_id = bridge.run_sync(self._registry.get_model_sampling(self._instance_id))._instance_id
+                return ModelSamplingProxy(proxy_id)
+            else:
+                return self._registry.get_model_sampling_sync(self._instance_id)
+
+        if name == 'current_patcher':
+            if self._is_child:
+                return ModelPatcherProxy(self._instance_id, self._registry, manage_lifecycle=False)
+            return self._get_inner_model_attr('current_patcher')
+
+        if name == 'scale_latent_inpaint':
+            def _scale_latent_inpaint(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'scale_latent_inpaint')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'scale_latent_inpaint_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _scale_latent_inpaint
+
+        if name == 'process_latent_out':
+            def _process_latent_out(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'process_latent_out')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'process_latent_out_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _process_latent_out
+
+        if name == 'load_device':
+            if self._is_child:
+                from comfy.isolation.rpc_bridge import RpcBridge
+                bridge = RpcBridge()
+                method = getattr(self._registry, 'get_inner_model_attr')
+                try:
+                    return bridge.run_sync(method(self._instance_id, 'load_device'))
+                except Exception:
+                    return None
+            else:
+                try:
+                    return self._get_inner_model_attr('load_device')
+                except AttributeError:
+                    return None
         
         # For other attributes, log and raise
         logger.warning(

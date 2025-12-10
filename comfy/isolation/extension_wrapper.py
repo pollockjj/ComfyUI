@@ -26,6 +26,8 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Tuple
 
 from pyisolate import ExtensionBase
+from comfy.isolation.development.model_patcher_proxy import ModelPatcherRegistry
+from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
 
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
@@ -85,6 +87,13 @@ class ComfyNodeExtension(ExtensionBase):
 
     async def on_module_loaded(self, module: Any) -> None:
         self._module = module
+        # Attach shared registries to host RPC so co-isolated samplers use the host registry
+        try:
+            ModelPatcherRegistry.use_remote(self._rpc)
+            ModelSamplingRegistry.use_remote(self._rpc)
+        except Exception as e:
+            logger.error("%s Failed to attach ModelPatcher/ModelSampling registries: %s", LOG_PREFIX, e)
+
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
 
@@ -261,6 +270,13 @@ class ComfyNodeExtension(ExtensionBase):
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
 
+        # Debug: log key input types for isolation troubleshooting
+        try:
+            for k, v in resolved_inputs.items():
+                logging.info("[execute_node] %s input %s type=%s", node_name, k, type(v))
+        except Exception:
+            pass
+
         result = getattr(instance, function_name)(**resolved_inputs)
         if asyncio.iscoroutine(result):
             result = await result
@@ -305,6 +321,8 @@ class ComfyNodeExtension(ExtensionBase):
             return {"__type__": "CLIPRef", "clip_id": data._instance_id}
         if type_name == 'VAEProxy':
             return {"__type__": "VAERef", "vae_id": data._instance_id}
+        if type_name == 'ModelSamplingProxy':
+            return {"__type__": "ModelSamplingRef", "ms_id": data._instance_id}
 
         if isinstance(data, (list, tuple)):
             wrapped = [self._wrap_unpicklable_objects(item) for item in data]
@@ -326,6 +344,9 @@ class ComfyNodeExtension(ExtensionBase):
         if isinstance(data, dict):
             ref_type = data.get("__type__")
             if ref_type in ("CLIPRef", "ModelPatcherRef", "VAERef"):
+                from pyisolate._internal.model_serialization import deserialize_proxy_result
+                return deserialize_proxy_result(data)
+            if ref_type == "ModelSamplingRef":
                 from pyisolate._internal.model_serialization import deserialize_proxy_result
                 return deserialize_proxy_result(data)
             return {k: self._resolve_remote_objects(v) for k, v in data.items()}
