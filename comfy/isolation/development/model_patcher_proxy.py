@@ -225,10 +225,6 @@ class ModelPatcherRegistry(ProxiedSingleton):
                 "current_size": len(self._registry),
             }
     
-    # ============================================================
-    # Phase 1 RPC Methods (7 core operations for PuLID)
-    # ============================================================
-    
     @_timing_decorator
     async def clone(self, instance_id: str) -> str:
         """
@@ -408,6 +404,33 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """RPC: Forward register_all_hook_patches used by sampler helpers."""
         instance = self._get_instance(instance_id)
         instance.register_all_hook_patches(hooks, target_dict, model_options, registered)
+
+    @_timing_decorator
+    async def add_wrapper_with_key(self, instance_id: str, wrapper_type: Any, key: str, fn: Any) -> None:
+        """RPC: Forward add_wrapper_with_key on underlying ModelPatcher.model."""
+        instance = self._get_instance(instance_id)
+        target_model = getattr(instance, "model", None)
+        if target_model is not None and hasattr(target_model, "add_wrapper_with_key"):
+            try:
+                return target_model.add_wrapper_with_key(wrapper_type, key, fn)
+            except Exception:
+                # Fall through to transformer_options mutation on any failure
+                pass
+        import comfy.patcher_extension as pe
+        pe.add_wrapper_with_key(wrapper_type, key, fn, instance.model_options, is_model_options=True)
+
+    @_timing_decorator
+    async def add_wrapper_with_key(self, instance_id: str, wrapper_type: Any, key: str, fn: Any) -> None:
+        """RPC: Forward add_wrapper_with_key to underlying ModelPatcher."""
+        instance = self._get_instance(instance_id)
+        target_model = getattr(instance, "model", None)
+        if target_model is not None and hasattr(target_model, "add_wrapper_with_key"):
+            try:
+                return target_model.add_wrapper_with_key(wrapper_type, key, fn)
+            except Exception:
+                pass
+        import comfy.patcher_extension as pe
+        pe.add_wrapper_with_key(wrapper_type, key, fn, instance.model_options, is_model_options=True)
 
     @_timing_decorator
     async def get_nested_additional_models(self, instance_id: str) -> Any:
@@ -851,6 +874,28 @@ class ModelPatcherRegistry(ProxiedSingleton):
         moved_kwargs = {k: _move(v) for k, v in kwargs.items()}
         result = instance.model.apply_model(*moved_args, **moved_kwargs)
         return _move(result)
+
+    def add_wrapper_with_key_sync(self, instance_id: str, wrapper_type: Any, key: str, fn: Any) -> None:
+        instance = self._get_instance(instance_id)
+        target_model = getattr(instance, "model", None)
+        if target_model is not None and hasattr(target_model, "add_wrapper_with_key"):
+            try:
+                return target_model.add_wrapper_with_key(wrapper_type, key, fn)
+            except Exception:
+                pass
+        import comfy.patcher_extension as pe
+        pe.add_wrapper_with_key(wrapper_type, key, fn, instance.model_options, is_model_options=True)
+
+    def add_wrapper_with_key_sync(self, instance_id: str, wrapper_type: Any, key: str, fn: Any) -> None:
+        instance = self._get_instance(instance_id)
+        target_model = getattr(instance, "model", None)
+        if target_model is not None and hasattr(target_model, "add_wrapper_with_key"):
+            try:
+                return target_model.add_wrapper_with_key(wrapper_type, key, fn)
+            except Exception:
+                pass
+        import comfy.patcher_extension as pe
+        pe.add_wrapper_with_key(wrapper_type, key, fn, instance.model_options, is_model_options=True)
     
     # ============================================================
     # Object Patching (for ModelSamplingAdvanced etc)
@@ -1308,6 +1353,10 @@ class ModelPatcherProxy:
     def current_loaded_device(self) -> Any:
         """Get current_loaded_device() value."""
         return self._call_registry('current_loaded_device')
+
+    def add_wrapper_with_key(self, wrapper_type, key: str, fn):
+        """Expose add_wrapper_with_key on proxied model."""
+        return self._call_registry('add_wrapper_with_key', wrapper_type, key, fn)
 
     def prepare_state(self, timestep):
         """Prepare sampler state (delegated to current_patcher)."""

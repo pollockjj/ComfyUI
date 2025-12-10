@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Tuple
 from pyisolate import ExtensionBase
 from comfy.isolation.development.model_patcher_proxy import ModelPatcherRegistry
 from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
+from comfy.isolation.clip_proxy import CLIPRegistry
 
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
@@ -87,12 +88,17 @@ class ComfyNodeExtension(ExtensionBase):
 
     async def on_module_loaded(self, module: Any) -> None:
         self._module = module
-        # Attach shared registries to host RPC so co-isolated samplers use the host registry
+
+        # Attach shared registries so children resolve host instances
         try:
-            ModelPatcherRegistry.use_remote(self._rpc)
-            ModelSamplingRegistry.use_remote(self._rpc)
+            if hasattr(ModelPatcherRegistry, "use_remote"):
+                ModelPatcherRegistry.use_remote(self._rpc)
+            if hasattr(ModelSamplingRegistry, "use_remote"):
+                ModelSamplingRegistry.use_remote(self._rpc)
+            if hasattr(CLIPRegistry, "use_remote"):
+                CLIPRegistry.use_remote(self._rpc)
         except Exception as e:
-            logger.error("%s Failed to attach ModelPatcher/ModelSampling registries: %s", LOG_PREFIX, e)
+            logger.error("%s Failed to attach registries: %s", LOG_PREFIX, e)
 
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}

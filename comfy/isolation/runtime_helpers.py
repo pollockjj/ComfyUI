@@ -47,7 +47,6 @@ def build_stub_class(
             serialized = serialize_for_isolation(inputs)
             try:
                 model_val = serialized.get("model") if isinstance(serialized, dict) else None
-                logging.warning("[runtime_helpers] serialized model type=%s value=%s", type(model_val), model_val)
             except Exception:
                 pass
             result = await extension.execute_node(node_name, **serialized)
