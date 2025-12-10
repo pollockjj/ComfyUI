@@ -270,13 +270,6 @@ class ComfyNodeExtension(ExtensionBase):
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
 
-        # Debug: log key input types for isolation troubleshooting
-        try:
-            for k, v in resolved_inputs.items():
-                logging.info("[execute_node] %s input %s type=%s", node_name, k, type(v))
-        except Exception:
-            pass
-
         result = getattr(instance, function_name)(**resolved_inputs)
         if asyncio.iscoroutine(result):
             result = await result
