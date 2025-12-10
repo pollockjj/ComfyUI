@@ -67,6 +67,45 @@ def _detach_if_grad(obj):
     return obj
 
 
+def _prefer_device(*tensors):
+    """Return a preferred device from the first CUDA tensor, else first tensor device, else None."""
+    for t in tensors:
+        try:
+            import torch
+            if isinstance(t, torch.Tensor):
+                if t.is_cuda:
+                    return t.device
+        except Exception:
+            return None
+    for t in tensors:
+        try:
+            import torch
+            if isinstance(t, torch.Tensor):
+                return t.device
+        except Exception:
+            return None
+    return None
+
+
+def _to_device(obj, device):
+    try:
+        import torch
+    except Exception:
+        return obj
+    if device is None:
+        return obj
+    if isinstance(obj, torch.Tensor):
+        if obj.device != device:
+            return obj.to(device)
+        return obj
+    if isinstance(obj, (list, tuple)):
+        converted = [_to_device(x, device) for x in obj]
+        return type(obj)(converted) if isinstance(obj, tuple) else converted
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device) for k, v in obj.items()}
+    return obj
+
+
 class ModelSamplingRegistry(ProxiedSingleton):
     def __init__(self) -> None:
         if hasattr(ProxiedSingleton, "__init__") and ProxiedSingleton is not object:
