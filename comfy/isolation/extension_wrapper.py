@@ -98,7 +98,7 @@ class ComfyNodeExtension(ExtensionBase):
             if hasattr(CLIPRegistry, "use_remote"):
                 CLIPRegistry.use_remote(self._rpc)
         except Exception as e:
-            logger.error("%s Failed to attach registries: %s", LOG_PREFIX, e)
+            logger.debug("%s Failed to attach registries: %s", LOG_PREFIX, e)
 
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
