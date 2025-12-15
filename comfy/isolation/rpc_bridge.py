@@ -18,32 +18,35 @@ class RpcBridge:
 
         try:
             loop = asyncio.get_running_loop()
+            if loop.is_running() and not loop.is_closed():
+                result_container = {}
+                exc_container = {}
+
+                def _runner():
+                    try:
+                        # Reuse running loop via call_soon_threadsafe instead of creating a throwaway loop
+                        fut = asyncio.run_coroutine_threadsafe(maybe_coro, loop)
+                        result_container["value"] = fut.result()
+                    except Exception as exc:  # pragma: no cover
+                        exc_container["error"] = exc
+
+                t = threading.Thread(target=_runner, daemon=True)
+                t.start()
+                t.join()
+
+                if "error" in exc_container:
+                    raise exc_container["error"]
+                return result_container.get("value")
         except RuntimeError:
             loop = None
 
-        if loop and loop.is_running():
-            result_container = {}
-            exc_container = {}
-
-            def _runner():
-                try:
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    result_container["value"] = new_loop.run_until_complete(maybe_coro)
-                except Exception as exc:  # pragma: no cover
-                    exc_container["error"] = exc
-                finally:
-                    try:
-                        new_loop.close()
-                    except Exception:
-                        pass
-
-            t = threading.Thread(target=_runner, daemon=True)
-            t.start()
-            t.join()
-
-            if "error" in exc_container:
-                raise exc_container["error"]
-            return result_container.get("value")
-
-        return asyncio.run(maybe_coro)
+        # No running loop: create one and keep it open for the duration of the call
+        new_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(new_loop)
+            return new_loop.run_until_complete(maybe_coro)
+        finally:
+            try:
+                new_loop.close()
+            except Exception:
+                pass
