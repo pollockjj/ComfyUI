@@ -65,15 +65,9 @@ def _sanitize_for_transport(value):
     return str(value)
 
 
-class RemoteObjectHandle:
-    __module__ = 'comfy.isolation.extension_wrapper'
-
-    def __init__(self, object_id: str, type_name: str):
-        self.object_id = object_id
-        self.type_name = type_name
-
-    def __repr__(self):
-        return f"<RemoteObject id={self.object_id} type={self.type_name}>"
+# Re-export RemoteObjectHandle from pyisolate for backward compatibility
+# The canonical definition is now in pyisolate._internal.remote_handle
+from pyisolate._internal.remote_handle import RemoteObjectHandle  # noqa: E402,F401
 
 
 class ComfyNodeExtension(ExtensionBase):
