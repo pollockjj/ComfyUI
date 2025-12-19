@@ -26,3 +26,4 @@ filtered-openapi.yaml
 uv.lock
 .pyisolate_venvs/
 .venv_golden/
+basic_launch.sh
