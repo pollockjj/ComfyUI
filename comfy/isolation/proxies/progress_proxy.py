@@ -3,11 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-try:
-    from pyisolate import ProxiedSingleton
-except ImportError:
-    class ProxiedSingleton:
-        pass
+from pyisolate import ProxiedSingleton
 
 from comfy_execution.progress import get_progress_state
 

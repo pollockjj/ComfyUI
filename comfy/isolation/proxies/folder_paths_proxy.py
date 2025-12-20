@@ -4,11 +4,7 @@ from typing import Optional, List, Tuple, Set
 
 import folder_paths
 
-try:
-    from pyisolate import ProxiedSingleton
-except ImportError:
-    class ProxiedSingleton:
-        pass
+from pyisolate import ProxiedSingleton
 
 
 class FolderPathsProxy(ProxiedSingleton):

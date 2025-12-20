@@ -13,13 +13,11 @@ from typing import Any, Dict, Optional
 
 from aiohttp import web
 
+from pyisolate import ProxiedSingleton
+
 try:
-    from pyisolate import ProxiedSingleton
     from pyisolate._internal.shared import current_rpc_context
 except ImportError:
-    # Fallback when pyisolate not installed
-    class ProxiedSingleton:
-        pass
     current_rpc_context = None
 
 LOG_PREFIX = "]["

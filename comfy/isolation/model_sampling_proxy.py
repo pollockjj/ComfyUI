@@ -10,11 +10,7 @@ import os
 import threading
 from typing import Any, Dict
 
-try:
-    from pyisolate import ProxiedSingleton
-except ImportError:  # graceful degradation
-    class ProxiedSingleton:  # type: ignore
-        pass
+from pyisolate import ProxiedSingleton
 
 logger = logging.getLogger(__name__)
 
