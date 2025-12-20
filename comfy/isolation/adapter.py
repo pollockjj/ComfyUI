@@ -147,7 +147,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
         # ModelSampling serialization - handles ModelSampling* types
         # Note: The registry is type-name based, so we register common variants
-        import copyreg
+        # NOTE: copyreg removed - no pickle fallback allowed (JSON-RPC security)
 
         def serialize_model_sampling(obj: Any) -> Dict[str, Any]:
             # Child-side: must already have _instance_id (proxy)
@@ -158,13 +158,7 @@ class ComfyUIAdapter(IsolationAdapter):
                     f"ModelSampling in child lacks _instance_id: "
                     f"{type(obj).__module__}.{type(obj).__name__}"
                 )
-            # Host-side: register with registry and set up copyreg
-            def _reduce_model_sampling(ms: Any) -> tuple[type[ModelSamplingProxy], tuple[int]]:
-                ms_id_local = ModelSamplingRegistry().register(ms)
-                return (ModelSamplingProxy, (ms_id_local,))
-
-            copyreg.pickle(type(obj), _reduce_model_sampling)
-
+            # Host-side: register with ModelSamplingRegistry and return JSON-safe dict
             ms_id = ModelSamplingRegistry().register(obj)
             return {"__type__": "ModelSamplingRef", "ms_id": ms_id}
 
