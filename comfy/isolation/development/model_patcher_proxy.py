@@ -1284,6 +1284,29 @@ class ModelPatcherProxy:
     # Phase 1 Methods (7 core operations for PuLID)
     # ============================================================
     
+    def is_clone(self, other) -> bool:
+        """
+        Check if this proxy and another share the same underlying model.
+        
+        This is needed by model_management.load_models_gpu() to detect
+        when models can share loaded state.
+        
+        Args:
+            other: Another ModelPatcherProxy or ModelPatcher to compare
+            
+        Returns:
+            True if both share the same underlying model
+        """
+        # If other is also a proxy, compare registry IDs
+        if isinstance(other, ModelPatcherProxy):
+            return self._instance_id == other._instance_id
+        
+        # If other has model attribute, delegate to registry
+        if hasattr(other, 'model'):
+            return self._call_registry('is_clone', other)
+        
+        return False
+    
     def clone(self) -> 'ModelPatcherProxy':
         """
         Clone ModelPatcher instance (Deep Remote Copy pattern).

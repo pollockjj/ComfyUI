@@ -543,7 +543,11 @@ class LoadedModel:
             self._patcher_finalizer.detach()
 
     def is_dead(self):
-        return self.real_model() is not None and self.model is None
+        # Model is dead if the weakref to model has been garbage collected
+        # This can happen with ModelPatcherProxy objects between isolated workflows
+        if self.model is None:
+            return True
+        return self.real_model is not None and self.real_model() is None and self.model is None
 
 
 def use_more_memory(extra_memory, loaded_models, device):

@@ -211,6 +211,36 @@ _ISOLATION_BACKGROUND_TASK: Optional["asyncio.Task[List[IsolatedNodeSpec]]"] = N
 _EARLY_START_TIME: Optional[float] = None
 
 
+def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop" = None) -> None:
+    """Update all active RPC instances with the current event loop.
+    
+    This MUST be called at the start of each workflow execution to ensure
+    RPC calls are scheduled on the correct event loop. This handles the case
+    where asyncio.run() creates a new event loop for each workflow.
+    
+    Args:
+        loop: The event loop to use. If None, uses asyncio.get_event_loop().
+    """
+    import asyncio
+    
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+    
+    update_count = 0
+    for manager in _EXTENSION_MANAGERS:
+        for name, extension in manager.extensions.items():
+            if hasattr(extension, 'rpc') and extension.rpc is not None:
+                if hasattr(extension.rpc, 'update_event_loop'):
+                    extension.rpc.update_event_loop(loop)
+                    update_count += 1
+    
+    if update_count > 0:
+        logger.debug(f"{LOG_PREFIX}[RPC] Updated event loop on {update_count} RPC instances")
+
+
 def start_isolation_loading_early(loop: "asyncio.AbstractEventLoop") -> None:
     """Start isolated node loading in the background BEFORE nodes.py needs them.
     

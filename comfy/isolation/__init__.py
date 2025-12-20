@@ -158,6 +158,49 @@ def get_claimed_paths() -> Set[Path]:
     return _CLAIMED_PATHS
 
 
+def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> None:
+    """Update all active RPC instances with the current event loop.
+    
+    This MUST be called at the start of each workflow execution to ensure
+    RPC calls are scheduled on the correct event loop. This handles the case
+    where asyncio.run() creates a new event loop for each workflow.
+    
+    Args:
+        loop: The event loop to use. If None, uses asyncio.get_running_loop().
+    """
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+    
+    update_count = 0
+    
+    # Update RPCs from ExtensionManagers
+    for manager in _EXTENSION_MANAGERS:
+        if not hasattr(manager, 'extensions'):
+            continue
+        for name, extension in manager.extensions.items():
+            if hasattr(extension, 'rpc') and extension.rpc is not None:
+                if hasattr(extension.rpc, 'update_event_loop'):
+                    extension.rpc.update_event_loop(loop)
+                    update_count += 1
+                    logger.debug(f"{LOG_PREFIX}[RPC] Updated loop on extension '{name}'")
+    
+    # Also update RPCs from running extensions (they may have direct RPC refs)
+    for name, extension in _RUNNING_EXTENSIONS.items():
+        if hasattr(extension, 'rpc') and extension.rpc is not None:
+            if hasattr(extension.rpc, 'update_event_loop'):
+                extension.rpc.update_event_loop(loop)
+                update_count += 1
+                logger.debug(f"{LOG_PREFIX}[RPC] Updated loop on running extension '{name}'")
+    
+    if update_count > 0:
+        logger.info(f"{LOG_PREFIX}[RPC] Updated event loop on {update_count} RPC instances")
+    else:
+        logger.debug(f"{LOG_PREFIX}[RPC] No RPC instances found to update (managers={len(_EXTENSION_MANAGERS)}, running={len(_RUNNING_EXTENSIONS)})")
+
+
 __all__ = [
     "LOG_PREFIX",
     "initialize_proxies",
@@ -166,5 +209,6 @@ __all__ = [
     "await_isolation_loading",
     "notify_execution_graph",
     "get_claimed_paths",
+    "update_rpc_event_loops",
     "IsolatedNodeSpec",
 ]

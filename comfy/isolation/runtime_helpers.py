@@ -37,7 +37,9 @@ def build_stub_class(
         
         extension.ensure_process_started()
         from comfy.isolation import _RUNNING_EXTENSIONS
+        # Update BOTH the local dict AND the module-level dict
         running_extensions[extension.name] = extension
+        _RUNNING_EXTENSIONS[extension.name] = extension
         try:
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,

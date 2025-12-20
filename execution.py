@@ -680,6 +680,17 @@ class PromptExecutor:
         asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        # Update RPC event loops for all isolated extensions
+        # This is critical for serial workflow execution - each asyncio.run() creates
+        # a new event loop, and RPC instances must be updated to use it
+        try:
+            from comfy.isolation import update_rpc_event_loops
+            update_rpc_event_loops()
+        except ImportError:
+            pass  # Isolation not available
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to update RPC event loops: {e}")
+        
         nodes.interrupt_processing(False)
 
         if "client_id" in extra_data:
