@@ -11,7 +11,7 @@ import yaml
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 from .vae_proxy import VAERegistry
-from .model_patcher_proxy import ModelPatcherRegistry
+from .development.model_patcher_proxy import ModelPatcherRegistry
 from .model_sampling_proxy import ModelSamplingRegistry
 
 from .extension_wrapper import ComfyNodeExtension

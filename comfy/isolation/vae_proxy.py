@@ -16,7 +16,13 @@ import threading
 import weakref
 from typing import Any, Dict, Optional
 
-from pyisolate import ProxiedSingleton
+try:
+    from pyisolate import ProxiedSingleton
+except ImportError:
+    # Graceful degradation if pyisolate not available
+    class ProxiedSingleton:
+        """Fallback when pyisolate not installed."""
+        pass
 
 logger = logging.getLogger(__name__)
 

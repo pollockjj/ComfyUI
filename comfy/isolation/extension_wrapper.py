@@ -26,7 +26,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Tuple
 
 from pyisolate import ExtensionBase
-from comfy.isolation.model_patcher_proxy import ModelPatcherRegistry
+from comfy.isolation.development.model_patcher_proxy import ModelPatcherRegistry
 from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
 from comfy.isolation.clip_proxy import CLIPRegistry
 
