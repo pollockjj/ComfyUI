@@ -185,7 +185,7 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
                 if hasattr(extension.rpc, 'update_event_loop'):
                     extension.rpc.update_event_loop(loop)
                     update_count += 1
-                    logger.debug(f"{LOG_PREFIX}[RPC] Updated loop on extension '{name}'")
+                    logger.debug(f"{LOG_PREFIX}Updated loop on extension '{name}'")
     
     # Also update RPCs from running extensions (they may have direct RPC refs)
     for name, extension in _RUNNING_EXTENSIONS.items():
@@ -193,12 +193,12 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
             if hasattr(extension.rpc, 'update_event_loop'):
                 extension.rpc.update_event_loop(loop)
                 update_count += 1
-                logger.debug(f"{LOG_PREFIX}[RPC] Updated loop on running extension '{name}'")
+                logger.debug(f"{LOG_PREFIX}Updated loop on running extension '{name}'")
     
     if update_count > 0:
-        logger.info(f"{LOG_PREFIX}[RPC] Updated event loop on {update_count} RPC instances")
+        logger.debug(f"{LOG_PREFIX}Updated event loop on {update_count} RPC instances")
     else:
-        logger.debug(f"{LOG_PREFIX}[RPC] No RPC instances found to update (managers={len(_EXTENSION_MANAGERS)}, running={len(_RUNNING_EXTENSIONS)})")
+        logger.debug(f"{LOG_PREFIX}No RPC instances found to update (managers={len(_EXTENSION_MANAGERS)}, running={len(_RUNNING_EXTENSIONS)})")
 
 
 __all__ = [

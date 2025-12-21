@@ -11,6 +11,7 @@ import yaml
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 from .vae_proxy import VAERegistry
+from .clip_proxy import CLIPRegistry
 from .development.model_patcher_proxy import ModelPatcherRegistry
 from .model_sampling_proxy import ModelSamplingRegistry
 
@@ -94,7 +95,7 @@ async def load_isolated_node(
         "share_torch": share_torch,
         "sandbox": sandbox,  # NEW: Pass sandbox config to pyisolate
         # Expose shared registries to isolated processes
-        "apis": [VAERegistry, ModelPatcherRegistry, ModelSamplingRegistry],
+        "apis": [VAERegistry, ModelPatcherRegistry, ModelSamplingRegistry, CLIPRegistry],
     }
 
     extension = manager.load_extension(extension_config)

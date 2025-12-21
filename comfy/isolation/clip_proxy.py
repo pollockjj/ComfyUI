@@ -5,13 +5,12 @@ This module provides:
 1. CLIPRegistry - Host-side registry of CLIP instances (ProxiedSingleton)
 2. CLIPProxy - Picklable handle that forwards calls via RPC
 
-Architecture mirrors model_sampling_proxy.py exactly.
+Architecture mirrors vae_proxy.py exactly.
 """
 
 import asyncio
 import logging
 import os
-import pickle
 import threading
 import weakref
 from typing import Any, Dict, Optional
@@ -29,50 +28,97 @@ logger = logging.getLogger(__name__)
 # Host/child detection
 IS_CHILD_PROCESS = os.environ.get("PYISOLATE_CHILD") == "1"
 
+_thread_local = threading.local()
+
+
+def _get_thread_loop() -> asyncio.AbstractEventLoop:
+    """Return a per-thread event loop, creating it if missing."""
+    loop = getattr(_thread_local, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _thread_local.loop = loop
+    return loop
+
+
+def _run_coro_in_new_loop(coro):
+    """Execute coroutine in a fresh thread-bound event loop and return result."""
+    result_box = {}
+    exc_box = {}
+
+    def runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result_box["value"] = loop.run_until_complete(coro)
+        except Exception as exc:  # noqa: BLE001
+            exc_box["exc"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join()
+    if "exc" in exc_box:
+        raise exc_box["exc"]
+    return result_box.get("value")
+
+
+def _detach_if_grad(obj):
+    """Detach tensors that require grad to make them multiprocess-safe."""
+    try:
+        import torch
+    except Exception:
+        return obj
+
+    if isinstance(obj, torch.Tensor):
+        return obj.detach() if obj.requires_grad else obj
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_detach_if_grad(x) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _detach_if_grad(v) for k, v in obj.items()}
+    return obj
+
 
 class CLIPRegistry(ProxiedSingleton):
     """
     Host-side registry of CLIP instances using ProxiedSingleton pattern.
-    
+
     Thread-safe singleton that manages CLIP object lifecycle and provides
     async RPC methods for isolated child processes.
-    
+
     CRITICAL: Inherits from ProxiedSingleton to enable RPC from child processes.
     """
-    
+
     def __init__(self) -> None:
         """Initialize registry state (called once by ProxiedSingleton)."""
         if hasattr(ProxiedSingleton, "__init__") and ProxiedSingleton is not object:
             super().__init__()
-        
+
         self._registry: Dict[str, Any] = {}
         self._id_map: Dict[int, str] = {}  # id(clip) → instance_id (identity preservation)
         self._counter = 0
         self._lock = threading.Lock()
-        logger.debug("][[CLIPRegistry] Initialized")
-    
+        logger.debug("]] [CLIPRegistry] Initialized")
+
     def register(self, clip_instance) -> str:
         """
         Register a CLIP instance and return unique ID.
-        
+
         If the same Python object (by id()) was already registered,
         returns the existing ID to preserve identity semantics.
-        
+
         Args:
             clip_instance: CLIP object to register
-            
+
         Returns:
             Unique instance ID (e.g., "clip_0")
-            
+
         Raises:
             RuntimeError: If called from child process
         """
-        if IS_CHILD_PROCESS:
-            raise RuntimeError(
-                "][[CLIPRegistry] FAIL-LOUD: "
-                "Cannot register CLIP in child process"
-            )
-        
+        # No check needed - if we can call register(), we're on the host
+        # The environment variable alone doesn't determine process context
+
         with self._lock:
             # Check if already registered (identity preservation)
             obj_id = id(clip_instance)
@@ -82,7 +128,7 @@ class CLIPRegistry(ProxiedSingleton):
                     f"][[CLIPRegistry] Re-using {existing_id} for object {obj_id}"
                 )
                 return existing_id
-            
+
             # New registration
             instance_id = f"clip_{self._counter}"
             self._counter += 1
@@ -91,454 +137,325 @@ class CLIPRegistry(ProxiedSingleton):
             logger.debug(
                 f"][[CLIPRegistry] Registered {instance_id}"
             )
-        
+
         return instance_id
-    
+
     def unregister_sync(self, instance_id: str) -> None:
         """
         Unregister a CLIP instance (called by weakref.finalize).
-        
-        This is a synchronous method designed to be called from finalizers.
-        Must not raise exceptions.
-        
+
+        Thread-safe synchronous cleanup for weakref callback compatibility.
+
         Args:
             instance_id: ID to unregister
         """
-        try:
-            with self._lock:
-                if instance_id in self._registry:
-                    del self._registry[instance_id]
-                    logger.debug(
-                        f"][[CLIPRegistry] Unregistered {instance_id}"
-                    )
-        except Exception as e:
-            logger.error(
-                f"][[CLIPRegistry] Unregister failed for {instance_id}: {e}"
-            )
-    
+        with self._lock:
+            clip = self._registry.pop(instance_id, None)
+            if clip:
+                obj_id = id(clip)
+                self._id_map.pop(obj_id, None)
+                logger.debug(f"][[CLIPRegistry] Unregistered {instance_id}")
+
     def _get_instance(self, instance_id: str):
-        """
-        Internal: Get CLIP instance by ID.
-        
-        Args:
-            instance_id: ID to lookup
-            
-        Returns:
-            CLIP instance
-            
-        Raises:
-            ValueError: If instance_id not found
-        """
-        instance = self._registry.get(instance_id)
-        if instance is None:
-            raise ValueError(
-                f"][[CLIPRegistry] FAIL-LOUD: "
-                f"Instance {instance_id} not found in registry"
+        """Get CLIP instance by ID (internal, host-side only)."""
+        if IS_CHILD_PROCESS:
+            raise RuntimeError(
+                "]] [CLIPRegistry] FAIL-LOUD: "
+                "_get_instance called in child process"
             )
-        return instance
-    
-    # RPC Methods (async) - Simple Operations
-    
+        with self._lock:
+            return self._registry.get(instance_id)
+
+    # RPC methods below (async for pyisolate compatibility)
+
     async def get_ram_usage(self, instance_id: str) -> int:
-        """RPC: Get RAM usage of CLIP instance."""
-        instance = self._get_instance(instance_id)
-        return instance.get_ram_usage()
-    
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.get_ram_usage()
+
     async def clip_layer(self, instance_id: str, layer_idx: int) -> None:
-        """RPC: Set CLIP layer index."""
-        instance = self._get_instance(instance_id)
-        instance.clip_layer(layer_idx)
-    
-    async def set_tokenizer_option(
-        self, instance_id: str, option_name: str, value: Any
-    ) -> None:
-        """RPC: Set tokenizer option."""
-        instance = self._get_instance(instance_id)
-        instance.set_tokenizer_option(option_name, value)
-    
-    # RPC Methods (async) - Tokenization
-    
-    async def tokenize(
-        self,
-        instance_id: str,
-        text: str,
-        return_word_ids: bool = False,
-        **kwargs
-    ) -> dict:
-        """RPC: Tokenize text."""
-        instance = self._get_instance(instance_id)
-        return instance.tokenize(text, return_word_ids=return_word_ids, **kwargs)
-    
-    # RPC Methods (async) - Encoding (Returns Tensors)
-    
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        clip.clip_layer(layer_idx)
+
+    async def set_tokenizer_option(self, instance_id: str, option_name: str, value: Any) -> None:
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        clip.set_tokenizer_option(option_name, value)
+
+    async def tokenize(self, instance_id: str, text: str, return_word_ids: bool = False, **kwargs):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.tokenize(text, return_word_ids=return_word_ids, **kwargs)
+
     async def encode(self, instance_id: str, text: str):
-        """RPC: Encode text to embeddings (returns tensor)."""
-        instance = self._get_instance(instance_id)
-        result = instance.encode(text)
-        # Tensors are automatically handled by share_torch=true
-        return result
-    
-    async def encode_from_tokens(
-        self,
-        instance_id: str,
-        tokens: Any,
-        return_pooled: bool = False,
-        return_dict: bool = False
-    ):
-        """RPC: Encode from tokens (returns tensor/tuple/dict)."""
-        instance = self._get_instance(instance_id)
-        result = instance.encode_from_tokens(
-            tokens, return_pooled=return_pooled, return_dict=return_dict
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return _detach_if_grad(clip.encode(text))
+
+    async def encode_from_tokens(self, instance_id: str, tokens, return_pooled: bool = False, return_dict: bool = False):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return _detach_if_grad(
+            clip.encode_from_tokens(tokens, return_pooled=return_pooled, return_dict=return_dict)
         )
-        # share_torch=true handles tensor returns automatically
-        return result
-    
+
     async def encode_from_tokens_scheduled(
         self,
         instance_id: str,
-        tokens: Any,
+        tokens,
         unprojected: bool = False,
-        add_dict: dict = None,
-        show_pbar: bool = True
+        add_dict: Optional[dict] = None,
+        show_pbar: bool = True,
     ):
-        """RPC: Scheduled encoding (returns list of tuples with tensors)."""
-        instance = self._get_instance(instance_id)
-        if add_dict is None:
-            add_dict = {}
-        result = instance.encode_from_tokens_scheduled(
-            tokens, unprojected=unprojected, add_dict=add_dict, show_pbar=show_pbar
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        add_dict = add_dict or {}
+        return _detach_if_grad(
+            clip.encode_from_tokens_scheduled(tokens, unprojected=unprojected, add_dict=add_dict, show_pbar=show_pbar)
         )
-        return result
-    
-    # RPC Methods (async) - Clone (Deep Remote Copy)
-    
+
+    async def add_patches(self, instance_id: str, patches, strength_patch: float = 1.0, strength_model: float = 1.0):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.add_patches(patches, strength_patch=strength_patch, strength_model=strength_model)
+
+    async def get_key_patches(self, instance_id: str):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.get_key_patches()
+
+    async def load_sd(self, instance_id: str, sd: dict, full_model: bool = False):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.load_sd(sd, full_model=full_model)
+
+    async def get_sd(self, instance_id: str):
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        return clip.get_sd()
+
     async def clone(self, instance_id: str) -> str:
-        """
-        RPC: Clone CLIP instance (Deep Remote Copy pattern).
-        
-        Creates a new CLIP instance via clone(), registers it,
-        and returns the new ID.
-        
-        Args:
-            instance_id: Source CLIP ID
-            
-        Returns:
-            New instance ID for the clone
-        """
-        instance = self._get_instance(instance_id)
-        new_clip = instance.clone()
-        new_id = self.register(new_clip)
-        logger.debug(
-            f"][[CLIPRegistry] Cloned {instance_id} → {new_id}"
-        )
-        return new_id
-    
-    # RPC Methods (async) - LoRA/Patching
-    
-    async def add_patches(
-        self,
-        instance_id: str,
-        patches: Any,
-        strength_patch: float = 1.0,
-        strength_model: float = 1.0
-    ):
-        """RPC: Add patches (LoRA)."""
-        instance = self._get_instance(instance_id)
-        return instance.add_patches(
-            patches, strength_patch=strength_patch, strength_model=strength_model
-        )
-    
-    async def get_key_patches(self, instance_id: str) -> dict:
-        """RPC: Get key patches."""
-        instance = self._get_instance(instance_id)
-        return instance.get_key_patches()
-    
-    # RPC Methods (async) - State Dict
-    
-    async def load_sd(
-        self, instance_id: str, sd: dict, full_model: bool = False
-    ):
-        """RPC: Load state dict."""
-        instance = self._get_instance(instance_id)
-        return instance.load_sd(sd, full_model=full_model)
-    
-    async def get_sd(self, instance_id: str) -> dict:
-        """RPC: Get state dict."""
-        instance = self._get_instance(instance_id)
-        return instance.get_sd()
+        clip = self._get_instance(instance_id)
+        if clip is None:
+            raise ValueError(f"CLIP {instance_id} not found in registry")
+        new_clip = clip.clone()
+        return self.register(new_clip)
 
 
 class CLIPProxy:
     """
-    Lightweight, picklable handle to a CLIP instance.
-    
-    Design Principles:
-    1. Zero State: Only stores instance_id + registry reference
-    2. Host Optimization: Bypasses RPC when running on host (_is_child=False)
-    3. Transparent: Appears identical to CLIP from node's perspective
-    4. Fail-Loud: Any RPC failure raises immediately (no silent failures)
+    Picklable proxy for CLIP that forwards calls to host-side registry via RPC.
+
+    Design:
+    - Pickle-safe (stores only instance_id string)
+    - Lazily acquires RPC caller on first method call
+    - Mirrors CLIP interface for transparent substitution
     """
-    
-    def __init__(
-        self,
-        instance_id: str,
-        registry: Optional[CLIPRegistry] = None,
-        manage_lifecycle: bool = False
-    ):
+
+    __module__ = 'comfy.sd'  # Mimic real CLIP module for compatibility
+
+    def __init__(self, instance_id: str, registry: Optional[CLIPRegistry] = None, manage_lifecycle: bool = False):
         """
-        Initialize CLIPProxy.
-        
+        Initialize proxy with registry ID.
+
         Args:
-            instance_id: Registry ID of the CLIP instance
-            registry: CLIPRegistry singleton (auto-created if None)
-            manage_lifecycle: If True, proxy manages cleanup via weakref.finalize
+            instance_id: Unique ID from CLIPRegistry.register()
         """
         self._instance_id = instance_id
-        self._manage_lifecycle = manage_lifecycle
-        self._is_child = os.environ.get("PYISOLATE_CHILD") == "1"
-        
-        # Registry passed in explicitly (from deserialization or manual creation)
+        self._rpc_caller = None
         self._registry = registry if registry is not None else CLIPRegistry()
-        
-        # Lifecycle: only host-side proxy cleans up
-        if manage_lifecycle and not self._is_child:
+        self._manage_lifecycle = manage_lifecycle
+        if manage_lifecycle and not IS_CHILD_PROCESS:
             self._finalizer = weakref.finalize(
                 self, self._registry.unregister_sync, instance_id
             )
-            logger.debug(
-                f"][[CLIPProxy] Lifecycle management enabled for {instance_id}"
-            )
-    
-    def __reduce__(self):
-        """
-        Custom pickle - only serialize instance_id.
-        
-        Returns tuple for pickle reconstruction with is_new_object=False
-        to prevent double-finalize on round-trip.
-        """
-        return (_reconstruct_clip_proxy, (self._instance_id, False))
-    
-    def _call_registry(self, method_name: str, *args, **kwargs):
-        """
-        Call registry method with host-side optimization.
-        
-        If running on host: call directly (no RPC overhead)
-        If running in child: use RpcBridge for sync-to-async
-        
-        Args:
-            method_name: Name of CLIPRegistry method to call
-            *args: Positional arguments
-            **kwargs: Keyword arguments
-            
-        Returns:
-            Result from registry method
-        """
-        # Get registry dynamically (important for child processes)
-        if self._registry is None:
-            self._registry = CLIPRegistry()
-        
-        method = getattr(self._registry, method_name)
-        
-        if self._is_child:
-            # Child process: RPC to host via ProxiedSingleton mechanism
-            # The registry instance will automatically be the remote proxy
-            from comfy.isolation.rpc_bridge import RpcBridge
-            bridge = RpcBridge()
-            return bridge.run_sync(method(self._instance_id, *args, **kwargs))
-        else:
-            # Host process: direct call (CRITICAL OPTIMIZATION)
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(
-                method(self._instance_id, *args, **kwargs)
-            )
-    
-    # Simple Methods
-    
+        logger.debug(f"][[CLIPProxy] Created for {instance_id}")
+
+    def _get_rpc(self):
+        """Lazy RPC caller acquisition."""
+        if self._rpc_caller is None:
+            from pyisolate._internal.shared import get_child_rpc_instance
+            rpc = get_child_rpc_instance()
+            if rpc is None:
+                raise RuntimeError(
+                    "]] [CLIPProxy] FAIL-LOUD: "
+                    "No RPC instance available in child process"
+                )
+            self._rpc_caller = rpc.create_caller(CLIPRegistry, CLIPRegistry.get_remote_id())
+        return self._rpc_caller
+
     def get_ram_usage(self) -> int:
-        """Get RAM usage of CLIP instance."""
-        return self._call_registry('get_ram_usage')
-    
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.get_ram_usage(self._instance_id))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.get_ram_usage(self._instance_id))
+
     def clip_layer(self, layer_idx: int) -> None:
-        """Set CLIP layer index."""
-        return self._call_registry('clip_layer', layer_idx)
-    
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.clip_layer(self._instance_id, layer_idx))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.clip_layer(self._instance_id, layer_idx))
+
     def set_tokenizer_option(self, option_name: str, value: Any) -> None:
-        """Set tokenizer option."""
-        return self._call_registry('set_tokenizer_option', option_name, value)
-    
-    # Tokenization
-    
-    def tokenize(self, text: str, return_word_ids: bool = False, **kwargs) -> dict:
-        """Tokenize text."""
-        return self._call_registry('tokenize', text, return_word_ids, **kwargs)
-    
-    # Encoding Methods (Return Tensors)
-    
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.set_tokenizer_option(self._instance_id, option_name, value))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.set_tokenizer_option(self._instance_id, option_name, value))
+
+    def tokenize(self, text: str, return_word_ids: bool = False, **kwargs):
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.tokenize(self._instance_id, text, return_word_ids=return_word_ids, **kwargs)
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.tokenize(self._instance_id, text, return_word_ids=return_word_ids, **kwargs)
+            )
+
     def encode(self, text: str):
-        """Encode text to embeddings."""
-        return self._call_registry('encode', text)
-    
-    def encode_from_tokens(
-        self, tokens: Any, return_pooled: bool = False, return_dict: bool = False
-    ):
-        """Encode from tokens."""
-        return self._call_registry(
-            'encode_from_tokens', tokens, return_pooled, return_dict
-        )
-    
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.encode(self._instance_id, text))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.encode(self._instance_id, text))
+
+    def encode_from_tokens(self, tokens, return_pooled: bool = False, return_dict: bool = False):
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.encode_from_tokens(self._instance_id, tokens, return_pooled=return_pooled, return_dict=return_dict)
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.encode_from_tokens(self._instance_id, tokens, return_pooled=return_pooled, return_dict=return_dict)
+            )
+
     def encode_from_tokens_scheduled(
         self,
-        tokens: Any,
+        tokens,
         unprojected: bool = False,
-        add_dict: dict = None,
-        show_pbar: bool = True
+        add_dict: Optional[dict] = None,
+        show_pbar: bool = True,
     ):
-        """Scheduled encoding."""
-        if add_dict is None:
-            add_dict = {}
-        result = self._call_registry(
-            'encode_from_tokens_scheduled', tokens, unprojected, add_dict, show_pbar
-        )
-        return result
-    
-    # Clone (Deep Remote Copy)
-    
-    def clone(self) -> 'CLIPProxy':
-        """
-        Clone CLIP instance (Deep Remote Copy pattern).
-        
-        Creates a new CLIP instance in the registry and returns a new proxy.
-        Host-side clones manage lifecycle; child-side do not.
-        
-        Returns:
-            New CLIPProxy for the cloned instance
-        """
-        new_id = self._call_registry('clone')
-        # Host-side clones manage lifecycle; child-side do not
-        return CLIPProxy(new_id, self._registry, manage_lifecycle=not self._is_child)
-    
-    # LoRA/Patching
-    
-    def add_patches(
-        self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0
-    ):
-        """Add patches (LoRA)."""
-        return self._call_registry(
-            'add_patches', patches, strength_patch, strength_model
-        )
-    
-    def get_key_patches(self) -> dict:
-        """Get key patches."""
-        return self._call_registry('get_key_patches')
-    
-    # State Dict
-    
+        rpc = self._get_rpc()
+        add_dict = add_dict or {}
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.encode_from_tokens_scheduled(
+                    self._instance_id,
+                    tokens,
+                    unprojected=unprojected,
+                    add_dict=add_dict,
+                    show_pbar=show_pbar,
+                )
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.encode_from_tokens_scheduled(
+                    self._instance_id,
+                    tokens,
+                    unprojected=unprojected,
+                    add_dict=add_dict,
+                    show_pbar=show_pbar,
+                )
+            )
+
+    def add_patches(self, patches, strength_patch: float = 1.0, strength_model: float = 1.0):
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(
+                rpc.add_patches(self._instance_id, patches, strength_patch=strength_patch, strength_model=strength_model)
+            )
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(
+                rpc.add_patches(self._instance_id, patches, strength_patch=strength_patch, strength_model=strength_model)
+            )
+
+    def get_key_patches(self):
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.get_key_patches(self._instance_id))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.get_key_patches(self._instance_id))
+
     def load_sd(self, sd: dict, full_model: bool = False):
-        """Load state dict."""
-        return self._call_registry('load_sd', sd, full_model)
-    
-    def get_sd(self) -> dict:
-        """Get state dict."""
-        return self._call_registry('get_sd')
-    
-    # load_model (SCOPED OUT for Phase 1)
-    
-    def load_model(self):
-        """SCOPED OUT for Phase 1 - ModelPatcher cannot be proxied yet."""
-        raise NotImplementedError(
-            "load_model() is not supported in isolated mode. "
-            "Access model functionality via CLIP methods (encode, tokenize, etc.)."
-        )
-    
-    # Property Guards (Raise AttributeError)
-    
-    @property
-    def patcher(self):
-        """Property guard: patcher access not supported."""
-        raise AttributeError(
-            "Direct access to 'patcher' is not supported in isolated mode. "
-            "Use add_patches() and get_key_patches() instead."
-        )
-    
-    @property
-    def cond_stage_model(self):
-        """Property guard: cond_stage_model access not supported."""
-        raise AttributeError(
-            "Direct access to 'cond_stage_model' is not supported in isolated mode. "
-            "Use CLIP methods (encode, tokenize) instead."
-        )
-    
-    @property
-    def layer_idx(self):
-        """Property guard: layer_idx access not supported."""
-        raise AttributeError(
-            "Direct access to 'layer_idx' is not supported in isolated mode. "
-            "Use clip_layer() to set layer index."
-        )
-    
-    @property
-    def use_clip_schedule(self):
-        """Property guard: use_clip_schedule access not supported."""
-        raise AttributeError(
-            "Direct access to 'use_clip_schedule' is not supported in isolated mode."
-        )
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.load_sd(self._instance_id, sd, full_model=full_model))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.load_sd(self._instance_id, sd, full_model=full_model))
+
+    def get_sd(self):
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            return _run_coro_in_new_loop(rpc.get_sd(self._instance_id))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            return loop.run_until_complete(rpc.get_sd(self._instance_id))
+
+    def clone(self) -> 'CLIPProxy':
+        rpc = self._get_rpc()
+        try:
+            asyncio.get_running_loop()
+            new_id = _run_coro_in_new_loop(rpc.clone(self._instance_id))
+        except RuntimeError:
+            loop = _get_thread_loop()
+            new_id = loop.run_until_complete(rpc.clone(self._instance_id))
+        return CLIPProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+
+    def __getstate__(self):
+        """Pickle support: only serialize instance_id."""
+        return {"_instance_id": self._instance_id}
+
+    def __setstate__(self, state):
+        """Unpickle support: restore instance_id, reset RPC caller."""
+        self._instance_id = state["_instance_id"]
+        self._rpc_caller = None
+        self._registry = CLIPRegistry()
+        self._manage_lifecycle = False
+        logger.debug(f"][[CLIPProxy] Restored from pickle: {self._instance_id}")
+
+    def __repr__(self):
+        return f"<CLIPProxy {self._instance_id}>"
 
 
-def _reconstruct_clip_proxy(clip_id: str, is_new_object: bool = True) -> CLIPProxy:
-    """
-    Pickle reconstruction helper.
-    
-    Args:
-        clip_id: Registry ID of the CLIP instance
-        is_new_object: True if this is a NEW object (e.g., clone result),
-                       False if this is a round-trip of existing proxy.
-                       
-    Lifecycle Rules:
-        - Child process: NEVER manage lifecycle (always False)
-        - Host process, new object: manage lifecycle (True)
-        - Host process, round-trip: do NOT manage (False) - original proxy owns it
-    
-    Returns:
-        Reconstructed CLIPProxy
-    """
-    IS_CHILD = os.environ.get("PYISOLATE_CHILD") == "1"
-    # Don't instantiate CLIPRegistry() here - let CLIPProxy._call_registry do it lazily
-    # This prevents "Cannot inject instance after first instantiation" errors
-    # when use_remote() hasn't been called yet in child processes
-    registry = None
-    
-    if IS_CHILD:
-        # Child never manages lifecycle
-        return CLIPProxy(clip_id, registry, manage_lifecycle=False)
-    else:
-        # Host: manage only if this is a new object (clone, etc.)
-        return CLIPProxy(clip_id, registry, manage_lifecycle=is_new_object)
-
-
-def maybe_wrap_clip_for_isolation(clip):
-    """
-    Wrap CLIP in isolation proxy if isolation is active.
-    
-    Called from checkpoint loading path.
-    Returns original clip if:
-    - Isolation not active
-    - Already in child process
-    - Already a CLIPProxy
-    
-    Args:
-        clip: CLIP instance to potentially wrap
-        
-    Returns:
-        CLIPProxy if isolation active, otherwise original clip
-    """
-    if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
-        return clip
-    if os.environ.get("PYISOLATE_CHILD") == "1":
-        return clip
-    if isinstance(clip, CLIPProxy):
-        return clip
-    
-    registry = CLIPRegistry()
-    clip_id = registry.register(clip)
-    logger.debug(f"][[CLIPProxy] Wrapped CLIP as {clip_id}")
-    return CLIPProxy(clip_id, registry, manage_lifecycle=True)
+# Registry instantiated in host_hooks.initialize_host_process; keep optional safety
+if not IS_CHILD_PROCESS:
+    _CLIP_REGISTRY_SINGLETON = CLIPRegistry()
