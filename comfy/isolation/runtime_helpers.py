@@ -28,14 +28,6 @@ def build_stub_class(
     restored_input_types = restore_input_types(info.get("input_types", {}))
 
     async def _execute(self, **inputs):
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # Check if we need to spawn (loud logging)
-        if not extension._process_initialized:
-            logger.warning(f"][ {extension.name} - just-in-time spawning of isolated custom_node")
-        
-        extension.ensure_process_started()
         from comfy.isolation import _RUNNING_EXTENSIONS
         # Update BOTH the local dict AND the module-level dict
         running_extensions[extension.name] = extension
@@ -55,10 +47,11 @@ def build_stub_class(
             return await deserialize_from_isolation(result, extension)
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
+        except Exception as e:
+            raise
         finally:
             if prev_child is not None:
                 os.environ["PYISOLATE_CHILD"] = prev_child
-
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
             return restored_input_types
