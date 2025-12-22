@@ -402,7 +402,27 @@ class ModelPatcherRegistry(ProxiedSingleton):
     @_timing_decorator
     async def register_all_hook_patches(self, instance_id: str, hooks: Any, target_dict: Any, model_options: Any, registered: Any) -> None:
         """RPC: Forward register_all_hook_patches used by sampler helpers."""
+        from types import SimpleNamespace
+        import comfy.hooks
+        
         instance = self._get_instance(instance_id)
+        
+        # Handle hooks that came through RPC as SimpleNamespace
+        if isinstance(hooks, SimpleNamespace):
+            # Reconstruct HookGroup from SimpleNamespace data
+            if hasattr(hooks, 'hooks') and isinstance(hooks.hooks, list):
+                real_hooks = comfy.hooks.HookGroup()
+                # The hooks list was also deserialized - skip if empty
+                if not hooks.hooks:
+                    hooks = real_hooks  # Empty HookGroup
+                else:
+                    # Can't reconstruct Hook objects from SimpleNamespace, skip registration
+                    logger.warning("Skipping register_all_hook_patches: hooks came as SimpleNamespace and cannot be reconstructed")
+                    return
+            else:
+                # No hooks data, create empty
+                hooks = comfy.hooks.HookGroup()
+        
         instance.register_all_hook_patches(hooks, target_dict, model_options, registered)
 
     @_timing_decorator
@@ -849,6 +869,28 @@ class ModelPatcherRegistry(ProxiedSingleton):
     def inner_model_memory_required_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
         instance = self._get_instance(instance_id)
         return instance.model.memory_required(*args, **kwargs)
+
+    @_timing_decorator
+    async def inner_model_extra_conds_shapes(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call inner model.extra_conds_shapes(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        return instance.model.extra_conds_shapes(*args, **kwargs)
+
+    def inner_model_extra_conds_shapes_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """Sync version of extra_conds_shapes for host-side calls."""
+        instance = self._get_instance(instance_id)
+        return instance.model.extra_conds_shapes(*args, **kwargs)
+
+    @_timing_decorator
+    async def inner_model_extra_conds(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """RPC: Call inner model.extra_conds(*args, **kwargs)."""
+        instance = self._get_instance(instance_id)
+        return instance.model.extra_conds(*args, **kwargs)
+
+    def inner_model_extra_conds_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        """Sync version of extra_conds for host-side calls."""
+        instance = self._get_instance(instance_id)
+        return instance.model.extra_conds(*args, **kwargs)
 
     def inner_model_apply_model_sync(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
         instance = self._get_instance(instance_id)
@@ -1651,8 +1693,21 @@ class _InnerModelProxy:
             raise AttributeError(name)
         
         # Supported attributes - add more as needed
-        if name in ('model_config', 'latent_format', 'model_type', 'extra_conds_shapes'):
+        if name in ('model_config', 'latent_format', 'model_type'):
             return self._get_inner_model_attr(name)
+
+        # extra_conds_shapes is a METHOD, not an attribute
+        if name == 'extra_conds_shapes':
+            def _extra_conds_shapes(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'inner_model_extra_conds_shapes')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'inner_model_extra_conds_shapes_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _extra_conds_shapes
 
         if name == 'memory_required':
             def _memory_required(*args, **kwargs):
@@ -1690,8 +1745,18 @@ class _InnerModelProxy:
                     return sync_method(self._instance_id, args, kwargs)
             return _process_latent_in
 
+        # extra_conds is a METHOD, not an attribute
         if name == 'extra_conds':
-            return self._get_inner_model_attr('extra_conds')
+            def _extra_conds(*args, **kwargs):
+                if self._is_child:
+                    from comfy.isolation.rpc_bridge import RpcBridge
+                    bridge = RpcBridge()
+                    method = getattr(self._registry, 'inner_model_extra_conds')
+                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                else:
+                    sync_method = getattr(self._registry, 'inner_model_extra_conds_sync')
+                    return sync_method(self._instance_id, args, kwargs)
+            return _extra_conds
 
         if name == 'model_sampling':
             if self._is_child:
