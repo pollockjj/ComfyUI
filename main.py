@@ -26,6 +26,12 @@ from app.logger import setup_logger
 import itertools
 import logging
 
+# --use-sandbox implies --use-process-isolation
+if '--use-sandbox' in sys.argv:
+    os.environ['PYISOLATE_USE_SANDBOX'] = '1'
+    if '--use-process-isolation' not in sys.argv:
+        sys.argv.append('--use-process-isolation')
+
 if '--use-process-isolation' in sys.argv:
     from comfy.isolation import initialize_proxies
     initialize_proxies()
