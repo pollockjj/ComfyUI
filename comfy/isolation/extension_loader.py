@@ -63,8 +63,9 @@ async def load_isolated_node(
         manifest = yaml.safe_load(handle) or {}
 
     # Read manifest values
-    isolated = manifest.get("isolated", False)
-    sandbox = manifest.get("sandbox", False)
+    # Support both old (isolated/sandbox) and new (can_isolate/can_sandbox) keys
+    isolated = manifest.get("isolated", manifest.get("can_isolate", False))
+    sandbox = manifest.get("sandbox", manifest.get("can_sandbox", False))
 
     # Apply enforcement policy (floor, not ceiling)
     policy = get_enforcement_policy()
@@ -81,6 +82,7 @@ async def load_isolated_node(
 
     dependencies = list(manifest.get("dependencies", []) or [])
     share_torch = manifest.get("share_torch", True)
+    share_cuda_ipc = manifest.get("share_cuda_ipc", False)
     extension_name = manifest.get("name", node_dir.name)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
@@ -93,10 +95,12 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
+        "share_cuda_ipc": share_cuda_ipc,
         "sandbox": sandbox,  # NEW: Pass sandbox config to pyisolate
         # Expose shared registries to isolated processes
         "apis": [VAERegistry, ModelPatcherRegistry, ModelSamplingRegistry, CLIPRegistry],
     }
+    logger.warning(f"Extension config for {extension_name}: share_cuda_ipc={share_cuda_ipc}")
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)

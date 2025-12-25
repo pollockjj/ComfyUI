@@ -1161,6 +1161,42 @@ class ModelPatcherRegistry(ProxiedSingleton):
         
         return {"model_id": new_model_id, "clip_id": new_clip_id}
 
+    async def model_sampling_percent_to_sigma(self, instance_id: str, percent: float) -> float:
+        """RPC: Forward percent_to_sigma call."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.percent_to_sigma(percent)
+
+    def model_sampling_percent_to_sigma_sync(self, instance_id: str, percent: float) -> float:
+        """Sync version of model_sampling_percent_to_sigma() for host-side calls."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.percent_to_sigma(percent)
+
+    async def model_sampling_get_sigmas(self, instance_id: str) -> Any:
+        """RPC: Get sigmas buffer from model_sampling object."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.sigmas
+
+    def model_sampling_get_sigmas_sync(self, instance_id: str) -> Any:
+        """Sync version for host-side calls."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.sigmas
+
+    async def model_sampling_get_log_sigmas(self, instance_id: str) -> Any:
+        """RPC: Get log_sigmas buffer from model_sampling object."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.log_sigmas
+
+    def model_sampling_get_log_sigmas_sync(self, instance_id: str) -> Any:
+        """Sync version for host-side calls."""
+        instance = self._get_instance(instance_id)
+        model_sampling = instance.get_model_object("model_sampling")
+        return model_sampling.log_sigmas
+
 
 class ModelSamplingProxy:
     """
@@ -1203,6 +1239,36 @@ class ModelSamplingProxy:
             return bridge.run_sync(method(self._instance_id, percent))
         else:
             return self._registry.model_sampling_percent_to_sigma_sync(self._instance_id, percent)
+
+    @property
+    def sigmas(self):
+        """
+        Forward sigmas buffer from host ModelSampling object.
+        
+        Required by comfy.sample.sample()
+        """
+        if self._is_child:
+            from comfy.isolation.rpc_bridge import RpcBridge
+            bridge = RpcBridge()
+            method = getattr(self._registry, 'model_sampling_get_sigmas')
+            return bridge.run_sync(method(self._instance_id))
+        else:
+            return self._registry.model_sampling_get_sigmas_sync(self._instance_id)
+
+    @property
+    def log_sigmas(self):
+        """
+        Forward log_sigmas buffer from host ModelSampling object.
+        
+        Required by some samplers/schedulers.
+        """
+        if self._is_child:
+            from comfy.isolation.rpc_bridge import RpcBridge
+            bridge = RpcBridge()
+            method = getattr(self._registry, 'model_sampling_get_log_sigmas')
+            return bridge.run_sync(method(self._instance_id))
+        else:
+            return self._registry.model_sampling_get_log_sigmas_sync(self._instance_id)
 
 
 def _reconstruct_model_sampling_proxy(instance_id: str) -> ModelSamplingProxy:
