@@ -12,7 +12,7 @@ import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 from .vae_proxy import VAERegistry
 from .clip_proxy import CLIPRegistry
-from .development.model_patcher_proxy import ModelPatcherRegistry
+from .model_patcher_proxy import ModelPatcherRegistry
 from .model_sampling_proxy import ModelSamplingRegistry
 
 from .extension_wrapper import ComfyNodeExtension

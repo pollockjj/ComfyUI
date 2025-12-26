@@ -17,7 +17,7 @@ def initialize_host_process() -> None:
     from .proxies.prompt_server_proxy import PromptServerProxy
     from .vae_proxy import VAERegistry
     from .model_sampling_proxy import ModelSamplingRegistry
-    from .development.model_patcher_proxy import ModelPatcherRegistry
+    from .model_patcher_proxy import ModelPatcherRegistry
 
     FolderPathsProxy()
     ModelManagementProxy()
@@ -26,14 +26,3 @@ def initialize_host_process() -> None:
     VAERegistry()
     ModelSamplingRegistry()
     ModelPatcherRegistry()
-
-    if os.environ.get("PYISOLATE_DEV") == "1":
-        from .development.proxies.nodes_proxy import NodesProxy
-        from .development.proxies.utils_proxy import UtilsProxy
-        from .clip_proxy import CLIPRegistry
-        from .model_sampling_proxy import ModelSamplingRegistry as DevModelSamplingRegistry
-
-        NodesProxy()
-        UtilsProxy()
-        CLIPRegistry()
-        DevModelSamplingRegistry()
