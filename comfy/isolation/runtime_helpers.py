@@ -39,12 +39,9 @@ def build_stub_class(
             )
             prev_child = os.environ.pop("PYISOLATE_CHILD", None)
             serialized = serialize_for_isolation(inputs)
-            try:
-                model_val = serialized.get("model") if isinstance(serialized, dict) else None
-            except Exception:
-                pass
             result = await extension.execute_node(node_name, **serialized)
-            return await deserialize_from_isolation(result, extension)
+            deserialized = await deserialize_from_isolation(result, extension)
+            return deserialized
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
         except Exception as e:

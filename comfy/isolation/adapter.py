@@ -192,7 +192,41 @@ class ComfyUIAdapter(IsolationAdapter):
 
         registry.register("NodeOutput", None, deserialize_node_output)
 
-        logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput")
+        # KSAMPLER serializer: stores sampler name instead of function object
+        # sampler_function is a callable which gets filtered out by JSONSocketTransport
+        def serialize_ksampler(obj: Any) -> Dict[str, Any]:
+            func_name = obj.sampler_function.__name__
+            # Map function name back to sampler name
+            if func_name == "sample_unipc":
+                sampler_name = "uni_pc"
+            elif func_name == "sample_unipc_bh2":
+                sampler_name = "uni_pc_bh2"
+            elif func_name == "dpm_fast_function":
+                sampler_name = "dpm_fast"
+            elif func_name == "dpm_adaptive_function":
+                sampler_name = "dpm_adaptive"
+            elif func_name.startswith("sample_"):
+                sampler_name = func_name[7:]  # Remove "sample_" prefix
+            else:
+                sampler_name = func_name
+            return {
+                "__type__": "KSAMPLER",
+                "sampler_name": sampler_name,
+                "extra_options": obj.extra_options,
+                "inpaint_options": obj.inpaint_options
+            }
+
+        def deserialize_ksampler(data: Dict[str, Any]) -> Any:
+            import comfy.samplers
+            return comfy.samplers.ksampler(
+                data["sampler_name"],
+                data.get("extra_options", {}),
+                data.get("inpaint_options", {})
+            )
+
+        registry.register("KSAMPLER", serialize_ksampler, deserialize_ksampler)
+
+        logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput, KSAMPLER")
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         return [PromptServerProxy, FolderPathsProxy]

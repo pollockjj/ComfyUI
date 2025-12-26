@@ -1,23 +1,17 @@
 """
 Stateless RPC pattern for ModelPatcher instances.
 
-This module provides:
+Provides:
 1. ModelPatcherRegistry - Host-side registry of ModelPatcher instances (ProxiedSingleton)
-2. ModelPatcherProxy - Picklable handle that forwards calls via RPC
+2. ModelPatcherProxy - Lightweight handle that forwards calls via RPC
 3. maybe_wrap_model_for_isolation - Integration hook for checkpoint loading
 
-Architecture mirrors clip_proxy.py exactly.
-
-Phase 1 Scope (PuLID Core):
-- clone() → Deep Remote Copy
-- get_model_object() → Return proxied nested objects
+Supported operations:
+- clone() - Deep copy of ModelPatcher
+- get_model_object() - Proxied nested object access
 - model_options property getter/setter
 - load_device / offload_device properties
 - size property
-
-Research References:
-- Shadow-Reference Protocol (MODELPATCHER_PHASE1_PLAN.md)
-- CLIPProxy implementation (proven pattern)
 """
 
 import asyncio
@@ -43,12 +37,7 @@ IS_CHILD_PROCESS = os.environ.get("PYISOLATE_CHILD") == "1"
 
 
 def _timing_decorator(func):
-    """
-    Decorator to log RPC method timing.
-    
-    Debug Checkpoint: Logs entry/exit with duration for every RPC call.
-    Target: <5ms average per call.
-    """
+    """Decorator to log RPC method timing."""
     async def wrapper(*args, **kwargs):
         method_name = func.__name__
         instance_id = args[1] if len(args) > 1 else "unknown"
@@ -78,16 +67,10 @@ class ModelPatcherRegistry(ProxiedSingleton):
     Thread-safe singleton that manages ModelPatcher object lifecycle and provides
     async RPC methods for isolated child processes.
     
-    CRITICAL: Inherits from ProxiedSingleton to enable RPC from child processes.
-    
-    Research References:
-    - Shadow-Reference Protocol Section 5.2 (Global Model Registry)
-    - CLIPProxy implementation (production proof)
-    
-    Design Principles:
-    - Identity preservation via _id_map (Finding 3: is_clone logic)
-    - Lazy patch application (Finding 2: metadata operations only)
-    - Zero CUDA tensor serialization (bandwidth reduction ~14,000x)
+    Design principles:
+    - Identity preservation via _id_map
+    - Lazy patch application (metadata operations only)
+    - Zero CUDA tensor serialization
     """
     
     def __init__(self) -> None:
@@ -113,11 +96,6 @@ class ModelPatcherRegistry(ProxiedSingleton):
         If the same Python object (by id()) was already registered,
         returns the existing ID to preserve identity semantics.
         
-        Research: Shadow-Reference Protocol Finding 1 (Model Reference Stability)
-        
-        Debug Checkpoint: Logs register with id() and instance_id.
-        Logs identity preservation hits (same id() returns cached instance_id).
-        
         Args:
             model_patcher: ModelPatcher object to register
             
@@ -129,12 +107,12 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """
         if IS_CHILD_PROCESS:
             raise RuntimeError(
-                "][[ModelPatcherRegistry] FAIL-LOUD: "
+                "][[ModelPatcherRegistry] "
                 "Cannot register ModelPatcher in child process"
             )
         
         with self._lock:
-            # Check if already registered (identity preservation - Finding 3)
+            # Check if already registered (identity preservation)
             obj_id = id(model_patcher)
             if obj_id in self._id_map:
                 existing_id = self._id_map[obj_id]
@@ -164,10 +142,8 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """
         Unregister a ModelPatcher instance (called by weakref.finalize).
         
-        This is a synchronous method designed to be called from finalizers.
+        Synchronous method designed to be called from finalizers.
         Must not raise exceptions.
-        
-        Debug Checkpoint: Logs unregister confirmation.
         
         Args:
             instance_id: ID to unregister
@@ -205,7 +181,7 @@ class ModelPatcherRegistry(ProxiedSingleton):
         instance = self._registry.get(instance_id)
         if instance is None:
             raise ValueError(
-                f"][[ModelPatcherRegistry] FAIL-LOUD: "
+                f"][[ModelPatcherRegistry] "
                 f"Instance {instance_id} not found in registry "
                 f"(registry size: {len(self._registry)})"
             )
@@ -228,12 +204,10 @@ class ModelPatcherRegistry(ProxiedSingleton):
     @_timing_decorator
     async def clone(self, instance_id: str) -> str:
         """
-        RPC: Clone ModelPatcher instance (Deep Remote Copy pattern).
+        RPC: Clone ModelPatcher instance.
         
         Creates a new ModelPatcher via clone(), registers it,
         and returns the new ID.
-        
-        Research: Shadow-Reference Protocol Section 5.3 validates this.
         
         Args:
             instance_id: Source ModelPatcher ID
@@ -288,9 +262,6 @@ class ModelPatcherRegistry(ProxiedSingleton):
         """
         RPC: Get model_options dict.
         
-        Research: Shadow-Reference Protocol Finding 2 (Lazy Patch Application)
-        This is CPU-bound metadata, not VRAM weights.
-        
         Args:
             instance_id: ModelPatcher ID
             
@@ -311,8 +282,6 @@ class ModelPatcherRegistry(ProxiedSingleton):
     async def set_model_options(self, instance_id: str, options: dict) -> None:
         """
         RPC: Set model_options dict.
-        
-        Debug Checkpoint: Logs before/after keys for state preservation validation.
         
         Args:
             instance_id: ModelPatcher ID
@@ -573,9 +542,6 @@ class ModelPatcherRegistry(ProxiedSingleton):
     async def get_size(self, instance_id: str) -> int:
         """
         RPC: Get model size in bytes.
-        
-        Research: Shadow-Reference Protocol Section 6.4 (VRAM Reporting)
-        Child should see ~0 VRAM since it doesn't hold the model.
         
         Args:
             instance_id: ModelPatcher ID
@@ -856,7 +822,8 @@ class ModelPatcherRegistry(ProxiedSingleton):
         moved_args = tuple(_move(a) for a in args)
         moved_kwargs = {k: _move(v) for k, v in kwargs.items()}
         result = instance.model.apply_model(*moved_args, **moved_kwargs)
-        return _move(result)
+        result = _move(result)
+        return result
     
     def get_inner_model_attr_sync(self, instance_id: str, name: str) -> Any:
         """Sync version of get_inner_model_attr() for host-side calls."""
@@ -1214,15 +1181,10 @@ class ModelPatcherProxy:
     """
     Lightweight, picklable handle to a ModelPatcher instance.
     
-    Design Principles (from CLIPProxy):
+    Design principles:
     1. Zero State: Only stores instance_id + registry reference
-    2. Host Optimization: Bypasses RPC when running on host (_is_child=False)
+    2. Host Optimization: Bypasses RPC when running on host
     3. Transparent: Appears identical to ModelPatcher from node's perspective
-    4. Fail-Loud: Any RPC failure raises immediately (no silent failures)
-    
-    Research References:
-    - Shadow-Reference Protocol Section 5.3 (Shadow Patcher concept)
-    - CLIPProxy implementation (proven pattern)
     """
     
     def __init__(
@@ -1266,12 +1228,10 @@ class ModelPatcherProxy:
     
     def _call_registry(self, method_name: str, *args, **kwargs):
         """
-        Call registry method with host-side optimization and timing.
+        Call registry method with host-side optimization.
         
-        If running on host: call directly (sync - registry methods are NOT async on host)
+        If running on host: call directly (sync)
         If running in child: use RpcBridge for sync-to-async RPC
-        
-        Debug Checkpoint: Logs RPC call with duration.
         
         Args:
             method_name: Name of ModelPatcherRegistry method to call
@@ -1323,7 +1283,7 @@ class ModelPatcherProxy:
             raise
     
     # ============================================================
-    # Phase 1 Methods (7 core operations for PuLID)
+    # Core Methods
     # ============================================================
     
     def is_clone(self, other) -> bool:
@@ -1388,20 +1348,12 @@ class ModelPatcherProxy:
     
     @property
     def model_options(self) -> dict:
-        """
-        Get model_options dict.
-        
-        Research: Shadow-Reference Protocol Finding 2 (Lazy Patch Application)
-        """
+        """Get model_options dict."""
         return self._call_registry('get_model_options')
     
     @model_options.setter
     def model_options(self, value: dict) -> None:
-        """
-        Set model_options dict.
-        
-        Debug Checkpoint: Value is logged in registry method for validation.
-        """
+        """Set model_options dict."""
         self._call_registry('set_model_options', value)
     
     @property
@@ -1531,38 +1483,34 @@ class ModelPatcherProxy:
         
         Returns a lightweight proxy that forwards attribute access to
         the actual model on the host side.
-        
-        Research: Shadow-Reference Protocol - this is needed for:
-        - model.model.model_config access patterns
-        - ModelSamplingAdvanced(model.model.model_config)
         """
         return _InnerModelProxy(self._instance_id, self._registry, self._is_child)
     
     # ============================================================
-    # Property Guards (Phase 1 - Raise AttributeError for unsupported)
+    # Property Guards (unsupported operations)
     # ============================================================
     
     @property
     def patches(self):
-        """Property guard: patches access not supported in Phase 1."""
+        """Property guard: patches access not supported."""
         raise AttributeError(
             "][[ModelPatcherProxy] Direct access to 'patches' is not supported "
-            "in isolated mode Phase 1. This will be added in Phase 2/3."
+            "in isolated mode."
         )
     
     @property
     def object_patches(self):
-        """Property guard: object_patches access not supported in Phase 1."""
+        """Property guard: object_patches access not supported."""
         raise AttributeError(
             "][[ModelPatcherProxy] Direct access to 'object_patches' is not supported "
-            "in isolated mode Phase 1. This will be added in Phase 2/3."
+            "in isolated mode."
         )
     
     def add_patches(self, *args, **kwargs):
-        """Method guard: add_patches not supported in Phase 1."""
+        """Method guard: add_patches not supported."""
         raise NotImplementedError(
             "][[ModelPatcherProxy] add_patches() is not supported "
-            "in isolated mode Phase 1. Use load_lora() instead for LoRA loading."
+            "in isolated mode. Use load_lora() instead."
         )
     
     def load_lora(
@@ -1626,17 +1574,17 @@ class ModelPatcherProxy:
         return (new_model, new_clip)
     
     def patch_model(self, *args, **kwargs):
-        """Method guard: patch_model not supported in Phase 1."""
+        """Method guard: patch_model not supported."""
         raise NotImplementedError(
             "][[ModelPatcherProxy] patch_model() is not supported "
-            "in isolated mode Phase 1. This will be added in Phase 4."
+            "in isolated mode."
         )
     
     def unpatch_model(self, *args, **kwargs):
-        """Method guard: unpatch_model not supported in Phase 1."""
+        """Method guard: unpatch_model not supported."""
         raise NotImplementedError(
             "][[ModelPatcherProxy] unpatch_model() is not supported "
-            "in isolated mode Phase 1. This will be added in Phase 4."
+            "in isolated mode."
         )
 
 
@@ -1727,7 +1675,8 @@ class _InnerModelProxy:
                     from comfy.isolation.rpc_bridge import RpcBridge
                     bridge = RpcBridge()
                     method = getattr(self._registry, 'inner_model_apply_model')
-                    return bridge.run_sync(method(self._instance_id, args, kwargs))
+                    result = bridge.run_sync(method(self._instance_id, args, kwargs))
+                    return result
                 else:
                     sync_method = getattr(self._registry, 'inner_model_apply_model_sync')
                     return sync_method(self._instance_id, args, kwargs)
@@ -1842,10 +1791,6 @@ def maybe_wrap_model_for_isolation(model_patcher):
     - Isolation not active
     - Already in child process
     - Already a ModelPatcherProxy
-    
-    Debug Checkpoint: Logs "MODEL wrapping: enabled/disabled" per call.
-    
-    Research: Shadow-Reference Protocol Section 5.4 (Transport Layer)
     
     Args:
         model_patcher: ModelPatcher instance to potentially wrap
