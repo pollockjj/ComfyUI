@@ -255,8 +255,17 @@ class ComfyUIAdapter(IsolationAdapter):
 
         if api_name == "UtilsProxy":
             import comfy.utils
+            logger.info("[UtilsProxy] BEFORE injection: PROGRESS_BAR_HOOK = %s (type=%s)", 
+                       comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK))
             # Inject the progress bar hook
             comfy.utils.PROGRESS_BAR_HOOK = api.progress_bar_hook
+            logger.info("[UtilsProxy] AFTER injection: PROGRESS_BAR_HOOK = %s (type=%s, callable=%s)", 
+                       comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK),
+                       callable(comfy.utils.PROGRESS_BAR_HOOK))
+            # Verify it's actually set
+            import sys
+            logger.info("[UtilsProxy] comfy.utils module id: %s, in sys.modules: %s", 
+                       id(comfy.utils), 'comfy.utils' in sys.modules)
             return
 
         if api_name == "PromptServerProxy":
