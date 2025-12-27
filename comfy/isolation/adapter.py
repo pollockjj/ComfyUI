@@ -15,7 +15,9 @@ try:
     from comfy.isolation.model_sampling_proxy import ModelSamplingProxy, ModelSamplingRegistry
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry
     from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
     from comfy.isolation.proxies.prompt_server_proxy import PromptServerProxy
+    from comfy.isolation.proxies.utils_proxy import UtilsProxy
 except ImportError as exc:  # Fail loud if Comfy environment is incomplete
     raise ImportError(f"ComfyUI environment incomplete: {exc}")
 
@@ -229,10 +231,33 @@ class ComfyUIAdapter(IsolationAdapter):
         logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput, KSAMPLER")
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        return [PromptServerProxy, FolderPathsProxy]
+        return [PromptServerProxy, FolderPathsProxy, ModelManagementProxy, UtilsProxy]
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         api_name = api.__class__.__name__
+
+        if api_name == "FolderPathsProxy":
+            import folder_paths
+            # Replace module-level functions with proxy methods
+            # This is aggressive but necessary for transparent proxying
+            for name in dir(api):
+                if not name.startswith("_"):
+                    setattr(folder_paths, name, getattr(api, name))
+            return
+
+        if api_name == "ModelManagementProxy":
+            import comfy.model_management
+            # Replace module-level functions with proxy methods
+            for name in dir(api):
+                if not name.startswith("_"):
+                    setattr(comfy.model_management, name, getattr(api, name))
+            return
+
+        if api_name == "UtilsProxy":
+            import comfy.utils
+            # Inject the progress bar hook
+            comfy.utils.PROGRESS_BAR_HOOK = api.progress_bar_hook
+            return
 
         if api_name == "PromptServerProxy":
             # Defer heavy import to child context
