@@ -69,6 +69,9 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def get_model_object(self, instance_id: str, name: str) -> Any:
         instance = self._get_instance(instance_id)
+        if name == "model":
+            return detach_if_grad(instance.model)
+        
         result = instance.get_model_object(name)
         if name == "model_sampling":
             from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
@@ -100,6 +103,36 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def get_size(self, instance_id: str) -> int:
         return self._get_instance(instance_id).size
+
+    ISOLATION_UNSUPPORTED_MSG = "['--use-process-isolation' does not support this functionality on an isolated child - {}]"
+
+    class RemoteExecutionBlocker:
+        def __init__(self, stub):
+            self.stub = stub
+            self.__name__ = getattr(stub, 'name', 'RemoteCallback')
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError(ModelPatcherProxy.ISOLATION_UNSUPPORTED_MSG.format(self.__name__))
+
+        def __repr__(self):
+            return f"<RemoteExecutionBlocker name='{self.__name__}'>"
+
+    async def get_all_callbacks(self, instance_id: str, call_type: str) -> Any:
+        stubs = self._get_instance(instance_id).get_all_callbacks(call_type)
+        return [self.RemoteExecutionBlocker(s) for s in stubs]
+
+    async def get_all_wrappers(self, instance_id: str, wrapper_type: str) -> Any:
+        stubs = self._get_instance(instance_id).get_all_wrappers(wrapper_type)
+        return [self.RemoteExecutionBlocker(s) for s in stubs]
+
+    async def _load_list(self, instance_id: str) -> Any:
+        # Sanitized for RPC: (module_offload_mem, module_mem, n, m, params)
+        # We convert 'm' (module) to string as it cannot be serialized
+        raw_list = self._get_instance(instance_id)._load_list()
+        sanitized = []
+        for item in raw_list:
+            sanitized.append((item[0], item[1], item[2], str(item[3]), item[4]))
+        return sanitized
 
     async def model_size(self, instance_id: str) -> Any:
         return self._get_instance(instance_id).model_size()
@@ -143,6 +176,15 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         
     async def detach(self, instance_id: str, unpatch_all: bool = True) -> None:
         self._get_instance(instance_id).detach(unpatch_all)
+
+    async def add_patches(self, instance_id: str, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
+        return self._get_instance(instance_id).add_patches(patches, strength_patch, strength_model)
+
+    async def get_key_patches(self, instance_id: str, filter_prefix: Optional[str] = None) -> Any:
+        return self._get_instance(instance_id).get_key_patches(filter_prefix)
+
+    async def model_state_dict(self, instance_id: str, filter_prefix: Optional[str] = None) -> Any:
+        return self._get_instance(instance_id).model_state_dict(filter_prefix)
 
     async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
         instance = self._get_instance(instance_id)
@@ -516,6 +558,15 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def size(self) -> int:
         return self._call_rpc("get_size")
         
+    def get_all_callbacks(self, call_type: str) -> Any:
+        return self._call_rpc("get_all_callbacks", call_type)
+
+    def get_all_wrappers(self, wrapper_type: str) -> Any:
+        return self._call_rpc("get_all_wrappers", wrapper_type)
+
+    def _load_list(self) -> Any:
+        return self._call_rpc("_load_list")
+
     def model_size(self) -> Any:
         return self._call_rpc("model_size")
 
@@ -722,6 +773,15 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def detach(self, unpatch_all: bool = True) -> Any:
         self._call_rpc("detach", unpatch_all)
         return self.model
+
+    def add_patches(self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
+        return self._call_rpc("add_patches", patches, strength_patch, strength_model)
+
+    def get_key_patches(self, filter_prefix: Optional[str] = None) -> Any:
+        return self._call_rpc("get_key_patches", filter_prefix)
+
+    def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
+        return self._call_rpc("model_state_dict", filter_prefix)
 
     # =========================================================================
     # Weight Operations
