@@ -69,6 +69,9 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def get_model_object(self, instance_id: str, name: str) -> Any:
         instance = self._get_instance(instance_id)
+        if name == "model":
+            return detach_if_grad(instance.model)
+        
         result = instance.get_model_object(name)
         if name == "model_sampling":
             from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
@@ -143,6 +146,15 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         
     async def detach(self, instance_id: str, unpatch_all: bool = True) -> None:
         self._get_instance(instance_id).detach(unpatch_all)
+
+    async def add_patches(self, instance_id: str, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
+        return self._get_instance(instance_id).add_patches(patches, strength_patch, strength_model)
+
+    async def get_key_patches(self, instance_id: str, filter_prefix: Optional[str] = None) -> Any:
+        return self._get_instance(instance_id).get_key_patches(filter_prefix)
+
+    async def model_state_dict(self, instance_id: str, filter_prefix: Optional[str] = None) -> Any:
+        return self._get_instance(instance_id).model_state_dict(filter_prefix)
 
     async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
         instance = self._get_instance(instance_id)
@@ -722,6 +734,15 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def detach(self, unpatch_all: bool = True) -> Any:
         self._call_rpc("detach", unpatch_all)
         return self.model
+
+    def add_patches(self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
+        return self._call_rpc("add_patches", patches, strength_patch, strength_model)
+
+    def get_key_patches(self, filter_prefix: Optional[str] = None) -> Any:
+        return self._call_rpc("get_key_patches", filter_prefix)
+
+    def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
+        return self._call_rpc("model_state_dict", filter_prefix)
 
     # =========================================================================
     # Weight Operations
