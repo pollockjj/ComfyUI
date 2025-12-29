@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from comfy.isolation.proxies.base import (
-    IS_CHILD_PROCESS,
     BaseProxy,
     BaseRegistry,
     detach_if_grad,
@@ -84,9 +83,21 @@ class ModelSamplingRegistry(BaseRegistry[Any]):
         sampling = self._get_instance(instance_id)
         return sampling.percent_to_sigma(percent)
 
-    async def get_attr(self, instance_id: str, name: str) -> Any:
+    async def get_sigma_min(self, instance_id: str) -> Any:
         sampling = self._get_instance(instance_id)
-        return getattr(sampling, name)
+        return detach_if_grad(sampling.sigma_min)
+
+    async def get_sigma_max(self, instance_id: str) -> Any:
+        sampling = self._get_instance(instance_id)
+        return detach_if_grad(sampling.sigma_max)
+    
+    async def get_sigma_data(self, instance_id: str) -> Any:
+        sampling = self._get_instance(instance_id)
+        return detach_if_grad(sampling.sigma_data)
+
+    async def set_sigmas(self, instance_id: str, sigmas: Any) -> None:
+        sampling = self._get_instance(instance_id)
+        sampling.set_sigmas(sigmas)
 
 
 class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
@@ -136,8 +147,17 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                     def percent_to_sigma(self_inner: Any, instance_id: str, percent: float) -> Any:
                         return registry.percent_to_sigma(instance_id, percent)
 
-                    def get_attr(self_inner: Any, instance_id: str, name: str) -> Any:
-                        return registry.get_attr(instance_id, name)
+                    def get_sigma_min(self_inner: Any, instance_id: str) -> Any:
+                        return registry.get_sigma_min(instance_id)
+
+                    def get_sigma_max(self_inner: Any, instance_id: str) -> Any:
+                        return registry.get_sigma_max(instance_id)
+
+                    def get_sigma_data(self_inner: Any, instance_id: str) -> Any:
+                        return registry.get_sigma_data(instance_id)
+
+                    def set_sigmas(self_inner: Any, instance_id: str, sigmas: Any) -> None:
+                        return registry.set_sigmas(instance_id, sigmas)
 
                 self._rpc_caller = _LocalCaller()
         return self._rpc_caller
@@ -154,6 +174,18 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                 loop = get_thread_loop()
                 return loop.run_until_complete(result)
         return result
+
+    @property
+    def sigma_min(self) -> Any:
+        return self._call("get_sigma_min")
+
+    @property
+    def sigma_max(self) -> Any:
+        return self._call("get_sigma_max")
+
+    @property
+    def sigma_data(self) -> Any:
+        return self._call("get_sigma_data")
 
     def calculate_input(self, sigma: Any, noise: Any) -> Any:
         return self._call("calculate_input", sigma, noise)
@@ -176,11 +208,6 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
     def percent_to_sigma(self, percent: float) -> Any:
         return self._call("percent_to_sigma", percent)
 
-    def get_attr(self, name: str) -> Any:
-        return self._call("get_attr", name)
-
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return self._call("get_attr", name)
+    def set_sigmas(self, sigmas: Any) -> None:
+        return self._call("set_sigmas", sigmas)
 
