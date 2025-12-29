@@ -29,3 +29,4 @@ uv.lock
 basic_launch.sh
 basic_launch_sage.sh
 reset_gpu.sh
+.agent/
