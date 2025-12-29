@@ -95,6 +95,10 @@ class ModelSamplingRegistry(BaseRegistry[Any]):
         sampling = self._get_instance(instance_id)
         return detach_if_grad(sampling.sigma_data)
 
+    async def get_sigmas(self, instance_id: str) -> Any:
+        sampling = self._get_instance(instance_id)
+        return detach_if_grad(sampling.sigmas)
+
     async def set_sigmas(self, instance_id: str, sigmas: Any) -> None:
         sampling = self._get_instance(instance_id)
         sampling.set_sigmas(sigmas)
@@ -156,6 +160,9 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                     def get_sigma_data(self_inner: Any, instance_id: str) -> Any:
                         return registry.get_sigma_data(instance_id)
 
+                    def get_sigmas(self_inner: Any, instance_id: str) -> Any:
+                        return registry.get_sigmas(instance_id)
+
                     def set_sigmas(self_inner: Any, instance_id: str, sigmas: Any) -> None:
                         return registry.set_sigmas(instance_id, sigmas)
 
@@ -186,6 +193,10 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
     @property
     def sigma_data(self) -> Any:
         return self._call("get_sigma_data")
+
+    @property
+    def sigmas(self) -> Any:
+        return self._call("get_sigmas")
 
     def calculate_input(self, sigma: Any, noise: Any) -> Any:
         return self._call("calculate_input", sigma, noise)
