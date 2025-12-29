@@ -1122,13 +1122,75 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     @property
     def patches(self) -> Any:
-         return self._call_rpc("get_patches")
+        res = self._call_rpc("get_patches")
+        if isinstance(res, dict):
+             # JSON-RPC converts internal tuples to lists. Restore them.
+             new_res = {}
+             for k, v in res.items():
+                 # value is list of tuples: [(1.0, patch, 1.0, offset, function), ...]
+                 # RPC makes it: [[1.0, patch, 1.0, offset, function], ...]
+                 new_list = []
+                 for item in v:
+                     if isinstance(item, list):
+                         new_list.append(tuple(item))
+                     else:
+                         new_list.append(item)
+                 new_res[k] = new_list
+             return new_res
+        return res
 
     @property
     def pinned(self) -> Set:
          # Server returns list (sanitized set), convert back to set
          val = self._call_rpc("get_patcher_attr", "pinned")
          return set(val) if val is not None else set()
+
+    @property
+    def hook_patches(self) -> Dict:
+        val = self._call_rpc("get_patcher_attr", "hook_patches")
+        if val is None:
+            return {}
+        
+        # Rehydrate HookRef keys from special string formats
+        try:
+            from comfy.hooks import _HookRef
+            import json
+            new_val = {}
+            for k, v in val.items():
+                if isinstance(k, str):
+                    if k.startswith("PYISOLATE_HOOKREF:"):
+                        ref_id = k.split(":", 1)[1]
+                        h = _HookRef()
+                        h._pyisolate_id = ref_id
+                        new_val[h] = v
+                    elif k.startswith("__pyisolate_key__"):
+                        # Handle case where HookRef was converted to tuple (unhashable fallback)
+                        # Format: __pyisolate_key__[["__hook_ref__", true], ["id", "{uuid}"]]
+                        try:
+                            json_str = k[len("__pyisolate_key__"):]
+                            data = json.loads(json_str)
+                            ref_id = None
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, list) and len(item) == 2 and item[0] == "id":
+                                        ref_id = item[1]
+                                        break
+                            
+                            if ref_id:
+                                h = _HookRef()
+                                h._pyisolate_id = ref_id
+                                new_val[h] = v
+                            else:
+                                new_val[k] = v
+                        except Exception:
+                            new_val[k] = v
+                    else:
+                        new_val[k] = v
+                else:
+                    new_val[k] = v
+            return new_val
+        except ImportError:
+            return val
 
     def set_hook_mode(self, hook_mode: Any) -> None:
         self._call_rpc("set_hook_mode", hook_mode)
@@ -1138,8 +1200,8 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def is_clone(self, other: Any) -> bool:
         if isinstance(other, ModelPatcherProxy):
-            return self._instance_id == other._instance_id
-        return self._call_rpc("is_clone", other)
+            return self._call_rpc("is_clone_by_id", other._instance_id) 
+        return False
 
     def clone(self) -> ModelPatcherProxy:
         new_id = self._call_rpc("clone")
@@ -1232,8 +1294,14 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         keys = self._call_rpc("model_state_dict", filter_prefix)
         return dict.fromkeys(keys, None)
 
-    def add_patches(self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
-        return self._call_rpc("add_patches", patches, strength_patch, strength_model)
+    def add_patches(self, *args: Any, **kwargs: Any) -> Any:
+        # Do NOT sanitize arguments as they contain Tensors/Weights needed by the server
+        res = self._call_rpc("add_patches", *args, **kwargs)
+        # JSON/RPC converts tuples to lists. ModelPatcher returns list of keys (which can be tuples).
+        # We must restore them to tuples for compatibility/verification.
+        if isinstance(res, list):
+            return [tuple(x) if isinstance(x, list) else x for x in res]
+        return res
 
     def get_key_patches(self, filter_prefix: Optional[str] = None) -> Any:
         return self._call_rpc("get_key_patches", filter_prefix)
@@ -1358,7 +1426,18 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         return self._call_rpc("memory_required", input_shape)
 
     def model_dtype(self) -> Any:
-        return self._call_rpc("model_dtype")
+        res = self._call_rpc("model_dtype")
+        # Handle case where torch.dtype was serialized as string
+        if isinstance(res, str) and res.startswith("torch."):
+            try:
+                import torch
+                # e.g. "torch.float16" -> torch.float16
+                attr = res.split(".")[-1]
+                if hasattr(torch, attr):
+                    return getattr(torch, attr)
+            except ImportError:
+                pass
+        return res
 
     @property
     def hook_mode(self) -> Any:
@@ -1705,12 +1784,19 @@ def register_hooks_serializers(registry=None):
     # _HookRef serializer (to satisfy strict checks, though used as value not key mostly)
     try:
         from comfy.hooks import _HookRef
+        import uuid
+        
+        # Monkeypatch removed: _HookRef identity logic moved to comfy/hooks.py
+        # Strict fencing enforced.
+
         def serialize_hook_ref(obj):
-            return {"__hook_ref__": True}
+            return {"__hook_ref__": True, "id": getattr(obj, "_pyisolate_id", str(uuid.uuid4()))}
+
         def deserialize_hook_ref(data):
-            # We can't easily recreate exact same _HookRef identity without state sharing,
-            # but for tests often just existence matters.
-            return _HookRef() 
+            h = _HookRef()
+            h._pyisolate_id = data.get("id", str(uuid.uuid4()))
+            return h
+            
         registry.register("_HookRef", serialize_hook_ref, deserialize_hook_ref)
         print("DEBUG: PyIsolate: Registered _HookRef serializer.", flush=True)
     except ImportError:
@@ -1727,3 +1813,9 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     logger.warning(f"Failed to register hooks serializers: {e}")
+
+# Call the registration
+try:
+    register_hooks_serializers()
+except Exception as e:
+    logger.error(f"Failed to initialize hook serializers: {e}")

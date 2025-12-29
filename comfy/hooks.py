@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 import comfy.lora
 import comfy.model_management
 import comfy.patcher_extension
+from comfy.cli_args import args
+import uuid
+import os
 from node_helpers import conditioning_set_values
 
 # #######################################################################################################
@@ -62,7 +65,28 @@ class EnumHookScope(enum.Enum):
 
 
 class _HookRef:
-    pass
+    def __init__(self):
+        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+            self._pyisolate_id = str(uuid.uuid4())
+    
+    def __eq__(self, other):
+        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+             if isinstance(other, _HookRef):
+                  return getattr(self, "_pyisolate_id", None) == getattr(other, "_pyisolate_id", None)
+             return False
+        return self is other
+
+    def __hash__(self):
+        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+             return hash(getattr(self, "_pyisolate_id", None))
+        return id(self)
+
+    def __str__(self):
+        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+             if not hasattr(self, "_pyisolate_id"):
+                 self._pyisolate_id = str(uuid.uuid4())
+             return f"PYISOLATE_HOOKREF:{self._pyisolate_id}"
+        return super().__str__()
 
 
 def default_should_register(hook: Hook, model: ModelPatcher, model_options: dict, target_dict: dict[str], registered: HookGroup):
