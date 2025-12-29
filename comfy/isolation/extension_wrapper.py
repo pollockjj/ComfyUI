@@ -362,6 +362,15 @@ class ComfyNodeExtension(ExtensionBase):
         return self.node_instances[node_name]
 
     async def before_module_loaded(self) -> None:
+        logging.getLogger(__name__).info(f"[TRACE:PBAR] before_module_loaded called. PID={os.getpid()}")
+        
+        # Inject initialization here if we think this is the child
+        try:
+            from comfy.isolation import initialize_proxies
+            initialize_proxies()
+        except Exception as e:
+            logging.getLogger(__name__).error(f"[TRACE:PBAR] Failed to call initialize_proxies in before_module_loaded: {e}")
+
         await super().before_module_loaded()
         try:
             from comfy_api.latest import ComfyAPI_latest
