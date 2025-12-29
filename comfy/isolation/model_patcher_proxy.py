@@ -558,6 +558,11 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def inner_model_extra_conds(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
         return self._get_instance(instance_id).model.extra_conds(*args, **kwargs)
+    async def inner_model_state_dict(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
+        # Return dict with tensor metadata - module_size() needs .nelement() and .element_size()
+        sd = self._get_instance(instance_id).model.state_dict(*args, **kwargs)
+        # Create lightweight metadata dict instead of full tensors
+        return {k: {'numel': v.numel(), 'element_size': v.element_size()} for k, v in sd.items()}
 
     async def inner_model_apply_model(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
         instance = self._get_instance(instance_id)
@@ -1402,6 +1407,11 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     @property
     def offload_device(self) -> Any:
         return self._call_rpc("get_offload_device")
+    
+    @property
+    def device(self) -> Any:
+        """Alias for load_device - used by LoadedModel wrappers in model_management.py"""
+        return self.load_device
 
     def current_loaded_device(self) -> Any:
         return self._call_rpc("current_loaded_device")
@@ -1645,6 +1655,8 @@ class _InnerModelProxy:
             return lambda *a, **k: self._parent._call_rpc("process_latent_out", a, k)
         if name == 'scale_latent_inpaint':
             return lambda *a, **k: self._parent._call_rpc("scale_latent_inpaint", a, k)
+        if name == 'diffusion_model':
+            return self._parent._call_rpc("get_inner_model_attr", 'diffusion_model')
             
         raise AttributeError(f"'{name}' not supported on isolated InnerModel")
 
