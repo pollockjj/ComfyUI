@@ -83,16 +83,9 @@ class ComfyNodeExtension(ExtensionBase):
     async def on_module_loaded(self, module: Any) -> None:
         self._module = module
 
-        # Attach shared registries so children resolve host instances
-        try:
-            if hasattr(ModelPatcherRegistry, "use_remote"):
-                ModelPatcherRegistry.use_remote(self._rpc)
-            if hasattr(ModelSamplingRegistry, "use_remote"):
-                ModelSamplingRegistry.use_remote(self._rpc)
-            if hasattr(CLIPRegistry, "use_remote"):
-                CLIPRegistry.use_remote(self._rpc)
-        except Exception as e:
-            logger.debug("%s Failed to attach registries: %s", LOG_PREFIX, e)
+        # Registries are initialized in host_hooks.py initialize_host_process()
+        # They auto-register via ProxiedSingleton when instantiated
+        # NO additional setup required here - if a registry is missing from host_hooks, it WILL fail
 
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}

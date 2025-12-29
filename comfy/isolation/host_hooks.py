@@ -15,14 +15,18 @@ def initialize_host_process() -> None:
     from .proxies.model_management_proxy import ModelManagementProxy
     from .proxies.progress_proxy import ProgressProxy
     from .proxies.prompt_server_proxy import PromptServerProxy
+    from .proxies.utils_proxy import UtilsProxy
     from .vae_proxy import VAERegistry
     from .model_sampling_proxy import ModelSamplingRegistry
     from .model_patcher_proxy import ModelPatcherRegistry
+    from .clip_proxy import CLIPRegistry
 
     FolderPathsProxy()
     ModelManagementProxy()
     ProgressProxy()
     PromptServerProxy()
+    UtilsProxy()
     VAERegistry()
     ModelSamplingRegistry()
     ModelPatcherRegistry()
+    CLIPRegistry()
