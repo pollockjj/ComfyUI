@@ -34,9 +34,25 @@ class VAERegistry(BaseRegistry[Any]):
         vae = self._get_instance(instance_id)
         return detach_if_grad(vae.decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs))
 
-    async def get_sd(self, instance_id: str) -> Any:
+    async def get_property(self, instance_id: str, name: str) -> Any:
         vae = self._get_instance(instance_id)
-        return vae.get_sd()
+        return getattr(vae, name)
+
+    async def memory_used_encode(self, instance_id: str, shape: Any, dtype: Any) -> int:
+        vae = self._get_instance(instance_id)
+        return vae.memory_used_encode(shape, dtype)
+
+    async def memory_used_decode(self, instance_id: str, shape: Any, dtype: Any) -> int:
+        vae = self._get_instance(instance_id)
+        return vae.memory_used_decode(shape, dtype)
+
+    async def process_input(self, instance_id: str, image: Any) -> Any:
+        vae = self._get_instance(instance_id)
+        return detach_if_grad(vae.process_input(image))
+
+    async def process_output(self, instance_id: str, image: Any) -> Any:
+        vae = self._get_instance(instance_id)
+        return detach_if_grad(vae.process_output(image))
 
 
 class VAEProxy(BaseProxy[VAERegistry]):
@@ -59,6 +75,62 @@ class VAEProxy(BaseProxy[VAERegistry]):
 
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")
+
+    # Wrapper for property access
+    def _get_property(self, name: str) -> Any:
+        return self._call_rpc("get_property", name)
+
+    @property
+    def latent_dim(self) -> int:
+        return self._get_property("latent_dim")
+
+    @property
+    def latent_channels(self) -> int:
+        return self._get_property("latent_channels")
+
+    @property
+    def downscale_ratio(self) -> Any:
+        return self._get_property("downscale_ratio")
+
+    @property
+    def upscale_ratio(self) -> Any:
+        return self._get_property("upscale_ratio")
+
+    @property
+    def output_channels(self) -> int:
+        return self._get_property("output_channels")
+
+    @property
+    def check_not_vide(self) -> bool:
+        return self._get_property("not_video")
+
+    @property
+    def device(self) -> Any:
+        return self._get_property("device")
+
+    @property
+    def working_dtypes(self) -> Any:
+        return self._get_property("working_dtypes")
+
+    @property
+    def disable_offload(self) -> bool:
+        return self._get_property("disable_offload")
+
+    @property
+    def size(self) -> Any:
+        return self._get_property("size")
+
+    def memory_used_encode(self, shape: Any, dtype: Any) -> int:
+        return self._call_rpc("memory_used_encode", shape, dtype)
+
+    def memory_used_decode(self, shape: Any, dtype: Any) -> int:
+        return self._call_rpc("memory_used_decode", shape, dtype)
+
+    def process_input(self, image: Any) -> Any:
+        return self._call_rpc("process_input", image)
+
+    def process_output(self, image: Any) -> Any:
+        return self._call_rpc("process_output", image)
 
 
 if not IS_CHILD_PROCESS:
