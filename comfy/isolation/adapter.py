@@ -3,13 +3,12 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pyisolate.interfaces import IsolationAdapter, SerializerRegistryProtocol  # type: ignore[import-untyped]
 from pyisolate._internal.shared import AsyncRPC, ProxiedSingleton  # type: ignore[import-untyped]
 
 try:
-    import folder_paths
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import ModelPatcherProxy, ModelPatcherRegistry
     from comfy.isolation.model_sampling_proxy import ModelSamplingProxy, ModelSamplingRegistry
@@ -230,7 +229,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
 
         # Register Hook Serializers (Hook, WeightHook, HookReference, etc.)
-        from comfy.isolation.model_patcher_proxy import register_hooks_serializers
+        from comfy.isolation.model_patcher_proxy_utils import register_hooks_serializers
         register_hooks_serializers(registry)
 
         logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput, KSAMPLER")
@@ -260,16 +259,16 @@ class ComfyUIAdapter(IsolationAdapter):
 
         if api_name == "UtilsProxy":
             import comfy.utils
-            logger.info("[UtilsProxy] BEFORE injection: PROGRESS_BAR_HOOK = %s (type=%s)", 
+            logger.info("[UtilsProxy] BEFORE injection: PROGRESS_BAR_HOOK = %s (type=%s)",
                        comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK))
             # Inject the progress bar hook
             comfy.utils.PROGRESS_BAR_HOOK = api.progress_bar_hook
-            logger.info("[UtilsProxy] AFTER injection: PROGRESS_BAR_HOOK = %s (type=%s, callable=%s)", 
+            logger.info("[UtilsProxy] AFTER injection: PROGRESS_BAR_HOOK = %s (type=%s, callable=%s)",
                        comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK),
                        callable(comfy.utils.PROGRESS_BAR_HOOK))
             # Verify it's actually set
             import sys
-            logger.info("[UtilsProxy] comfy.utils module id: %s, in sys.modules: %s", 
+            logger.info("[UtilsProxy] comfy.utils module id: %s, in sys.modules: %s",
                        id(comfy.utils), 'comfy.utils' in sys.modules)
             return
 
