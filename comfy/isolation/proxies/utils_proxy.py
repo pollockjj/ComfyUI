@@ -14,11 +14,16 @@ class UtilsProxy(ProxiedSingleton):
     """
     
     _instance: Optional['UtilsProxy'] = None
+    _rpc: Optional[Any] = None
 
     def __new__(cls) -> 'UtilsProxy':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+
+    @classmethod
+    def set_rpc(cls, rpc: Any) -> None:
+        cls._rpc = rpc
 
     @property
     def instance(self) -> 'UtilsProxy':
@@ -35,10 +40,10 @@ class UtilsProxy(ProxiedSingleton):
             logger = logging.getLogger(__name__)
             # logger.info(f"[TRACE:PBAR] D: UtilsProxy (Child) instance={id(self)} RPC={hasattr(self, '_rpc') and self._rpc is not None}")
             
-            # Primary channel: injected _rpc
-            if hasattr(self, "_rpc") and self._rpc:
-                return await self._rpc.call_remote("progress_bar_hook", value, total, preview, node_id)
-            
+            # Use class-level RPC storage (Static Injection)
+            if UtilsProxy._rpc:
+                return await UtilsProxy._rpc.call_remote("progress_bar_hook", value, total, preview, node_id)
+
             # Fallback channel: current context (e.g. if we are in a callback but instance is fresh)
             try:
                 from pyisolate._internal.shared import current_rpc_context

@@ -275,6 +275,10 @@ class ComfyUIAdapter(IsolationAdapter):
             # [TRACE:PBAR] Host-side registration check
             logger.info(f"[TRACE:PBAR] Host Adapter registration for UtilsProxy. Host Hook is: {comfy.utils.PROGRESS_BAR_HOOK}")
             
+            # Static Injection of RPC mechanism to ensure Child can access it
+            # independent of instance lifecycle.
+            api.set_rpc(rpc)
+
             # CRITICAL: Do NOT overwrite the host hook with the proxy hook.
             # This would cause infinite recursion (Host Hook -> Proxy -> Host Hook).
             # The Host Hook is already set up to talk to the browser.

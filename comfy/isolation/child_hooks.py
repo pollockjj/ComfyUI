@@ -39,6 +39,11 @@ def _setup_utils_proxy() -> None:
                     return
 
             if loop.is_running():
+                # Introspection debug
+                psp = PromptServerProxy.instance
+                has_rpc = hasattr(psp, "_rpc")
+                logging.getLogger(__name__).info(f"[TRACE:PBAR] C: PromptServerProxy RPC={has_rpc}")
+                
                 # UtilsProxy() returns the singleton instance
                 loop.create_task(UtilsProxy().progress_bar_hook(value, total, preview=preview, node_id=node_id))
 
