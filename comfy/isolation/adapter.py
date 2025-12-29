@@ -62,6 +62,13 @@ class ComfyUIAdapter(IsolationAdapter):
                     logging.getLogger(pkg_name).setLevel(logging.ERROR)
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
+        print(f"DEBUG: register_serializers called. Adapter methods: {dir(self)}", flush=True)
+        try:
+            import server
+            print(f"DEBUG: PromptServer.instance type: {type(getattr(server.PromptServer, 'instance', None))}", flush=True)
+        except ImportError:
+            pass
+
         def serialize_model_patcher(obj: Any) -> Dict[str, Any]:
             # Child-side: must already have _instance_id (proxy)
             if os.environ.get("PYISOLATE_CHILD") == "1":
@@ -238,45 +245,55 @@ class ComfyUIAdapter(IsolationAdapter):
         return [PromptServerProxy, FolderPathsProxy, ModelManagementProxy, UtilsProxy]
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
-        api_name = api.__class__.__name__
+        # Resolve the real name whether it's an instance or the Singleton class itself
+        api_name = api.__name__ if isinstance(api, type) else api.__class__.__name__
+        
+        print(f"DEBUG: handle_api_registration called for {api_name}", flush=True)
 
         if api_name == "FolderPathsProxy":
             import folder_paths
             # Replace module-level functions with proxy methods
             # This is aggressive but necessary for transparent proxying
-            for name in dir(api):
+            # Handle both instance and class cases
+            instance = api() if isinstance(api, type) else api
+            for name in dir(instance):
                 if not name.startswith("_"):
-                    setattr(folder_paths, name, getattr(api, name))
+                    setattr(folder_paths, name, getattr(instance, name))
             return
 
         if api_name == "ModelManagementProxy":
             import comfy.model_management
+            instance = api() if isinstance(api, type) else api
             # Replace module-level functions with proxy methods
-            for name in dir(api):
+            for name in dir(instance):
                 if not name.startswith("_"):
-                    setattr(comfy.model_management, name, getattr(api, name))
+                    setattr(comfy.model_management, name, getattr(instance, name))
             return
 
         if api_name == "UtilsProxy":
             import comfy.utils
-            logger.info("[UtilsProxy] BEFORE injection: PROGRESS_BAR_HOOK = %s (type=%s)",
-                       comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK))
-            # Inject the progress bar hook
-            comfy.utils.PROGRESS_BAR_HOOK = api.progress_bar_hook
-            logger.info("[UtilsProxy] AFTER injection: PROGRESS_BAR_HOOK = %s (type=%s, callable=%s)",
-                       comfy.utils.PROGRESS_BAR_HOOK, type(comfy.utils.PROGRESS_BAR_HOOK),
-                       callable(comfy.utils.PROGRESS_BAR_HOOK))
-            # Verify it's actually set
-            import sys
-            logger.info("[UtilsProxy] comfy.utils module id: %s, in sys.modules: %s",
-                       id(comfy.utils), 'comfy.utils' in sys.modules)
+            # [TRACE:PBAR] Host-side registration check
+            logger.info(f"[TRACE:PBAR] Host Adapter registration for UtilsProxy. Host Hook is: {comfy.utils.PROGRESS_BAR_HOOK}")
+            
+            # Static Injection of RPC mechanism to ensure Child can access it
+            # independent of instance lifecycle.
+            api.set_rpc(rpc)
+
+            # CRITICAL: Do NOT overwrite the host hook with the proxy hook.
+            # This would cause infinite recursion (Host Hook -> Proxy -> Host Hook).
+            # The Host Hook is already set up to talk to the browser.
+            # The Proxy just needs to exist so the Child can call it via RPC.
+            
+            logger.info("[TRACE:PBAR] SKIPPING overwrite of host PROGRESS_BAR_HOOK to prevent recursion.")
             return
 
         if api_name == "PromptServerProxy":
             # Defer heavy import to child context
             import server
-
-            proxy = api.instance
+            
+            instance = api() if isinstance(api, type) else api
+            proxy = instance.instance # PromptServerProxy instance has .instance property returning self
+            
             original_register_route = proxy.register_route
 
             def register_route_wrapper(method: str, path: str, handler: Callable[..., Any]) -> None:

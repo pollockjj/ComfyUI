@@ -24,15 +24,23 @@ PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
 
 
+
+# [TRACE:PBAR] Module Import
+print(f"DEBUG: comfy.isolation imported. PID={os.getpid()}", flush=True)
+
 def initialize_proxies() -> None:
     from .child_hooks import is_child_process
-    if is_child_process():
+    is_child = is_child_process()
+    print(f"DEBUG: [TRACE:PBAR] initialize_proxies called. PID={os.getpid()}, Child={is_child}", flush=True)
+    
+    if is_child:
+        print("DEBUG: [TRACE:PBAR] Initializing CHILD process hooks", flush=True)
         from .child_hooks import initialize_child_process
         initialize_child_process()
     else:
+        print("DEBUG: [TRACE:PBAR] Initializing HOST process hooks", flush=True)
         from .host_hooks import initialize_host_process
         initialize_host_process()
-
 
 @dataclass(frozen=True)
 class IsolatedNodeSpec:

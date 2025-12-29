@@ -308,6 +308,8 @@ async def run(server_instance, address='', port=8188, verbose=True, call_on_star
 
 def hijack_progress(server_instance):
     def hook(value, total, preview_image, prompt_id=None, node_id=None):
+        import logging
+        logging.getLogger(__name__).info(f"[TRACE:PBAR] Main.hijack_progress: hook called. value={value}/{total}")
         executing_context = get_executing_context()
         if prompt_id is None and executing_context is not None:
             prompt_id = executing_context.prompt_id
