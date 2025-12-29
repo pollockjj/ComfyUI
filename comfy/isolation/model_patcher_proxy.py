@@ -137,7 +137,22 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
              
         # 2. Dictionary / Mapping - Explicitly Recurse
         if isinstance(obj, dict):
-             return {str(k): self._sanitize_rpc_result(v, seen) for k, v in obj.items()}
+             new_dict = {}
+             for k, v in obj.items():
+                 # Handle tuple keys (common in model_options patches)
+                 if isinstance(k, tuple):
+                     import json
+                     # Use special prefix to identify tuple keys for client-side reconstruction
+                     # Convert tuple to list for JSON serialization
+                     try:
+                         key_str = "__pyisolate_key__" + json.dumps(list(k))
+                         new_dict[key_str] = self._sanitize_rpc_result(v, seen)
+                     except Exception:
+                         # Fallback to string representation if key is not JSON serializable even as list
+                         new_dict[str(k)] = self._sanitize_rpc_result(v, seen)
+                 else:
+                     new_dict[str(k)] = self._sanitize_rpc_result(v, seen)
+             return new_dict
 
         # 3. Explicitly allowed Objects (with __dict__)
         # BE CAREFUL: Many things have __dict__ but are not safe. 
@@ -263,7 +278,7 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         return getattr(self._get_instance(instance_id), "hook_mode", None)
 
     async def set_hook_mode(self, instance_id: str, value: Any) -> None:
-        self._get_instance(instance_id).set_hook_mode(value)
+        setattr(self._get_instance(instance_id), "hook_mode", value)
 
     async def inject_model(self, instance_id: str) -> None:
         instance = self._get_instance(instance_id)
@@ -655,13 +670,7 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             return ModelSamplingProxy(sampling_id, registry)
         return detach_if_grad(result)
 
-    async def get_model_options(self, instance_id: str) -> dict:
-        instance = self._get_instance(instance_id)
-        import copy
-        return copy.deepcopy(instance.model_options)
 
-    async def set_model_options(self, instance_id: str, options: dict) -> None:
-        self._get_instance(instance_id).model_options = options
 
     # =========================================================================
     # Device / Memory / Properties
@@ -808,17 +817,6 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def get_hook_mode(self, instance_id: str) -> Any:
         return getattr(self._get_instance(instance_id), "hook_mode", None)
-
-    async def set_hook_mode(self, instance_id: str, value: Any) -> None:
-        setattr(self._get_instance(instance_id), "hook_mode", value)
-
-    async def inject_model(self, instance_id: str) -> None:
-        self._get_instance(instance_id).inject_model()
-
-    async def eject_model(self, instance_id: str) -> None:
-        self._get_instance(instance_id).eject_model()
-        
-    async def get_is_injected(self, instance_id: str) -> bool:
         return self._get_instance(instance_id).is_injected
         
     async def set_skip_injection(self, instance_id: str, value: bool) -> None:
@@ -1125,8 +1123,17 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     @property
     def patches(self) -> Any:
          return self._call_rpc("get_patches")
+
+    @property
+    def pinned(self) -> Set:
+         # Server returns list (sanitized set), convert back to set
+         val = self._call_rpc("get_patcher_attr", "pinned")
+         return set(val) if val is not None else set()
+
+    def set_hook_mode(self, hook_mode: Any) -> None:
+        self._call_rpc("set_hook_mode", hook_mode)
          
-    def register_all_hook_patches(self, hooks: Any, target_dict: Any, model_options: Any, registered: Any) -> None:
+    def register_all_hook_patches(self, hooks: Any, target_dict: Any, model_options: Any = None, registered: Any = None) -> None:
         self._call_rpc("register_all_hook_patches", hooks, target_dict, model_options, registered)
 
     def is_clone(self, other: Any) -> bool:
@@ -1151,12 +1158,175 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     @property
     def model_options(self) -> dict:
-        return self._call_rpc("get_model_options")
+        data = self._call_rpc("get_model_options")
+        import json
+        
+        def _decode_keys(obj):
+            if isinstance(obj, dict):
+                new_d = {}
+                for k, v in obj.items():
+                    if isinstance(k, str) and k.startswith("__pyisolate_key__"):
+                        try:
+                            # Decode key
+                            json_str = k[17:] # len("__pyisolate_key__")
+                            val = json.loads(json_str)
+                            if isinstance(val, list):
+                                val = tuple(val)
+                            new_d[val] = _decode_keys(v)
+                        except:
+                            new_d[k] = _decode_keys(v)
+                    else:
+                        new_d[k] = _decode_keys(v)
+                return new_d
+            if isinstance(obj, list):
+                return [_decode_keys(x) for x in obj]
+            return obj
+            
+        return _decode_keys(data)
 
     @model_options.setter
     def model_options(self, value: dict) -> None:
         self._call_rpc("set_model_options", value)
 
+    def apply_hooks(self, hooks: Any) -> Any:
+        return self._call_rpc("apply_hooks", hooks)
+
+    def prepare_state(self, timestep: Any) -> Any:
+        return self._call_rpc("prepare_state", timestep)
+
+    def restore_hook_patches(self) -> None:
+        self._call_rpc("restore_hook_patches")
+        
+    def unpatch_hooks(self, whitelist_keys_set: Optional[Set[str]] = None) -> None:
+        self._call_rpc("unpatch_hooks", whitelist_keys_set)
+
+    # =========================================================================
+    # Device / Memory / Loading
+    # =========================================================================
+
+    def model_patches_to(self, device: Any) -> Any:
+        return self._call_rpc("model_patches_to", device)
+
+    def partially_load(self, device: Any, extra_memory: Any, force_patch_weights: bool = False) -> Any:
+        return self._call_rpc("partially_load", device, extra_memory, force_patch_weights)
+        
+    def partially_unload(self, device_to: Any, memory_to_free: int = 0, force_patch_weights: bool = False) -> int:
+        return self._call_rpc("partially_unload", device_to, memory_to_free, force_patch_weights)
+
+    def load(self, device_to: Any = None, lowvram_model_memory: int = 0, force_patch_weights: bool = False, full_load: bool = False) -> None:
+        self._call_rpc("load", device_to, lowvram_model_memory, force_patch_weights, full_load)
+
+    def patch_model(self, device_to: Any = None, lowvram_model_memory: int = 0, load_weights: bool = True, force_patch_weights: bool = False) -> Any:
+        self._call_rpc("patch_model", device_to, lowvram_model_memory, load_weights, force_patch_weights)
+        return self
+
+    def unpatch_model(self, device_to: Any = None, unpatch_weights: bool = True) -> None:
+        self._call_rpc("unpatch_model", device_to, unpatch_weights)
+
+    def detach(self, unpatch_all: bool = True) -> Any:
+        self._call_rpc("detach", unpatch_all)
+        return self.model
+
+    def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
+        # Reconstruct dict with None values from keys list
+        keys = self._call_rpc("model_state_dict", filter_prefix)
+        return dict.fromkeys(keys, None)
+
+    def add_patches(self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
+        return self._call_rpc("add_patches", patches, strength_patch, strength_model)
+
+    def get_key_patches(self, filter_prefix: Optional[str] = None) -> Any:
+        return self._call_rpc("get_key_patches", filter_prefix)
+
+    # =========================================================================
+    # Weight Operations
+    # =========================================================================
+
+    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
+        self._call_rpc("patch_weight_to_device", key, device_to, inplace_update)
+
+    def pin_weight_to_device(self, key):
+        self._call_rpc("pin_weight_to_device", key)
+
+    def unpin_weight(self, key):
+        self._call_rpc("unpin_weight", key)
+
+    def unpin_all_weights(self):
+        self._call_rpc("unpin_all_weights")
+        
+    def calculate_weight(self, patches, weight, key, intermediate_dtype=None):
+        return self._call_rpc("calculate_weight", patches, weight, key, intermediate_dtype)
+
+    # =========================================================================
+    # Lifecycle / Hooks / Injection
+    # =========================================================================
+
+    def inject_model(self) -> None:
+        self._call_rpc("inject_model")
+
+    def eject_model(self) -> None:
+        self._call_rpc("eject_model")
+        
+    def use_ejected(self, skip_and_inject_on_exit_only: bool = False) -> Any:
+        return AutoPatcherEjector(self, skip_and_inject_on_exit_only=skip_and_inject_on_exit_only)
+        
+    @property
+    def is_injected(self) -> bool:
+        return self._call_rpc("get_is_injected")
+
+    @property
+    def skip_injection(self) -> bool:
+        return self._call_rpc("get_skip_injection")
+        
+    @skip_injection.setter
+    def skip_injection(self, value: bool) -> None:
+        self._call_rpc("set_skip_injection", value)
+
+    def clean_hooks(self) -> None:
+        self._call_rpc("clean_hooks")
+
+    def pre_run(self) -> None:
+        self._call_rpc("pre_run")
+        
+    def cleanup(self) -> None:
+        self._call_rpc("cleanup")
+
+    @property
+    def model(self) -> _InnerModelProxy:
+        return _InnerModelProxy(self)
+
+    def __getattr__(self, name: str) -> Any:
+        # whitelist of state attributes to proxy directly
+        _whitelisted_attrs = {
+            "hook_patches_backup", "hook_backup", "cached_hook_patches", 
+            "current_hooks", "forced_hooks", "is_clip", "patches_uuid",
+            "pinned", "attachments", "additional_models", 
+            "injections", "hook_patches", "model_lowvram", "model_loaded_weight_memory",
+            "backup", "object_patches_backup", "weight_wrapper_patches",
+            "weight_inplace_update", "force_cast_weights"
+        }
+        if name in _whitelisted_attrs:
+            return self._call_rpc("get_patcher_attr", name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def load_lora(self, lora_path: str, strength_model: float, clip: Optional[Any] = None, strength_clip: float = 1.0) -> tuple:
+        clip_id = None
+        if clip is not None:
+            # Handle both proxy types
+            clip_id = getattr(clip, '_instance_id', getattr(clip, '_clip_id', None))
+            
+        result = self._call_rpc("load_lora", lora_path, strength_model, clip_id, strength_clip)
+        
+        new_model = None
+        if result.get("model_id"):
+            new_model = ModelPatcherProxy(result["model_id"], self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+            
+        new_clip = None
+        if result.get("clip_id"):
+            from comfy.isolation.clip_proxy import CLIPProxy
+            new_clip = CLIPProxy(result["clip_id"])
+            
+        return (new_model, new_clip)
     @property
     def load_device(self) -> Any:
         return self._call_rpc("get_load_device")
@@ -1352,163 +1522,11 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def parent(self) -> Any:
         return self._call_rpc("get_parent")
 
-    # =========================================================================
-    # Device / Memory / Loading
-    # =========================================================================
 
-    def model_patches_to(self, device: Any) -> Any:
-        return self._call_rpc("model_patches_to", device)
 
-    def partially_load(self, device: Any, extra_memory: Any, force_patch_weights: bool = False) -> Any:
-        return self._call_rpc("partially_load", device, extra_memory, force_patch_weights)
+
         
-    def partially_unload(self, device_to: Any, memory_to_free: int = 0, force_patch_weights: bool = False) -> int:
-        return self._call_rpc("partially_unload", device_to, memory_to_free, force_patch_weights)
 
-    def load(self, device_to: Any = None, lowvram_model_memory: int = 0, force_patch_weights: bool = False, full_load: bool = False) -> None:
-        self._call_rpc("load", device_to, lowvram_model_memory, force_patch_weights, full_load)
-
-    def patch_model(self, device_to: Any = None, lowvram_model_memory: int = 0, load_weights: bool = True, force_patch_weights: bool = False) -> Any:
-        self._call_rpc("patch_model", device_to, lowvram_model_memory, load_weights, force_patch_weights)
-        return self
-
-    def unpatch_model(self, device_to: Any = None, unpatch_weights: bool = True) -> None:
-        self._call_rpc("unpatch_model", device_to, unpatch_weights)
-
-    def detach(self, unpatch_all: bool = True) -> Any:
-        self._call_rpc("detach", unpatch_all)
-        return self.model
-
-    def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
-        # Reconstruct dict with None values from keys list
-        keys = self._call_rpc("model_state_dict", filter_prefix)
-        return dict.fromkeys(keys, None)
-
-    def add_patches(self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> Any:
-        return self._call_rpc("add_patches", patches, strength_patch, strength_model)
-
-    def get_key_patches(self, filter_prefix: Optional[str] = None) -> Any:
-        return self._call_rpc("get_key_patches", filter_prefix)
-
-    # =========================================================================
-    # Weight Operations
-    # =========================================================================
-
-    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
-        self._call_rpc("patch_weight_to_device", key, device_to, inplace_update)
-
-    def pin_weight_to_device(self, key):
-        self._call_rpc("pin_weight_to_device", key)
-
-    def unpin_weight(self, key):
-        self._call_rpc("unpin_weight", key)
-
-    def unpin_all_weights(self):
-        self._call_rpc("unpin_all_weights")
-        
-    def calculate_weight(self, patches, weight, key, intermediate_dtype=None):
-        return self._call_rpc("calculate_weight", patches, weight, key, intermediate_dtype)
-
-    # =========================================================================
-    # Lifecycle / Hooks / Injection
-    # =========================================================================
-
-    def inject_model(self) -> None:
-        self._call_rpc("inject_model")
-
-    def eject_model(self) -> None:
-        self._call_rpc("eject_model")
-        
-    def use_ejected(self, skip_and_inject_on_exit_only: bool = False) -> Any:
-        return AutoPatcherEjector(self, skip_and_inject_on_exit_only=skip_and_inject_on_exit_only)
-        
-    @property
-    def is_injected(self) -> bool:
-        return self._call_rpc("get_is_injected")
-
-    @property
-    def skip_injection(self) -> bool:
-        return self._call_rpc("get_skip_injection")
-        
-    @skip_injection.setter
-    def skip_injection(self, value: bool) -> None:
-        self._call_rpc("set_skip_injection", value)
-
-    def clean_hooks(self) -> None:
-        self._call_rpc("clean_hooks")
-
-    def pre_run(self) -> None:
-        self._call_rpc("pre_run")
-        
-    def cleanup(self) -> None:
-        self._call_rpc("cleanup")
-
-    def restore_hook_patches(self) -> None:
-        self._call_rpc("restore_hook_patches")
-        
-    def unpatch_hooks(self, whitelist_keys_set: Optional[Set[str]] = None) -> None:
-        self._call_rpc("unpatch_hooks", whitelist_keys_set)
-
-    def register_all_hook_patches(self, hooks: Any, target_dict: Any, model_options: Any, registered: Any) -> None:
-        self._call_rpc("register_all_hook_patches", hooks, target_dict, model_options, registered)
-
-    def apply_hooks(self, hooks: Any) -> Any:
-        return self._call_rpc("apply_hooks", hooks)
-
-    def prepare_state(self, timestep: Any) -> Any:
-        return self._call_rpc("prepare_state", timestep)
-
-    @property
-    def model(self) -> _InnerModelProxy:
-        return _InnerModelProxy(self)
-
-    # =========================================================================
-    # Guards & Hard Parts (Not Implemented yet)
-    # =========================================================================
-
-    @property
-    def patches(self) -> Any:
-        raise AttributeError("Direct access to 'patches' is not supported in isolated mode. See PASSDOWN_MODEL_PATCHER_HARD_PARTS.md")
-
-    @property
-    def object_patches(self) -> Any:
-        raise AttributeError("Direct access to 'object_patches' is not supported in isolated mode.")
-
-    def add_patches(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError("add_patches() is not supported in isolated mode. Use load_lora() instead.")
-        
-    def __getattr__(self, name: str) -> Any:
-        # whitelist of state attributes to proxy directly
-        _whitelisted_attrs = {
-            "hook_patches_backup", "hook_backup", "cached_hook_patches",
-            "current_hooks", "forced_hooks", "is_clip", "patches_uuid",
-            "pinned", "attachments", "additional_models",
-            "injections", "hook_patches", "model_lowvram", "model_loaded_weight_memory",
-            "backup", "object_patches_backup", "weight_wrapper_patches",
-            "weight_inplace_update", "force_cast_weights"
-        }
-        if name in _whitelisted_attrs:
-            return self._call_rpc("get_patcher_attr", name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
-    def load_lora(self, lora_path: str, strength_model: float, clip: Optional[Any] = None, strength_clip: float = 1.0) -> tuple:
-        clip_id = None
-        if clip is not None:
-            # Handle both proxy types
-            clip_id = getattr(clip, '_instance_id', getattr(clip, '_clip_id', None))
-            
-        result = self._call_rpc("load_lora", lora_path, strength_model, clip_id, strength_clip)
-        
-        new_model = None
-        if result.get("model_id"):
-            new_model = ModelPatcherProxy(result["model_id"], self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
-            
-        new_clip = None
-        if result.get("clip_id"):
-            from comfy.isolation.clip_proxy import CLIPProxy
-            new_clip = CLIPProxy(result["clip_id"])
-            
-        return (new_model, new_clip)
 
 
 class _InnerModelProxy:
@@ -1519,7 +1537,7 @@ class _InnerModelProxy:
         if name.startswith('_'):
             raise AttributeError(name)
             
-        if name in ('model_config', 'latent_format', 'model_type'):
+        if name in ('model_config', 'latent_format', 'model_type', 'current_weight_patches_uuid'):
             return self._parent._call_rpc("get_inner_model_attr", name)
             
         if name == 'load_device':
@@ -1571,12 +1589,14 @@ def maybe_wrap_model_for_isolation(model_patcher: Any) -> Any:
     return ModelPatcherProxy(model_id, registry, manage_lifecycle=True)
 
 
-def _register_hooks_serializers():
+
+def register_hooks_serializers(registry=None):
     from pyisolate._internal.serialization_registry import SerializerRegistry
     import comfy.hooks
     import enum
 
-    registry = SerializerRegistry.get_instance()
+    if registry is None:
+        registry = SerializerRegistry.get_instance()
 
     # Generic Enum Serializer
     def serialize_enum(obj):
@@ -1594,7 +1614,7 @@ def _register_hooks_serializers():
 
     # HookGroup
     def serialize_hook_group(obj):
-        return {"hooks": obj.hooks}
+        return {"__type__": "HookGroup", "hooks": obj.hooks}
 
     def deserialize_hook_group(data):
         hg = comfy.hooks.HookGroup()
@@ -1608,6 +1628,11 @@ def _register_hooks_serializers():
     def serialize_dict_state(obj):
         # helper to pickle __dict__
         d = obj.__dict__.copy()
+        d['__type__'] = type(obj).__name__
+        # Remove custom_should_register function (not serializable)
+        # It will be restored to default by __init__ on deserialization
+        if 'custom_should_register' in d:
+            del d['custom_should_register']
         # Do NOT delete hook_ref, it is needed by Server
         return d
 
@@ -1696,7 +1721,7 @@ def _register_hooks_serializers():
 # Register serializers immediately
 try:
     print("DEBUG: PyIsolate: Loading model_patcher_proxy serializers...", flush=True)
-    _register_hooks_serializers()
+
     print("DEBUG: PyIsolate: FINISHED registering hooks serializers.", flush=True)
 except Exception as e:
     import traceback

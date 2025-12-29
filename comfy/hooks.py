@@ -168,6 +168,8 @@ class WeightHook(Hook):
                 key_map = comfy.lora.model_lora_keys_clip(model.model, key_map)
             else:
                 key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
+            if self.weights is None:
+                self.weights = {}
             weights = comfy.lora.load_lora(self.weights, key_map, log_missing=False)
         else:
             if target == EnumWeightTarget.Clip:
