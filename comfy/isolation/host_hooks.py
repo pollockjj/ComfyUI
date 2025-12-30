@@ -14,7 +14,7 @@ def initialize_host_process() -> None:
     from .proxies.folder_paths_proxy import FolderPathsProxy
     from .proxies.model_management_proxy import ModelManagementProxy
     from .proxies.progress_proxy import ProgressProxy
-    from .proxies.prompt_server_proxy import PromptServerProxy
+    from .proxies.prompt_server_impl import PromptServerService
     from .proxies.utils_proxy import UtilsProxy
     from .vae_proxy import VAERegistry
     from .model_sampling_proxy import ModelSamplingRegistry
@@ -24,9 +24,6 @@ def initialize_host_process() -> None:
     FolderPathsProxy()
     ModelManagementProxy()
     ProgressProxy()
-    PromptServerProxy()
+    PromptServerService()
     UtilsProxy()
     VAERegistry()
-    ModelSamplingRegistry()
-    ModelPatcherRegistry()
-    CLIPRegistry()

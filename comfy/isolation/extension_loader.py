@@ -94,8 +94,7 @@ async def load_isolated_node(
         "dependencies": dependencies,
         "share_torch": share_torch,
         "sandbox": sandbox,  # NEW: Pass sandbox config to pyisolate
-        # Expose shared registries to isolated processes
-        "apis": [VAERegistry, ModelPatcherRegistry, ModelSamplingRegistry, CLIPRegistry],
+        # APIs are auto-populated from adapter.provide_rpc_services() if not specified here
     }
 
     extension = manager.load_extension(extension_config)

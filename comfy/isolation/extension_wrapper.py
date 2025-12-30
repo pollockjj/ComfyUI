@@ -355,14 +355,14 @@ class ComfyNodeExtension(ExtensionBase):
         return self.node_instances[node_name]
 
     async def before_module_loaded(self) -> None:
-        logging.getLogger(__name__).info(f"[TRACE:PBAR] before_module_loaded called. PID={os.getpid()}")
+
         
         # Inject initialization here if we think this is the child
         try:
             from comfy.isolation import initialize_proxies
             initialize_proxies()
         except Exception as e:
-            logging.getLogger(__name__).error(f"[TRACE:PBAR] Failed to call initialize_proxies in before_module_loaded: {e}")
+            logging.getLogger(__name__).error(f"Failed to call initialize_proxies in before_module_loaded: {e}")
 
         await super().before_module_loaded()
         try:
@@ -373,10 +373,10 @@ class ComfyNodeExtension(ExtensionBase):
             import comfy_api.latest._resources as latest_resources
 
             ComfyAPI_latest.Execution = ProgressProxy
-            ComfyAPI_latest.execution = ProgressProxy()
-            fp_proxy = FolderPathsProxy()
-            latest_ui.folder_paths = fp_proxy
-            latest_resources.folder_paths = fp_proxy
+            # ComfyAPI_latest.execution = ProgressProxy()  # Eliminated to avoid Singleton collision
+            # fp_proxy = FolderPathsProxy()                 # Eliminated to avoid Singleton collision
+            # latest_ui.folder_paths = fp_proxy
+            # latest_resources.folder_paths = fp_proxy
         except Exception:
             pass
 

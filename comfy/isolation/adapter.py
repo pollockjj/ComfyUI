@@ -15,8 +15,9 @@ try:
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry
     from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
     from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
-    from comfy.isolation.proxies.prompt_server_proxy import PromptServerProxy
+    from comfy.isolation.proxies.prompt_server_impl import PromptServerService
     from comfy.isolation.proxies.utils_proxy import UtilsProxy
+    from comfy.isolation.proxies.progress_proxy import ProgressProxy
 except ImportError as exc:  # Fail loud if Comfy environment is incomplete
     raise ImportError(f"ComfyUI environment incomplete: {exc}")
 
@@ -62,10 +63,8 @@ class ComfyUIAdapter(IsolationAdapter):
                     logging.getLogger(pkg_name).setLevel(logging.ERROR)
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
-        print(f"DEBUG: register_serializers called. Adapter methods: {dir(self)}", flush=True)
         try:
             import server
-            print(f"DEBUG: PromptServer.instance type: {type(getattr(server.PromptServer, 'instance', None))}", flush=True)
         except ImportError:
             pass
 
@@ -241,14 +240,24 @@ class ComfyUIAdapter(IsolationAdapter):
 
         logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput, KSAMPLER")
 
+    
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        return [PromptServerProxy, FolderPathsProxy, ModelManagementProxy, UtilsProxy]
+        return [
+            PromptServerService,
+            FolderPathsProxy,
+            ModelManagementProxy,
+            UtilsProxy,
+            ProgressProxy,
+            VAERegistry,
+            CLIPRegistry,
+            ModelPatcherRegistry,
+            ModelSamplingRegistry
+        ]
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         # Resolve the real name whether it's an instance or the Singleton class itself
         api_name = api.__name__ if isinstance(api, type) else api.__class__.__name__
-        
-        print(f"DEBUG: handle_api_registration called for {api_name}", flush=True)
+
 
         if api_name == "FolderPathsProxy":
             import folder_paths
@@ -272,8 +281,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
         if api_name == "UtilsProxy":
             import comfy.utils
-            # [TRACE:PBAR] Host-side registration check
-            logger.info(f"[TRACE:PBAR] Host Adapter registration for UtilsProxy. Host Hook is: {comfy.utils.PROGRESS_BAR_HOOK}")
+
             
             # Static Injection of RPC mechanism to ensure Child can access it
             # independent of instance lifecycle.
@@ -284,7 +292,7 @@ class ComfyUIAdapter(IsolationAdapter):
             # The Host Hook is already set up to talk to the browser.
             # The Proxy just needs to exist so the Child can call it via RPC.
             
-            logger.info("[TRACE:PBAR] SKIPPING overwrite of host PROGRESS_BAR_HOOK to prevent recursion.")
+
             return
 
         if api_name == "PromptServerProxy":
