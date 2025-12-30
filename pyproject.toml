@@ -70,5 +70,3 @@ messages_control.disable = [
   "unused-variable",
 ]
 
-[project.entry-points."pyisolate.adapters"]
-comfyui = "comfy.isolation.adapter:ComfyUIAdapter"

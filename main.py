@@ -28,7 +28,20 @@ import logging
 
 if '--use-process-isolation' in sys.argv:
     from comfy.isolation import initialize_proxies
+    from comfy.isolation import initialize_proxies
     initialize_proxies()
+
+    # Explicitly register the ComfyUI adapter for pyisolate (v1.0 architecture)
+    try:
+        import pyisolate
+        from comfy.isolation.adapter import ComfyUIAdapter
+        pyisolate.register_adapter(ComfyUIAdapter())
+        logging.info("PyIsolate adapter registered: comfyui")
+    except ImportError:
+        logging.warning("PyIsolate not installed or version too old for explicit registration")
+    except Exception as e:
+        logging.error(f"Failed to register PyIsolate adapter: {e}")
+
     if not IS_PYISOLATE_CHILD:
         if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
