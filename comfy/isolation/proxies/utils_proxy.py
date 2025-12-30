@@ -34,12 +34,13 @@ class UtilsProxy(ProxiedSingleton):
             if UtilsProxy._rpc:
                 return await UtilsProxy._rpc.progress_bar_hook(value, total, preview, node_id)
             
-            # Fallback channel: current context
+            # Fallback channel: global child rpc
             try:
-                from pyisolate._internal.shared import current_rpc_context
-                rpc = current_rpc_context.get()
-                if rpc:
-                    return await rpc.call_remote("progress_bar_hook", value, total, preview, node_id)
+                from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+                rpc = get_child_rpc_instance()
+                # If we have an RPC instance but no UtilsProxy._rpc, we *could* try to use it,
+                # but we need a caller. For now, just pass to avoid crashing.
+                pass 
             except (ImportError, LookupError):
                 pass
             

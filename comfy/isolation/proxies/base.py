@@ -117,7 +117,7 @@ class BaseProxy(Generic[T]):
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
-            from pyisolate._internal.shared import get_child_rpc_instance
+            from pyisolate._internal.rpc_protocol import get_child_rpc_instance
             rpc = get_child_rpc_instance()
             if rpc is None:
                 raise RuntimeError(f"[{self.__class__.__name__}] No RPC in child")

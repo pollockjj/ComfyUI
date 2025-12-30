@@ -13,7 +13,7 @@ def is_child_process() -> bool:
 def initialize_child_process() -> None:
     # Manual RPC Injection Fallback
     try:
-        from pyisolate._internal.shared import get_child_rpc_instance
+        from pyisolate._internal.rpc_protocol import get_child_rpc_instance
         rpc = get_child_rpc_instance()
         if rpc:
              _setup_prompt_server_stub(rpc)

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from pyisolate.interfaces import IsolationAdapter, SerializerRegistryProtocol  # type: ignore[import-untyped]
-from pyisolate._internal.shared import AsyncRPC, ProxiedSingleton  # type: ignore[import-untyped]
+from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type: ignore[import-untyped]
 
 try:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
