@@ -1,4 +1,4 @@
-"""Child process initialization for PyIsolate."""
+# Child process initialization for PyIsolate
 import logging
 import os
 import sys
@@ -11,7 +11,7 @@ def is_child_process() -> bool:
 
 
 def initialize_child_process() -> None:
-    # Manual RPC Injection Fallback
+    # Manual RPC injection
     try:
         from pyisolate._internal.rpc_protocol import get_child_rpc_instance
         rpc = get_child_rpc_instance()
@@ -35,7 +35,7 @@ def _setup_prompt_server_stub(rpc=None) -> None:
         import sys
         import types
 
-        # Mock 'server' module to avoid side-effects
+        # Mock server module
         if "server" not in sys.modules:
             mock_server = types.ModuleType("server")
             sys.modules["server"] = mock_server
@@ -64,14 +64,7 @@ def _setup_utils_proxy(rpc=None) -> None:
         import comfy.utils
         import asyncio
         
-        from .proxies.utils_proxy import UtilsProxy
-        import comfy.utils
-        import asyncio
-        
-        # UtilsProxy instantiation removed to allow pyisolate injection
-        # logic to handle it (SingletonMetaclass collision avoidance).
-        # We also don't need manual set_rpc as injection handles it.
-
+        # Sync hook wrapper for progress updates
         def sync_hook_wrapper(value: int, total: int, preview: None = None, node_id: None = None) -> None:
             resolved = "arg"
             if node_id is None:
@@ -86,30 +79,10 @@ def _setup_utils_proxy(rpc=None) -> None:
                 except Exception as e:
                     resolved = f"err({e})"
 
-            # Direct RPC Injection to bypass blocked Event Loop
-            # The standard proxy method is async and requires the loop to run to schedule the send.
-            # But the loop is blocked by KSampler (us!). So we must manually inject into the
-            # thread-safe outbox which feeds the independent _send_thread.
+            # Bypass blocked event loop by direct outbox injection
             if rpc:
                 try:
-                    # We need to construct a pseudo-request. We don't care about the response.
-                    # importing here to avoid circular deps if possible, or just using dict
-                    
-                    # We can't easily get the strict types, but it's just a dict at runtime.
-                    # Structure matches pyisolate._internal.shared.RPCPendingRequest
-                    
-                    # object_id="UtilsProxy" because that's what UtilsProxy is registered as.
-                    # method="progress_bar_hook"
-                    
-                    # We provide a dummy future/loop for the response handler, preventing crashes.
-                    # The response will arrive and callback will be scheduled on the blocked loop,
-                    # which is fine (we ignore the result anyway/it happens later).
-                    
                     loop = asyncio.get_event_loop()
-                    
-                    # NOTE: We are NOT awaiting this future.
-                    # We are forcing the "Call" packet into the outbox.
-                    
                     rpc.outbox.put({
                         "kind": "call",
                         "object_id": "UtilsProxy",

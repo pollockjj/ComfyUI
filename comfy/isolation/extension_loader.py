@@ -22,15 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_enforcement_policy() -> Dict[str, bool]:
-    """Return host-level enforcement requirements.
-
-    Environment Variables:
-        PYISOLATE_ENFORCE_ISOLATED: Force all nodes to run isolated
-        PYISOLATE_ENFORCE_SANDBOX: Force all nodes to use sandbox (implies isolated)
-
-    Returns:
-        Dict with force_isolated and force_sandbox booleans
-    """
+    # Return enforcement policy (PYISOLATE_ENFORCE_ISOLATED, PYISOLATE_ENFORCE_SANDBOX)
     return {
         "force_isolated": os.environ.get("PYISOLATE_ENFORCE_ISOLATED") == "1",
         "force_sandbox": os.environ.get("PYISOLATE_ENFORCE_SANDBOX") == "1",
@@ -66,7 +58,6 @@ async def load_isolated_node(
     isolated = manifest.get("isolated", False)
     sandbox = manifest.get("sandbox", False)
 
-    # Apply enforcement policy (floor, not ceiling)
     policy = get_enforcement_policy()
     if policy["force_sandbox"]:
         sandbox = True

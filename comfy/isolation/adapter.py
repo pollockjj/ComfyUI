@@ -12,7 +12,7 @@ try:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import ModelPatcherProxy, ModelPatcherRegistry
     from comfy.isolation.model_sampling_proxy import ModelSamplingProxy, ModelSamplingRegistry
-    from comfy.isolation.vae_proxy import VAEProxy, VAERegistry
+    from comfy.isolation.vae_proxy import VAEProxy, VAERegistry, FirstStageModelRegistry
     from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
     from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
     from comfy.isolation.proxies.prompt_server_impl import PromptServerService
@@ -23,9 +23,20 @@ except ImportError as exc:  # Fail loud if Comfy environment is incomplete
 
 logger = logging.getLogger(__name__)
 
+# Force /dev/shm for shared memory (bwrap makes /tmp private)
+import tempfile
+if os.path.exists("/dev/shm"):
+    # Only override if not already set or if default is not /dev/shm
+    current_tmp = tempfile.gettempdir()
+    if not current_tmp.startswith("/dev/shm"):
+        logger.info(f"Configuring shared memory: Changing TMPDIR from {current_tmp} to /dev/shm")
+        os.environ["TMPDIR"] = "/dev/shm"
+        tempfile.tempdir = None  # Clear cache to force re-evaluation
+
+
 
 class ComfyUIAdapter(IsolationAdapter):
-    """ComfyUI-specific IsolationAdapter implementation."""
+    # ComfyUI-specific IsolationAdapter implementation
 
     @property
     def identifier(self) -> str:
@@ -153,8 +164,7 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("VAERef", None, deserialize_vae_ref)
 
         # ModelSampling serialization - handles ModelSampling* types
-        # Note: The registry is type-name based, so we register common variants
-        # NOTE: copyreg removed - no pickle fallback allowed (JSON-RPC security)
+        # copyreg removed - no pickle fallback allowed
 
         def serialize_model_sampling(obj: Any) -> Dict[str, Any]:
             # Child-side: must already have _instance_id (proxy)
@@ -189,12 +199,8 @@ class ComfyUIAdapter(IsolationAdapter):
         # Register ModelSamplingRef for deserialization (context-aware: host or child)
         registry.register("ModelSamplingRef", None, deserialize_model_sampling_ref)
 
-        # NodeOutput is a V3 API container - deserialize by unwrapping .args
-        # This is an async-aware deserializer that recurses into the args
+        # V3 API: unwrap NodeOutput.args
         def deserialize_node_output(data: Any) -> Any:
-            """Unwrap NodeOutput container to its args for deserialization."""
-            # Return the args attribute for further deserialization
-            # The caller (deserialize_from_isolation) will recurse into this
             return getattr(data, 'args', data)
 
         registry.register("NodeOutput", None, deserialize_node_output)
@@ -246,7 +252,8 @@ class ComfyUIAdapter(IsolationAdapter):
             VAERegistry,
             CLIPRegistry,
             ModelPatcherRegistry,
-            ModelSamplingRegistry
+            ModelSamplingRegistry,
+            FirstStageModelRegistry
         ]
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
@@ -282,12 +289,7 @@ class ComfyUIAdapter(IsolationAdapter):
             # independent of instance lifecycle.
             api.set_rpc(rpc)
 
-            # CRITICAL: Do NOT overwrite the host hook with the proxy hook.
-            # This would cause infinite recursion (Host Hook -> Proxy -> Host Hook).
-            # The Host Hook is already set up to talk to the browser.
-            # The Proxy just needs to exist so the Child can call it via RPC.
-            
-
+            # Don't overwrite host hook (infinite recursion)
             return
 
         if api_name == "PromptServerProxy":

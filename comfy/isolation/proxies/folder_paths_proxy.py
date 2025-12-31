@@ -14,8 +14,7 @@ class FolderPathsProxy(ProxiedSingleton):
     def __getattr__(self, name):
         return getattr(folder_paths, name)
 
-    # Return copies of dicts to avoid RPC chatter for every key access
-    # and to ensure we send a snapshot rather than a proxy to a dict
+    # Return dict snapshots (avoid RPC chatter)
     @property
     def folder_names_and_paths(self) -> Dict:
         return dict(folder_paths.folder_names_and_paths)

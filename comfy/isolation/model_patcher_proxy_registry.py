@@ -1,4 +1,4 @@
-"""RPC server for ModelPatcher isolation (child process)"""
+# RPC server for ModelPatcher isolation (child process)
 from __future__ import annotations
 
 import logging
@@ -52,20 +52,16 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         return False
 
     async def get_model_object(self, instance_id: str, name: str) -> Any:
-        try:
-            instance = self._get_instance(instance_id)
-            if name == "model":
-                 return f"<ModelObject: {type(instance.model).__name__}>"
-            result = instance.get_model_object(name)
-            if name == "model_sampling":
-                from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
-                registry = ModelSamplingRegistry()
-                sampling_id = registry.register(result)
-                return ModelSamplingProxy(sampling_id, registry)
-            return detach_if_grad(result)
-        except Exception as e:
-            logger.warning(f"get_model_object failed for {name}: {e}")
-            raise e
+        instance = self._get_instance(instance_id)
+        if name == "model":
+             return f"<ModelObject: {type(instance.model).__name__}>"
+        result = instance.get_model_object(name)
+        if name == "model_sampling":
+            from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+            registry = ModelSamplingRegistry()
+            sampling_id = registry.register(result)
+            return ModelSamplingProxy(sampling_id, registry)
+        return detach_if_grad(result)
 
     async def get_model_options(self, instance_id: str) -> dict:
         instance = self._get_instance(instance_id)

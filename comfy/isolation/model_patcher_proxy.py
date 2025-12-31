@@ -1,4 +1,4 @@
-"""RPC proxy for ModelPatcher (parent process)"""
+# RPC proxy for ModelPatcher (parent process)
 from __future__ import annotations
 
 import logging

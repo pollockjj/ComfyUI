@@ -1,4 +1,4 @@
-"""Isolation utilities and serializers for ModelPatcherProxy"""
+# Isolation utilities and serializers for ModelPatcherProxy
 from __future__ import annotations
 
 import logging

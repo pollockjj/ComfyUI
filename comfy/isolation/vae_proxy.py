@@ -27,7 +27,7 @@ class FirstStageModelRegistry(BaseRegistry[Any]):
 class FirstStageModelProxy(BaseProxy[FirstStageModelRegistry]):
     _registry_class = FirstStageModelRegistry
     __module__ = "comfy.ldm.models.autoencoder"
-
+    
     def __getattr__(self, name: str) -> Any:
         try:
              return self._call_rpc("get_property", name)
@@ -88,7 +88,7 @@ class VAERegistry(BaseRegistry[Any]):
 class VAEProxy(BaseProxy[VAERegistry]):
     _registry_class = VAERegistry
     __module__ = "comfy.sd"
-
+    
     @property
     def patcher(self) -> ModelPatcherProxy:
         if not hasattr(self, "_patcher_proxy"):

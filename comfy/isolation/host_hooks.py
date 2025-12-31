@@ -1,4 +1,4 @@
-"""Host process initialization for PyIsolate."""
+# Host process initialization for PyIsolate
 import logging
 import os
 
