@@ -7,57 +7,105 @@ from comfy.isolation.proxies.base import (
     BaseRegistry,
     detach_if_grad,
 )
+from comfy.isolation.model_patcher_proxy import ModelPatcherProxy, ModelPatcherRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class FirstStageModelRegistry(BaseRegistry[Any]):
+    _type_prefix = "first_stage_model"
+
+    async def get_property(self, instance_id: str, name: str) -> Any:
+        obj = self._get_instance(instance_id)
+        return getattr(obj, name)
+
+    async def has_property(self, instance_id: str, name: str) -> bool:
+        obj = self._get_instance(instance_id)
+        return hasattr(obj, name)
+
+
+class FirstStageModelProxy(BaseProxy[FirstStageModelRegistry]):
+    _registry_class = FirstStageModelRegistry
+    __module__ = "comfy.ldm.models.autoencoder"
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+             return self._call_rpc("get_property", name)
+        except Exception as e:
+             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") from e
+
+    def __repr__(self) -> str:
+        return f"<FirstStageModelProxy {self._instance_id}>"
 
 
 class VAERegistry(BaseRegistry[Any]):
     _type_prefix = "vae"
 
-    async def encode(self, instance_id: str, pixels: Any) -> Any:
+    async def get_patcher_id(self, instance_id: str) -> str:
         vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.encode(pixels))
+        return ModelPatcherRegistry().register(vae.patcher)
+
+    async def get_first_stage_model_id(self, instance_id: str) -> str:
+        vae = self._get_instance(instance_id)
+        return FirstStageModelRegistry().register(vae.first_stage_model)
+
+    async def encode(self, instance_id: str, pixels: Any) -> Any:
+        return detach_if_grad(self._get_instance(instance_id).encode(pixels))
 
     async def encode_tiled(
         self, instance_id: str, pixels: Any, tile_x: int = 512, tile_y: int = 512, overlap: int = 64
     ) -> Any:
-        vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.encode_tiled(pixels, tile_x=tile_x, tile_y=tile_y, overlap=overlap))
+        return detach_if_grad(
+            self._get_instance(instance_id).encode_tiled(pixels, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
+        )
 
     async def decode(self, instance_id: str, samples: Any, **kwargs: Any) -> Any:
-        vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.decode(samples, **kwargs))
+        return detach_if_grad(self._get_instance(instance_id).decode(samples, **kwargs))
 
     async def decode_tiled(
         self, instance_id: str, samples: Any, tile_x: int = 64, tile_y: int = 64, overlap: int = 16, **kwargs: Any
     ) -> Any:
-        vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs))
+        return detach_if_grad(
+            self._get_instance(instance_id).decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs)
+        )
 
     async def get_property(self, instance_id: str, name: str) -> Any:
-        vae = self._get_instance(instance_id)
-        return getattr(vae, name)
+        return getattr(self._get_instance(instance_id), name)
 
     async def memory_used_encode(self, instance_id: str, shape: Any, dtype: Any) -> int:
-        vae = self._get_instance(instance_id)
-        return vae.memory_used_encode(shape, dtype)
+        return self._get_instance(instance_id).memory_used_encode(shape, dtype)
 
     async def memory_used_decode(self, instance_id: str, shape: Any, dtype: Any) -> int:
-        vae = self._get_instance(instance_id)
-        return vae.memory_used_decode(shape, dtype)
+        return self._get_instance(instance_id).memory_used_decode(shape, dtype)
 
     async def process_input(self, instance_id: str, image: Any) -> Any:
-        vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.process_input(image))
+        return detach_if_grad(self._get_instance(instance_id).process_input(image))
 
     async def process_output(self, instance_id: str, image: Any) -> Any:
-        vae = self._get_instance(instance_id)
-        return detach_if_grad(vae.process_output(image))
+        return detach_if_grad(self._get_instance(instance_id).process_output(image))
 
 
 class VAEProxy(BaseProxy[VAERegistry]):
     _registry_class = VAERegistry
     __module__ = "comfy.sd"
+
+    @property
+    def patcher(self) -> ModelPatcherProxy:
+        if not hasattr(self, "_patcher_proxy"):
+            patcher_id = self._call_rpc("get_patcher_id")
+            self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=False)
+        return self._patcher_proxy
+    
+    @property
+    def first_stage_model(self) -> FirstStageModelProxy:
+        if not hasattr(self, "_first_stage_model_proxy"):
+            fsm_id = self._call_rpc("get_first_stage_model_id")
+            self._first_stage_model_proxy = FirstStageModelProxy(fsm_id, manage_lifecycle=False)
+        return self._first_stage_model_proxy
+
+    @property
+    def vae_dtype(self) -> Any:
+        return self._get_property("vae_dtype")
 
     def encode(self, pixels: Any) -> Any:
         return self._call_rpc("encode", pixels)
@@ -76,7 +124,6 @@ class VAEProxy(BaseProxy[VAERegistry]):
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")
 
-    # Wrapper for property access
     def _get_property(self, name: str) -> Any:
         return self._call_rpc("get_property", name)
 
@@ -135,5 +182,4 @@ class VAEProxy(BaseProxy[VAERegistry]):
 
 if not IS_CHILD_PROCESS:
     _VAE_REGISTRY_SINGLETON = VAERegistry()
-
-
+    _FIRST_STAGE_MODEL_REGISTRY_SINGLETON = FirstStageModelRegistry()

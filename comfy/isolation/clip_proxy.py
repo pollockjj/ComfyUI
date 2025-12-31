@@ -1,7 +1,4 @@
-"""
-Stateless RPC pattern for CLIP instances.
-Inherits from BaseRegistry/BaseProxy for standardized isolation.
-"""
+"""CLIP Proxy implementation."""
 from __future__ import annotations
 
 import logging
@@ -13,69 +10,99 @@ from comfy.isolation.proxies.base import (
     BaseRegistry,
     detach_if_grad,
 )
-from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
+from comfy.isolation.model_patcher_proxy import ModelPatcherProxy, ModelPatcherRegistry
+
+
+class CondStageModelRegistry(BaseRegistry[Any]):
+    _type_prefix = "cond_stage_model"
+
+    async def get_property(self, instance_id: str, name: str) -> Any:
+        obj = self._get_instance(instance_id)
+        return getattr(obj, name)
+
+
+class CondStageModelProxy(BaseProxy[CondStageModelRegistry]):
+    _registry_class = CondStageModelRegistry
+    __module__ = "comfy.sd"
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+             return self._call_rpc("get_property", name)
+        except Exception as e:
+             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") from e
+    
+    def __repr__(self) -> str:
+        return f"<CondStageModelProxy {self._instance_id}>"
+
+
+class TokenizerRegistry(BaseRegistry[Any]):
+    _type_prefix = "tokenizer"
+
+    async def get_property(self, instance_id: str, name: str) -> Any:
+        obj = self._get_instance(instance_id)
+        return getattr(obj, name)
+
+
+class TokenizerProxy(BaseProxy[TokenizerRegistry]):
+    _registry_class = TokenizerRegistry
+    __module__ = "comfy.sd"
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+             return self._call_rpc("get_property", name)
+        except Exception as e:
+             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") from e
+
+    def __repr__(self) -> str:
+        return f"<TokenizerProxy {self._instance_id}>"
 
 logger = logging.getLogger(__name__)
 
 
 class CLIPRegistry(BaseRegistry[Any]):
     _type_prefix = "clip"
-
-    # =========================================================================
-    # Core RPC Methods
-    # =========================================================================
+    _allowed_setters = {"layer_idx", "tokenizer_options", "use_clip_schedule", "apply_hooks_to_conds"}
 
     async def get_ram_usage(self, instance_id: str) -> int:
-        clip = self._get_instance(instance_id)
-        return clip.get_ram_usage()
+        return self._get_instance(instance_id).get_ram_usage()
 
     async def get_patcher_id(self, instance_id: str) -> str:
-        clip = self._get_instance(instance_id)
-        # Ensure the associated ModelPatcher is registered in its own registry
-        from comfy.isolation.model_patcher_proxy import ModelPatcherRegistry
-        mp_registry = ModelPatcherRegistry()
-        return mp_registry.register(clip.patcher)
+        return ModelPatcherRegistry().register(self._get_instance(instance_id).patcher)
+
+    async def get_cond_stage_model_id(self, instance_id: str) -> str:
+        return CondStageModelRegistry().register(self._get_instance(instance_id).cond_stage_model)
+
+    async def get_tokenizer_id(self, instance_id: str) -> str:
+        return TokenizerRegistry().register(self._get_instance(instance_id).tokenizer)
 
     async def load_model(self, instance_id: str) -> None:
-        clip = self._get_instance(instance_id)
-        clip.load_model()
-        # Return None; Proxy handles patcher access via dedicated property
-        return None
+        self._get_instance(instance_id).load_model()
 
     async def clip_layer(self, instance_id: str, layer_idx: int) -> None:
-        clip = self._get_instance(instance_id)
-        clip.clip_layer(layer_idx)
-
-    # =========================================================================
-    # Tokenizer / Text Encoding
-    # =========================================================================
+        self._get_instance(instance_id).clip_layer(layer_idx)
 
     async def set_tokenizer_option(self, instance_id: str, option_name: str, value: Any) -> None:
-        clip = self._get_instance(instance_id)
-        clip.set_tokenizer_option(option_name, value)
+        self._get_instance(instance_id).set_tokenizer_option(option_name, value)
 
     async def get_property(self, instance_id: str, name: str) -> Any:
-        clip = self._get_instance(instance_id)
-        return getattr(clip, name)
+        return getattr(self._get_instance(instance_id), name)
 
     async def set_property(self, instance_id: str, name: str, value: Any) -> None:
-        clip = self._get_instance(instance_id)
-        setattr(clip, name, value)
+        if name not in self._allowed_setters:
+            raise PermissionError(f"Setting '{name}' is not allowed via RPC")
+        setattr(self._get_instance(instance_id), name, value)
 
     async def tokenize(self, instance_id: str, text: str, return_word_ids: bool = False, **kwargs: Any) -> Any:
-        clip = self._get_instance(instance_id)
-        return clip.tokenize(text, return_word_ids=return_word_ids, **kwargs)
+        return self._get_instance(instance_id).tokenize(text, return_word_ids=return_word_ids, **kwargs)
 
     async def encode(self, instance_id: str, text: str) -> Any:
-        clip = self._get_instance(instance_id)
-        return detach_if_grad(clip.encode(text))
+        return detach_if_grad(self._get_instance(instance_id).encode(text))
 
     async def encode_from_tokens(
         self, instance_id: str, tokens: Any, return_pooled: bool = False, return_dict: bool = False
     ) -> Any:
-        clip = self._get_instance(instance_id)
         return detach_if_grad(
-            clip.encode_from_tokens(tokens, return_pooled=return_pooled, return_dict=return_dict)
+            self._get_instance(instance_id).encode_from_tokens(tokens, return_pooled=return_pooled, return_dict=return_dict)
         )
 
     async def encode_from_tokens_scheduled(
@@ -86,40 +113,29 @@ class CLIPRegistry(BaseRegistry[Any]):
         add_dict: Optional[dict] = None,
         show_pbar: bool = True,
     ) -> Any:
-        clip = self._get_instance(instance_id)
         add_dict = add_dict or {}
         return detach_if_grad(
-            clip.encode_from_tokens_scheduled(
+            self._get_instance(instance_id).encode_from_tokens_scheduled(
                 tokens, unprojected=unprojected, add_dict=add_dict, show_pbar=show_pbar
             )
         )
 
-    # =========================================================================
-    # Patching / State
-    # =========================================================================
-
     async def add_patches(
         self, instance_id: str, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0
     ) -> Any:
-        clip = self._get_instance(instance_id)
-        return clip.add_patches(patches, strength_patch=strength_patch, strength_model=strength_model)
+        return self._get_instance(instance_id).add_patches(patches, strength_patch=strength_patch, strength_model=strength_model)
 
     async def get_key_patches(self, instance_id: str) -> Any:
-        clip = self._get_instance(instance_id)
-        return clip.get_key_patches()
+        return self._get_instance(instance_id).get_key_patches()
 
     async def load_sd(self, instance_id: str, sd: dict, full_model: bool = False) -> Any:
-        clip = self._get_instance(instance_id)
-        return clip.load_sd(sd, full_model=full_model)
+        return self._get_instance(instance_id).load_sd(sd, full_model=full_model)
 
     async def get_sd(self, instance_id: str) -> Any:
-        clip = self._get_instance(instance_id)
-        return clip.get_sd()
+        return self._get_instance(instance_id).get_sd()
 
     async def clone(self, instance_id: str) -> str:
-        clip = self._get_instance(instance_id)
-        new_clip = clip.clone()
-        return self.register(new_clip)
+        return self.register(self._get_instance(instance_id).clone())
 
 
 class CLIPProxy(BaseProxy[CLIPRegistry]):
@@ -132,7 +148,6 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
     @property
     def patcher(self) -> ModelPatcherProxy:
         if not hasattr(self, "_patcher_proxy"):
-            # Lazy load the patcher proxy
             patcher_id = self._call_rpc("get_patcher_id")
             self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=False)
         return self._patcher_proxy
@@ -143,6 +158,20 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
             self._patcher_proxy = value
         else:
             logger.warning(f"Attempted to set CLIPProxy.patcher to non-proxy object: {value}")
+
+    @property
+    def cond_stage_model(self) -> CondStageModelProxy:
+        if not hasattr(self, "_cond_stage_model_proxy"):
+            csm_id = self._call_rpc("get_cond_stage_model_id")
+            self._cond_stage_model_proxy = CondStageModelProxy(csm_id, manage_lifecycle=False)
+        return self._cond_stage_model_proxy
+
+    @property
+    def tokenizer(self) -> TokenizerProxy:
+        if not hasattr(self, "_tokenizer_proxy"):
+            tok_id = self._call_rpc("get_tokenizer_id")
+            self._tokenizer_proxy = TokenizerProxy(tok_id, manage_lifecycle=False)
+        return self._tokenizer_proxy
 
     def load_model(self) -> ModelPatcherProxy:
         self._call_rpc("load_model")
@@ -196,7 +225,6 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
         self, tokens: Any, return_pooled: bool = False, return_dict: bool = False
     ) -> Any:
         res = self._call_rpc("encode_from_tokens", tokens, return_pooled=return_pooled, return_dict=return_dict)
-        # Rehydrate tuple if needed (RPC converts tuples to lists)
         if return_pooled and isinstance(res, list) and not return_dict:
             return tuple(res)
         return res
@@ -234,6 +262,7 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
         return CLIPProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
 
 
-# Registry instantiated in host_hooks.initialize_host_process; keep optional safety
 if not IS_CHILD_PROCESS:
     _CLIP_REGISTRY_SINGLETON = CLIPRegistry()
+    _COND_STAGE_MODEL_REGISTRY_SINGLETON = CondStageModelRegistry()
+    _TOKENIZER_REGISTRY_SINGLETON = TokenizerRegistry()
