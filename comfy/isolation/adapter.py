@@ -233,13 +233,8 @@ class ComfyUIAdapter(IsolationAdapter):
 
         registry.register("KSAMPLER", serialize_ksampler, deserialize_ksampler)
 
-
-        # Register Hook Serializers (Hook, WeightHook, HookReference, etc.)
         from comfy.isolation.model_patcher_proxy_utils import register_hooks_serializers
         register_hooks_serializers(registry)
-
-        logger.info("Registered ComfyUI serializers: ModelPatcher, CLIP, VAE, ModelSampling, NodeOutput, KSAMPLER")
-
     
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         return [

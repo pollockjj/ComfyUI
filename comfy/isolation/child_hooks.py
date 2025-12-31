@@ -54,7 +54,6 @@ def _setup_prompt_server_stub(rpc=None) -> None:
                  stub.set_rpc(rpc)
 
         server.PromptServer.instance = stub
-        logger.info(f"PromptServerStub manually setup with RPC={rpc is not None}")
         
     except Exception as e:
         logger.error(f"Failed to setup PromptServerStub: {e}")
@@ -128,7 +127,6 @@ def _setup_utils_proxy(rpc=None) -> None:
                  logging.getLogger(__name__).warning("No RPC instance available for progress update")
 
         comfy.utils.PROGRESS_BAR_HOOK = sync_hook_wrapper
-        logger.info(f"Injected isolated progress bar hook: {comfy.utils.PROGRESS_BAR_HOOK}")
 
     except Exception as e:
         logger.error(f"Failed to setup UtilsProxy hook: {e}")
