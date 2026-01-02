@@ -107,29 +107,17 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
             config[k] = v
 
         operations = model_options.get("custom_operations", None)
-        scaled_fp8 = None
-        quantization_metadata = model_options.get("quantization_metadata", None)
+        quant_config = model_options.get("quantization_metadata", None)
 
         if operations is None:
-            layer_quant_config = None
-            if quantization_metadata is not None:
-                layer_quant_config = json.loads(quantization_metadata).get("layers", None)
-
-            if layer_quant_config is not None:
-                operations = comfy.ops.mixed_precision_ops(layer_quant_config, dtype, full_precision_mm=True)
-                logging.info(f"Using MixedPrecisionOps for text encoder: {len(layer_quant_config)} quantized layers")
+            if quant_config is not None:
+                operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=True)
+                logging.info("Using MixedPrecisionOps for text encoder")
             else:
-                # Fallback to scaled_fp8_ops for backward compatibility
-                scaled_fp8 = model_options.get("scaled_fp8", None)
-                if scaled_fp8 is not None:
-                    operations = comfy.ops.scaled_fp8_ops(fp8_matrix_mult=False, override_dtype=scaled_fp8)
-                else:
-                    operations = comfy.ops.manual_cast
+                operations = comfy.ops.manual_cast
 
         self.operations = operations
         self.transformer = model_class(config, dtype, device, self.operations)
-        if scaled_fp8 is not None:
-            self.transformer.scaled_fp8 = torch.nn.Parameter(torch.tensor([], dtype=scaled_fp8))
 
         self.num_layers = self.transformer.num_layers
 
@@ -147,6 +135,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.layer_norm_hidden_state = layer_norm_hidden_state
         self.return_projected_pooled = return_projected_pooled
         self.return_attention_masks = return_attention_masks
+        self.execution_device = None
 
         if layer == "hidden":
             assert layer_idx is not None
@@ -163,6 +152,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def set_clip_options(self, options):
         layer_idx = options.get("layer", self.layer_idx)
         self.return_projected_pooled = options.get("projected_pooled", self.return_projected_pooled)
+        self.execution_device = options.get("execution_device", self.execution_device)
         if isinstance(self.layer, list) or self.layer == "all":
             pass
         elif layer_idx is None or abs(layer_idx) > self.num_layers:
@@ -175,6 +165,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.layer = self.options_default[0]
         self.layer_idx = self.options_default[1]
         self.return_projected_pooled = self.options_default[2]
+        self.execution_device = None
 
     def process_tokens(self, tokens, device):
         end_token = self.special_tokens.get("end", None)
@@ -258,7 +249,11 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         return torch.cat(embeds_out), torch.tensor(attention_masks, device=device, dtype=torch.long), num_tokens, embeds_info
 
     def forward(self, tokens):
-        device = self.transformer.get_input_embeddings().weight.device
+        if self.execution_device is None:
+            device = self.transformer.get_input_embeddings().weight.device
+        else:
+            device = self.execution_device
+
         embeds, attention_mask, num_tokens, embeds_info = self.process_tokens(tokens, device)
 
         attention_mask_model = None
@@ -471,7 +466,7 @@ def load_embed(embedding_name, embedding_directory, embedding_size, embed_key=No
     return embed_out
 
 class SDTokenizer:
-    def __init__(self, tokenizer_path=None, max_length=77, pad_with_end=True, embedding_directory=None, embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True, has_end_token=True, pad_to_max_length=True, min_length=None, pad_token=None, end_token=None, min_padding=None, pad_left=False, tokenizer_data={}, tokenizer_args={}):
+    def __init__(self, tokenizer_path=None, max_length=77, pad_with_end=True, embedding_directory=None, embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True, has_end_token=True, pad_to_max_length=True, min_length=None, pad_token=None, end_token=None, min_padding=None, pad_left=False, disable_weights=False, tokenizer_data={}, tokenizer_args={}):
         if tokenizer_path is None:
             tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sd1_tokenizer")
         self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path, **tokenizer_args)
@@ -518,6 +513,8 @@ class SDTokenizer:
         self.embedding_size = embedding_size
         self.embedding_key = embedding_key
 
+        self.disable_weights = disable_weights
+
     def _try_get_embedding(self, embedding_name:str):
         '''
         Takes a potential embedding name and tries to retrieve it.
@@ -552,7 +549,7 @@ class SDTokenizer:
         min_padding = tokenizer_options.get("{}_min_padding".format(self.embedding_key), self.min_padding)
 
         text = escape_important(text)
-        if kwargs.get("disable_weights", False):
+        if kwargs.get("disable_weights", self.disable_weights):
             parsed_weights = [(text, 1.0)]
         else:
             parsed_weights = token_weights(text, 1.0)

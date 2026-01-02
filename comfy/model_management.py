@@ -26,6 +26,7 @@ import importlib
 import platform
 import weakref
 import gc
+import os
 
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
@@ -333,13 +334,15 @@ except:
 SUPPORT_FP8_OPS = args.supports_fp8_compute
 
 AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
+AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
 
 try:
     if is_amd():
         arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
         if not (any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH)):
-            torch.backends.cudnn.enabled = False  # Seems to improve things a lot on AMD
-            logging.info("Set: torch.backends.cudnn.enabled = False for better AMD performance.")
+            if os.getenv(AMD_ENABLE_MIOPEN_ENV) != '1':
+                torch.backends.cudnn.enabled = False  # Seems to improve things a lot on AMD
+                logging.info("Set: torch.backends.cudnn.enabled = False for better AMD performance.")
 
         try:
             rocm_version = tuple(map(int, str(torch.version.hip).split(".")[:2]))
@@ -1020,8 +1023,8 @@ NUM_STREAMS = 0
 if args.async_offload is not None:
     NUM_STREAMS = args.async_offload
 else:
-    #  Enable by default on Nvidia
-    if is_nvidia():
+    #  Enable by default on Nvidia and AMD
+    if is_nvidia() or is_amd():
         NUM_STREAMS = 2
 
 if args.disable_async_offload:
@@ -1127,6 +1130,16 @@ if not args.disable_pinned_memory:
 
 PINNING_ALLOWED_TYPES = set(["Parameter", "QuantizedTensor"])
 
+def discard_cuda_async_error():
+    try:
+        a = torch.tensor([1], dtype=torch.uint8, device=get_torch_device())
+        b = torch.tensor([1], dtype=torch.uint8, device=get_torch_device())
+        _ = a + b
+        torch.cuda.synchronize()
+    except torch.AcceleratorError:
+        #Dump it! We already know about it from the synchronous return
+        pass
+
 def pin_memory(tensor):
     global TOTAL_PINNED_MEMORY
     if MAX_PINNED_MEMORY <= 0:
@@ -1159,6 +1172,9 @@ def pin_memory(tensor):
         PINNED_MEMORY[ptr] = size
         TOTAL_PINNED_MEMORY += size
         return True
+    else:
+        logging.warning("Pin error.")
+        discard_cuda_async_error()
 
     return False
 
@@ -1187,6 +1203,9 @@ def unpin_memory(tensor):
         if len(PINNED_MEMORY) == 0:
             TOTAL_PINNED_MEMORY = 0
         return True
+    else:
+        logging.warning("Unpin error.")
+        discard_cuda_async_error()
 
     return False
 
@@ -1495,6 +1514,20 @@ def extended_fp16_support():
         return False
 
     return True
+
+LORA_COMPUTE_DTYPES = {}
+def lora_compute_dtype(device):
+    dtype = LORA_COMPUTE_DTYPES.get(device, None)
+    if dtype is not None:
+        return dtype
+
+    if should_use_fp16(device):
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+
+    LORA_COMPUTE_DTYPES[device] = dtype
+    return dtype
 
 def soft_empty_cache(force=False):
     global cpu_state
