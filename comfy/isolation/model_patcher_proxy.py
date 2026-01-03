@@ -207,6 +207,33 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("detach", unpatch_all)
         return self.model
 
+    # [PERF] Intercept apply_model to fix CPU tensor regression.
+    # The Host returns CPU tensors, which Child passes to apply_model.
+    # If we don't move them to CUDA here, they get serialized as XXMB blobs (xN steps).
+    # moving to CUDA ensures we send lightweight Handles.
+    def apply_model(self, *args, **kwargs) -> Any:
+        import torch
+        import os
+        # Helper to move CPU tensors to CUDA
+        def _to_cuda(obj):
+             if isinstance(obj, torch.Tensor) and obj.device.type == "cpu":
+                  # logging.getLogger(__name__).error(f"[DEBUG-PROXY-APPLY] PID: {os.getpid()} | Moving Tensor {obj.shape} CPU -> CUDA")
+                  return obj.to("cuda")
+             elif isinstance(obj, dict):
+                  return {k: _to_cuda(v) for k, v in obj.items()}
+             elif isinstance(obj, list):
+                  return [_to_cuda(v) for v in obj]
+             elif isinstance(obj, tuple):
+                  return tuple(_to_cuda(v) for v in obj)
+             return obj
+
+        args = _to_cuda(args)
+        kwargs = _to_cuda(kwargs)
+        
+        # Use inner_model_apply_model to match original behavior.
+        # It expects (args_tuple, kwargs_dict) as arguments.
+        return self._call_rpc("inner_model_apply_model", args, kwargs)
+
     def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
         keys = self._call_rpc("model_state_dict", filter_prefix)
         return dict.fromkeys(keys, None)
@@ -510,7 +537,8 @@ class _InnerModelProxy:
         if name == 'memory_required':
             return lambda *a, **k: self._parent._call_rpc("inner_model_memory_required", a, k)
         if name == 'apply_model':
-            return lambda *a, **k: self._parent._call_rpc("inner_model_apply_model", a, k)
+            # Delegate to parent's method to get the CPU->CUDA optimization
+            return self._parent.apply_model
         if name == 'process_latent_in':
             return lambda *a, **k: self._parent._call_rpc("process_latent_in", a, k)
         if name == 'process_latent_out':

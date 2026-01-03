@@ -72,6 +72,7 @@ async def load_isolated_node(
 
     dependencies = list(manifest.get("dependencies", []) or [])
     share_torch = manifest.get("share_torch", True)
+    share_cuda_ipc = manifest.get("share_cuda_ipc")
     extension_name = manifest.get("name", node_dir.name)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
@@ -87,6 +88,9 @@ async def load_isolated_node(
         "sandbox": sandbox,  # NEW: Pass sandbox config to pyisolate
         # APIs are auto-populated from adapter.provide_rpc_services() if not specified here
     }
+
+    if share_cuda_ipc is not None:
+        extension_config["share_cuda_ipc"] = share_cuda_ipc
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
