@@ -11,29 +11,50 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import folder_paths
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 LOG_PREFIX = "]["
 logger = logging.getLogger(__name__)
 
 CACHE_SUBDIR = "cache"
 CACHE_KEY_FILE = "cache_key"
 CACHE_DATA_FILE = "node_info.json"
-CACHE_KEY_LENGTH = 16  # 64-bit hex, ~10^-19 collision probability per pair
+CACHE_KEY_LENGTH = 16
 
 
 def find_manifest_directories() -> List[Tuple[Path, Path]]:
+    """Find custom node directories containing a valid pyproject.toml with [tool.comfy.isolation]."""
     manifest_dirs: List[Tuple[Path, Path]] = []
+    
+    # Standard custom_nodes paths
     for base_path in folder_paths.get_folder_paths("custom_nodes"):
         base = Path(base_path)
         if not base.exists() or not base.is_dir():
             continue
+            
         for entry in base.iterdir():
             if not entry.is_dir():
                 continue
-            manifest = entry / "pyisolate.yaml"
+                
+            # Look for pyproject.toml
+            manifest = entry / "pyproject.toml"
             if not manifest.exists():
-                manifest = entry / "pyisolate.yml"
-            if manifest.exists():
-                manifest_dirs.append((entry, manifest))
+                continue
+                
+            # Validate [tool.comfy.isolation] section existence
+            try:
+                with manifest.open("rb") as f:
+                    data = tomllib.load(f)
+                
+                if "tool" in data and "comfy" in data["tool"] and "isolation" in data["tool"]["comfy"]:
+                    manifest_dirs.append((entry, manifest))
+                    
+            except Exception:
+                continue
+                
     return manifest_dirs
 
 
@@ -42,6 +63,7 @@ def compute_cache_key(node_dir: Path, manifest_path: Path) -> str:
     hasher = hashlib.sha256()
 
     try:
+        # Hashing the manifest content ensures config changes invalidate cache
         hasher.update(manifest_path.read_bytes())
     except OSError:
         hasher.update(b"__manifest_read_error__")

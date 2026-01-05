@@ -4,10 +4,10 @@ import logging
 import os
 import sys
 import types
+import platform
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
-import yaml
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
 from .vae_proxy import VAERegistry
@@ -17,6 +17,11 @@ from .model_sampling_proxy import ModelSamplingRegistry
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -51,33 +56,51 @@ async def load_isolated_node(
     venv_root: Path,
     extension_managers: List[ExtensionManager],
 ) -> List[Tuple[str, str, type]]:
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        manifest = yaml.safe_load(handle) or {}
+    try:
+        with manifest_path.open("rb") as handle:
+            manifest_data = tomllib.load(handle)
+    except Exception as e:
+        logger.warning(f"][ Failed to parse {manifest_path}: {e}")
+        return []
 
-    # Read manifest values
-    isolated = manifest.get("isolated", False)
-    sandbox = manifest.get("sandbox", False)
+    # Parse [tool.comfy.isolation]
+    tool_config = manifest_data.get("tool", {}).get("comfy", {}).get("isolation", {})
+    can_isolate = tool_config.get("can_isolate", False)
+    share_torch = tool_config.get("share_torch", False)
 
+    # Parse [project] dependencies
+    project_config = manifest_data.get("project", {})
+    dependencies = project_config.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        dependencies = []
+
+    # Get extension name (default to folder name if not in project.name)
+    extension_name = project_config.get("name", node_dir.name)
+
+    # LOGIC: Isolation Decision
     policy = get_enforcement_policy()
-    if policy["force_sandbox"]:
-        sandbox = True
-        isolated = True
-        logger.debug("Enforcement: sandbox=True for %s", node_dir.name)
-    elif policy["force_isolated"]:
-        isolated = True
-        logger.debug("Enforcement: isolated=True for %s", node_dir.name)
+    isolated = can_isolate or policy["force_isolated"]
 
     if not isolated:
         return []
 
-    dependencies = list(manifest.get("dependencies", []) or [])
-    share_torch = manifest.get("share_torch", True)
-    share_cuda_ipc = manifest.get("share_cuda_ipc")
-    extension_name = manifest.get("name", node_dir.name)
+    logger.info(f"][ Loading isolated node: {extension_name}")
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
+
+    # Configure sandbox policy (Linux only)
+    sandbox_config = {}
+    is_linux = platform.system() == "Linux"
+    if is_linux and isolated:
+        sandbox_config = {
+            "network": True,
+            "writable_paths": ["/dev/shm", "/tmp"]
+        }
+        
+    # Enable CUDA IPC if sharing torch on Linux
+    share_cuda_ipc = share_torch and is_linux
 
     extension_config = {
         "name": extension_name,
@@ -85,12 +108,9 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
-        "sandbox": sandbox,  # NEW: Pass sandbox config to pyisolate
-        # APIs are auto-populated from adapter.provide_rpc_services() if not specified here
+        "share_cuda_ipc": share_cuda_ipc, 
+        "sandbox": sandbox_config,
     }
-
-    if share_cuda_ipc is not None:
-        extension_config["share_cuda_ipc"] = share_cuda_ipc
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
