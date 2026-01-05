@@ -10,6 +10,19 @@ homepage = "https://www.comfy.org/"
 repository = "https://github.com/comfyanonymous/ComfyUI"
 documentation = "https://docs.comfy.org/"
 
+[tool.comfy.host]
+allow_network = false
+writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj/ComfyUI/input"]
+
+[tool.comfy.host.whitelist]
+"ComfyUI-GGUF" = "*"
+"ComfyUI-Manager" = "*"
+"comfyui-kjnodes" = "*"
+"comfyui-videohelpersuite" = "*"
+"rgthree-comfy" = "*"
+"was-ns" = "*"
+"websocket_image_save.py" = "*"
+
 [tool.ruff]
 lint.select = [
   "N805", # invalid-first-argument-name-for-method
@@ -73,4 +86,3 @@ messages_control.disable = [
   "no-else-return",
   "unused-variable",
 ]
-

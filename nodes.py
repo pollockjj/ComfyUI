@@ -2234,9 +2234,18 @@ async def init_external_custom_nodes():
     Returns:
         None
     """
+    whitelist = set()
     if args.use_process_isolation:
         from pathlib import Path
         from comfy.isolation import await_isolation_loading, get_claimed_paths
+        from comfy.isolation.host_policy import load_host_policy
+
+        # Load Global Host Policy
+        host_policy = load_host_policy(Path(folder_paths.base_path))
+        whitelist_dict = host_policy.get("whitelist", {})
+        whitelist = set(whitelist_dict.keys())
+        logging.info(f"[HostPolicy] Loaded Whitelist: {len(whitelist)} nodes allowed.")
+
         isolated_specs = await await_isolation_loading()
         for spec in isolated_specs:
             NODE_CLASS_MAPPINGS.setdefault(spec.node_name, spec.stub_class)
@@ -2269,6 +2278,11 @@ async def init_external_custom_nodes():
             if args.use_process_isolation:
                 from pathlib import Path
                 if Path(module_path).resolve() in isolated_module_paths:
+                    continue
+                
+                # Tri-State Enforcement: If not Isolated (checked above), MUST be Whitelisted.
+                if possible_module not in whitelist:
+                    logging.warning(f"[HostPolicy] REJECTED: Node '{possible_module}' is blocked by security policy (not whitelisted/isolated).")
                     continue
 
             time_before = time.perf_counter()

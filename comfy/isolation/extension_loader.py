@@ -17,6 +17,7 @@ from .model_sampling_proxy import ModelSamplingRegistry
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
+from .host_policy import load_host_policy  # New import
 
 try:
     import tomllib
@@ -89,14 +90,20 @@ async def load_isolated_node(
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
+    
+    # Load Host Security Policy
+    # We use folder_paths.base_path which should point to ComfyUI root
+    import folder_paths
+    host_policy = load_host_policy(Path(folder_paths.base_path))
 
     # Configure sandbox policy (Linux only)
     sandbox_config = {}
     is_linux = platform.system() == "Linux"
     if is_linux and isolated:
         sandbox_config = {
-            "network": True,
-            "writable_paths": ["/dev/shm", "/tmp"]
+            "network": host_policy["allow_network"],
+            "writable_paths": host_policy["writable_paths"],
+            "readonly_paths": host_policy["readonly_paths"],
         }
         
     # Enable CUDA IPC if sharing torch on Linux
