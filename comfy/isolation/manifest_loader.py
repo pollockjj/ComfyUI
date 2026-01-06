@@ -28,33 +28,33 @@ CACHE_KEY_LENGTH = 16
 def find_manifest_directories() -> List[Tuple[Path, Path]]:
     """Find custom node directories containing a valid pyproject.toml with [tool.comfy.isolation]."""
     manifest_dirs: List[Tuple[Path, Path]] = []
-    
+
     # Standard custom_nodes paths
     for base_path in folder_paths.get_folder_paths("custom_nodes"):
         base = Path(base_path)
         if not base.exists() or not base.is_dir():
             continue
-            
+
         for entry in base.iterdir():
             if not entry.is_dir():
                 continue
-                
+
             # Look for pyproject.toml
             manifest = entry / "pyproject.toml"
             if not manifest.exists():
                 continue
-                
+
             # Validate [tool.comfy.isolation] section existence
             try:
                 with manifest.open("rb") as f:
                     data = tomllib.load(f)
-                
+
                 if "tool" in data and "comfy" in data["tool"] and "isolation" in data["tool"]["comfy"]:
                     manifest_dirs.append((entry, manifest))
-                    
+
             except Exception:
                 continue
-                
+
     return manifest_dirs
 
 

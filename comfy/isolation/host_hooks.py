@@ -1,6 +1,5 @@
 # Host process initialization for PyIsolate
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +16,6 @@ def initialize_host_process() -> None:
     from .proxies.prompt_server_impl import PromptServerService
     from .proxies.utils_proxy import UtilsProxy
     from .vae_proxy import VAERegistry
-    from .model_sampling_proxy import ModelSamplingRegistry
-    from .model_patcher_proxy import ModelPatcherRegistry
-    from .clip_proxy import CLIPRegistry
 
     FolderPathsProxy()
     ModelManagementProxy()

@@ -30,7 +30,7 @@ class CondStageModelProxy(BaseProxy[CondStageModelRegistry]):
              return self._call_rpc("get_property", name)
         except Exception as e:
              raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") from e
-    
+
     def __repr__(self) -> str:
         return f"<CondStageModelProxy {self._instance_id}>"
 

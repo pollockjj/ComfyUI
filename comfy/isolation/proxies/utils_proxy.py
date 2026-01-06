@@ -12,7 +12,7 @@ class UtilsProxy(ProxiedSingleton):
     Primarily handles the PROGRESS_BAR_HOOK to ensure progress updates
     from isolated nodes reach the host.
     """
-    
+
     # _instance and __new__ removed to rely on SingletonMetaclass
     _rpc: Optional[Any] = None
 
@@ -33,17 +33,17 @@ class UtilsProxy(ProxiedSingleton):
             # Use class-level RPC storage (Static Injection)
             if UtilsProxy._rpc:
                 return await UtilsProxy._rpc.progress_bar_hook(value, total, preview, node_id)
-            
+
             # Fallback channel: global child rpc
             try:
                 from pyisolate._internal.rpc_protocol import get_child_rpc_instance
-                rpc = get_child_rpc_instance()
+                get_child_rpc_instance()
                 # If we have an RPC instance but no UtilsProxy._rpc, we *could* try to use it,
                 # but we need a caller. For now, just pass to avoid crashing.
-                pass 
+                pass
             except (ImportError, LookupError):
                 pass
-            
+
             return None
 
         # Host Execution

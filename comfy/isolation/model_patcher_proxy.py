@@ -213,7 +213,6 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     # moving to CUDA ensures we send lightweight Handles.
     def apply_model(self, *args, **kwargs) -> Any:
         import torch
-        import os
         # Helper to move CPU tensors to CUDA
         def _to_cuda(obj):
              if isinstance(obj, torch.Tensor) and obj.device.type == "cpu":
@@ -229,7 +228,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
         args = _to_cuda(args)
         kwargs = _to_cuda(kwargs)
-        
+
         # Use inner_model_apply_model to match original behavior.
         # It expects (args_tuple, kwargs_dict) as arguments.
         return self._call_rpc("inner_model_apply_model", args, kwargs)

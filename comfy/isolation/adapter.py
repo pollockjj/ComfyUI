@@ -74,10 +74,7 @@ class ComfyUIAdapter(IsolationAdapter):
                     logging.getLogger(pkg_name).setLevel(logging.ERROR)
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
-        try:
-            import server
-        except ImportError:
-            pass
+
 
         def serialize_model_patcher(obj: Any) -> Dict[str, Any]:
             # Child-side: must already have _instance_id (proxy)
@@ -241,7 +238,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
         from comfy.isolation.model_patcher_proxy_utils import register_hooks_serializers
         register_hooks_serializers(registry)
-    
+
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         return [
             PromptServerService,
@@ -284,7 +281,7 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "UtilsProxy":
             import comfy.utils
 
-            
+
             # Static Injection of RPC mechanism to ensure Child can access it
             # independent of instance lifecycle.
             api.set_rpc(rpc)
@@ -295,10 +292,10 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "PromptServerProxy":
             # Defer heavy import to child context
             import server
-            
+
             instance = api() if isinstance(api, type) else api
             proxy = instance.instance # PromptServerProxy instance has .instance property returning self
-            
+
             original_register_route = proxy.register_route
 
             def register_route_wrapper(method: str, path: str, handler: Callable[..., Any]) -> None:

@@ -8,13 +8,17 @@ Replaces the legacy PromptServerProxy (Singleton) with a clean Service/Stub arch
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-import inspect
-from typing import Any, Dict, Optional, Callable, Union
+from typing import Any, Dict, Optional, Callable
+
+import logging
+from aiohttp import web
 
 # IMPORTS
 from pyisolate import ProxiedSingleton
+
+logger = logging.getLogger(__name__)
+LOG_PREFIX = "[Isolation:C<->H]"
 
 # ...
 
@@ -24,17 +28,17 @@ from pyisolate import ProxiedSingleton
 
 class PromptServerStub:
     """Stateless Stub for PromptServer."""
-    
+
     # Masquerade as the real server module
     __module__ = 'server'
-    
+
     _instance: Optional['PromptServerStub'] = None
     _rpc: Optional[Any] = None # This will be the Caller object
     _source_file: Optional[str] = None
-    
+
     def __init__(self):
         self.routes = RouteStub(self)
-    
+
     @classmethod
     def set_rpc(cls, rpc: Any) -> None:
         """Inject RPC client (called by adapter.py or manually)."""
@@ -55,15 +59,15 @@ class PromptServerStub:
         # If we use PromptServerStub as the type, returning object will be typed as PromptServerStub?
         # The first arg is 'service_cls'.
         cls._rpc = rpc.create_caller(PromptServerService, target_id) # We import Service below?
-        
-    # We need PromptServerService available for the create_caller call? 
+
+    # We need PromptServerService available for the create_caller call?
     # Or just use the Stub class if ID matches?
     # prompt_server_impl.py defines BOTH. So PromptServerService IS available!
 
     @property
     def instance(self) -> 'PromptServerStub':
         return self
-        
+
     # ... Compatibility ...
     @classmethod
     def _get_source_file(cls) -> str:
@@ -79,7 +83,7 @@ class PromptServerStub:
     # --- Properties ---
     @property
     def client_id(self) -> Optional[str]:
-        return "isolated_client" 
+        return "isolated_client"
 
     def supports(self, feature: str) -> bool:
         return True
@@ -91,16 +95,16 @@ class PromptServerStub:
     @property
     def prompt_queue(self):
         raise RuntimeError("PromptServer.prompt_queue is not accessible in isolated nodes.")
-        
+
     # --- UI Communication (RPC Delegates) ---
     async def send_sync(self, event: str, data: Dict[str, Any], sid: Optional[str] = None) -> None:
         if self._rpc:
             await self._rpc.ui_send_sync(event, data, sid)
-    
+
     async def send(self, event: str, data: Dict[str, Any], sid: Optional[str] = None) -> None:
         if self._rpc:
             await self._rpc.ui_send(event, data, sid)
-            
+
     def send_progress_text(self, text: str, node_id: str, sid=None) -> None:
         if self._rpc:
             # Fire and forget likely needed. If method is async on host, caller invocation returns coroutine.
@@ -123,21 +127,20 @@ class PromptServerStub:
         if not self._rpc:
             logger.error("RPC not initialized in PromptServerStub")
             return
-        
+
         # Fire registration async
-        import asyncio
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._rpc.register_route_rpc(method, path, handler))
         except RuntimeError:
-             pass 
+             pass
 
 
 class RouteStub:
     """Simulates aiohttp.web.RouteTableDef."""
     def __init__(self, stub: PromptServerStub):
         self._stub = stub
-        
+
     def get(self, path: str):
         def decorator(handler):
             self._stub.register_route("GET", path, handler)
@@ -149,19 +152,19 @@ class RouteStub:
             self._stub.register_route("POST", path, handler)
             return handler
         return decorator
-        
+
     def patch(self, path: str):
         def decorator(handler):
             self._stub.register_route("PATCH", path, handler)
             return handler
         return decorator
-    
+
     def put(self, path: str):
         def decorator(handler):
             self._stub.register_route("PUT", path, handler)
             return handler
         return decorator
-    
+
     def delete(self, path: str):
         def decorator(handler):
             self._stub.register_route("DELETE", path, handler)
@@ -175,7 +178,7 @@ class RouteStub:
 
 class PromptServerService(ProxiedSingleton):
     """Host-side RPC Service for PromptServer."""
-    
+
     def __init__(self):
         # We will bind to the real server instance lazily or via global import
         pass
@@ -190,15 +193,15 @@ class PromptServerService(ProxiedSingleton):
 
     async def ui_send(self, event: str, data: Dict[str, Any], sid: Optional[str] = None):
         await self.server.send(event, data, sid)
-    
+
     async def ui_send_progress_text(self, text: str, node_id: str, sid=None):
          # Made async to be awaitable by RPC layer
         self.server.send_progress_text(text, node_id, sid)
-    
+
     async def register_route_rpc(self, method: str, path: str, child_handler_proxy):
         """RPC Target: Register a route that forwards to the Child."""
         logger.info(f"{LOG_PREFIX} Registering Isolated Route {method} {path}")
-        
+
         async def route_wrapper(request: web.Request) -> web.Response:
             # 1. Capture request data
             req_data = {
@@ -208,11 +211,11 @@ class PromptServerService(ProxiedSingleton):
             }
             if request.can_read_body:
                  req_data["text"] = await request.text()
-                 
+
             try:
                 # 2. Call Child Handler via RPC (child_handler_proxy is async callable)
                 result = await child_handler_proxy(req_data)
-                
+
                 # 3. Serialize Response
                 return self._serialize_response(result)
             except Exception as e:
@@ -224,7 +227,7 @@ class PromptServerService(ProxiedSingleton):
 
     def _serialize_response(self, result: Any) -> web.Response:
         """Helper to convert Child result -> web.Response"""
-        if isinstance(result, web.Response): 
+        if isinstance(result, web.Response):
             return result
         # Handle dict (json)
         if isinstance(result, dict):

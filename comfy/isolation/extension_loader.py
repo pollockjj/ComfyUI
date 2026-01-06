@@ -10,10 +10,6 @@ from typing import Callable, Dict, List, Tuple
 
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
-from .vae_proxy import VAERegistry
-from .clip_proxy import CLIPRegistry
-from .model_patcher_proxy import ModelPatcherRegistry
-from .model_sampling_proxy import ModelSamplingRegistry
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
@@ -90,7 +86,7 @@ async def load_isolated_node(
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
-    
+
     # Load Host Security Policy
     # We use folder_paths.base_path which should point to ComfyUI root
     import folder_paths
@@ -105,7 +101,7 @@ async def load_isolated_node(
             "writable_paths": host_policy["writable_paths"],
             "readonly_paths": host_policy["readonly_paths"],
         }
-        
+
     # Enable CUDA IPC if sharing torch on Linux
     share_cuda_ipc = share_torch and is_linux
 
@@ -115,7 +111,7 @@ async def load_isolated_node(
         "isolated": True,
         "dependencies": dependencies,
         "share_torch": share_torch,
-        "share_cuda_ipc": share_cuda_ipc, 
+        "share_cuda_ipc": share_cuda_ipc,
         "sandbox": sandbox_config,
     }
 

@@ -1,7 +1,6 @@
 # Child process initialization for PyIsolate
 import logging
 import os
-import sys
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ def initialize_child_process() -> None:
         logger.error(f"Manual RPC Injection failed: {e}")
         _setup_prompt_server_stub()
         _setup_utils_proxy()
-    
+
     _setup_logging()
 
 def _setup_prompt_server_stub(rpc=None) -> None:
@@ -39,45 +38,43 @@ def _setup_prompt_server_stub(rpc=None) -> None:
         if "server" not in sys.modules:
             mock_server = types.ModuleType("server")
             sys.modules["server"] = mock_server
-        
+
         server = sys.modules["server"]
-        
+
         if not hasattr(server, "PromptServer"):
-            class MockPromptServer: pass
+            class MockPromptServer:
+                pass
             server.PromptServer = MockPromptServer
-        
+
         stub = PromptServerStub()
-        
+
         if rpc:
              PromptServerStub.set_rpc(rpc)
              if hasattr(stub, "set_rpc"):
                  stub.set_rpc(rpc)
 
         server.PromptServer.instance = stub
-        
+
     except Exception as e:
         logger.error(f"Failed to setup PromptServerStub: {e}")
 
 def _setup_utils_proxy(rpc=None) -> None:
     try:
-        from .proxies.utils_proxy import UtilsProxy
         import comfy.utils
         import asyncio
-        
+
         # Sync hook wrapper for progress updates
         def sync_hook_wrapper(value: int, total: int, preview: None = None, node_id: None = None) -> None:
-            resolved = "arg"
             if node_id is None:
                 try:
                     from comfy_execution.utils import get_executing_context
                     ctx = get_executing_context()
                     if ctx:
                         node_id = ctx.node_id
-                        resolved = f"ctx({node_id})"
                     else:
-                        resolved = "ctx(None)"
-                except Exception as e:
-                    resolved = f"err({e})"
+                        pass
+                except Exception:
+                    pass
 
             # Bypass blocked event loop by direct outbox injection
             if rpc:

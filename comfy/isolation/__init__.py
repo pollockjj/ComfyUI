@@ -31,7 +31,7 @@ def initialize_proxies() -> None:
     from .child_hooks import is_child_process
     is_child = is_child_process()
 
-    
+
     if is_child:
         from .child_hooks import initialize_child_process
         initialize_child_process()
@@ -135,13 +135,13 @@ def _get_class_types_for_extension(extension_name: str) -> Set[str]:
     extension = _RUNNING_EXTENSIONS.get(extension_name)
     if not extension:
         return set()
-    
+
     ext_path = Path(extension.module_path)
     class_types = set()
     for spec in _ISOLATED_NODE_SPECS:
         if spec.module_path.resolve() == ext_path.resolve():
             class_types.add(spec.node_name)
-    
+
     return class_types
 
 
@@ -149,7 +149,7 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
     for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
         ext_class_types = _get_class_types_for_extension(ext_name)
-        
+
         # If NONE of this extension's nodes are in the execution graph → evict
         if not ext_class_types.intersection(needed_class_types):
             logger.info(
@@ -165,11 +165,11 @@ def get_claimed_paths() -> Set[Path]:
 
 def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> None:
     """Update all active RPC instances with the current event loop.
-    
+
     This MUST be called at the start of each workflow execution to ensure
     RPC calls are scheduled on the correct event loop. This handles the case
     where asyncio.run() creates a new event loop for each workflow.
-    
+
     Args:
         loop: The event loop to use. If None, uses asyncio.get_running_loop().
     """
@@ -178,9 +178,9 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.get_event_loop()
-    
+
     update_count = 0
-    
+
     # Update RPCs from ExtensionManagers
     for manager in _EXTENSION_MANAGERS:
         if not hasattr(manager, 'extensions'):
@@ -191,7 +191,7 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
                     extension.rpc.update_event_loop(loop)
                     update_count += 1
                     logger.debug(f"{LOG_PREFIX}Updated loop on extension '{name}'")
-    
+
     # Also update RPCs from running extensions (they may have direct RPC refs)
     for name, extension in _RUNNING_EXTENSIONS.items():
         if hasattr(extension, 'rpc') and extension.rpc is not None:
@@ -199,7 +199,7 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
                 extension.rpc.update_event_loop(loop)
                 update_count += 1
                 logger.debug(f"{LOG_PREFIX}Updated loop on running extension '{name}'")
-    
+
     if update_count > 0:
         logger.debug(f"{LOG_PREFIX}Updated event loop on {update_count} RPC instances")
     else:
@@ -216,4 +216,5 @@ __all__ = [
     "get_claimed_paths",
     "update_rpc_event_loops",
     "IsolatedNodeSpec",
+    "get_class_types_for_extension",
 ]

@@ -7,16 +7,16 @@ class ModelManagementProxy(ProxiedSingleton):
     Uses __getattr__ to forward all calls to the underlying module,
     reducing maintenance burden.
     """
-    
+
     # Explicitly expose Enums/Classes as properties
     @property
     def VRAMState(self):
         return mm.VRAMState
-    
+
     @property
     def CPUState(self):
         return mm.CPUState
-        
+
     @property
     def OOM_EXCEPTION(self):
         return mm.OOM_EXCEPTION

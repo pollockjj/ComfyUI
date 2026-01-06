@@ -90,7 +90,7 @@ class ModelSamplingRegistry(BaseRegistry[Any]):
     async def get_sigma_max(self, instance_id: str) -> Any:
         sampling = self._get_instance(instance_id)
         return detach_if_grad(sampling.sigma_max)
-    
+
     async def get_sigma_data(self, instance_id: str) -> Any:
         sampling = self._get_instance(instance_id)
         return detach_if_grad(sampling.sigma_data)
@@ -121,16 +121,16 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                 registry = ModelSamplingRegistry()
 
                 class _LocalCaller:
-                    def calculate_input(self_inner: Any, instance_id: str, sigma: Any, noise: Any) -> Any:
+                    def calculate_input(self, instance_id: str, sigma: Any, noise: Any) -> Any:
                         return registry.calculate_input(instance_id, sigma, noise)
 
                     def calculate_denoised(
-                        self_inner: Any, instance_id: str, sigma: Any, model_output: Any, model_input: Any
+                        self, instance_id: str, sigma: Any, model_output: Any, model_input: Any
                     ) -> Any:
                         return registry.calculate_denoised(instance_id, sigma, model_output, model_input)
 
                     def noise_scaling(
-                        self_inner: Any,
+                        self,
                         instance_id: str,
                         sigma: Any,
                         noise: Any,
@@ -139,31 +139,31 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                     ) -> Any:
                         return registry.noise_scaling(instance_id, sigma, noise, latent_image, max_denoise)
 
-                    def inverse_noise_scaling(self_inner: Any, instance_id: str, sigma: Any, latent: Any) -> Any:
+                    def inverse_noise_scaling(self, instance_id: str, sigma: Any, latent: Any) -> Any:
                         return registry.inverse_noise_scaling(instance_id, sigma, latent)
 
-                    def timestep(self_inner: Any, instance_id: str, sigma: Any) -> Any:
+                    def timestep(self, instance_id: str, sigma: Any) -> Any:
                         return registry.timestep(instance_id, sigma)
 
-                    def sigma(self_inner: Any, instance_id: str, timestep: Any) -> Any:
+                    def sigma(self, instance_id: str, timestep: Any) -> Any:
                         return registry.sigma(instance_id, timestep)
 
-                    def percent_to_sigma(self_inner: Any, instance_id: str, percent: float) -> Any:
+                    def percent_to_sigma(self, instance_id: str, percent: float) -> Any:
                         return registry.percent_to_sigma(instance_id, percent)
 
-                    def get_sigma_min(self_inner: Any, instance_id: str) -> Any:
+                    def get_sigma_min(self, instance_id: str) -> Any:
                         return registry.get_sigma_min(instance_id)
 
-                    def get_sigma_max(self_inner: Any, instance_id: str) -> Any:
+                    def get_sigma_max(self, instance_id: str) -> Any:
                         return registry.get_sigma_max(instance_id)
 
-                    def get_sigma_data(self_inner: Any, instance_id: str) -> Any:
+                    def get_sigma_data(self, instance_id: str) -> Any:
                         return registry.get_sigma_data(instance_id)
 
-                    def get_sigmas(self_inner: Any, instance_id: str) -> Any:
+                    def get_sigmas(self, instance_id: str) -> Any:
                         return registry.get_sigmas(instance_id)
 
-                    def set_sigmas(self_inner: Any, instance_id: str, sigmas: Any) -> None:
+                    def set_sigmas(self, instance_id: str, sigmas: Any) -> None:
                         return registry.set_sigmas(instance_id, sigmas)
 
                 self._rpc_caller = _LocalCaller()

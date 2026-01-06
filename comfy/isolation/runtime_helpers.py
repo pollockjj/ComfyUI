@@ -44,7 +44,7 @@ def build_stub_class(
             return deserialized
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
-        except Exception as e:
+        except Exception:
             raise
         finally:
             if prev_child is not None:
@@ -113,7 +113,7 @@ def build_stub_class(
         attributes["NOT_IDEMPOTENT"] = info.get("not_idempotent", False)
         attributes["INPUT_IS_LIST"] = info.get("input_is_list", False)
 
-    display_name = info.get("display_name") or node_name
+
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     bases = (_ComfyNodeInternal,) if is_v3 else ()
     stub_cls = type(class_name, bases, attributes)
@@ -130,7 +130,7 @@ def build_stub_class(
 def get_class_types_for_extension(
     extension_name: str,
     running_extensions: Dict[str, "ComfyNodeExtension"],
-    specs: List["IsolatedNodeSpec"],
+    specs: List[Any],
 ) -> Set[str]:
     extension = running_extensions.get(extension_name)
     if not extension:

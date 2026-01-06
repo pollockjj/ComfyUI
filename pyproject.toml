@@ -11,7 +11,7 @@ repository = "https://github.com/comfyanonymous/ComfyUI"
 documentation = "https://docs.comfy.org/"
 
 [tool.comfy.host]
-allow_network = false
+allow_network = true
 writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj/ComfyUI/input"]
 
 [tool.comfy.host.whitelist]
@@ -19,6 +19,7 @@ writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj
 "ComfyUI-Manager" = "*"
 "comfyui-kjnodes" = "*"
 "comfyui-videohelpersuite" = "*"
+"comfyui_controlnet_aux" = "*"
 "rgthree-comfy" = "*"
 "was-ns" = "*"
 "websocket_image_save.py" = "*"

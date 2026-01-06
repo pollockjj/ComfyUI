@@ -83,9 +83,11 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     def _sanitize_rpc_result(self, obj, seen=None):
         if seen is None:
             seen = set()
-        if obj is None: return None
+        if obj is None:
+            return None
         if isinstance(obj, (bool, int, float, str)):
-            if isinstance(obj, str) and len(obj) > 500000: return f"<Truncated String len={len(obj)}>"
+            if isinstance(obj, str) and len(obj) > 500000:
+                return f"<Truncated String len={len(obj)}>"
             return obj
         obj_id = id(obj)
         if obj_id in seen:
@@ -291,7 +293,8 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def clone_has_same_weights_by_id(self, instance_id: str, other_id: str) -> bool:
         instance = self._get_instance(instance_id)
         other = self._get_instance(other_id)
-        if not other: return False
+        if not other:
+            return False
         return instance.clone_has_same_weights(other)
 
     async def load_list_internal(self, instance_id: str, *args, **kwargs) -> Any:
@@ -469,7 +472,8 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
                     target = v.device
                     break
         def _move(obj):
-            if target is None: return obj
+            if target is None:
+                return obj
             if isinstance(obj, (tuple, list)):
                 return type(obj)(_move(o) for o in obj)
             if hasattr(obj, "to"):

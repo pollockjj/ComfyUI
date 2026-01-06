@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional, List, Tuple, Set, Dict
+from typing import Dict
 
 import folder_paths
 from pyisolate import ProxiedSingleton

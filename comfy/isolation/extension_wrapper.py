@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import torch
-from types import SimpleNamespace
 
 
 class AttrDict(dict):
@@ -19,16 +18,12 @@ import inspect
 import json
 import logging
 import os
-import pickle
 import sys
 import uuid
 from dataclasses import asdict
 from typing import Any, Dict, List, Tuple
 
 from pyisolate import ExtensionBase
-from comfy.isolation.model_patcher_proxy import ModelPatcherRegistry
-from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry
-from comfy.isolation.clip_proxy import CLIPRegistry
 
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
@@ -217,11 +212,11 @@ class ComfyNodeExtension(ExtensionBase):
 
         instance = self._get_node_instance(node_name)
         node_cls = self._get_node_class(node_name)
-        
+
         # V3 API nodes expect hidden parameters in cls.hidden, not as kwargs
         # Hidden params come through RPC as string keys like "Hidden.prompt"
         from comfy_api.latest._io import Hidden, HiddenHolder
-        
+
         # Map string representations back to Hidden enum keys
         hidden_string_map = {
             "Hidden.unique_id": Hidden.unique_id,
@@ -231,11 +226,11 @@ class ComfyNodeExtension(ExtensionBase):
             "Hidden.auth_token_comfy_org": Hidden.auth_token_comfy_org,
             "Hidden.api_key_comfy_org": Hidden.api_key_comfy_org,
         }
-        
+
         # Find and extract hidden parameters (both enum and string form)
         hidden_found = {}
         keys_to_remove = []
-        
+
         for key in list(resolved_inputs.keys()):
             # Check string form first (from RPC serialization)
             if key in hidden_string_map:
@@ -245,11 +240,11 @@ class ComfyNodeExtension(ExtensionBase):
             elif isinstance(key, Hidden):
                 hidden_found[key] = resolved_inputs[key]
                 keys_to_remove.append(key)
-        
+
         # Remove hidden params from kwargs
         for key in keys_to_remove:
             resolved_inputs.pop(key)
-        
+
         # Set hidden on node class if any hidden params found
         if hidden_found:
             if not hasattr(node_cls, 'hidden') or node_cls.hidden is None:
@@ -258,7 +253,7 @@ class ComfyNodeExtension(ExtensionBase):
                 # Update existing hidden holder
                 for key, value in hidden_found.items():
                     setattr(node_cls.hidden, key.value.lower(), value)
-            
+
         function_name = getattr(node_cls, "FUNCTION", "execute")
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
@@ -356,7 +351,7 @@ class ComfyNodeExtension(ExtensionBase):
 
     async def before_module_loaded(self) -> None:
 
-        
+
         # Inject initialization here if we think this is the child
         try:
             from comfy.isolation import initialize_proxies
@@ -368,9 +363,6 @@ class ComfyNodeExtension(ExtensionBase):
         try:
             from comfy_api.latest import ComfyAPI_latest
             from .proxies.progress_proxy import ProgressProxy
-            from .proxies.folder_paths_proxy import FolderPathsProxy
-            import comfy_api.latest._ui as latest_ui
-            import comfy_api.latest._resources as latest_resources
 
             ComfyAPI_latest.Execution = ProgressProxy
             # ComfyAPI_latest.execution = ProgressProxy()  # Eliminated to avoid Singleton collision
