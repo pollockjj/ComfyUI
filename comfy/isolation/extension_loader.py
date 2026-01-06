@@ -13,7 +13,7 @@ from pyisolate import ExtensionManager, ExtensionManagerConfig
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
-from .host_policy import load_host_policy  # New import
+from .host_policy import load_host_policy
 
 try:
     import tomllib
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_enforcement_policy() -> Dict[str, bool]:
-    # Return enforcement policy (PYISOLATE_ENFORCE_ISOLATED, PYISOLATE_ENFORCE_SANDBOX)
     return {
         "force_isolated": os.environ.get("PYISOLATE_ENFORCE_ISOLATED") == "1",
         "force_sandbox": os.environ.get("PYISOLATE_ENFORCE_SANDBOX") == "1",
@@ -87,12 +86,9 @@ async def load_isolated_node(
     manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
     extension_managers.append(manager)
 
-    # Load Host Security Policy
-    # We use folder_paths.base_path which should point to ComfyUI root
     import folder_paths
     host_policy = load_host_policy(Path(folder_paths.base_path))
 
-    # Configure sandbox policy (Linux only)
     sandbox_config = {}
     is_linux = platform.system() == "Linux"
     if is_linux and isolated:
@@ -101,8 +97,6 @@ async def load_isolated_node(
             "writable_paths": host_policy["writable_paths"],
             "readonly_paths": host_policy["readonly_paths"],
         }
-
-    # Enable CUDA IPC if sharing torch on Linux
     share_cuda_ipc = share_torch and is_linux
 
     extension_config = {
