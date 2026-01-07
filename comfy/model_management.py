@@ -456,7 +456,7 @@ def module_size(module):
     sd = module.state_dict()
     for k in sd:
         t = sd[k]
-        module_mem += t.nelement() * t.element_size()
+        module_mem += t.nbytes
     return module_mem
 
 class LoadedModel:
@@ -1160,7 +1160,7 @@ def pin_memory(tensor):
     if not tensor.is_contiguous():
         return False
 
-    size = tensor.numel() * tensor.element_size()
+    size = tensor.nbytes
     if (TOTAL_PINNED_MEMORY + size) > MAX_PINNED_MEMORY:
         return False
 
@@ -1187,7 +1187,7 @@ def unpin_memory(tensor):
         return False
 
     ptr = tensor.data_ptr()
-    size = tensor.numel() * tensor.element_size()
+    size = tensor.nbytes
 
     size_stored = PINNED_MEMORY.get(ptr, None)
     if size_stored is None:
@@ -1508,6 +1508,16 @@ def supports_fp8_compute(device=None):
 
     return True
 
+def supports_nvfp4_compute(device=None):
+    if not is_nvidia():
+        return False
+
+    props = torch.cuda.get_device_properties(device)
+    if props.major < 10:
+        return False
+
+    return True
+
 def extended_fp16_support():
     # TODO: check why some models work with fp16 on newer torch versions but not on older
     if torch_version_numeric < (2, 7):
@@ -1546,6 +1556,10 @@ def soft_empty_cache(force=False):
 def unload_all_models():
     free_memory(1e30, get_torch_device())
 
+def debug_memory_summary():
+    if is_amd() or is_nvidia():
+        return torch.cuda.memory.memory_summary()
+    return ""
 
 #TODO: might be cleaner to put this somewhere else
 import threading
