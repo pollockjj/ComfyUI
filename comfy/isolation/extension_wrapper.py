@@ -270,6 +270,9 @@ class ComfyNodeExtension(ExtensionBase):
 
         if type(result).__name__ == 'NodeOutput':
             result = result.args
+        if self._is_comfy_protocol_return(result):
+            return self._wrap_unpicklable_objects(result)
+
         if not isinstance(result, tuple):
             result = (result,)
         return self._wrap_unpicklable_objects(result)
@@ -405,6 +408,22 @@ class ComfyNodeExtension(ExtensionBase):
         else:
             result = handler(mock_request)
         return self._serialize_response(result)
+
+    def _is_comfy_protocol_return(self, result: Any) -> bool:
+        """
+        Check if the result matches the ComfyUI 'Protocol Return' schema.
+        
+        A Protocol Return is a dictionary containing specific reserved keys that 
+        ComfyUI's execution engine interprets as instructions (UI updates, 
+        Workflow expansion, etc.) rather than purely data outputs.
+
+        Schema:
+           - Must be a dict
+           - Must contain at least one of: 'ui', 'result', 'expand'
+        """
+        if not isinstance(result, dict):
+            return False
+        return any(key in result for key in ("ui", "result", "expand"))
 
     def _serialize_response(self, response: Any) -> Dict[str, Any]:
         if response is None:
