@@ -258,9 +258,16 @@ class ComfyNodeExtension(ExtensionBase):
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
 
-        result = getattr(instance, function_name)(**resolved_inputs)
-        if asyncio.iscoroutine(result):
-            result = await result
+        handler = getattr(instance, function_name)
+        
+        if asyncio.iscoroutinefunction(handler):
+            result = await handler(**resolved_inputs)
+        else:
+
+            import functools
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, functools.partial(handler, **resolved_inputs))
+
         if type(result).__name__ == 'NodeOutput':
             result = result.args
         if not isinstance(result, tuple):

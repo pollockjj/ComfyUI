@@ -174,6 +174,8 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
         instance = self._get_instance(instance_id)
         cp = getattr(instance.model, "current_patcher", instance)
+        if cp is None:
+            cp = instance
         return cp.prepare_state(timestep)
 
     async def pre_run(self, instance_id: str) -> None:
@@ -185,6 +187,8 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def apply_hooks(self, instance_id: str, hooks: Any) -> Any:
         instance = self._get_instance(instance_id)
         cp = getattr(instance.model, "current_patcher", instance)
+        if cp is None:
+            cp = instance
         return cp.apply_hooks(hooks=hooks)
 
     async def clean_hooks(self, instance_id: str) -> None:

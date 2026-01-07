@@ -3,6 +3,7 @@ import heapq
 import inspect
 import logging
 import sys
+import os
 import threading
 import time
 import traceback
@@ -535,6 +536,11 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     tasks = [x for x in output_data if isinstance(x, asyncio.Task)]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
+                
+                if os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
+                     await await_completion()
+                     return await execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
+
                 asyncio.create_task(await_completion())
                 return (ExecutionResult.PENDING, None, None)
         if len(output_ui) > 0:

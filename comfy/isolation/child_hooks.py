@@ -62,6 +62,23 @@ def _setup_utils_proxy(rpc=None) -> None:
     try:
         import comfy.utils
         import asyncio
+        
+        # Capture main loop during initialization (safe context)
+        main_loop = None
+        try:
+            main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                main_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                pass
+        
+        try:
+            from .proxies.base import set_global_loop
+            if main_loop:
+                set_global_loop(main_loop)
+        except ImportError:
+            pass
 
         # Sync hook wrapper for progress updates
         def sync_hook_wrapper(value: int, total: int, preview: None = None, node_id: None = None) -> None:
@@ -79,7 +96,11 @@ def _setup_utils_proxy(rpc=None) -> None:
             # Bypass blocked event loop by direct outbox injection
             if rpc:
                 try:
-                    loop = asyncio.get_event_loop()
+                    # Use captured main loop if available (for threaded execution), or current loop
+                    loop = main_loop
+                    if loop is None:
+                        loop = asyncio.get_event_loop()
+                        
                     rpc.outbox.put({
                         "kind": "call",
                         "object_id": "UtilsProxy",

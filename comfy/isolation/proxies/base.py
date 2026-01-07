@@ -103,6 +103,12 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
         return instance
 
 
+_GLOBAL_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+def set_global_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _GLOBAL_LOOP
+    _GLOBAL_LOOP = loop
+
 class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
@@ -128,6 +134,29 @@ class BaseProxy(Generic[T]):
         rpc = self._get_rpc()
         method = getattr(rpc, method_name)
         coro = method(self._instance_id, *args, **kwargs)
+        
+        # If we have a global loop (Main Thread Loop), use it for dispatch from worker threads
+        if _GLOBAL_LOOP is not None and _GLOBAL_LOOP.is_running():
+            try:
+                # If we are already in the global loop, we can't block on it?
+                # Actually, this method is synchronous (__getattr__ -> lambda).
+                # If called from async context in main loop, we need to handle that.
+                curr_loop = asyncio.get_running_loop()
+                if curr_loop is _GLOBAL_LOOP:
+                     # We are in the main loop. We cannot await/block here if we are just a sync function.
+                     # But proxies are often called from sync code.
+                     # If called from sync code in main loop, creating a new loop is bad.
+                     # But we can't await `coro`.
+                     # This implies proxies MUST be awaited if called from async context?
+                     # Existing code used `run_coro_in_new_loop` which is weird.
+                     # Let's trust that if we are in a thread (RuntimeError on get_running_loop),
+                     # we use run_coroutine_threadsafe.
+                     pass
+            except RuntimeError:
+                # No running loop - we are in a worker thread.
+                future = asyncio.run_coroutine_threadsafe(coro, _GLOBAL_LOOP)
+                return future.result()
+
         try:
             asyncio.get_running_loop()
             return run_coro_in_new_loop(coro)
