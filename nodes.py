@@ -2303,8 +2303,10 @@ async def init_external_custom_nodes():
         from comfy.isolation import isolated_node_timings
         if isolated_node_timings:
             logging.info("\nImport times for isolated custom nodes:")
-            for timing, path in sorted(isolated_node_timings):
-                logging.info("{:6.1f} seconds: {}".format(timing, path))
+            # #### TEMPORARY ISOLATION LOGGING - DELETE WHEN UPSTREAMED ####
+            for timing, path, count in sorted(isolated_node_timings):
+                logging.info("{:6.1f} seconds: {} ({})".format(timing, path, count))
+            # #### END TEMPORARY ISOLATION LOGGING ####
             logging.info("")
 
 async def init_builtin_extra_nodes():

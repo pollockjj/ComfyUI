@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "]["
-isolated_node_timings: List[tuple[float, Path]] = []
+isolated_node_timings: List[tuple[float, Path, int]] = []
 
 PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
 PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
@@ -114,7 +114,7 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
                 )
                 for node_name, display_name, stub_cls in spec_list
             ]
-            isolated_node_timings.append((time.perf_counter() - load_start, node_dir))
+            isolated_node_timings.append((time.perf_counter() - load_start, node_dir, len(spec_list)))
             return spec_list
 
     tasks = [load_with_semaphore(node_dir, manifest) for node_dir, manifest in manifest_entries]

@@ -12,7 +12,7 @@ documentation = "https://docs.comfy.org/"
 
 [tool.comfy.host]
 allow_network = true
-writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj/ComfyUI/input"]
+writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj/ComfyUI/input", "/home/johnj/ComfyUI/temp"]
 
 [tool.comfy.host.whitelist]
 "ComfyUI-GGUF" = "*"
