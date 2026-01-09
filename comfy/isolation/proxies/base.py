@@ -134,7 +134,7 @@ class BaseProxy(Generic[T]):
         rpc = self._get_rpc()
         method = getattr(rpc, method_name)
         coro = method(self._instance_id, *args, **kwargs)
-        
+
         # If we have a global loop (Main Thread Loop), use it for dispatch from worker threads
         if _GLOBAL_LOOP is not None and _GLOBAL_LOOP.is_running():
             try:

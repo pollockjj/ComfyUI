@@ -62,7 +62,7 @@ def _setup_utils_proxy(rpc=None) -> None:
     try:
         import comfy.utils
         import asyncio
-        
+
         # Capture main loop during initialization (safe context)
         main_loop = None
         try:
@@ -72,7 +72,7 @@ def _setup_utils_proxy(rpc=None) -> None:
                 main_loop = asyncio.get_event_loop()
             except RuntimeError:
                 pass
-        
+
         try:
             from .proxies.base import set_global_loop
             if main_loop:
@@ -100,7 +100,7 @@ def _setup_utils_proxy(rpc=None) -> None:
                     loop = main_loop
                     if loop is None:
                         loop = asyncio.get_event_loop()
-                        
+
                     rpc.outbox.put({
                         "kind": "call",
                         "object_id": "UtilsProxy",
