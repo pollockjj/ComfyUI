@@ -239,6 +239,18 @@ class ComfyUIAdapter(IsolationAdapter):
         from comfy.isolation.model_patcher_proxy_utils import register_hooks_serializers
         register_hooks_serializers(registry)
 
+        # Generic Numpy Serializer
+        def serialize_numpy(obj: Any) -> Any:
+            import torch
+            try:
+                # Attempt zero-copy conversion to Tensor
+                return torch.from_numpy(obj)
+            except Exception:
+                # Fallback for non-numeric arrays (strings, objects, mixes)
+                return obj.tolist()
+
+        registry.register("ndarray", serialize_numpy, None)
+
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         return [
             PromptServerService,
