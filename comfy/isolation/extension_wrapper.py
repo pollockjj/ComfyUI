@@ -259,7 +259,7 @@ class ComfyNodeExtension(ExtensionBase):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
 
         handler = getattr(instance, function_name)
-        
+
         if asyncio.iscoroutinefunction(handler):
             result = await handler(**resolved_inputs)
         else:
@@ -412,9 +412,9 @@ class ComfyNodeExtension(ExtensionBase):
     def _is_comfy_protocol_return(self, result: Any) -> bool:
         """
         Check if the result matches the ComfyUI 'Protocol Return' schema.
-        
-        A Protocol Return is a dictionary containing specific reserved keys that 
-        ComfyUI's execution engine interprets as instructions (UI updates, 
+
+        A Protocol Return is a dictionary containing specific reserved keys that
+        ComfyUI's execution engine interprets as instructions (UI updates,
         Workflow expansion, etc.) rather than purely data outputs.
 
         Schema:
