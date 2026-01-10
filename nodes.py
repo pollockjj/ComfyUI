@@ -2247,7 +2247,9 @@ async def init_external_custom_nodes():
         # Load Global Host Policy
         host_policy = load_host_policy(Path(folder_paths.base_path))
         whitelist_dict = host_policy.get("whitelist", {})
-        whitelist = set(whitelist_dict.keys())
+        # Normalize whitelist keys to lowercase for case-insensitive matching
+        # (matches ComfyUI-Manager's normalization: project.name.strip().lower())
+        whitelist = set(k.strip().lower() for k in whitelist_dict.keys())
         logging.info(f"][ Loaded Whitelist: {len(whitelist)} nodes allowed.")
 
         isolated_specs = await await_isolation_loading()
@@ -2285,7 +2287,8 @@ async def init_external_custom_nodes():
                     continue
                 
                 # Tri-State Enforcement: If not Isolated (checked above), MUST be Whitelisted.
-                if possible_module not in whitelist:
+                # Normalize to lowercase for case-insensitive matching (matches ComfyUI-Manager)
+                if possible_module.strip().lower() not in whitelist:
                     logging.warning(f"][ REJECTED: Node '{possible_module}' is blocked by security policy (not whitelisted/isolated).")
                     continue
 

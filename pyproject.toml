@@ -15,8 +15,12 @@ allow_network = true
 writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj/ComfyUI/input", "/home/johnj/ComfyUI/temp"]
 
 [tool.comfy.host.whitelist]
+"ComfyUI-Crystools" = "*"
+"ComfyUI-Florence2" = "*"
 "ComfyUI-GGUF" = "*"
+"ComfyUI-KJNodes" = "*"
 "ComfyUI-Manager" = "*"
+"comfyui-depthanythingv2" = "*"
 "comfyui-kjnodes" = "*"
 "comfyui-videohelpersuite" = "*"
 "comfyui_controlnet_aux" = "*"
