@@ -149,7 +149,7 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
     def patcher(self) -> ModelPatcherProxy:
         if not hasattr(self, "_patcher_proxy"):
             patcher_id = self._call_rpc("get_patcher_id")
-            self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=False)
+            self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=True)
         return self._patcher_proxy
 
     @patcher.setter
@@ -259,7 +259,7 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
 
     def clone(self) -> CLIPProxy:
         new_id = self._call_rpc("clone")
-        return CLIPProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+        return CLIPProxy(new_id, self._registry, manage_lifecycle=True)
 
 
 if not IS_CHILD_PROCESS:

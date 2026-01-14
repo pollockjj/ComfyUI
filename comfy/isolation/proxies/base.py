@@ -85,7 +85,12 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             self._counter += 1
             self._registry[instance_id] = instance
             self._id_map[obj_id] = instance_id
+
         return instance_id
+
+    async def release(self, instance_id: str) -> None:
+
+        self.unregister_sync(instance_id)
 
     def unregister_sync(self, instance_id: str) -> None:
         with self._lock:
@@ -109,17 +114,44 @@ def set_global_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _GLOBAL_LOOP
     _GLOBAL_LOOP = loop
 
+def _cleanup_remote(registry_cls: Any, instance_id: str) -> None:
+
+    try:
+        if _GLOBAL_LOOP is None or _GLOBAL_LOOP.is_closed():
+            return
+
+        from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+        rpc = get_child_rpc_instance()
+        if rpc is None:
+            return
+
+        # We must not block here (finalizers run in unpredictable contexts)
+        # We assume the registry has a 'release' method (added above)
+        remote_id = registry_cls.get_remote_id()
+        caller = rpc.create_caller(registry_cls, remote_id)
+        coro = caller.release(instance_id)
+        
+        asyncio.run_coroutine_threadsafe(coro, _GLOBAL_LOOP)
+    except Exception:
+        # Finalizers must not raise
+        pass
+
 class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
 
     def __init__(self, instance_id: str, registry: Optional[Any] = None, manage_lifecycle: bool = False) -> None:
+
         self._instance_id = instance_id
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
         self._manage_lifecycle = manage_lifecycle
-        if manage_lifecycle and not IS_CHILD_PROCESS:
-            self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
+        
+        if manage_lifecycle:
+            if IS_CHILD_PROCESS:
+                self._finalizer = weakref.finalize(self, _cleanup_remote, self._registry_class, instance_id)
+            else:
+                self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:

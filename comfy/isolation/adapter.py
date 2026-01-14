@@ -93,13 +93,13 @@ class ComfyUIAdapter(IsolationAdapter):
 
         def deserialize_model_patcher(data: Dict[str, Any]) -> ModelPatcherProxy:
             """Child-side deserializer: create proxy."""
-            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=True)
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelPatcherRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=True)
             else:
                 return ModelPatcherRegistry()._get_instance(data["model_id"])
 
@@ -117,13 +117,13 @@ class ComfyUIAdapter(IsolationAdapter):
             return {"__type__": "CLIPRef", "clip_id": clip_id}
 
         def deserialize_clip(data: Dict[str, Any]) -> CLIPProxy:
-            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=True)
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
             """Context-aware CLIPRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=True)
             else:
                 return CLIPRegistry()._get_instance(data["clip_id"])
 
@@ -141,14 +141,14 @@ class ComfyUIAdapter(IsolationAdapter):
             return {"__type__": "VAERef", "vae_id": vae_id}
 
         def deserialize_vae(data: Dict[str, Any]) -> VAEProxy:
-            return VAEProxy(data["vae_id"])
+            return VAEProxy(data["vae_id"], registry=None, manage_lifecycle=True)
 
         def deserialize_vae_ref(data: Dict[str, Any]) -> Any:
             """Context-aware VAERef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
                 # Child: create a proxy
-                return VAEProxy(data["vae_id"])
+                return VAEProxy(data["vae_id"], registry=None, manage_lifecycle=True)
             else:
                 # Host: lookup real VAE from registry
                 return VAERegistry()._get_instance(data["vae_id"])
@@ -178,13 +178,13 @@ class ComfyUIAdapter(IsolationAdapter):
 
         def deserialize_model_sampling(data: Dict[str, Any]) -> ModelSamplingProxy:
             """Child-side deserializer: create proxy."""
-            return ModelSamplingProxy(data["ms_id"])
+            return ModelSamplingProxy(data["ms_id"], registry=None, manage_lifecycle=True)
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelSamplingRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelSamplingProxy(data["ms_id"])
+                return ModelSamplingProxy(data["ms_id"], registry=None, manage_lifecycle=True)
             else:
                 return ModelSamplingRegistry()._get_instance(data["ms_id"])
 
