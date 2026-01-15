@@ -131,7 +131,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def clone(self) -> ModelPatcherProxy:
         new_id = self._call_rpc("clone")
-        return ModelPatcherProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+        return ModelPatcherProxy(new_id, self._registry)
 
     def clone_has_same_weights(self, clone: Any) -> bool:
         if isinstance(clone, ModelPatcherProxy):
@@ -308,7 +308,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         result = self._call_rpc("load_lora", lora_path, strength_model, clip_id, strength_clip)
         new_model = None
         if result.get("model_id"):
-            new_model = ModelPatcherProxy(result["model_id"], self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+            new_model = ModelPatcherProxy(result["model_id"], self._registry)
         new_clip = None
         if result.get("clip_id"):
             from comfy.isolation.clip_proxy import CLIPProxy
@@ -502,7 +502,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def get_additional_models(self) -> List[ModelPatcherProxy]:
         ids = self._call_rpc("get_additional_models")
-        return [ModelPatcherProxy(mid, self._registry, manage_lifecycle=not IS_CHILD_PROCESS) for mid in ids]
+        return [ModelPatcherProxy(mid, self._registry) for mid in ids]
 
     def model_patches_models(self) -> Any:
         return self._call_rpc("model_patches_models")
@@ -526,7 +526,7 @@ class _InnerModelProxy:
         if name == 'device':
             return self._parent._call_rpc("get_inner_model_attr", 'device')
         if name == 'current_patcher':
-             return ModelPatcherProxy(self._parent._instance_id, self._parent._registry, manage_lifecycle=False)
+             return ModelPatcherProxy(self._parent._instance_id, self._parent._registry)
         if name == 'model_sampling':
             return self._parent._call_rpc("get_model_object", "model_sampling")
         if name == 'extra_conds_shapes':
