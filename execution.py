@@ -537,7 +537,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
                 
-                if os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
+                # User Directive: Hardcoded Sequential Execution
+                if True: # os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
                      await await_completion()
                      return await execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
 
