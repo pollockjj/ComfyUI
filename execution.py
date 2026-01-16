@@ -537,7 +537,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
                 
-                if os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
+                # User Directive: Hardcoded Sequential Execution
+                if True: # os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
                      await await_completion()
                      return await execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
 
@@ -691,6 +692,7 @@ class PromptExecutor:
         asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        logging.info(f"PROMPT_EXECUTION_START: {prompt_id}")
         # Update RPC event loops for all isolated extensions
         # This is critical for serial workflow execution - each asyncio.run() creates
         # a new event loop, and RPC instances must be updated to use it
@@ -756,7 +758,17 @@ class PromptExecutor:
                     break
 
                 assert node_id is not None, "Node ID should not be None at this point"
+                
+                # Instrumentation for Node-Level VRAM Analysis
+                node_obj = dynamic_prompt.get_node(node_id)
+                node_class_type = node_obj.get('class_type', 'Unknown')
+                
+                logging.info(f"EXECUTION_NODE_START: {node_id} {node_class_type}")
+                
                 result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs)
+                
+                logging.info(f"EXECUTION_NODE_END: {node_id}")
+
                 self.success = result != ExecutionResult.FAILURE
                 if result == ExecutionResult.FAILURE:
                     self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
@@ -782,6 +794,7 @@ class PromptExecutor:
             self.server.last_node_id = None
             if comfy.model_management.DISABLE_SMART_MEMORY:
                 comfy.model_management.unload_all_models()
+        logging.info(f"PROMPT_EXECUTION_END: {prompt_id}")
 
 
 async def validate_inputs(prompt_id, prompt, item, validated):

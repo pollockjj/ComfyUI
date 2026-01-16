@@ -73,6 +73,7 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             super().__init__()
         self._registry: Dict[str, T] = {}
         self._id_map: Dict[int, str] = {}
+        self._handle_owner_map: Dict[str, weakref.ref] = {}  # Track parent object lifetime
         self._counter = 0
         self._lock = threading.Lock()
 
@@ -85,13 +86,21 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             self._counter += 1
             self._registry[instance_id] = instance
             self._id_map[obj_id] = instance_id
+            self._handle_owner_map[instance_id] = weakref.ref(instance)  # Life-lock to parent
+            logger.info(f"HANDLE_CREATED: {instance_id} for {type(instance).__name__}")
         return instance_id
 
-    def unregister_sync(self, instance_id: str) -> None:
+    def cleanup_dead_handles(self) -> None:
+        """Remove handles whose parent objects have been destroyed."""
         with self._lock:
-            instance = self._registry.pop(instance_id, None)
-            if instance:
-                self._id_map.pop(id(instance), None)
+            dead_ids = [
+                handle_id for handle_id, weak_ref in self._handle_owner_map.items()
+                if weak_ref() is None
+            ]
+            for handle_id in dead_ids:
+                self._registry.pop(handle_id, None)
+                self._handle_owner_map.pop(handle_id)
+                logger.info(f"HANDLE_CLEANED: {handle_id} (parent object destroyed)")
 
     def _get_instance(self, instance_id: str) -> T:
         if IS_CHILD_PROCESS:
@@ -109,17 +118,16 @@ def set_global_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _GLOBAL_LOOP
     _GLOBAL_LOOP = loop
 
+
+
 class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
 
-    def __init__(self, instance_id: str, registry: Optional[Any] = None, manage_lifecycle: bool = False) -> None:
+    def __init__(self, instance_id: str, registry: Optional[Any] = None) -> None:
         self._instance_id = instance_id
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
-        self._manage_lifecycle = manage_lifecycle
-        if manage_lifecycle and not IS_CHILD_PROCESS:
-            self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:

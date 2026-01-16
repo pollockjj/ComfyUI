@@ -149,7 +149,7 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
     def patcher(self) -> ModelPatcherProxy:
         if not hasattr(self, "_patcher_proxy"):
             patcher_id = self._call_rpc("get_patcher_id")
-            self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=False)
+            self._patcher_proxy = ModelPatcherProxy(patcher_id)
         return self._patcher_proxy
 
     @patcher.setter
@@ -163,14 +163,14 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
     def cond_stage_model(self) -> CondStageModelProxy:
         if not hasattr(self, "_cond_stage_model_proxy"):
             csm_id = self._call_rpc("get_cond_stage_model_id")
-            self._cond_stage_model_proxy = CondStageModelProxy(csm_id, manage_lifecycle=False)
+            self._cond_stage_model_proxy = CondStageModelProxy(csm_id)
         return self._cond_stage_model_proxy
 
     @property
     def tokenizer(self) -> TokenizerProxy:
         if not hasattr(self, "_tokenizer_proxy"):
             tok_id = self._call_rpc("get_tokenizer_id")
-            self._tokenizer_proxy = TokenizerProxy(tok_id, manage_lifecycle=False)
+            self._tokenizer_proxy = TokenizerProxy(tok_id)
         return self._tokenizer_proxy
 
     def load_model(self) -> ModelPatcherProxy:
@@ -259,7 +259,7 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
 
     def clone(self) -> CLIPProxy:
         new_id = self._call_rpc("clone")
-        return CLIPProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+        return CLIPProxy(new_id, self._registry)
 
 
 if not IS_CHILD_PROCESS:

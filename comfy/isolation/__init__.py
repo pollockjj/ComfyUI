@@ -147,16 +147,18 @@ def _get_class_types_for_extension(extension_name: str) -> Set[str]:
 
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
-    for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
-        ext_class_types = _get_class_types_for_extension(ext_name)
+    # RIFLE SHOT: Disable eviction. Keep all isolated nodes in memory.
+    pass
+    # for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
+    #     ext_class_types = _get_class_types_for_extension(ext_name)
 
-        # If NONE of this extension's nodes are in the execution graph → evict
-        if not ext_class_types.intersection(needed_class_types):
-            logger.info(
-                f"][ {ext_name} isolated custom_node not in execution graph, evicting"
-            )
-            extension.stop()
-            del _RUNNING_EXTENSIONS[ext_name]
+    #     # If NONE of this extension's nodes are in the execution graph → evict
+    #     if not ext_class_types.intersection(needed_class_types):
+    #         logger.info(
+    #             f"][ {ext_name} isolated custom_node not in execution graph, evicting"
+    #         )
+    #         extension.stop()
+    #         del _RUNNING_EXTENSIONS[ext_name]
 
 
 def get_claimed_paths() -> Set[Path]:
