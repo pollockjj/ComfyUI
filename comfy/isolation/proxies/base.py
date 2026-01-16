@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
 import threading
+import time
 import weakref
 from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 
@@ -71,27 +73,27 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
     def __init__(self) -> None:
         if hasattr(ProxiedSingleton, "__init__") and ProxiedSingleton is not object:
             super().__init__()
-        self._registry: Dict[str, T] = {}
-        self._id_map: Dict[int, str] = {}
+        # FIX: Use WeakValueDictionary to allow GC of underlying objects
+        # This fixes "Recursive Accumulation Failure" where Registry held strong refs
+        self._registry: weakref.WeakValueDictionary[str, T] = weakref.WeakValueDictionary()
         self._counter = 0
         self._lock = threading.Lock()
 
     def register(self, instance: T) -> str:
         with self._lock:
-            obj_id = id(instance)
-            if obj_id in self._id_map:
-                return self._id_map[obj_id]
+            # We no longer check _id_map because we want the Object itself
+            # to be the source of truth for its ID (via _isolation_handle_id in adapter).
+
             instance_id = f"{self._type_prefix}_{self._counter}"
             self._counter += 1
             self._registry[instance_id] = instance
-            self._id_map[obj_id] = instance_id
+            logger.info(f"HANDLE_CREATED: {instance_id} for {type(instance).__name__}")
         return instance_id
 
-    def unregister_sync(self, instance_id: str) -> None:
+    def get_instance(self, instance_id: str) -> Optional[T]:
+        """Public accessor that won't raise if missing."""
         with self._lock:
-            instance = self._registry.pop(instance_id, None)
-            if instance:
-                self._id_map.pop(id(instance), None)
+            return self._registry.get(instance_id)
 
     def _get_instance(self, instance_id: str) -> T:
         if IS_CHILD_PROCESS:
@@ -109,17 +111,16 @@ def set_global_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _GLOBAL_LOOP
     _GLOBAL_LOOP = loop
 
+
+
 class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
 
-    def __init__(self, instance_id: str, registry: Optional[Any] = None, manage_lifecycle: bool = False) -> None:
+    def __init__(self, instance_id: str, registry: Optional[Any] = None) -> None:
         self._instance_id = instance_id
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
-        self._manage_lifecycle = manage_lifecycle
-        if manage_lifecycle and not IS_CHILD_PROCESS:
-            self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:

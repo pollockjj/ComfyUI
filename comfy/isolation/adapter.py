@@ -86,20 +86,26 @@ class ComfyUIAdapter(IsolationAdapter):
                     f"{type(obj).__module__}.{type(obj).__name__}"
                 )
             # Host-side: register with registry
-            if hasattr(obj, "_instance_id"):
-                return {"__type__": "ModelPatcherRef", "model_id": obj._instance_id}
+            # Host-side: register with registry
+            if hasattr(obj, "_isolation_handle_id"):
+                 # Check if the existing ID is still valid in the registry (it might have been GC'd)
+                 if ModelPatcherRegistry().get_instance(obj._isolation_handle_id) is not None:
+                     return {"__type__": "ModelPatcherRef", "model_id": obj._isolation_handle_id}
+                 # Fallback: Object has ID but not in registry -> Re-register
+
             model_id = ModelPatcherRegistry().register(obj)
+            obj._isolation_handle_id = model_id  # Life-lock: attach handle to parent object
             return {"__type__": "ModelPatcherRef", "model_id": model_id}
 
         def deserialize_model_patcher(data: Dict[str, Any]) -> ModelPatcherProxy:
             """Child-side deserializer: create proxy."""
-            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+            return ModelPatcherProxy(data["model_id"], registry=None)
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelPatcherRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+                return ModelPatcherProxy(data["model_id"], registry=None)
             else:
                 return ModelPatcherRegistry()._get_instance(data["model_id"])
 
@@ -111,19 +117,32 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("ModelPatcherRef", None, deserialize_model_patcher_ref)
 
         def serialize_clip(obj: Any) -> Dict[str, Any]:
-            if hasattr(obj, "_instance_id"):
-                return {"__type__": "CLIPRef", "clip_id": obj._instance_id}
+            if os.environ.get("PYISOLATE_CHILD") == "1":
+                if hasattr(obj, "_instance_id"):
+                    return {"__type__": "CLIPRef", "clip_id": obj._instance_id}
+                raise RuntimeError(
+                    f"CLIP in child lacks _instance_id: "
+                    f"{type(obj).__module__}.{type(obj).__name__}"
+                )
+
+            if hasattr(obj, "_isolation_handle_id"):
+                 # Check existence
+                 if CLIPRegistry().get_instance(obj._isolation_handle_id) is not None:
+                      return {"__type__": "CLIPRef", "clip_id": obj._isolation_handle_id}
+                 # Fallback to re-register
+
             clip_id = CLIPRegistry().register(obj)
+            obj._isolation_handle_id = clip_id  # Life-lock: attach handle to parent object
             return {"__type__": "CLIPRef", "clip_id": clip_id}
 
         def deserialize_clip(data: Dict[str, Any]) -> CLIPProxy:
-            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+            return CLIPProxy(data["clip_id"], registry=None)
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
             """Context-aware CLIPRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+                return CLIPProxy(data["clip_id"], registry=None)
             else:
                 return CLIPRegistry()._get_instance(data["clip_id"])
 
@@ -135,20 +154,33 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("CLIPRef", None, deserialize_clip_ref)
 
         def serialize_vae(obj: Any) -> Dict[str, Any]:
-            if hasattr(obj, "_instance_id"):
-                return {"__type__": "VAERef", "vae_id": obj._instance_id}
+            if os.environ.get("PYISOLATE_CHILD") == "1":
+                if hasattr(obj, "_instance_id"):
+                    return {"__type__": "VAERef", "vae_id": obj._instance_id}
+                raise RuntimeError(
+                    f"VAE in child lacks _instance_id: "
+                    f"{type(obj).__module__}.{type(obj).__name__}"
+                )
+
+            if hasattr(obj, "_isolation_handle_id"):
+                 # Check existence
+                 if VAERegistry().get_instance(obj._isolation_handle_id) is not None:
+                     return {"__type__": "VAERef", "vae_id": obj._isolation_handle_id}
+                 # Fallback to re-register
+
             vae_id = VAERegistry().register(obj)
+            obj._isolation_handle_id = vae_id  # Life-lock: attach handle to parent object
             return {"__type__": "VAERef", "vae_id": vae_id}
 
         def deserialize_vae(data: Dict[str, Any]) -> VAEProxy:
-            return VAEProxy(data["vae_id"])
+            return VAEProxy(data["vae_id"], registry=None)
 
         def deserialize_vae_ref(data: Dict[str, Any]) -> Any:
             """Context-aware VAERef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
                 # Child: create a proxy
-                return VAEProxy(data["vae_id"])
+                return VAEProxy(data["vae_id"], registry=None)
             else:
                 # Host: lookup real VAE from registry
                 return VAERegistry()._get_instance(data["vae_id"])
@@ -173,18 +205,25 @@ class ComfyUIAdapter(IsolationAdapter):
                     f"{type(obj).__module__}.{type(obj).__name__}"
                 )
             # Host-side: register with ModelSamplingRegistry and return JSON-safe dict
+            if hasattr(obj, "_isolation_handle_id"):
+                 # Check existence
+                 if ModelSamplingRegistry().get_instance(obj._isolation_handle_id) is not None:
+                      return {"__type__": "ModelSamplingRef", "ms_id": obj._isolation_handle_id}
+                 # Fallback to re-register
+
             ms_id = ModelSamplingRegistry().register(obj)
+            obj._isolation_handle_id = ms_id
             return {"__type__": "ModelSamplingRef", "ms_id": ms_id}
 
         def deserialize_model_sampling(data: Dict[str, Any]) -> ModelSamplingProxy:
             """Child-side deserializer: create proxy."""
-            return ModelSamplingProxy(data["ms_id"])
+            return ModelSamplingProxy(data["ms_id"], registry=None)
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelSamplingRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelSamplingProxy(data["ms_id"])
+                return ModelSamplingProxy(data["ms_id"], registry=None)
             else:
                 return ModelSamplingRegistry()._get_instance(data["ms_id"])
 

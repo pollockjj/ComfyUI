@@ -27,6 +27,7 @@ writable_paths = ["/dev/shm", "/tmp", "/home/johnj/ComfyUI/output", "/home/johnj
 "rgthree-comfy" = "*"
 "was-ns" = "*"
 "websocket_image_save.py" = "*"
+"ComfyUI-StabilityTest" = "*"
 
 [tool.ruff]
 lint.select = [

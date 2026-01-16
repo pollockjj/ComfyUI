@@ -28,6 +28,13 @@ import weakref
 import gc
 import os
 
+# Fenced import for isolation support
+try:
+    from comfy.isolation.proxies.base import BaseRegistry
+    _ISOLATION_AVAILABLE = True
+except ImportError:
+    _ISOLATION_AVAILABLE = False
+
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
     NO_VRAM = 1     #Very low vram: enable all the options to save vram
@@ -586,6 +593,7 @@ def minimum_inference_memory():
     return (1024 * 1024 * 1024) * 0.8 + extra_reserved_memory()
 
 def free_memory(memory_required, device, keep_loaded=[]):
+    dump_vram_state("BEFORE_FREE_MEMORY")
     cleanup_models_gc()
     unloaded_model = []
     can_unload = []
@@ -620,9 +628,11 @@ def free_memory(memory_required, device, keep_loaded=[]):
             mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True)
             if mem_free_torch > mem_free_total * 0.25:
                 soft_empty_cache()
+    dump_vram_state("AFTER_FREE_MEMORY")
     return unloaded_models
 
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
+    dump_vram_state("BEFORE_LOAD_MODELS_GPU")
     cleanup_models_gc()
     global vram_state
 
@@ -707,6 +717,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
+    dump_vram_state("AFTER_LOAD_MODELS_GPU")
     return
 
 def load_model_gpu(model):
@@ -740,7 +751,55 @@ def cleanup_models_gc():
             cur = current_loaded_models[i]
             if cur.is_dead():
                 logging.warning("WARNING, memory leak with model {}. Please make sure it is not being referenced from somewhere.".format(cur.real_model().__class__.__name__))
+    
+    # Fenced: Clean up dead isolation handles after GC
+    if _ISOLATION_AVAILABLE:
+        try:
+            # Call cleanup on all registry instances
+            # This purges handles whose parent objects have been destroyed
+            for registry_cls in [BaseRegistry]:
+                # Get singleton instance and clean
+                try:
+                    instance = registry_cls()
+                    instance.cleanup_dead_handles()
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.error(f"Isolation handle cleanup failed: {e}")
 
+
+
+
+def dump_vram_state(phase):
+    try:
+        logging.debug(f"VRAM_STATE_DUMP_START: {phase}")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # objs = gc.get_objects()
+        # for obj in objs:
+        #     try:
+        #         if torch.is_tensor(obj):
+        #             # Strict safety: NO hasattr(obj, 'data') check here.
+        #             # Just pure tensor properties.
+        #             device = obj.device
+        #             shape = tuple(obj.shape)
+        #             dtype = obj.dtype
+        #             numel = obj.numel()
+        #             element_size = obj.element_size()
+        #             total_bytes = numel * element_size
+        #             
+        #             # We can try to get a bit more info if it's a parameter
+        #             is_param = isinstance(obj, torch.nn.Parameter)
+        #             
+        #             # logging.info(f"TENSOR: id={id(obj)} device={device} shape={shape} dtype={dtype} bytes={total_bytes} is_param={is_param}")
+        #     except Exception as e:
+        #         # Surpress errors during inspection to avoid crashing
+        #         pass
+        pass
+    except Exception as e:
+        logging.error(f"Failed to dump vram state: {e}")
 
 
 def cleanup_models():
@@ -752,6 +811,7 @@ def cleanup_models():
     for i in to_delete:
         x = current_loaded_models.pop(i)
         del x
+    dump_vram_state("AFTER_CLEANUP_MODELS")
 
 def dtype_size(dtype):
     dtype_size = 4
