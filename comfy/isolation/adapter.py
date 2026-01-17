@@ -91,8 +91,11 @@ class ComfyUIAdapter(IsolationAdapter):
             model_id = ModelPatcherRegistry().register(obj)
             return {"__type__": "ModelPatcherRef", "model_id": model_id}
 
-        def deserialize_model_patcher(data: Dict[str, Any]) -> ModelPatcherProxy:
+        def deserialize_model_patcher(data: Dict[str, Any]) -> Any:
             """Child-side deserializer: create proxy."""
+            # Passthrough if already resolved to actual ModelPatcher
+            if not isinstance(data, dict):
+                return data
             return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
@@ -116,7 +119,10 @@ class ComfyUIAdapter(IsolationAdapter):
             clip_id = CLIPRegistry().register(obj)
             return {"__type__": "CLIPRef", "clip_id": clip_id}
 
-        def deserialize_clip(data: Dict[str, Any]) -> CLIPProxy:
+        def deserialize_clip(data: Dict[str, Any]) -> Any:
+            # Passthrough if already resolved to actual CLIP
+            if not isinstance(data, dict):
+                return data
             return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
@@ -140,7 +146,10 @@ class ComfyUIAdapter(IsolationAdapter):
             vae_id = VAERegistry().register(obj)
             return {"__type__": "VAERef", "vae_id": vae_id}
 
-        def deserialize_vae(data: Dict[str, Any]) -> VAEProxy:
+        def deserialize_vae(data: Dict[str, Any]) -> Any:
+            # Passthrough if already resolved to actual VAE
+            if not isinstance(data, dict):
+                return data
             return VAEProxy(data["vae_id"])
 
         def deserialize_vae_ref(data: Dict[str, Any]) -> Any:
@@ -227,6 +236,9 @@ class ComfyUIAdapter(IsolationAdapter):
             }
 
         def deserialize_ksampler(data: Dict[str, Any]) -> Any:
+            # Passthrough if already resolved to actual KSAMPLER
+            if not isinstance(data, dict):
+                return data
             import comfy.samplers
             return comfy.samplers.ksampler(
                 data["sampler_name"],

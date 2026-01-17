@@ -306,6 +306,7 @@ class ComfyNodeExtension(ExtensionBase):
         # They will be handled via RemoteObjectHandle below.
 
         type_name = type(data).__name__
+        
         if type_name == 'ModelPatcherProxy':
             return {"__type__": "ModelPatcherRef", "model_id": data._instance_id}
         if type_name == 'CLIPProxy':
@@ -314,6 +315,14 @@ class ComfyNodeExtension(ExtensionBase):
             return {"__type__": "VAERef", "vae_id": data._instance_id}
         if type_name == 'ModelSamplingProxy':
             return {"__type__": "ModelSamplingRef", "ms_id": data._instance_id}
+        if type_name == 'KSAMPLER':
+            # Use the registered KSAMPLER serializer
+            from pyisolate._internal.serialization_registry import SerializerRegistry
+            registry = SerializerRegistry.get_instance()
+            if registry.has_handler('KSAMPLER'):
+                serializer = registry.get_serializer('KSAMPLER')
+                if serializer:
+                    return serializer(data)
 
         if isinstance(data, (list, tuple)):
             wrapped = [self._wrap_unpicklable_objects(item) for item in data]
