@@ -624,6 +624,12 @@ def free_memory(memory_required, device, keep_loaded=[]):
 
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
     cleanup_models_gc()
+    # DEBUG: VRAM logging
+    try:
+        mem_before = get_total_memory(get_torch_device(), torch_total_too=True)[1]
+    except:
+        mem_before = 0
+
     global vram_state
 
     inference_memory = minimum_inference_memory()
@@ -707,6 +713,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
+
+    # DEBUG: VRAM logging
+    try:
+        mem_after = get_total_memory(get_torch_device(), torch_total_too=True)[1]
+        print(f"][ load_models_gpu - VRAM-PRE: {mem_before / (1024*1024*1024):.2f}GB | VRAM-POST: {mem_after / (1024*1024*1024):.2f}GB | Delta: {(mem_after - mem_before) / (1024*1024):.2f}MB")
+    except:
+        pass
+
     return
 
 def load_model_gpu(model):
@@ -724,6 +738,22 @@ def loaded_models(only_currently_used=False):
 
 
 def cleanup_models_gc():
+    try:
+        for i, loaded_model in enumerate(current_loaded_models):
+            real_model = loaded_model.real_model() if loaded_model.real_model else None
+            model_name = real_model.__class__.__name__ if real_model else "Unknown"
+            
+            size_bytes = loaded_model.model_loaded_memory()
+            if size_bytes > 1024*1024*1024:
+                size_str = f"{size_bytes / (1024*1024*1024):.2f}GB"
+            else:
+                size_str = f"{size_bytes / (1024*1024):.2f}MB"
+                
+            status = "Alive" if not loaded_model.is_dead() else "Dead"
+            print(f"][ cleanup_models_gc - Model {i} - Name {model_name} | Size: {size_str} | Status: {status}")
+    except:
+        pass
+
     do_gc = False
     for i in range(len(current_loaded_models)):
         cur = current_loaded_models[i]
