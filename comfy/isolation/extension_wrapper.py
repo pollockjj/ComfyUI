@@ -271,11 +271,39 @@ class ComfyNodeExtension(ExtensionBase):
         if type(result).__name__ == 'NodeOutput':
             result = result.args
         if self._is_comfy_protocol_return(result):
-            return self._wrap_unpicklable_objects(result)
+            wrapped = self._wrap_unpicklable_objects(result)
+            # Aggressively clear inputs to allow proxy GC
+            resolved_inputs.clear()
+            inputs.clear()
+            import gc
+            gc.collect()
+            gc.collect()  # Double collect to trigger weak refs
+            return wrapped
 
         if not isinstance(result, tuple):
             result = (result,)
-        return self._wrap_unpicklable_objects(result)
+        wrapped = self._wrap_unpicklable_objects(result)
+        # Aggressively clear inputs to allow proxy GC
+        import gc
+        import logging
+
+        # Log proxy refs before clearing
+        proxy_count = 0
+        for k, v in resolved_inputs.items():
+            if hasattr(v, '_instance_id'):
+                proxy_count += 1
+                referrers = gc.get_referrers(v)
+                ref_count = len(referrers)
+                # Log referrer types
+                ref_types = [type(r).__name__ for r in referrers[:5]]
+                logging.info(f"[execute_node GC] proxy {v._instance_id} has {ref_count} referrers: {ref_types}")
+
+        resolved_inputs.clear()
+        inputs.clear()
+        gc.collect()
+        gc.collect()  # Double collect to trigger weak refs
+        logging.info(f"[execute_node GC] cleared {proxy_count} proxies, ran gc.collect() x2")
+        return wrapped
 
     async def get_remote_object(self, object_id: str) -> Any:
         """Retrieve a remote object by ID for host-side deserialization."""
