@@ -96,13 +96,13 @@ class ComfyUIAdapter(IsolationAdapter):
             # Passthrough if already resolved to actual ModelPatcher
             if not isinstance(data, dict):
                 return data
-            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+            return ModelPatcherProxy(data["model_id"], registry=None)
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelPatcherRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+                return ModelPatcherProxy(data["model_id"], registry=None)
             else:
                 return ModelPatcherRegistry()._get_instance(data["model_id"])
 
@@ -123,13 +123,13 @@ class ComfyUIAdapter(IsolationAdapter):
             # Passthrough if already resolved to actual CLIP
             if not isinstance(data, dict):
                 return data
-            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+            return CLIPProxy(data["clip_id"], registry=None)
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
             """Context-aware CLIPRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+                return CLIPProxy(data["clip_id"], registry=None)
             else:
                 return CLIPRegistry()._get_instance(data["clip_id"])
 

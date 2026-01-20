@@ -269,6 +269,12 @@ class ModelPatcher:
         if not hasattr(self.model, 'model_offload_buffer_memory'):
             self.model.model_offload_buffer_memory = 0
 
+        # Lifecycle instrumentation
+        import sys, os
+        model_name = self.model.__class__.__name__
+        pid = os.getpid()
+        print(f"][ MP:__init__ | pid={pid} | model={model_name} | id={id(self)}")
+
     def model_size(self):
         if self.size > 0:
             return self.size
@@ -341,6 +347,14 @@ class ModelPatcher:
 
         for callback in self.get_all_callbacks(CallbacksMP.ON_CLONE):
             callback(self, n)
+        # Lifecycle instrumentation
+        import sys, os
+        model_name = self.model.__class__.__name__
+        pid = os.getpid()
+        parent_id = id(self)
+        clone_id = id(n)
+        proxy_id = getattr(self, '_proxy_instance_id', 'NO_PROXY_ID')
+        print(f"][ MP:clone | pid={pid} | model={model_name} | parent_id={parent_id} | clone_id={clone_id} | proxy_id={proxy_id}")
         return n
 
     def is_clone(self, other):
@@ -829,6 +843,12 @@ class ModelPatcher:
         return self.model
 
     def unpatch_model(self, device_to=None, unpatch_weights=True):
+        import sys, os
+        model_name = self.model.__class__.__name__ if self.model else "UNKNOWN"
+        pid = os.getpid()
+        refcount = sys.getrefcount(self)
+        proxy_id = getattr(self, '_proxy_instance_id', 'NO_PROXY_ID')
+        print(f"][ MP:unpatch_model | pid={pid} | model={model_name} | proxy_id={proxy_id} | refs={refcount} | device_to={device_to} | unpatch_weights={unpatch_weights}")
         self.eject_model()
         if unpatch_weights:
             self.unpatch_hooks()
@@ -983,6 +1003,12 @@ class ModelPatcher:
             return self.model.model_loaded_weight_memory - current_used
 
     def detach(self, unpatch_all=True):
+        import sys, os
+        model_name = self.model.__class__.__name__ if self.model else "UNKNOWN"
+        pid = os.getpid()
+        refcount = sys.getrefcount(self)
+        proxy_id = getattr(self, '_proxy_instance_id', 'NO_PROXY_ID')
+        print(f"][ MP:detach | pid={pid} | model={model_name} | id={id(self)} | proxy_id={proxy_id} | refs={refcount} | unpatch_all={unpatch_all}")
         self.eject_model()
         self.model_patches_to(self.offload_device)
         if unpatch_all:
@@ -999,6 +1025,12 @@ class ModelPatcher:
         return comfy.lora.calculate_weight(patches, weight, key, intermediate_dtype=intermediate_dtype)
 
     def cleanup(self):
+        import sys, os
+        model_name = self.model.__class__.__name__ if self.model else "UNKNOWN"
+        pid = os.getpid()
+        refcount = sys.getrefcount(self)
+        proxy_id = getattr(self, '_proxy_instance_id', 'NO_PROXY_ID')
+        print(f"][ MP:cleanup | pid={pid} | model={model_name} | id={id(self)} | proxy_id={proxy_id} | refs={refcount}")
         self.clean_hooks()
         if hasattr(self.model, "current_patcher"):
             self.model.current_patcher = None

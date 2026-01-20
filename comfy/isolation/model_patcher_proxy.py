@@ -125,13 +125,39 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("register_all_hook_patches", hooks, target_dict, model_options, registered)
 
     def is_clone(self, other: Any) -> bool:
+        import logging
         if isinstance(other, ModelPatcherProxy):
             return self._call_rpc("is_clone_by_id", other._instance_id)
+        # Handle comparison with real ModelPatcher (e.g., from current_loaded_models on Host)
+        if not IS_CHILD_PROCESS:
+            # On Host: compare via registry using the real model's object id
+            try:
+                if other is None:
+                    logging.info(f"[ModelPatcherProxy.is_clone] other is None, returning False")
+                    return False
+                obj_id = id(other)
+                with self._registry._lock:
+                    other_instance_id = self._registry._id_map.get(obj_id)
+                logging.info(f"[ModelPatcherProxy.is_clone] other type={type(other).__name__}, obj_id={obj_id}, other_instance_id={other_instance_id}")
+                if other_instance_id:
+                    result = self._call_rpc("is_clone_by_id", other_instance_id)
+                    logging.info(f"[ModelPatcherProxy.is_clone] is_clone_by_id({self._instance_id}, {other_instance_id}) = {result}")
+                    return result
+                # If other is not in registry, try direct comparison with our real model
+                my_real_model = self._registry._get_instance(self._instance_id)
+                logging.info(f"[ModelPatcherProxy.is_clone] my_real_model type={type(my_real_model).__name__}")
+                if hasattr(my_real_model, "is_clone"):
+                    result = my_real_model.is_clone(other)
+                    logging.info(f"[ModelPatcherProxy.is_clone] my_real_model.is_clone(other) = {result}")
+                    return result
+            except Exception as e:
+                logging.info(f"[ModelPatcherProxy.is_clone] Exception: {e}")
+                pass
         return False
 
     def clone(self) -> ModelPatcherProxy:
         new_id = self._call_rpc("clone")
-        return ModelPatcherProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+        return ModelPatcherProxy(new_id, self._registry)
 
     def clone_has_same_weights(self, clone: Any) -> bool:
         if isinstance(clone, ModelPatcherProxy):
@@ -308,7 +334,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         result = self._call_rpc("load_lora", lora_path, strength_model, clip_id, strength_clip)
         new_model = None
         if result.get("model_id"):
-            new_model = ModelPatcherProxy(result["model_id"], self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+            new_model = ModelPatcherProxy(result["model_id"], self._registry)
         new_clip = None
         if result.get("clip_id"):
             from comfy.isolation.clip_proxy import CLIPProxy
@@ -502,7 +528,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def get_additional_models(self) -> List[ModelPatcherProxy]:
         ids = self._call_rpc("get_additional_models")
-        return [ModelPatcherProxy(mid, self._registry, manage_lifecycle=not IS_CHILD_PROCESS) for mid in ids]
+        return [ModelPatcherProxy(mid, self._registry) for mid in ids]
 
     def model_patches_models(self) -> Any:
         return self._call_rpc("model_patches_models")
@@ -526,7 +552,7 @@ class _InnerModelProxy:
         if name == 'device':
             return self._parent._call_rpc("get_inner_model_attr", 'device')
         if name == 'current_patcher':
-             return ModelPatcherProxy(self._parent._instance_id, self._parent._registry, manage_lifecycle=False)
+             return ModelPatcherProxy(self._parent._instance_id, self._parent._registry)
         if name == 'model_sampling':
             return self._parent._call_rpc("get_model_object", "model_sampling")
         if name == 'extra_conds_shapes':

@@ -73,25 +73,93 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             super().__init__()
         self._registry: Dict[str, T] = {}
         self._id_map: Dict[int, str] = {}
+        self._refcounts: Dict[str, int] = {}
         self._counter = 0
         self._lock = threading.Lock()
 
     def register(self, instance: T) -> str:
+        """Register an object and return its ID. Refcount starts at 0.
+
+        Refcount tracks ONLY Child proxy references. When all Child proxies die
+        (via release()), refcount hits 0 and the entry is removed, allowing GC.
+        The Host can still access the object while it's registered.
+        """
+        import logging
         with self._lock:
             obj_id = id(instance)
             if obj_id in self._id_map:
-                return self._id_map[obj_id]
+                instance_id = self._id_map[obj_id]
+                # Already registered - don't change refcount, just return ID
+                logging.info(f"[Registry] register: {instance_id} EXISTING refcount={self._refcounts.get(instance_id, 0)}")
+                return instance_id
             instance_id = f"{self._type_prefix}_{self._counter}"
             self._counter += 1
             self._registry[instance_id] = instance
             self._id_map[obj_id] = instance_id
+            self._refcounts[instance_id] = 0  # Start at 0 - only Child proxies add refcount
+            # Attach instance_id to the real object for later lookup during unload
+            try:
+                instance._proxy_instance_id = instance_id
+            except (AttributeError, TypeError):
+                pass  # Object doesn't support attribute assignment
+            logging.info(f"[Registry] register: {instance_id} NEW refcount=0")
         return instance_id
 
-    def unregister_sync(self, instance_id: str) -> None:
+    def acquire(self, instance_id: str) -> bool:
+        """Increment refcount for an existing ID. Returns True if successful."""
+        import logging
         with self._lock:
-            instance = self._registry.pop(instance_id, None)
-            if instance:
-                self._id_map.pop(id(instance), None)
+            if instance_id not in self._registry:
+                logging.info(f"[Registry] acquire: {instance_id} not found")
+                return False
+            self._refcounts[instance_id] = self._refcounts.get(instance_id, 1) + 1
+            logging.info(f"[Registry] acquire: {instance_id} refcount++ -> {self._refcounts[instance_id]}")
+            return True
+
+    def release(self, instance_id: str) -> None:
+        """Decrement refcount, unregister when zero."""
+        import gc
+        import logging
+        with self._lock:
+            if instance_id not in self._refcounts:
+                logging.info(f"[Registry] release: {instance_id} not found (already released)")
+                return
+            self._refcounts[instance_id] -= 1
+            new_count = self._refcounts[instance_id]
+            logging.info(f"[Registry] release: {instance_id} refcount-- -> {new_count}")
+            if new_count <= 0:
+                del self._refcounts[instance_id]
+                instance = self._registry.pop(instance_id, None)
+                if instance:
+                    self._id_map.pop(id(instance), None)
+                logging.info(f"[Registry] release: {instance_id} REMOVED from registry (refcount=0)")
+        # gc.collect outside lock to allow weakrefs in model_management to be processed
+        if new_count <= 0:
+            gc.collect()
+
+    def unregister_sync(self, instance_id: str) -> None:
+        """Legacy method - now calls release()."""
+        self.release(instance_id)
+
+    def clear_all(self) -> None:
+        """Clear all registry entries. Called at workflow end to release all references."""
+        import gc
+        import logging
+        with self._lock:
+            count = len(self._registry)
+            self._registry.clear()
+            self._id_map.clear()
+            self._refcounts.clear()
+            logging.info(f"[Registry] clear_all: cleared {count} entries")
+        gc.collect()
+
+    async def acquire_async(self, instance_id: str) -> bool:
+        """Async version of acquire for RPC calls from Child."""
+        return self.acquire(instance_id)
+
+    async def release_async(self, instance_id: str) -> None:
+        """Async version of release for RPC calls from Child."""
+        self.release(instance_id)
 
     def _get_instance(self, instance_id: str) -> T:
         if IS_CHILD_PROCESS:
@@ -113,13 +181,17 @@ class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
 
-    def __init__(self, instance_id: str, registry: Optional[Any] = None, manage_lifecycle: bool = False) -> None:
+    def __init__(self, instance_id: str, registry: Optional[Any] = None) -> None:
+        import logging
         self._instance_id = instance_id
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
-        self._manage_lifecycle = manage_lifecycle
-        if manage_lifecycle and not IS_CHILD_PROCESS:
-            self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
+        logging.info(f"[BaseProxy.__init__] {self.__class__.__name__}({instance_id}) IS_CHILD={IS_CHILD_PROCESS}")
+        # On Host: acquire refcount and attach finalizer for release
+        # On Child: don't acquire (Host owns the object), finalizer will release via RPC
+        if not IS_CHILD_PROCESS:
+            self._registry.acquire(instance_id)
+            self._finalizer = weakref.finalize(self, self._registry.release, instance_id)
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
@@ -171,10 +243,47 @@ class BaseProxy(Generic[T]):
         self._instance_id = state["_instance_id"]
         self._rpc_caller = None
         self._registry = self._registry_class()
-        self._manage_lifecycle = False
+        # Child proxies need to acquire refcount on Host and release when done
+        if IS_CHILD_PROCESS:
+            _child_acquire_callback(self._registry_class, state["_instance_id"])
+            self._finalizer = weakref.finalize(self, _child_release_callback, self._registry_class, state["_instance_id"])
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} {self._instance_id}>"
+
+
+def _child_acquire_callback(registry_class: type, instance_id: str) -> None:
+    """Callback for Child proxy deserialization to acquire refcount on Host."""
+    try:
+        from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+        rpc = get_child_rpc_instance()
+        if rpc is None:
+            return  # RPC not available
+        caller = rpc.create_caller(registry_class, registry_class.get_remote_id())
+        coro = caller.acquire_async(instance_id)
+        loop = get_thread_loop()
+        loop.run_until_complete(coro)
+        logger.debug(f"[ChildAcquire] Acquired {instance_id} on Host")
+    except Exception as e:
+        logger.debug(f"[ChildAcquire] Failed to acquire {instance_id}: {e}")
+
+
+def _child_release_callback(registry_class: type, instance_id: str) -> None:
+    """Callback for Child proxy finalizers to release Host registry entry."""
+    try:
+        from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+        rpc = get_child_rpc_instance()
+        if rpc is None:
+            return  # RPC not available, can't release
+        caller = rpc.create_caller(registry_class, registry_class.get_remote_id())
+        # Call release_async via RPC - this decrements Host refcount
+        coro = caller.release_async(instance_id)
+        loop = get_thread_loop()
+        loop.run_until_complete(coro)
+        logger.debug(f"[ChildRelease] Released {instance_id} on Host")
+    except Exception as e:
+        # Swallow errors during shutdown/cleanup
+        logger.debug(f"[ChildRelease] Failed to release {instance_id}: {e}")
 
 
 def create_rpc_method(method_name: str) -> Callable[..., Any]:

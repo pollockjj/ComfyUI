@@ -36,9 +36,26 @@ from comfy.isolation.proxies.base import (
 
 logger = logging.getLogger(__name__)
 
+# Module-level reference to actual registry instance (bypasses RPC wrapper)
+_real_registry_instance: Optional["ModelPatcherRegistry"] = None
+
+
+def get_real_model_patcher_registry() -> Optional["ModelPatcherRegistry"]:
+    """Get the actual ModelPatcherRegistry instance, bypassing RPC wrapper."""
+    return _real_registry_instance
+
 
 class ModelPatcherRegistry(BaseRegistry[Any]):
     _type_prefix = "model"
+
+    def __init__(self) -> None:
+        global _real_registry_instance
+        super().__init__()
+        # Store reference to bypass RPC wrapper for direct access
+        if _real_registry_instance is None:
+            _real_registry_instance = self
+            import os
+            logger.info(f"[ModelPatcherRegistry] Stored real instance reference id={id(self)} pid={os.getpid()}")
 
     async def clone(self, instance_id: str) -> str:
         instance = self._get_instance(instance_id)
