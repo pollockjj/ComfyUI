@@ -93,14 +93,14 @@ class VAEProxy(BaseProxy[VAERegistry]):
     def patcher(self) -> ModelPatcherProxy:
         if not hasattr(self, "_patcher_proxy"):
             patcher_id = self._call_rpc("get_patcher_id")
-            self._patcher_proxy = ModelPatcherProxy(patcher_id, manage_lifecycle=False)
+            self._patcher_proxy = ModelPatcherProxy(patcher_id)
         return self._patcher_proxy
 
     @property
     def first_stage_model(self) -> FirstStageModelProxy:
         if not hasattr(self, "_first_stage_model_proxy"):
             fsm_id = self._call_rpc("get_first_stage_model_id")
-            self._first_stage_model_proxy = FirstStageModelProxy(fsm_id, manage_lifecycle=False)
+            self._first_stage_model_proxy = FirstStageModelProxy(fsm_id)
         return self._first_stage_model_proxy
 
     @property

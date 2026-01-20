@@ -96,15 +96,22 @@ class ComfyUIAdapter(IsolationAdapter):
             # Passthrough if already resolved to actual ModelPatcher
             if not isinstance(data, dict):
                 return data
-            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+            return ModelPatcherProxy(data["model_id"], registry=None)
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelPatcherRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+                return ModelPatcherProxy(data["model_id"], registry=None)
             else:
-                return ModelPatcherRegistry()._get_instance(data["model_id"])
+                # Use module-level function to bypass RPC wrapper
+                from comfy.isolation.model_patcher_proxy_registry import get_real_model_patcher_registry
+                registry = get_real_model_patcher_registry()
+                if registry and data["model_id"] in registry._registry:
+                    return registry._registry[data["model_id"]]
+                # Fallback - return proxy (will be handled downstream)
+                logger.warning(f"[deserialize_model_patcher_ref] {data['model_id']} not found in registry, returning proxy")
+                return ModelPatcherProxy(data["model_id"], registry=None)
 
         # Register ModelPatcher type for serialization
         registry.register("ModelPatcher", serialize_model_patcher, deserialize_model_patcher)
@@ -112,6 +119,16 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("ModelPatcherProxy", serialize_model_patcher, deserialize_model_patcher)
         # Register ModelPatcherRef for deserialization (context-aware: host or child)
         registry.register("ModelPatcherRef", None, deserialize_model_patcher_ref)
+
+        # _InnerModelProxy serialization - serialize as its parent ModelPatcherProxy
+        def serialize_inner_model_proxy(obj: Any) -> Dict[str, Any]:
+            # _InnerModelProxy wraps a ModelPatcherProxy via ._parent
+            parent = getattr(obj, "_parent", None)
+            if parent and hasattr(parent, "_instance_id"):
+                return {"__type__": "ModelPatcherRef", "model_id": parent._instance_id}
+            raise RuntimeError(f"_InnerModelProxy lacks valid parent: {obj}")
+
+        registry.register("_InnerModelProxy", serialize_inner_model_proxy, deserialize_model_patcher_ref)
 
         def serialize_clip(obj: Any) -> Dict[str, Any]:
             if hasattr(obj, "_instance_id"):
@@ -123,13 +140,13 @@ class ComfyUIAdapter(IsolationAdapter):
             # Passthrough if already resolved to actual CLIP
             if not isinstance(data, dict):
                 return data
-            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+            return CLIPProxy(data["clip_id"], registry=None)
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
             """Context-aware CLIPRef deserializer for both host and child."""
             is_child = os.environ.get("PYISOLATE_CHILD") == "1"
             if is_child:
-                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+                return CLIPProxy(data["clip_id"], registry=None)
             else:
                 return CLIPRegistry()._get_instance(data["clip_id"])
 
@@ -281,7 +298,6 @@ class ComfyUIAdapter(IsolationAdapter):
         # Resolve the real name whether it's an instance or the Singleton class itself
         api_name = api.__name__ if isinstance(api, type) else api.__class__.__name__
 
-
         if api_name == "FolderPathsProxy":
             import folder_paths
             # Replace module-level functions with proxy methods
@@ -295,11 +311,64 @@ class ComfyUIAdapter(IsolationAdapter):
 
         if api_name == "ModelManagementProxy":
             import comfy.model_management
+
             instance = api() if isinstance(api, type) else api
-            # Replace module-level functions with proxy methods
-            for name in dir(instance):
-                if not name.startswith("_"):
-                    setattr(comfy.model_management, name, getattr(instance, name))
+
+            # pyisolate's CallWrapper doesn't expose methods via dir(), so we must
+            # explicitly create wrapper functions for each method we need to patch.
+            # These wrappers convert async RPC calls to sync for ComfyUI compatibility.
+
+            def make_sync_wrapper(method_name):
+                """Create a sync wrapper that calls the async RPC method.
+
+                Uses run_coro_in_new_loop to avoid deadlock when called from MainThread.
+                The coroutine runs in a new thread with its own event loop, which allows
+                the RPC's send_thread to pick up the request from the outbox.
+                """
+                def wrapper(*args, **kwargs):
+                    from comfy.isolation.proxies.base import run_coro_in_new_loop
+
+                    # Get the coroutine from CallWrapper
+                    coro = getattr(instance, method_name)(*args, **kwargs)
+                    return run_coro_in_new_loop(coro)
+                return wrapper
+
+            # Patch critical model management functions
+            methods_to_patch = [
+                "load_models_gpu",
+                "load_model_gpu",
+                "cleanup_models_gc",
+                "unload_all_models",
+                "free_memory",
+                "soft_empty_cache",
+                "unload_model",
+                "get_torch_device",
+                "get_torch_device_name",
+                "get_total_memory",
+                "get_free_memory",
+                "vram_usage",
+                "should_use_fp16",
+                "should_use_bf16",
+                "supports_fp8_compute",
+                "supports_nvfp4_compute",
+                "xformers_enabled",
+                "pytorch_attention_enabled",
+                "is_device_mps",
+                "interrupt_current_processing",
+                "processing_interrupted",
+                "throw_exception_if_processing_interrupted",
+            ]
+
+            patched_count = 0
+            for method_name in methods_to_patch:
+                try:
+                    wrapper = make_sync_wrapper(method_name)
+                    setattr(comfy.model_management, method_name, wrapper)
+                    patched_count += 1
+                except Exception as e:
+                    logger.warning(f"[ModelManagementProxy] Failed to patch {method_name}: {e}")
+
+            logger.info(f"[ModelManagementProxy] Patched {patched_count}/{len(methods_to_patch)} methods")
             return
 
         if api_name == "UtilsProxy":

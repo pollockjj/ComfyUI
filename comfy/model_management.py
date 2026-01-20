@@ -451,6 +451,44 @@ except:
 
 current_loaded_models = []
 
+# Artifact writer for lifecycle.md
+from comfy.isolation.artifact_writer import aw as _aw_func
+
+def _snapshot_current_loaded_models(label: str) -> None:
+    """Record exact state of current_loaded_models for FSM analysis."""
+    import gc
+    total_mb = 0
+    model_parts = []
+    for i, lm in enumerate(current_loaded_models):
+        # Filter to cuda:0 only
+        if str(lm.device) != "cuda:0":
+            continue
+        model = lm.model
+        if model is None:
+            model_parts.append(f"[{i}]DEAD")
+            continue
+        model_name = model.model.__class__.__name__ if hasattr(model, 'model') else type(model).__name__
+        refcount = sys.getrefcount(model)
+        try:
+            size_mb = lm.model_memory() / (1024 * 1024)
+        except:
+            size_mb = 0
+        total_mb += size_mb
+        used_flag = "T" if lm.currently_used else "F"
+        model_parts.append(f"[{i}]{model_name}({id(model) % 1000:03d})[{refcount}][{used_flag}][{size_mb/1024:05.2f}]")
+    total_gb = total_mb / 1024
+    # Pad labels to align
+    if label.endswith("PRE"):
+        padded_label = "  PRE"
+    elif label.endswith("POST"):
+        padded_label = " POST"
+    else:
+        padded_label = label.split(" - ")[-1] if " - " in label else ""
+    prefix = label.split(" - ")[0] if " - " in label else label
+    parts = [f"][ {prefix} - {total_gb:05.1f}G{padded_label}"] + model_parts
+    line = " | ".join(parts)
+    _aw_func("lifecycle.md", line, print_to_screen=True)
+
 def module_size(module):
     module_mem = 0
     sd = module.state_dict()
@@ -467,6 +505,60 @@ class LoadedModel:
         self.currently_used = True
         self.model_finalizer = None
         self._patcher_finalizer = None
+        # Option D: Track registry instance_id for lifecycle management
+        # If model was registered for RPC (has _proxy_instance_id), acquire refcount
+        # If not registered yet, register it now so we can track and release it later
+        self._registry_instance_id = getattr(model, "_proxy_instance_id", None)
+        self._registry_released = False
+        if self._registry_instance_id:
+            self._acquire_registry()
+        else:
+            # Model not registered yet - register it now for lifecycle tracking
+            self._register_model_for_lifecycle(model)
+
+    def _register_model_for_lifecycle(self, model):
+        """Register a model that wasn't already registered for RPC.
+
+        This handles models loaded directly on Host (before Child starts).
+        We register them so we can properly release them later.
+        """
+        try:
+            from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
+            registry = ModelPatcherRegistry()
+            instance_id = registry.register(model)
+            self._registry_instance_id = instance_id
+            # Now acquire refcount for this LoadedModel
+            registry.acquire(instance_id)
+            logging.info(f"[LoadedModel] Registered and acquired {instance_id} for lifecycle tracking")
+        except Exception as e:
+            logging.debug(f"[LoadedModel] Could not register model for lifecycle: {e}")
+
+    def _acquire_registry(self):
+        """Acquire registry refcount for this LoadedModel instance."""
+        try:
+            from comfy.isolation.model_patcher_proxy_registry import get_real_model_patcher_registry
+            registry = get_real_model_patcher_registry()
+            if registry and self._registry_instance_id:
+                logging.info(f"[LoadedModel] Acquiring registry {self._registry_instance_id}")
+                registry.acquire(self._registry_instance_id)
+                logging.info(f"[LoadedModel] Acquired registry {self._registry_instance_id}")
+        except Exception as e:
+            logging.warning(f"[LoadedModel] Failed to acquire registry {self._registry_instance_id}: {e}")
+
+    def _release_registry(self):
+        """Release registry refcount when this LoadedModel is done with the model."""
+        if self._registry_released or not self._registry_instance_id:
+            return
+        try:
+            from comfy.isolation.model_patcher_proxy_registry import get_real_model_patcher_registry
+            registry = get_real_model_patcher_registry()
+            if registry:
+                logging.info(f"[LoadedModel] Releasing registry {self._registry_instance_id}")
+                registry.release(self._registry_instance_id)
+                logging.info(f"[LoadedModel] Released registry {self._registry_instance_id}")
+                self._registry_released = True
+        except Exception as e:
+            logging.warning(f"[LoadedModel] Failed to release registry {self._registry_instance_id}: {e}")
 
     def _set_model(self, model):
         self._model = weakref.ref(model)
@@ -533,6 +625,8 @@ class LoadedModel:
         self.model_finalizer.detach()
         self.model_finalizer = None
         self.real_model = None
+        # Option D: Release registry entry to allow model GC
+        self._release_registry()
         return True
 
     def model_use_more_vram(self, extra_memory, force_patch_weights=False):
@@ -544,6 +638,8 @@ class LoadedModel:
     def __del__(self):
         if self._patcher_finalizer is not None:
             self._patcher_finalizer.detach()
+        # Option D: Safety net - release registry if not already done
+        self._release_registry()
 
     def is_dead(self):
         # Model is dead if the weakref to model has been garbage collected
@@ -613,6 +709,15 @@ def free_memory(memory_required, device, keep_loaded=[]):
     for i in sorted(unloaded_model, reverse=True):
         unloaded_models.append(current_loaded_models.pop(i))
 
+    logging.info(f"[free_memory] unloaded_models count={len(unloaded_models)}, can_unload={len(can_unload)}")
+
+    # Registry cleanup is now handled by Child proxy lifecycle:
+    # - Child proxy __setstate__ calls acquire() to increment refcount
+    # - Child proxy finalizer calls release() to decrement refcount
+    # - When refcount hits 0, the entry is removed and GC can collect the model
+    # - LoadedModel weakref then returns None, and cleanup_models_gc removes the dead entry
+    logging.info(f"[free_memory] unloaded_models count={len(unloaded_models)}, registry cleanup via Child proxy lifecycle")
+
     if len(unloaded_model) > 0:
         soft_empty_cache()
     else:
@@ -622,13 +727,39 @@ def free_memory(memory_required, device, keep_loaded=[]):
                 soft_empty_cache()
     return unloaded_models
 
-def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
-    cleanup_models_gc()
-    # DEBUG: VRAM logging
+def _resolve_proxy_to_real_model(model):
+    """If model is a proxy, return the real model from registry. Otherwise return as-is."""
     try:
-        mem_before = get_total_memory(get_torch_device(), torch_total_too=True)[1]
-    except:
-        mem_before = 0
+        from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
+        if isinstance(model, ModelPatcherProxy):
+            logging.info(f"[_resolve_proxy] Resolving proxy {model._instance_id}")
+            # Use module-level function to get actual registry (bypasses RPC wrapper)
+            from comfy.isolation.model_patcher_proxy_registry import get_real_model_patcher_registry
+            import os
+            registry = get_real_model_patcher_registry()
+            if registry is None:
+                logging.warning(f"[_resolve_proxy] Real registry not available pid={os.getpid()}")
+                return model
+            logging.info(f"[_resolve_proxy] Registry id={id(registry)} pid={os.getpid()} keys={list(registry._registry.keys())}")
+            # Look up in registry's internal dict
+            real_model = registry._registry.get(model._instance_id)
+            if real_model:
+                logging.info(f"[_resolve_proxy] Resolved to {type(real_model).__name__}")
+                return real_model
+            logging.warning(f"[_resolve_proxy] {model._instance_id} not found in registry")
+    except Exception as e:
+        logging.error(f"[_resolve_proxy] Exception: {e}", exc_info=True)
+    return model
+
+
+def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
+    _snapshot_current_loaded_models("load_models_gpu - PRE")
+    cleanup_models_gc()
+    # DEBUG: VRAM logging (dormant)
+    # try:
+    #     mem_before = get_total_memory(get_torch_device(), torch_total_too=True)[1]
+    # except:
+    #     mem_before = 0
 
     global vram_state
 
@@ -667,13 +798,22 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
     for loaded_model in models_to_load:
         to_unload = []
+        logging.info(f"[load_models_gpu] Checking clones for loaded_model.model type={type(loaded_model.model).__name__}")
         for i in range(len(current_loaded_models)):
-            if loaded_model.model.is_clone(current_loaded_models[i].model):
+            curr_model = current_loaded_models[i].model
+            logging.info(f"[load_models_gpu]   comparing with current_loaded_models[{i}].model type={type(curr_model).__name__}")
+            is_clone_result = loaded_model.model.is_clone(curr_model)
+            logging.info(f"[load_models_gpu]   is_clone result: {is_clone_result}")
+            if is_clone_result:
                 to_unload = [i] + to_unload
+        logging.info(f"[load_models_gpu] to_unload: {to_unload}")
         for i in to_unload:
             model_to_unload = current_loaded_models.pop(i)
+            logging.info(f"[load_models_gpu] Clone-unload: popped model index={i}, registry_id={getattr(model_to_unload, '_registry_instance_id', 'NONE')}")
             model_to_unload.model.detach(unpatch_all=False)
             model_to_unload.model_finalizer.detach()
+            # Option D: Release registry entry to allow model GC
+            model_to_unload._release_registry()
 
     total_memory_required = {}
     for loaded_model in models_to_load:
@@ -714,13 +854,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
 
-    # DEBUG: VRAM logging
-    try:
-        mem_after = get_total_memory(get_torch_device(), torch_total_too=True)[1]
-        print(f"][ load_models_gpu - VRAM-PRE: {mem_before / (1024*1024*1024):.2f}GB | VRAM-POST: {mem_after / (1024*1024*1024):.2f}GB | Delta: {(mem_after - mem_before) / (1024*1024):.2f}MB")
-    except:
-        pass
+    # DEBUG: VRAM logging (dormant)
+    # try:
+    #     mem_after = get_total_memory(get_torch_device(), torch_total_too=True)[1]
+    #     print(f"][ load_models_gpu - VRAM-PRE: {mem_before / (1024*1024*1024):.2f}GB | VRAM-POST: {mem_after / (1024*1024*1024):.2f}GB | Delta: {(mem_after - mem_before) / (1024*1024):.2f}MB")
+    # except:
+    #     pass
 
+    _snapshot_current_loaded_models("load_models_gpu - POST")
     return
 
 def load_model_gpu(model):
@@ -738,22 +879,6 @@ def loaded_models(only_currently_used=False):
 
 
 def cleanup_models_gc():
-    try:
-        for i, loaded_model in enumerate(current_loaded_models):
-            real_model = loaded_model.real_model() if loaded_model.real_model else None
-            model_name = real_model.__class__.__name__ if real_model else "Unknown"
-            
-            size_bytes = loaded_model.model_loaded_memory()
-            if size_bytes > 1024*1024*1024:
-                size_str = f"{size_bytes / (1024*1024*1024):.2f}GB"
-            else:
-                size_str = f"{size_bytes / (1024*1024):.2f}MB"
-                
-            status = "Alive" if not loaded_model.is_dead() else "Dead"
-            print(f"][ cleanup_models_gc - Model {i} - Name {model_name} | Size: {size_str} | Status: {status}")
-    except:
-        pass
-
     do_gc = False
     for i in range(len(current_loaded_models)):
         cur = current_loaded_models[i]
@@ -774,6 +899,7 @@ def cleanup_models_gc():
 
 
 def cleanup_models():
+    _snapshot_current_loaded_models("cleanup_models - PRE")
     to_delete = []
     for i in range(len(current_loaded_models)):
         if current_loaded_models[i].real_model() is None:
@@ -782,6 +908,7 @@ def cleanup_models():
     for i in to_delete:
         x = current_loaded_models.pop(i)
         del x
+    _snapshot_current_loaded_models("cleanup_models - POST")
 
 def dtype_size(dtype):
     dtype_size = 4

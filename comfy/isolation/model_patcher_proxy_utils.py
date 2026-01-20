@@ -25,7 +25,7 @@ def maybe_wrap_model_for_isolation(model_patcher: Any) -> Any:
     registry = ModelPatcherRegistry()
     model_id = registry.register(model_patcher)
     logger.debug(f"Isolated ModelPatcher: {model_id}")
-    return ModelPatcherProxy(model_id, registry, manage_lifecycle=True)
+    return ModelPatcherProxy(model_id, registry)
 
 
 def register_hooks_serializers(registry=None):
