@@ -22,8 +22,10 @@ class ImageCrop(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageCrop",
-            display_name="Image Crop",
+            search_aliases=["trim"],
+            display_name="Image Crop (Deprecated)",
             category="image/transform",
+            is_deprecated=True,
             inputs=[
                 IO.Image.Input("image"),
                 IO.Int.Input("width", default=512, min=1, max=nodes.MAX_RESOLUTION, step=1),
@@ -46,11 +48,63 @@ class ImageCrop(IO.ComfyNode):
     crop = execute  # TODO: remove
 
 
+class ImageCropV2(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ImageCropV2",
+            search_aliases=["trim"],
+            display_name="Image Crop",
+            category="image/transform",
+            inputs=[
+                IO.Image.Input("image"),
+                IO.BoundingBox.Input("crop_region", component="ImageCrop"),
+            ],
+            outputs=[IO.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, image, crop_region) -> IO.NodeOutput:
+        x = crop_region.get("x", 0)
+        y = crop_region.get("y", 0)
+        width = crop_region.get("width", 512)
+        height = crop_region.get("height", 512)
+
+        x = min(x, image.shape[2] - 1)
+        y = min(y, image.shape[1] - 1)
+        to_x = width + x
+        to_y = height + y
+        img = image[:,y:to_y, x:to_x, :]
+        return IO.NodeOutput(img, ui=UI.PreviewImage(img))
+
+
+class BoundingBox(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="PrimitiveBoundingBox",
+            display_name="Bounding Box",
+            category="utils/primitive",
+            inputs=[
+                IO.Int.Input("x", default=0, min=0, max=MAX_RESOLUTION),
+                IO.Int.Input("y", default=0, min=0, max=MAX_RESOLUTION),
+                IO.Int.Input("width", default=512, min=1, max=MAX_RESOLUTION),
+                IO.Int.Input("height", default=512, min=1, max=MAX_RESOLUTION),
+            ],
+            outputs=[IO.BoundingBox.Output()],
+        )
+
+    @classmethod
+    def execute(cls, x, y, width, height) -> IO.NodeOutput:
+        return IO.NodeOutput({"x": x, "y": y, "width": width, "height": height})
+
+
 class RepeatImageBatch(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="RepeatImageBatch",
+            search_aliases=["duplicate image", "clone image"],
             category="image/batch",
             inputs=[
                 IO.Image.Input("image"),
@@ -72,6 +126,7 @@ class ImageFromBatch(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageFromBatch",
+            search_aliases=["select image", "pick from batch", "extract image"],
             category="image/batch",
             inputs=[
                 IO.Image.Input("image"),
@@ -97,6 +152,7 @@ class ImageAddNoise(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageAddNoise",
+            search_aliases=["film grain"],
             category="image",
             inputs=[
                 IO.Image.Input("image"),
@@ -194,11 +250,11 @@ class SaveAnimatedPNG(IO.ComfyNode):
 
 class ImageStitch(IO.ComfyNode):
     """Upstreamed from https://github.com/kijai/ComfyUI-KJNodes"""
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageStitch",
+            search_aliases=["combine images", "join images", "concatenate images", "side by side"],
             display_name="Image Stitch",
             description="Stitches image2 to image1 in the specified direction.\n"
             "If image2 is not provided, returns image1 unchanged.\n"
@@ -369,11 +425,11 @@ class ImageStitch(IO.ComfyNode):
 
 
 class ResizeAndPadImage(IO.ComfyNode):
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ResizeAndPadImage",
+            search_aliases=["fit to size"],
             category="image/transform",
             inputs=[
                 IO.Image.Input("image"),
@@ -420,11 +476,11 @@ class ResizeAndPadImage(IO.ComfyNode):
 
 
 class SaveSVGNode(IO.ComfyNode):
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="SaveSVGNode",
+            search_aliases=["export vector", "save vector graphics"],
             description="Save SVG files on disk.",
             category="image/save",
             inputs=[
@@ -492,11 +548,11 @@ class SaveSVGNode(IO.ComfyNode):
 
 
 class GetImageSize(IO.ComfyNode):
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="GetImageSize",
+            search_aliases=["dimensions", "resolution", "image info"],
             display_name="Get Image Size",
             description="Returns width and height of the image, and passes it through unchanged.",
             category="image",
@@ -527,11 +583,11 @@ class GetImageSize(IO.ComfyNode):
 
 
 class ImageRotate(IO.ComfyNode):
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageRotate",
+            search_aliases=["turn", "flip orientation"],
             category="image/transform",
             inputs=[
                 IO.Image.Input("image"),
@@ -557,11 +613,11 @@ class ImageRotate(IO.ComfyNode):
 
 
 class ImageFlip(IO.ComfyNode):
-
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageFlip",
+            search_aliases=["mirror", "reflect"],
             category="image/transform",
             inputs=[
                 IO.Image.Input("image"),
@@ -628,6 +684,8 @@ class ImagesExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
             ImageCrop,
+            ImageCropV2,
+            BoundingBox,
             RepeatImageBatch,
             ImageFromBatch,
             ImageAddNoise,
