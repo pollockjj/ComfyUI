@@ -475,6 +475,37 @@ except:
 
 current_loaded_models = []
 
+def _format_loaded_model_snapshot_entry(idx, loaded_model):
+    try:
+        model = loaded_model.model
+    except Exception as exc:
+        return f"[{idx}]model=<err:{type(exc).__name__}>"
+
+    if model is None:
+        return f"[{idx}]model=None:dead"
+
+    model_id = f"{id(model) & 0xFFFF:04x}"
+    proxy_id = getattr(model, "_instance_id", "-")
+    used = "T" if loaded_model.currently_used else "F"
+
+    real_state = "none"
+    if loaded_model.real_model is not None:
+        try:
+            real_state = "alive" if loaded_model.real_model() is not None else "dead"
+        except Exception:
+            real_state = "err"
+
+    return f"[{idx}]{type(model).__name__}:{model_id}:proxy={proxy_id}:used={used}:real={real_state}"
+
+
+def _log_current_loaded_models(tag):
+    entries = []
+    for i, loaded_model in enumerate(current_loaded_models):
+        entries.append(_format_loaded_model_snapshot_entry(i, loaded_model))
+    payload = " | ".join(entries) if entries else "empty"
+    logging.info(f"][ MM:current_loaded_models | {tag} | count={len(current_loaded_models)} | {payload}")
+
+
 def module_size(module):
     module_mem = 0
     sd = module.state_dict()
@@ -617,6 +648,7 @@ def minimum_inference_memory():
 
 def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_required=0):
     cleanup_models_gc()
+    _log_current_loaded_models("free_memory.pre")
     unloaded_model = []
     can_unload = []
     unloaded_models = []
@@ -658,10 +690,12 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
             mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True)
             if mem_free_torch > mem_free_total * 0.25:
                 soft_empty_cache()
+    _log_current_loaded_models("free_memory.post")
     return unloaded_models
 
 def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
     cleanup_models_gc()
+    _log_current_loaded_models("load_models_gpu.pre")
     global vram_state
 
     inference_memory = minimum_inference_memory()
@@ -754,6 +788,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
+    _log_current_loaded_models("load_models_gpu.post")
     return
 
 def load_model_gpu(model):
@@ -771,6 +806,7 @@ def loaded_models(only_currently_used=False):
 
 
 def cleanup_models_gc():
+    _log_current_loaded_models("cleanup_models_gc.pre")
     do_gc = False
 
     reset_cast_buffers()
@@ -790,6 +826,7 @@ def cleanup_models_gc():
             cur = current_loaded_models[i]
             if cur.is_dead():
                 logging.warning("WARNING, memory leak with model {}. Please make sure it is not being referenced from somewhere.".format(cur.real_model().__class__.__name__))
+    _log_current_loaded_models("cleanup_models_gc.post")
 
 
 def archive_model_dtypes(model):
@@ -799,6 +836,7 @@ def archive_model_dtypes(model):
 
 
 def cleanup_models():
+    _log_current_loaded_models("cleanup_models.pre")
     to_delete = []
     for i in range(len(current_loaded_models)):
         if current_loaded_models[i].real_model() is None:
@@ -807,6 +845,7 @@ def cleanup_models():
     for i in to_delete:
         x = current_loaded_models.pop(i)
         del x
+    _log_current_loaded_models("cleanup_models.post")
 
 def dtype_size(dtype):
     dtype_size = 4

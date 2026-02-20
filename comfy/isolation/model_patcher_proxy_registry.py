@@ -201,7 +201,9 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         self._get_instance(instance_id).pre_run()
 
     async def cleanup(self, instance_id: str) -> None:
+        logger.info(f"][ MP:cleanup_registry | id={instance_id} | registry_size_pre={len(self._registry)}")
         self._get_instance(instance_id).cleanup()
+        logger.info(f"][ MP:cleanup_registry_done | id={instance_id} | registry_size_post={len(self._registry)}")
 
     async def apply_hooks(self, instance_id: str, hooks: Any) -> Any:
         instance = self._get_instance(instance_id)

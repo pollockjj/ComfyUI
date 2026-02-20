@@ -1034,11 +1034,21 @@ class ModelPatcher:
         return comfy.lora.calculate_weight(patches, weight, key, intermediate_dtype=intermediate_dtype)
 
     def cleanup(self):
+        caller = "unknown"
+        frame = inspect.currentframe()
+        if frame is not None and frame.f_back is not None:
+            f_back = frame.f_back
+            filename = f_back.f_code.co_filename.rsplit("/", 1)[-1]
+            caller = f"{f_back.f_code.co_name}@{filename}:{f_back.f_lineno}"
+        del frame
+        model_id = f"{id(self) & 0xFFFF:04x}"
+        logging.info(f"][ MP:cleanup_model | id={model_id} | caller={caller}")
         self.clean_hooks()
         if hasattr(self.model, "current_patcher"):
             self.model.current_patcher = None
         for callback in self.get_all_callbacks(CallbacksMP.ON_CLEANUP):
             callback(self)
+        logging.info(f"][ MP:cleanup_model_done | id={model_id}")
 
     def add_callback(self, call_type: str, callback: Callable):
         self.add_callback_with_key(call_type, None, callback)

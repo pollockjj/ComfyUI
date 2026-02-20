@@ -85,6 +85,10 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             self._counter += 1
             self._registry[instance_id] = instance
             self._id_map[obj_id] = instance_id
+            size = len(self._registry)
+        logger.info(
+            f"][ MM:proxy_registry | registry={self._type_prefix} | event=register | id={instance_id} | size={size}"
+        )
         return instance_id
 
     def unregister_sync(self, instance_id: str) -> None:
@@ -92,6 +96,11 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
             instance = self._registry.pop(instance_id, None)
             if instance:
                 self._id_map.pop(id(instance), None)
+            size = len(self._registry)
+            existed = instance is not None
+        logger.info(
+            f"][ MM:proxy_registry | registry={self._type_prefix} | event=unregister | id={instance_id} | existed={existed} | size={size}"
+        )
 
     def _get_instance(self, instance_id: str) -> T:
         if IS_CHILD_PROCESS:

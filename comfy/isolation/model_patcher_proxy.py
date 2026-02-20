@@ -1,6 +1,7 @@
 # RPC proxy for ModelPatcher (parent process)
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Optional, List, Set, Dict, Callable
 
@@ -289,7 +290,16 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("pre_run")
 
     def cleanup(self) -> None:
+        caller = "unknown"
+        frame = inspect.currentframe()
+        if frame is not None and frame.f_back is not None:
+            f_back = frame.f_back
+            filename = f_back.f_code.co_filename.rsplit("/", 1)[-1]
+            caller = f"{f_back.f_code.co_name}@{filename}:{f_back.f_lineno}"
+        del frame
+        logger.info(f"][ MP:cleanup_proxy | id={self._instance_id} | caller={caller}")
         self._call_rpc("cleanup")
+        logger.info(f"][ MP:cleanup_proxy_done | id={self._instance_id}")
 
     @property
     def model(self) -> _InnerModelProxy:
