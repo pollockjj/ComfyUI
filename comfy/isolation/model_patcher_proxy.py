@@ -349,6 +349,15 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def memory_required(self, input_shape: Any) -> Any:
         return self._call_rpc("memory_required", input_shape)
 
+    def is_dynamic(self) -> bool:
+        return bool(self._call_rpc("is_dynamic"))
+
+    def get_free_memory(self, device: Any) -> Any:
+        return self._call_rpc("get_free_memory", device)
+
+    def partially_unload_ram(self, ram_to_unload: int) -> Any:
+        return self._call_rpc("partially_unload_ram", ram_to_unload)
+
     def model_dtype(self) -> Any:
         res = self._call_rpc("model_dtype")
         if isinstance(res, str) and res.startswith("torch."):

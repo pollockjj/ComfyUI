@@ -143,6 +143,25 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def memory_required(self, instance_id: str, input_shape: Any) -> Any:
         return self._get_instance(instance_id).memory_required(input_shape)
 
+    async def is_dynamic(self, instance_id: str) -> bool:
+        instance = self._get_instance(instance_id)
+        if hasattr(instance, "is_dynamic"):
+            return bool(instance.is_dynamic())
+        return False
+
+    async def get_free_memory(self, instance_id: str, device: Any) -> Any:
+        instance = self._get_instance(instance_id)
+        if hasattr(instance, "get_free_memory"):
+            return instance.get_free_memory(device)
+        import comfy.model_management
+        return comfy.model_management.get_free_memory(device)
+
+    async def partially_unload_ram(self, instance_id: str, ram_to_unload: int) -> Any:
+        instance = self._get_instance(instance_id)
+        if hasattr(instance, "partially_unload_ram"):
+            return instance.partially_unload_ram(ram_to_unload)
+        return None
+
     async def model_dtype(self, instance_id: str) -> Any:
         return self._get_instance(instance_id).model_dtype()
 
