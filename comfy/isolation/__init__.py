@@ -123,7 +123,8 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     specs: List[IsolatedNodeSpec] = []
     for result in results:
         if isinstance(result, Exception):
-            raise result
+            logger.error("%s Isolated node failed during startup; continuing: %s", LOG_PREFIX, result)
+            continue
         specs.extend(result)
 
     _ISOLATED_NODE_SPECS = specs

@@ -154,7 +154,7 @@ class ComfyNodeExtension(ExtensionBase):
                 schema_v1 = asdict(schema.get_v1_info(node_cls))
                 try:
                     schema_v3 = asdict(schema.get_v3_info(node_cls))
-                except TypeError:
+                except (AttributeError, TypeError):
                     schema_v3 = self._build_schema_v3_fallback(schema)
                 details.update({
                     "schema_v1": schema_v1,
@@ -178,10 +178,10 @@ class ComfyNodeExtension(ExtensionBase):
 
         if getattr(schema, "inputs", None):
             for inp in schema.inputs:
-                latest_io.add_to_dict_v3(inp, input_dict)
+                self._add_schema_io_v3(inp, input_dict)
         if getattr(schema, "outputs", None):
             for out in schema.outputs:
-                latest_io.add_to_dict_v3(out, output_dict)
+                self._add_schema_io_v3(out, output_dict)
         if getattr(schema, "hidden", None):
             for h in schema.hidden:
                 hidden_list.append(getattr(h, "value", str(h)))
@@ -199,6 +199,19 @@ class ComfyNodeExtension(ExtensionBase):
             "experimental": getattr(schema, "is_experimental", False),
             "api_node": getattr(schema, "is_api_node", False),
         }
+
+    def _add_schema_io_v3(self, io_obj: Any, target: Dict[str, Any]) -> None:
+        io_id = getattr(io_obj, "id", None)
+        if io_id is None:
+            return
+
+        io_type_fn = getattr(io_obj, "get_io_type", None)
+        io_type = io_type_fn() if callable(io_type_fn) else getattr(io_obj, "io_type", None)
+
+        as_dict_fn = getattr(io_obj, "as_dict", None)
+        payload = as_dict_fn() if callable(as_dict_fn) else {}
+
+        target[str(io_id)] = (io_type, payload)
 
     async def get_input_types(self, node_name: str) -> Dict[str, Any]:
         node_cls = self._get_node_class(node_name)
