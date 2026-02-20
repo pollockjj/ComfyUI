@@ -91,9 +91,11 @@ class ComfyUIAdapter(IsolationAdapter):
             model_id = ModelPatcherRegistry().register(obj)
             return {"__type__": "ModelPatcherRef", "model_id": model_id}
 
-        def deserialize_model_patcher(data: Dict[str, Any]) -> ModelPatcherProxy:
-            """Child-side deserializer: create proxy."""
-            return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+        def deserialize_model_patcher(data: Any) -> Any:
+            """Deserialize ModelPatcher refs; pass through already-materialized objects."""
+            if isinstance(data, dict):
+                return ModelPatcherProxy(data["model_id"], registry=None, manage_lifecycle=False)
+            return data
 
         def deserialize_model_patcher_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelPatcherRef deserializer for both host and child."""
@@ -116,8 +118,10 @@ class ComfyUIAdapter(IsolationAdapter):
             clip_id = CLIPRegistry().register(obj)
             return {"__type__": "CLIPRef", "clip_id": clip_id}
 
-        def deserialize_clip(data: Dict[str, Any]) -> CLIPProxy:
-            return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+        def deserialize_clip(data: Any) -> Any:
+            if isinstance(data, dict):
+                return CLIPProxy(data["clip_id"], registry=None, manage_lifecycle=False)
+            return data
 
         def deserialize_clip_ref(data: Dict[str, Any]) -> Any:
             """Context-aware CLIPRef deserializer for both host and child."""
@@ -140,8 +144,10 @@ class ComfyUIAdapter(IsolationAdapter):
             vae_id = VAERegistry().register(obj)
             return {"__type__": "VAERef", "vae_id": vae_id}
 
-        def deserialize_vae(data: Dict[str, Any]) -> VAEProxy:
-            return VAEProxy(data["vae_id"])
+        def deserialize_vae(data: Any) -> Any:
+            if isinstance(data, dict):
+                return VAEProxy(data["vae_id"])
+            return data
 
         def deserialize_vae_ref(data: Dict[str, Any]) -> Any:
             """Context-aware VAERef deserializer for both host and child."""
@@ -176,9 +182,11 @@ class ComfyUIAdapter(IsolationAdapter):
             ms_id = ModelSamplingRegistry().register(obj)
             return {"__type__": "ModelSamplingRef", "ms_id": ms_id}
 
-        def deserialize_model_sampling(data: Dict[str, Any]) -> ModelSamplingProxy:
-            """Child-side deserializer: create proxy."""
-            return ModelSamplingProxy(data["ms_id"])
+        def deserialize_model_sampling(data: Any) -> Any:
+            """Deserialize ModelSampling refs; pass through already-materialized objects."""
+            if isinstance(data, dict):
+                return ModelSamplingProxy(data["ms_id"])
+            return data
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelSamplingRef deserializer for both host and child."""
