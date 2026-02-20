@@ -48,6 +48,6 @@ class TestNodesProxy:
         """Verify a class can inherit from proxied base classes."""
         class TestNode(proxy.PreviewImage):
             pass
-        
+
         instance = TestNode()
         assert isinstance(instance, nodes.PreviewImage), "Inheritance from PreviewImage failed"

@@ -45,9 +45,9 @@ class TestUtilsProxy:
         """Verify multiple ProgressBar instances can be created."""
         pbar1 = proxy.ProgressBar(total=100)
         pbar2 = proxy.ProgressBar(total=200)
-        
+
         assert pbar1 is not pbar2, "ProgressBar instances should be distinct"
-        
+
         # Both should work independently
         pbar1.update(10)
         pbar2.update(20)

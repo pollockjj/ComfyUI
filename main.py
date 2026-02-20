@@ -27,7 +27,6 @@ import logging
 
 if '--use-process-isolation' in sys.argv:
     from comfy.isolation import initialize_proxies
-    from comfy.isolation import initialize_proxies
     initialize_proxies()
 
     # Explicitly register the ComfyUI adapter for pyisolate (v1.0 architecture)

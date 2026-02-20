@@ -2347,7 +2347,7 @@ async def init_external_custom_nodes():
                 from pathlib import Path
                 if Path(module_path).resolve() in isolated_module_paths:
                     continue
-                
+
                 # Tri-State Enforcement: If not Isolated (checked above), MUST be Whitelisted.
                 # Normalize to lowercase for case-insensitive matching (matches ComfyUI-Manager)
                 if possible_module.strip().lower() not in whitelist:
@@ -2367,7 +2367,7 @@ async def init_external_custom_nodes():
                 import_message = " (IMPORT FAILED)"
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
-    
+
     if args.use_process_isolation:
         from comfy.isolation import isolated_node_timings
         if isolated_node_timings:
@@ -2513,7 +2513,7 @@ async def init_public_apis():
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
     import time as _time
     _builtin_start = _time.perf_counter()
-    
+
     await init_public_apis()
 
     import_failed = await init_builtin_extra_nodes()
@@ -2521,7 +2521,7 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
     import_failed_api = []
     if init_api_nodes:
         import_failed_api = await init_builtin_api_nodes()
-    
+
     _builtin_time = _time.perf_counter() - _builtin_start
 
     if init_custom_nodes:

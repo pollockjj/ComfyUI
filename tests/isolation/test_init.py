@@ -1,7 +1,5 @@
 """Unit tests for PyIsolate isolation system initialization."""
 
-import logging
-import pytest
 
 
 def test_log_prefix():
@@ -47,7 +45,6 @@ class TestInitializeProxies:
 
     def test_dev_proxies_accessible_when_dev_mode(self, monkeypatch):
         """Verify dev proxies load when PYISOLATE_DEV=1."""
-        import os
         monkeypatch.setenv("PYISOLATE_DEV", "1")
         from comfy.isolation import initialize_proxies
         from comfy.isolation.development.proxies.nodes_proxy import NodesProxy

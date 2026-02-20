@@ -3,7 +3,6 @@ import heapq
 import inspect
 import logging
 import sys
-import os
 import threading
 import time
 import traceback
@@ -21,7 +20,6 @@ import comfy_aimdo.model_vbar
 
 from latent_preview import set_preview_method
 import nodes
-from comfy.cli_args import args
 from comfy_execution.caching import (
     BasicCache,
     CacheKeySetID,
@@ -555,7 +553,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     tasks = [x for x in output_data if isinstance(x, asyncio.Task)]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
-                
+
                 # User Directive: Hardcoded Sequential Execution
                 if True: # os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
                      await await_completion()
@@ -723,7 +721,7 @@ class PromptExecutor:
             pass  # Isolation not available
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to update RPC event loops: {e}")
-        
+
         set_preview_method(extra_data.get("preview_method"))
 
         nodes.interrupt_processing(False)

@@ -26,7 +26,7 @@ def _run_client_process(env):
     if existing:
         pythonpath_parts.append(existing)
     env["PYTHONPATH"] = ":".join(pythonpath_parts)
-    
+
     result = subprocess.run(  # noqa: S603
         [sys.executable, "-c", SCRIPT],
         capture_output=True,

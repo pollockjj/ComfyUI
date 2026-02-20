@@ -68,7 +68,7 @@ class _HookRef:
     def __init__(self):
         if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
             self._pyisolate_id = str(uuid.uuid4())
-    
+
     def __eq__(self, other):
         if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
              if isinstance(other, _HookRef):

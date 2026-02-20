@@ -16,14 +16,11 @@ in extension_loader.py (Phase 2).
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 
 class TestComputeCacheKey:
@@ -109,6 +106,8 @@ class TestComputeCacheKey:
         # At minimum, verify key is a valid hex string
         assert len(key1) == 16, "Key should be 16 hex characters"
         assert all(c in "0123456789abcdef" for c in key1), "Key should be hex"
+        assert len(key2) == 16, "Key should be 16 hex characters"
+        assert all(c in "0123456789abcdef" for c in key2), "Key should be hex"
 
     def test_key_excludes_pycache(self, tmp_path: Path) -> None:
         """Cache key ignores __pycache__ directory changes."""

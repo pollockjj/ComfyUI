@@ -26,7 +26,6 @@ from typing import Any, Dict, List, Tuple
 from pyisolate import ExtensionBase
 
 from comfy_api.internal import _ComfyNodeInternal
-from comfy_api.latest import _io as latest_io
 
 LOG_PREFIX = "]["
 V3_DISCOVERY_TIMEOUT = 30

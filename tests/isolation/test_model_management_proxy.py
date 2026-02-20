@@ -42,7 +42,7 @@ class TestModelManagementProxy:
         """Verify get_torch_device_name works with CUDA device if available."""
         if not torch.cuda.is_available():
             pytest.skip("CUDA not available")
-        
+
         cuda_device = torch.device("cuda:0")
         result = proxy.get_torch_device_name(cuda_device)
         assert isinstance(result, str), f"Expected str, got {type(result)}"

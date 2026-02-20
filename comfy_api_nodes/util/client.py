@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -448,28 +450,28 @@ def _display_text(
     if display_lines:
         message = "\n".join(display_lines)
         node_id = get_node_id(node_cls)
-        
+
         # PyIsolate child process: use proxy to send progress to host
-        import os
         if os.environ.get("PYISOLATE_CHILD") == "1" and os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
             try:
-                from comfy.isolation.proxies.prompt_server_proxy import PromptServerProxy
-                if PromptServerProxy.instance is not None:
-                    import asyncio
+                proxy_mod = importlib.import_module("comfy.isolation.proxies.prompt_server_proxy")
+                prompt_server_proxy = getattr(proxy_mod, "PromptServerProxy", None)
+                proxy_instance = getattr(prompt_server_proxy, "instance", None)
+                if proxy_instance is not None:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         async def _send():
                             try:
-                                await PromptServerProxy.instance.send_progress_text(message, node_id)
+                                await proxy_instance.send_progress_text(message, node_id)
                             except Exception:
                                 pass
                         loop.create_task(_send())
                     else:
-                        loop.run_until_complete(PromptServerProxy.instance.send_progress_text(message, node_id))
+                        loop.run_until_complete(proxy_instance.send_progress_text(message, node_id))
                     return
             except (ImportError, AttributeError):
                 pass
-        
+
         # Normal path: direct call to PromptServer
         PromptServer.instance.send_progress_text(message, node_id)
 
@@ -612,7 +614,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 if interrupted:
                     return
                 if cfg.monitor_progress:
-                    import os
                     if os.environ.get("PYISOLATE_CHILD") != "1":
                         _display_time_progress(
                                 cfg.node_cls, cfg.wait_label, int(time.monotonic() - start_ts), cfg.estimated_total
@@ -620,12 +621,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             return  # normal shutdown
-        except Exception as e:
-            raise
 
-    import logging
-    logger = logging.getLogger("comfy.isolation")
-    
     start_time = cfg.progress_origin_ts if cfg.progress_origin_ts is not None else time.monotonic()
     attempt = 0
     delay = cfg.retry_delay
