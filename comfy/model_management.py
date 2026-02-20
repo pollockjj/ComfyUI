@@ -538,6 +538,11 @@ class LoadedModel:
             with torch.no_grad():
                 real_model = ipex.optimize(real_model.eval(), inplace=True, graph_mode=True, concat_linear=True)
 
+        model_id = getattr(self.model, "_instance_id", None)
+        if model_id is None:
+            model_id = f"{id(self.model) & 0xFFFF:04x}"
+        logging.info(f"][ MM:model_load | id={model_id}({sys.getrefcount(self.model)})")
+
         self.real_model = weakref.ref(real_model)
         self.model_finalizer = weakref.finalize(real_model, cleanup_models)
         return real_model
@@ -629,11 +634,15 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
                 shift_model.currently_used = False
 
     if can_unload and os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-        from pyisolate import flush_tensor_keeper
-        flushed = flush_tensor_keeper()
-        if flushed > 0:
-            logging.debug("][ MM:tensor_keeper_flush | released=%d", flushed)
-            gc.collect()
+        try:
+            from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
+        except Exception:
+            flush_tensor_keeper = None
+        if callable(flush_tensor_keeper):
+            flushed = flush_tensor_keeper()
+            if flushed > 0:
+                logging.debug("][ MM:tensor_keeper_flush | released=%d", flushed)
+                gc.collect()
 
     for x in sorted(can_unload):
         i = x[-1]
