@@ -118,6 +118,7 @@ class BaseProxy(Generic[T]):
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
         self._manage_lifecycle = manage_lifecycle
+        self._cleaned_up = False
         if manage_lifecycle and not IS_CHILD_PROCESS:
             self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
 
@@ -172,6 +173,16 @@ class BaseProxy(Generic[T]):
         self._rpc_caller = None
         self._registry = self._registry_class()
         self._manage_lifecycle = False
+        self._cleaned_up = False
+
+    def cleanup(self) -> None:
+        if self._cleaned_up or IS_CHILD_PROCESS:
+            return
+        self._cleaned_up = True
+        finalizer = getattr(self, "_finalizer", None)
+        if finalizer is not None:
+            finalizer.detach()
+        self._registry.unregister_sync(self._instance_id)
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} {self._instance_id}>"

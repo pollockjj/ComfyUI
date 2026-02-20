@@ -289,7 +289,12 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("pre_run")
 
     def cleanup(self) -> None:
-        self._call_rpc("cleanup")
+        try:
+            self._call_rpc("cleanup")
+        except Exception:
+            logger.debug("ModelPatcherProxy cleanup RPC failed for %s", self._instance_id, exc_info=True)
+        finally:
+            super().cleanup()
 
     @property
     def model(self) -> _InnerModelProxy:

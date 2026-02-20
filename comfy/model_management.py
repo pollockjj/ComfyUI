@@ -628,6 +628,13 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
                 can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
                 shift_model.currently_used = False
 
+    if can_unload and os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+        from pyisolate import flush_tensor_keeper
+        flushed = flush_tensor_keeper()
+        if flushed > 0:
+            logging.debug("][ MM:tensor_keeper_flush | released=%d", flushed)
+            gc.collect()
+
     for x in sorted(can_unload):
         i = x[-1]
         memory_to_free = 1e32
@@ -649,7 +656,13 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
             current_loaded_models[i].model.partially_unload_ram(ram_to_free)
 
     for i in sorted(unloaded_model, reverse=True):
-        unloaded_models.append(current_loaded_models.pop(i))
+        unloaded = current_loaded_models.pop(i)
+        model_obj = unloaded.model
+        if model_obj is not None:
+            cleanup = getattr(model_obj, "cleanup", None)
+            if callable(cleanup):
+                cleanup()
+        unloaded_models.append(unloaded)
 
     if len(unloaded_model) > 0:
         soft_empty_cache()
@@ -806,6 +819,11 @@ def cleanup_models():
 
     for i in to_delete:
         x = current_loaded_models.pop(i)
+        model_obj = getattr(x, "model", None)
+        if model_obj is not None:
+            cleanup = getattr(model_obj, "cleanup", None)
+            if callable(cleanup):
+                cleanup()
         del x
 
 def dtype_size(dtype):
