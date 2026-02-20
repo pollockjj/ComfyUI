@@ -799,6 +799,15 @@ class PromptExecutor:
                 "outputs": ui_outputs,
                 "meta": meta_outputs,
             }
+            comfy.model_management.cleanup_models_gc()
+            try:
+                from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
+            except Exception:
+                flush_tensor_keeper = None
+            if callable(flush_tensor_keeper):
+                flushed = flush_tensor_keeper()
+                if flushed > 0:
+                    logging.debug("][ EX:flush_tensor_keeper | released=%d", flushed)
             self.server.last_node_id = None
             if comfy.model_management.DISABLE_SMART_MEMORY:
                 comfy.model_management.unload_all_models()
