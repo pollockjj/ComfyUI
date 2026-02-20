@@ -33,6 +33,19 @@ V3_DISCOVERY_TIMEOUT = 30
 logger = logging.getLogger(__name__)
 
 
+def _flush_tensor_transport_state(marker: str) -> int:
+    try:
+        from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
+    except Exception:
+        return 0
+    if not callable(flush_tensor_keeper):
+        return 0
+    flushed = flush_tensor_keeper()
+    if flushed > 0:
+        logger.debug("%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed)
+    return flushed
+
+
 def _sanitize_for_transport(value):
     primitives = (str, int, float, bool, type(None))
     if isinstance(value, primitives):
@@ -219,6 +232,8 @@ class ComfyNodeExtension(ExtensionBase):
         return {}
 
     async def execute_node(self, node_name: str, **inputs: Any) -> Tuple[Any, ...]:
+        if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+            _flush_tensor_transport_state("EXT:pre_execute")
 
         resolved_inputs = self._resolve_remote_objects(inputs)
 
@@ -288,6 +303,11 @@ class ComfyNodeExtension(ExtensionBase):
         if not isinstance(result, tuple):
             result = (result,)
         return self._wrap_unpicklable_objects(result)
+
+    async def flush_transport_state(self) -> int:
+        if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
+            return 0
+        return _flush_tensor_transport_state("EXT:workflow_end")
 
     async def get_remote_object(self, object_id: str) -> Any:
         """Retrieve a remote object by ID for host-side deserialization."""

@@ -800,6 +800,14 @@ class PromptExecutor:
                 "meta": meta_outputs,
             }
             comfy.model_management.cleanup_models_gc()
+            if args.use_process_isolation:
+                try:
+                    from comfy.isolation import flush_running_extensions_transport_state
+                    child_flushed = await flush_running_extensions_transport_state()
+                    if child_flushed > 0:
+                        logging.debug("][ EX:child_flush_tensor_keeper | released=%d", child_flushed)
+                except Exception:
+                    logging.debug("][ EX:child_flush_tensor_keeper failed", exc_info=True)
             try:
                 from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
             except Exception:

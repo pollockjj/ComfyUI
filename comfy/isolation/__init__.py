@@ -160,6 +160,23 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             del _RUNNING_EXTENSIONS[ext_name]
 
 
+async def flush_running_extensions_transport_state() -> int:
+    total_flushed = 0
+    for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
+        flush_fn = getattr(extension, "flush_transport_state", None)
+        if not callable(flush_fn):
+            continue
+        try:
+            flushed = await flush_fn()
+            if isinstance(flushed, int):
+                total_flushed += flushed
+                if flushed > 0:
+                    logger.debug("%s %s workflow-end flush released=%d", LOG_PREFIX, ext_name, flushed)
+        except Exception:
+            logger.debug("%s %s workflow-end flush failed", LOG_PREFIX, ext_name, exc_info=True)
+    return total_flushed
+
+
 def get_claimed_paths() -> Set[Path]:
     return _CLAIMED_PATHS
 
@@ -214,6 +231,7 @@ __all__ = [
     "start_isolation_loading_early",
     "await_isolation_loading",
     "notify_execution_graph",
+    "flush_running_extensions_transport_state",
     "get_claimed_paths",
     "update_rpc_event_loops",
     "IsolatedNodeSpec",

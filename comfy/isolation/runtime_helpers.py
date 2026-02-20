@@ -16,6 +16,18 @@ if TYPE_CHECKING:
 LOG_PREFIX = "]["
 
 
+def _flush_tensor_transport_state(marker: str, logger: logging.Logger) -> None:
+    try:
+        from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
+    except Exception:
+        return
+    if not callable(flush_tensor_keeper):
+        return
+    flushed = flush_tensor_keeper()
+    if flushed > 0:
+        logger.debug("%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed)
+
+
 def build_stub_class(
     node_name: str,
     info: Dict[str, object],
@@ -32,6 +44,7 @@ def build_stub_class(
         # Update BOTH the local dict AND the module-level dict
         running_extensions[extension.name] = extension
         _RUNNING_EXTENSIONS[extension.name] = extension
+        prev_child = None
         try:
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,
@@ -49,6 +62,8 @@ def build_stub_class(
         finally:
             if prev_child is not None:
                 os.environ["PYISOLATE_CHILD"] = prev_child
+            if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+                _flush_tensor_transport_state("RUNTIME:post_execute", logger)
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
             return restored_input_types
