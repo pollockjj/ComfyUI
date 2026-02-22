@@ -307,7 +307,19 @@ class ComfyNodeExtension(ExtensionBase):
     async def flush_transport_state(self) -> int:
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
             return 0
-        return _flush_tensor_transport_state("EXT:workflow_end")
+        flushed = _flush_tensor_transport_state("EXT:workflow_end")
+        try:
+            from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
+            registry = ModelPatcherRegistry()
+            removed = registry.sweep_pending_cleanup()
+            if removed > 0:
+                logger.debug("%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed)
+            purged = registry.purge_all()
+            if purged > 0:
+                logger.debug("%s EXT:workflow_end registry purge removed=%d", LOG_PREFIX, purged)
+        except Exception:
+            logger.debug("%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True)
+        return flushed
 
     async def get_remote_object(self, object_id: str) -> Any:
         """Retrieve a remote object by ID for host-side deserialization."""

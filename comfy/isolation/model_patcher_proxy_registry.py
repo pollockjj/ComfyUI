@@ -1,6 +1,7 @@
 # RPC server for ModelPatcher isolation (child process)
 from __future__ import annotations
 
+import gc
 import logging
 from typing import Any, Optional, List
 
@@ -39,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 class ModelPatcherRegistry(BaseRegistry[Any]):
     _type_prefix = "model"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pending_cleanup_ids: set[str] = set()
 
     async def clone(self, instance_id: str) -> str:
         instance = self._get_instance(instance_id)
@@ -201,7 +206,44 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         self._get_instance(instance_id).pre_run()
 
     async def cleanup(self, instance_id: str) -> None:
-        self._get_instance(instance_id).cleanup()
+        try:
+            instance = self._get_instance(instance_id)
+        except Exception:
+            logger.debug("ModelPatcher cleanup requested for missing instance %s", instance_id, exc_info=True)
+            return
+
+        try:
+            instance.cleanup()
+        finally:
+            with self._lock:
+                self._pending_cleanup_ids.add(instance_id)
+            gc.collect()
+
+    def sweep_pending_cleanup(self) -> int:
+        removed = 0
+        with self._lock:
+            pending_ids = list(self._pending_cleanup_ids)
+            self._pending_cleanup_ids.clear()
+            registry_before = len(self._registry)
+            for instance_id in pending_ids:
+                instance = self._registry.pop(instance_id, None)
+                if instance is None:
+                    continue
+                self._id_map.pop(id(instance), None)
+                removed += 1
+            registry_after = len(self._registry)
+
+        gc.collect()
+        return removed
+
+    def purge_all(self) -> int:
+        with self._lock:
+            removed = len(self._registry)
+            self._registry.clear()
+            self._id_map.clear()
+            self._pending_cleanup_ids.clear()
+        gc.collect()
+        return removed
 
     async def apply_hooks(self, instance_id: str, hooks: Any) -> Any:
         instance = self._get_instance(instance_id)

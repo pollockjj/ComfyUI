@@ -560,7 +560,6 @@ class LoadedModel:
         model_id = getattr(self.model, "_instance_id", None)
         if model_id is None:
             model_id = f"{id(self.model) & 0xFFFF:04x}"
-        logging.info(f"][ MM:model_load | id={model_id}({sys.getrefcount(self.model)})")
 
         self.real_model = weakref.ref(real_model)
         self.model_finalizer = weakref.finalize(real_model, cleanup_models)
@@ -679,8 +678,14 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
             memory_required -= current_loaded_models[i].model.loaded_size()
             memory_to_free = 0
             skip_unload_for_dynamic = True
-        if isolation_active and not skip_unload_for_dynamic and memory_to_free <= 0:
-            memory_to_free = 1
+        force_full_unload = os.environ.get("PYISOLATE_FORCE_FULL_UNLOAD", "1") == "1"
+        if isolation_active and force_full_unload and not skip_unload_for_dynamic:
+            # In isolation mode, always target a full unload to avoid partial-only paths
+            # that can leave SHM-backed tensors alive across workflow boundaries.
+            memory_to_free = max(
+                memory_to_free,
+                max(1, current_loaded_models[i].model.loaded_size()),
+            )
         if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
             logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
             unloaded_model.append(i)
