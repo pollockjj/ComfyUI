@@ -556,10 +556,12 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     await asyncio.gather(*tasks, return_exceptions=True)
                     unblock()
 
-                # User Directive: Hardcoded Sequential Execution
-                if True: # os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "false").lower() == "true":
-                     await await_completion()
-                     return await execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
+                # Keep isolation node execution deterministic by default, but allow
+                # opt-out for diagnostics.
+                isolation_sequential = os.environ.get("COMFY_ISOLATE_SEQUENTIAL", "1").lower() in ("1", "true", "yes")
+                if args.use_process_isolation and isolation_sequential:
+                    await await_completion()
+                    return await execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs)
 
                 asyncio.create_task(await_completion())
                 return (ExecutionResult.PENDING, None, None)

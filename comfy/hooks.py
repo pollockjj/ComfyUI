@@ -64,29 +64,37 @@ class EnumHookScope(enum.Enum):
     HookedOnly = "hooked_only"
 
 
+_ISOLATION_HOOKREF_MODE = args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1"
+
+
 class _HookRef:
     def __init__(self):
-        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+        if _ISOLATION_HOOKREF_MODE:
             self._pyisolate_id = str(uuid.uuid4())
 
+    def _ensure_pyisolate_id(self):
+        pyisolate_id = getattr(self, "_pyisolate_id", None)
+        if pyisolate_id is None:
+            pyisolate_id = str(uuid.uuid4())
+            self._pyisolate_id = pyisolate_id
+        return pyisolate_id
+
     def __eq__(self, other):
-        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-             if isinstance(other, _HookRef):
-                  return getattr(self, "_pyisolate_id", None) == getattr(other, "_pyisolate_id", None)
-             return False
-        return self is other
+        if not _ISOLATION_HOOKREF_MODE:
+            return self is other
+        if not isinstance(other, _HookRef):
+            return False
+        return self._ensure_pyisolate_id() == other._ensure_pyisolate_id()
 
     def __hash__(self):
-        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-             return hash(getattr(self, "_pyisolate_id", None))
-        return id(self)
+        if not _ISOLATION_HOOKREF_MODE:
+            return id(self)
+        return hash(self._ensure_pyisolate_id())
 
     def __str__(self):
-        if args.use_process_isolation or os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-             if not hasattr(self, "_pyisolate_id"):
-                 self._pyisolate_id = str(uuid.uuid4())
-             return f"PYISOLATE_HOOKREF:{self._pyisolate_id}"
-        return super().__str__()
+        if not _ISOLATION_HOOKREF_MODE:
+            return super().__str__()
+        return f"PYISOLATE_HOOKREF:{self._ensure_pyisolate_id()}"
 
 
 def default_should_register(hook: Hook, model: ModelPatcher, model_options: dict, target_dict: dict[str], registered: HookGroup):

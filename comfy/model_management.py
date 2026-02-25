@@ -574,7 +574,9 @@ class LoadedModel:
         # This can happen with ModelPatcherProxy objects between isolated workflows
         if self.model is None:
             return True
-        return self.real_model is not None and self.real_model() is None and self.model is None
+        if self.real_model is None:
+            return False
+        return self.real_model() is None
 
 
 def use_more_memory(extra_memory, loaded_models, device):

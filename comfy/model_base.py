@@ -117,8 +117,8 @@ def model_sampling(model_config, model_type):
                 registry = ModelSamplingRegistry()
                 ms_id = registry.register(self)
                 return (ModelSamplingProxy, (ms_id,))
-            except Exception:
-                return (str, ("ModelSamplingOpaque",))
+            except Exception as exc:
+                raise RuntimeError("Failed to serialize ModelSampling for isolation.") from exc
 
     return ModelSampling(model_config)
 

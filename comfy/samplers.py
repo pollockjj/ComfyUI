@@ -346,8 +346,8 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                     for i in range(dims):
                         out_c = out_c.narrow(i + 2, a[i + dims], a[i])
                         out_cts = out_cts.narrow(i + 2, a[i + dims], a[i])
-                    out_c += output[o] * mult[o]
-                    out_cts += mult[o]
+                    out_c += out_t * mult_t
+                    out_cts += mult_t
 
     for i in range(len(out_conds)):
         out_conds[i] /= out_counts[i]

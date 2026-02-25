@@ -41,7 +41,6 @@ from comfy.cli_args import args
 import importlib
 
 import folder_paths
-
 import latent_preview
 import node_helpers
 
@@ -2301,6 +2300,7 @@ async def init_external_custom_nodes():
         None
     """
     whitelist = set()
+    isolated_module_paths = set()
     if args.use_process_isolation:
         from pathlib import Path
         from comfy.isolation import await_isolation_loading, get_claimed_paths
@@ -2344,7 +2344,6 @@ async def init_external_custom_nodes():
                     continue
 
             if args.use_process_isolation:
-                from pathlib import Path
                 if Path(module_path).resolve() in isolated_module_paths:
                     continue
 
@@ -2372,10 +2371,8 @@ async def init_external_custom_nodes():
         from comfy.isolation import isolated_node_timings
         if isolated_node_timings:
             logging.info("\nImport times for isolated custom nodes:")
-            # #### TEMPORARY ISOLATION LOGGING - DELETE WHEN UPSTREAMED ####
             for timing, path, count in sorted(isolated_node_timings):
                 logging.info("{:6.1f} seconds: {} ({})".format(timing, path, count))
-            # #### END TEMPORARY ISOLATION LOGGING ####
             logging.info("")
 
 async def init_builtin_extra_nodes():
@@ -2476,7 +2473,6 @@ async def init_builtin_extra_nodes():
         "nodes_image_compare.py",
         "nodes_zimage.py",
         "nodes_lora_debug.py",
-        "nodes_textgen.py",
         "nodes_color.py",
         "nodes_toolkit.py",
         "nodes_replacements.py",
@@ -2511,9 +2507,6 @@ async def init_public_apis():
     ])
 
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
-    import time as _time
-    _builtin_start = _time.perf_counter()
-
     await init_public_apis()
 
     import_failed = await init_builtin_extra_nodes()
@@ -2521,8 +2514,6 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
     import_failed_api = []
     if init_api_nodes:
         import_failed_api = await init_builtin_api_nodes()
-
-    _builtin_time = _time.perf_counter() - _builtin_start
 
     if init_custom_nodes:
         await init_external_custom_nodes()
