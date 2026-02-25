@@ -493,14 +493,6 @@ class LoadedModel:
         self._patcher_finalizer = None
 
     def _set_model(self, model):
-        self._model_strong = None
-        if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-            try:
-                from comfy.isolation.proxies.base import BaseProxy
-                if isinstance(model, BaseProxy):
-                    self._model_strong = model
-            except Exception:
-                pass
         self._model = weakref.ref(model)
         if model.parent is not None:
             self._parent_model = weakref.ref(model.parent)
@@ -513,18 +505,7 @@ class LoadedModel:
 
     @property
     def model(self):
-        if self._model_strong is not None:
-            return self._model_strong
         return self._model()
-
-    def release_proxy(self):
-        proxy = self._model_strong
-        if proxy is None:
-            return
-        self._model_strong = None
-        cleanup = getattr(proxy, "cleanup", None)
-        if callable(cleanup):
-            cleanup()
 
     def model_memory(self):
         return self.model.model_size()
@@ -556,10 +537,6 @@ class LoadedModel:
         if is_intel_xpu() and not args.disable_ipex_optimize and 'ipex' in globals() and real_model is not None:
             with torch.no_grad():
                 real_model = ipex.optimize(real_model.eval(), inplace=True, graph_mode=True, concat_linear=True)
-
-        model_id = getattr(self.model, "_instance_id", None)
-        if model_id is None:
-            model_id = f"{id(self.model) & 0xFFFF:04x}"
 
         self.real_model = weakref.ref(real_model)
         self.model_finalizer = weakref.finalize(real_model, cleanup_models)
@@ -652,7 +629,7 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
                 can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
                 shift_model.currently_used = False
 
-    if can_unload and os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+    if can_unload and isolation_active:
         try:
             from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
         except Exception:
@@ -671,21 +648,11 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
             memory_to_free = memory_required - get_free_memory(device)
             ram_to_free = ram_required - get_free_ram()
 
-        skip_unload_for_dynamic = False
         if current_loaded_models[i].model.is_dynamic() and for_dynamic:
             #don't actually unload dynamic models for the sake of other dynamic models
             #as that works on-demand.
             memory_required -= current_loaded_models[i].model.loaded_size()
             memory_to_free = 0
-            skip_unload_for_dynamic = True
-        force_full_unload = os.environ.get("PYISOLATE_FORCE_FULL_UNLOAD", "1") == "1"
-        if isolation_active and force_full_unload and not skip_unload_for_dynamic:
-            # In isolation mode, always target a full unload to avoid partial-only paths
-            # that can leave SHM-backed tensors alive across workflow boundaries.
-            memory_to_free = max(
-                memory_to_free,
-                max(1, current_loaded_models[i].model.loaded_size()),
-            )
         if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
             logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
             unloaded_model.append(i)
@@ -700,7 +667,6 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
             cleanup = getattr(model_obj, "cleanup", None)
             if callable(cleanup):
                 cleanup()
-        unloaded.release_proxy()
         unloaded_models.append(unloaded)
 
     if len(unloaded_model) > 0:
@@ -845,7 +811,6 @@ def cleanup_models_gc():
                     cleanup = getattr(model_obj, "cleanup", None)
                     if callable(cleanup):
                         cleanup()
-                leaked.release_proxy()
 
 
 def archive_model_dtypes(model):
@@ -867,7 +832,6 @@ def cleanup_models():
             cleanup = getattr(model_obj, "cleanup", None)
             if callable(cleanup):
                 cleanup()
-        x.release_proxy()
         del x
 
 def dtype_size(dtype):

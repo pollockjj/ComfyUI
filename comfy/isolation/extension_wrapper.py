@@ -314,9 +314,6 @@ class ComfyNodeExtension(ExtensionBase):
             removed = registry.sweep_pending_cleanup()
             if removed > 0:
                 logger.debug("%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed)
-            purged = registry.purge_all()
-            if purged > 0:
-                logger.debug("%s EXT:workflow_end registry purge removed=%d", LOG_PREFIX, purged)
         except Exception:
             logger.debug("%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True)
         return flushed

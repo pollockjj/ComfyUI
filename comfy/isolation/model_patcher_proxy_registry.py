@@ -224,14 +224,12 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         with self._lock:
             pending_ids = list(self._pending_cleanup_ids)
             self._pending_cleanup_ids.clear()
-            registry_before = len(self._registry)
             for instance_id in pending_ids:
                 instance = self._registry.pop(instance_id, None)
                 if instance is None:
                     continue
                 self._id_map.pop(id(instance), None)
                 removed += 1
-            registry_after = len(self._registry)
 
         gc.collect()
         return removed
@@ -567,7 +565,7 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             if target is not None and hasattr(result, "to"):
                 return detach_if_grad(result.to(target))
         except Exception:
-            pass
+            logger.debug("process_latent_out: failed to move result to target device", exc_info=True)
         return detach_if_grad(result)
 
     async def scale_latent_inpaint(self, instance_id: str, args: tuple, kwargs: dict) -> Any:
@@ -585,7 +583,7 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             if target is not None and hasattr(result, "to"):
                 return detach_if_grad(result.to(target))
         except Exception:
-            pass
+            logger.debug("scale_latent_inpaint: failed to move result to target device", exc_info=True)
         return detach_if_grad(result)
 
     async def load_lora(self, instance_id: str, lora_path: str, strength_model: float, clip_id: Optional[str] = None, strength_clip: float = 1.0) -> dict:

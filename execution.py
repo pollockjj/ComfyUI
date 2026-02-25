@@ -700,6 +700,38 @@ class PromptExecutor:
                 logging.debug("][ EX:purge_named_sender_shm failed for %s", path, exc_info=True)
         return removed
 
+    async def _notify_execution_graph_safe(self, class_types: set[str], *, fail_loud: bool = False) -> None:
+        try:
+            from comfy.isolation import notify_execution_graph
+            await notify_execution_graph(class_types)
+        except Exception:
+            if fail_loud:
+                raise
+            logging.debug("][ EX:notify_execution_graph failed", exc_info=True)
+
+    async def _flush_running_extensions_transport_state_safe(self) -> None:
+        try:
+            from comfy.isolation import flush_running_extensions_transport_state
+            await flush_running_extensions_transport_state()
+        except Exception:
+            logging.debug("][ EX:flush_running_extensions_transport_state failed", exc_info=True)
+
+    def _flush_tensor_keeper_safe(self) -> None:
+        try:
+            from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
+        except Exception:
+            flush_tensor_keeper = None
+        if callable(flush_tensor_keeper):
+            flush_tensor_keeper()
+
+    def _purge_orphan_sender_shm_files_safe(self, min_age_seconds: float = 15.0) -> None:
+        try:
+            from pyisolate import purge_orphan_sender_shm_files  # type: ignore[attr-defined]
+        except Exception:
+            purge_orphan_sender_shm_files = None
+        if callable(purge_orphan_sender_shm_files):
+            purge_orphan_sender_shm_files(min_age_seconds=min_age_seconds)
+
     def add_message(self, event, data: dict, broadcast: bool):
         data = {
             **data,
@@ -765,6 +797,28 @@ class PromptExecutor:
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         with torch.inference_mode():
+            if args.use_process_isolation:
+                try:
+                    # Boundary cleanup runs at the start of the next workflow in
+                    # isolation mode, matching non-isolated "next prompt" timing.
+                    self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
+                    await self._flush_running_extensions_transport_state_safe()
+                    comfy.model_management.unload_all_models()
+                    comfy.model_management.cleanup_models_gc()
+                    comfy.model_management.cleanup_models()
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    self._flush_tensor_keeper_safe()
+                    self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
+                    sender_shm_files = self._list_sender_shm_files()
+                    persistent_sender_shm_files = sender_shm_files & self._previous_sender_shm_files
+                    if persistent_sender_shm_files:
+                        self._purge_named_sender_shm_files(persistent_sender_shm_files)
+                        sender_shm_files = self._list_sender_shm_files()
+                    self._previous_sender_shm_files = sender_shm_files
+                except Exception:
+                    logging.debug("][ EX:isolation_boundary_cleanup_start failed", exc_info=True)
+
             dynamic_prompt = DynamicPrompt(prompt)
             reset_progress_state(prompt_id, dynamic_prompt)
             add_progress_handler(WebUIProgressHandler(self.server))
@@ -792,12 +846,11 @@ class PromptExecutor:
                 execution_list.add_node(node_id)
 
             if args.use_process_isolation:
-                from comfy.isolation import notify_execution_graph
                 pending_class_types = set()
                 for node_id in execution_list.pendingNodes.keys():
                     class_type = dynamic_prompt.get_node(node_id)["class_type"]
                     pending_class_types.add(class_type)
-                await notify_execution_graph(pending_class_types)
+                await self._notify_execution_graph_safe(pending_class_types, fail_loud=True)
 
             while not execution_list.is_empty():
                 node_id, error, ex = await execution_list.stage_node_execution()
@@ -829,92 +882,10 @@ class PromptExecutor:
                 "outputs": ui_outputs,
                 "meta": meta_outputs,
             }
-            if args.use_process_isolation:
-                try:
-                    def _clear_cache_tree(cache_obj):
-                        removed = 0
-                        if cache_obj is None:
-                            return removed
-                        cache_store = getattr(cache_obj, "cache", None)
-                        if isinstance(cache_store, dict):
-                            removed += len(cache_store)
-                            cache_store.clear()
-                        subcaches = getattr(cache_obj, "subcaches", None)
-                        if isinstance(subcaches, dict):
-                            for child in list(subcaches.values()):
-                                removed += _clear_cache_tree(child)
-                            subcaches.clear()
-                        children = getattr(cache_obj, "children", None)
-                        if isinstance(children, dict):
-                            children.clear()
-                        used_generation = getattr(cache_obj, "used_generation", None)
-                        if isinstance(used_generation, dict):
-                            used_generation.clear()
-                        return removed
-
-                    outputs_cleared = _clear_cache_tree(getattr(self.caches, "outputs", None))
-                    objects_cleared = _clear_cache_tree(getattr(self.caches, "objects", None))
-                    # Drop prompt-local containers before teardown to avoid retaining
-                    # SHM-backed tensors through execution graph/cache structures.
-                    pending_subgraph_results.clear()
-                    pending_async_nodes.clear()
-                    ui_node_outputs.clear()
-                    executed.clear()
-                    execution_list = None
-                    current_outputs = []
-                    cached_nodes = []
-                    gc.collect()
-                except Exception:
-                    pass
             comfy.model_management.cleanup_models_gc()
+            self._flush_tensor_keeper_safe()
             if args.use_process_isolation:
-                # Force end-of-prompt unload in isolation mode so proxy-backed models
-                # follow the same lifecycle boundary each run.
-                comfy.model_management.unload_all_models()
-                comfy.model_management.cleanup_models_gc()
-                try:
-                    from comfy.isolation import flush_running_extensions_transport_state
-                    await flush_running_extensions_transport_state()
-                except Exception:
-                    pass
-            try:
-                from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
-            except Exception:
-                flush_tensor_keeper = None
-            if callable(flush_tensor_keeper):
-                flush_tensor_keeper()
-            if args.use_process_isolation:
-                # Avoid cross-prompt retention of proxy-backed model objects in isolation mode.
-                self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
-                try:
-                    # Force extension/process eviction at prompt boundary so child registries
-                    # cannot pin model objects across workflows.
-                    from comfy.isolation import notify_execution_graph
-                    await notify_execution_graph(set())
-                except Exception:
-                    pass
-                try:
-                    from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
-                    registry = ModelPatcherRegistry()
-                    registry.sweep_pending_cleanup()
-                    registry.purge_all()
-                except Exception:
-                    pass
-                try:
-                    from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
-                except Exception:
-                    flush_tensor_keeper = None
-                if callable(flush_tensor_keeper):
-                    flush_tensor_keeper()
-                try:
-                    from pyisolate import purge_orphan_sender_shm_files  # type: ignore[attr-defined]
-                except Exception:
-                    purge_orphan_sender_shm_files = None
-                if callable(purge_orphan_sender_shm_files):
-                    purge_orphan_sender_shm_files(min_age_seconds=15.0)
-                comfy.model_management.cleanup_models()
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
+                self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
                 try:
                     remaining_models = []
                     for loaded in list(comfy.model_management.current_loaded_models):
@@ -932,7 +903,7 @@ class PromptExecutor:
                         sender_shm_files = self._list_sender_shm_files()
                     self._previous_sender_shm_files = sender_shm_files
                 except Exception:
-                    pass
+                    logging.debug("][ EX:sender_shm_boundary_cleanup failed", exc_info=True)
             self.server.last_node_id = None
             if comfy.model_management.DISABLE_SMART_MEMORY:
                 comfy.model_management.unload_all_models()
