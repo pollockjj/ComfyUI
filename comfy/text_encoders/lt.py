@@ -3,7 +3,6 @@ import os
 from transformers import T5TokenizerFast
 from .spiece_tokenizer import SPieceTokenizer
 import comfy.text_encoders.genmo
-from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
 import torch
 import comfy.utils
 import math
@@ -102,6 +101,7 @@ class LTXAVTEModel(torch.nn.Module):
         super().__init__()
         self.dtypes = set()
         self.dtypes.add(dtype)
+        self.compat_mode = False
 
         self.gemma3_12b = Gemma3_12BModel(device=device, dtype=dtype_llama, model_options=model_options, layer="all", layer_idx=None)
         self.dtypes.add(dtype_llama)
@@ -109,6 +109,11 @@ class LTXAVTEModel(torch.nn.Module):
         operations = self.gemma3_12b.operations # TODO
         self.text_embedding_projection = operations.Linear(3840 * 49, 3840, bias=False, dtype=dtype, device=device)
 
+    def enable_compat_mode(self):  # TODO: remove
+        from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
+        operations = self.gemma3_12b.operations
+        dtype = self.text_embedding_projection.weight.dtype
+        device = self.text_embedding_projection.weight.device
         self.audio_embeddings_connector = Embeddings1DConnector(
             split_rope=True,
             double_precision_rope=True,
@@ -124,6 +129,7 @@ class LTXAVTEModel(torch.nn.Module):
             device=device,
             operations=operations,
         )
+        self.compat_mode = True
 
     def set_clip_options(self, options):
         self.execution_device = options.get("execution_device", self.execution_device)
@@ -146,9 +152,11 @@ class LTXAVTEModel(torch.nn.Module):
         out = out.reshape((out.shape[0], out.shape[1], -1))
         out = self.text_embedding_projection(out)
         out = out.float()
-        out_vid = self.video_embeddings_connector(out)[0]
-        out_audio = self.audio_embeddings_connector(out)[0]
-        out = torch.concat((out_vid, out_audio), dim=-1)
+
+        if self.compat_mode:
+            out_vid = self.video_embeddings_connector(out)[0]
+            out_audio = self.audio_embeddings_connector(out)[0]
+            out = torch.concat((out_vid, out_audio), dim=-1)
 
         return out.to(out_device), pooled
 
@@ -159,19 +167,29 @@ class LTXAVTEModel(torch.nn.Module):
         if "model.layers.47.self_attn.q_norm.weight" in sd:
             return self.gemma3_12b.load_sd(sd)
         else:
-            sdo = comfy.utils.state_dict_prefix_replace(sd, {"text_embedding_projection.aggregate_embed.weight": "text_embedding_projection.weight", "model.diffusion_model.video_embeddings_connector.": "video_embeddings_connector.", "model.diffusion_model.audio_embeddings_connector.": "audio_embeddings_connector."}, filter_keys=True)
+            sdo = comfy.utils.state_dict_prefix_replace(sd, {"text_embedding_projection.aggregate_embed.weight": "text_embedding_projection.weight"}, filter_keys=True)
             if len(sdo) == 0:
                 sdo = sd
 
             missing_all = []
             unexpected_all = []
 
-            for prefix, component in [("text_embedding_projection.", self.text_embedding_projection), ("video_embeddings_connector.", self.video_embeddings_connector), ("audio_embeddings_connector.", self.audio_embeddings_connector)]:
+            for prefix, component in [("text_embedding_projection.", self.text_embedding_projection)]:
                 component_sd = {k.replace(prefix, ""): v for k, v in sdo.items() if k.startswith(prefix)}
                 if component_sd:
                     missing, unexpected = component.load_state_dict(component_sd, strict=False, assign=getattr(self, "can_assign_sd", False))
                     missing_all.extend([f"{prefix}{k}" for k in missing])
                     unexpected_all.extend([f"{prefix}{k}" for k in unexpected])
+
+            if "model.diffusion_model.audio_embeddings_connector.transformer_1d_blocks.2.attn1.to_q.bias" not in sd:  # TODO: remove
+                ww = sd.get("model.diffusion_model.audio_embeddings_connector.transformer_1d_blocks.0.attn1.to_q.bias", None)
+                if ww is not None:
+                    if ww.shape[0] == 3840:
+                        self.enable_compat_mode()
+                        sdv = comfy.utils.state_dict_prefix_replace(sd, {"model.diffusion_model.video_embeddings_connector.": ""}, filter_keys=True)
+                        self.video_embeddings_connector.load_state_dict(sdv, strict=False, assign=getattr(self, "can_assign_sd", False))
+                        sda = comfy.utils.state_dict_prefix_replace(sd, {"model.diffusion_model.audio_embeddings_connector.": ""}, filter_keys=True)
+                        self.audio_embeddings_connector.load_state_dict(sda, strict=False, assign=getattr(self, "can_assign_sd", False))
 
             return (missing_all, unexpected_all)
 
