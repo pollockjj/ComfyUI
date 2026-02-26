@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional, List, Set, Dict, Callable
 
 from comfy.isolation.proxies.base import (
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     _registry_class = ModelPatcherRegistry
     __module__ = "comfy.model_patcher"
+    _APPLY_MODEL_GUARD_INTERVAL_S = 0.25
+    _APPLY_MODEL_GUARD_PADDING_BYTES = 64 * 1024 * 1024
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
@@ -207,30 +210,75 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("detach", unpatch_all)
         return self.model
 
-    # [PERF] Intercept apply_model to fix CPU tensor regression.
-    # The Host returns CPU tensors, which Child passes to apply_model.
-    # If we don't move them to CUDA here, they get serialized as XXMB blobs (xN steps).
-    # moving to CUDA ensures we send lightweight Handles.
+    def _cpu_tensor_bytes(self, obj: Any) -> int:
+        import torch
+        if isinstance(obj, torch.Tensor):
+            if obj.device.type == "cpu":
+                return obj.nbytes
+            return 0
+        if isinstance(obj, dict):
+            return sum(self._cpu_tensor_bytes(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(self._cpu_tensor_bytes(v) for v in obj)
+        return 0
+
+    def _ensure_apply_model_headroom(self, required_bytes: int) -> None:
+        if required_bytes <= 0:
+            return
+
+        import comfy.model_management as model_management
+
+        target = self.load_device
+        if not hasattr(target, "type") or target.type != "cuda":
+            return
+
+        required = max(
+            required_bytes + self._APPLY_MODEL_GUARD_PADDING_BYTES,
+            model_management.minimum_inference_memory(),
+        )
+        free_now = model_management.get_free_memory(target)
+        if free_now >= required:
+            return
+
+        now = time.monotonic()
+        last = getattr(self, "_last_apply_model_guard_at", 0.0)
+        if now - last < self._APPLY_MODEL_GUARD_INTERVAL_S:
+            return
+        self._last_apply_model_guard_at = now
+
+        model_management.cleanup_models_gc()
+        model_management.cleanup_models()
+
+        free_after_cleanup = model_management.get_free_memory(target)
+        if free_after_cleanup < required:
+            model_management.free_memory(required, target, for_dynamic=True)
+            model_management.soft_empty_cache()
+
+        if model_management.get_free_memory(target) < required:
+            model_management.load_models_gpu(
+                [self],
+                minimum_memory_required=required,
+            )
+
     def apply_model(self, *args, **kwargs) -> Any:
         import torch
-        # Helper to move CPU tensors to CUDA
-        def _to_cuda(obj):
-             if isinstance(obj, torch.Tensor) and obj.device.type == "cpu":
-                  # logging.getLogger(__name__).error(f"[DEBUG-PROXY-APPLY] PID: {os.getpid()} | Moving Tensor {obj.shape} CPU -> CUDA")
-                  return obj.to("cuda")
-             elif isinstance(obj, dict):
-                  return {k: _to_cuda(v) for k, v in obj.items()}
-             elif isinstance(obj, list):
-                  return [_to_cuda(v) for v in obj]
-             elif isinstance(obj, tuple):
-                  return tuple(_to_cuda(v) for v in obj)
-             return obj
+
+        required_bytes = self._cpu_tensor_bytes(args) + self._cpu_tensor_bytes(kwargs)
+        self._ensure_apply_model_headroom(required_bytes)
+
+        def _to_cuda(obj: Any) -> Any:
+            if isinstance(obj, torch.Tensor) and obj.device.type == "cpu":
+                return obj.to("cuda")
+            if isinstance(obj, dict):
+                return {k: _to_cuda(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_to_cuda(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_cuda(v) for v in obj)
+            return obj
 
         args = _to_cuda(args)
         kwargs = _to_cuda(kwargs)
-
-        # Use inner_model_apply_model to match original behavior.
-        # It expects (args_tuple, kwargs_dict) as arguments.
         return self._call_rpc("inner_model_apply_model", args, kwargs)
 
     def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:

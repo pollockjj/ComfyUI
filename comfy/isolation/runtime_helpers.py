@@ -28,6 +28,24 @@ def _flush_tensor_transport_state(marker: str, logger: logging.Logger) -> None:
         logger.debug("%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed)
 
 
+def _relieve_host_vram_pressure(marker: str, logger: logging.Logger) -> None:
+    import comfy.model_management as model_management
+
+    model_management.cleanup_models_gc()
+    model_management.cleanup_models()
+
+    device = model_management.get_torch_device()
+    if not hasattr(device, "type") or device.type == "cpu":
+        return
+
+    required = model_management.minimum_inference_memory()
+    if model_management.get_free_memory(device) < required:
+        model_management.free_memory(required, device, for_dynamic=True)
+        model_management.cleanup_models()
+        model_management.soft_empty_cache()
+        logger.debug("%s %s free_memory target=%d", LOG_PREFIX, marker, required)
+
+
 def build_stub_class(
     node_name: str,
     info: Dict[str, object],
@@ -46,6 +64,9 @@ def build_stub_class(
         _RUNNING_EXTENSIONS[extension.name] = extension
         prev_child = None
         try:
+            if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+                _relieve_host_vram_pressure("RUNTIME:pre_execute", logger)
+                _flush_tensor_transport_state("RUNTIME:pre_execute", logger)
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,
                 deserialize_from_isolation,

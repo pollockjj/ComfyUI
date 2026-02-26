@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import inspect
 import sys
 import types
 import platform
@@ -21,6 +22,15 @@ except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
+
+
+async def _stop_extension_safe(extension: ComfyNodeExtension, extension_name: str) -> None:
+    try:
+        stop_result = extension.stop()
+        if inspect.isawaitable(stop_result):
+            await stop_result
+    except Exception:
+        logger.debug("][ %s stop failed", extension_name, exc_info=True)
 
 
 def _normalize_dependency_spec(dep: str, base_paths: list[Path]) -> str:
@@ -173,12 +183,12 @@ async def load_isolated_node(
         remote_nodes: Dict[str, str] = await extension.list_nodes()
     except Exception as exc:
         logger.warning("][ %s metadata discovery failed, skipping isolated load: %s", extension_name, exc)
-        extension.stop()
+        await _stop_extension_safe(extension, extension_name)
         return []
 
     if not remote_nodes:
         logger.info("][ %s exposed no isolated nodes; skipping", extension_name)
-        extension.stop()
+        await _stop_extension_safe(extension, extension_name)
         return []
 
     specs: List[Tuple[str, str, type]] = []
@@ -197,7 +207,7 @@ async def load_isolated_node(
 
     if not specs:
         logger.warning("][ %s produced no usable nodes after metadata scan; skipping", extension_name)
-        extension.stop()
+        await _stop_extension_safe(extension, extension_name)
         return []
 
     # Save metadata to cache for future runs
@@ -206,7 +216,7 @@ async def load_isolated_node(
 
     # EJECT: Kill process after getting metadata (will respawn on first execution)
     logger.info(f"][ {extension_name} ejecting after metadata extraction")
-    extension.stop()
+    await _stop_extension_safe(extension, extension_name)
 
     return specs
 

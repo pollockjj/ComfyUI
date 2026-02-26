@@ -460,15 +460,22 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         return safe_res
 
     async def add_hook_patches(self, instance_id: str, hook: Any, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> None:
-        if hasattr(hook, 'hook_ref') and isinstance(hook.hook_ref, (dict, list, tuple)) and hasattr(hook.hook_ref, 'items'):
-             try:
-                 items = sorted(hook.hook_ref.items())
-                 hook.hook_ref = tuple(items)
-             except Exception:
-                 hook.hook_ref = None
+        if hasattr(hook, 'hook_ref') and isinstance(hook.hook_ref, dict):
+            try:
+                hook.hook_ref = tuple(sorted(hook.hook_ref.items()))
+            except Exception:
+                hook.hook_ref = None
         self._get_instance(instance_id).add_hook_patches(hook, patches, strength_patch, strength_model)
 
     async def get_combined_hook_patches(self, instance_id: str, hooks: Any) -> Any:
+        if hooks is not None and hasattr(hooks, "hooks"):
+            for hook in getattr(hooks, "hooks", []):
+                hook_ref = getattr(hook, "hook_ref", None)
+                if isinstance(hook_ref, dict):
+                    try:
+                        hook.hook_ref = tuple(sorted(hook_ref.items()))
+                    except Exception:
+                        hook.hook_ref = None
         res = self._get_instance(instance_id).get_combined_hook_patches(hooks)
         return self._sanitize_rpc_result(res)
 

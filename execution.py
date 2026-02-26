@@ -661,40 +661,12 @@ class PromptExecutor:
         self.cache_args = cache_args
         self.cache_type = cache_type
         self.server = server
-        self._previous_sender_shm_files: set[str] = set()
         self.reset()
 
     def reset(self):
         self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
         self.status_messages = []
         self.success = True
-        self._previous_sender_shm_files = set()
-
-    @staticmethod
-    def _list_sender_shm_files() -> set[str]:
-        shm_root = "/dev/shm"
-        prefix = f"torch_{os.getpid()}_"
-        try:
-            entries = os.scandir(shm_root)
-        except Exception:
-            return set()
-        try:
-            return {entry.path for entry in entries if entry.name.startswith(prefix)}
-        finally:
-            entries.close()
-
-    @staticmethod
-    def _purge_named_sender_shm_files(paths: set[str]) -> int:
-        removed = 0
-        for path in paths:
-            try:
-                os.unlink(path)
-                removed += 1
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logging.debug("][ EX:purge_named_sender_shm failed for %s", path, exc_info=True)
-        return removed
 
     async def _notify_execution_graph_safe(self, class_types: set[str], *, fail_loud: bool = False) -> None:
         try:
@@ -806,12 +778,6 @@ class PromptExecutor:
                     comfy.model_management.soft_empty_cache()
                     self._flush_tensor_keeper_safe()
                     self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
-                    sender_shm_files = self._list_sender_shm_files()
-                    persistent_sender_shm_files = sender_shm_files & self._previous_sender_shm_files
-                    if persistent_sender_shm_files:
-                        self._purge_named_sender_shm_files(persistent_sender_shm_files)
-                        sender_shm_files = self._list_sender_shm_files()
-                    self._previous_sender_shm_files = sender_shm_files
                 except Exception:
                     logging.debug("][ EX:isolation_boundary_cleanup_start failed", exc_info=True)
 
@@ -882,24 +848,6 @@ class PromptExecutor:
             self._flush_tensor_keeper_safe()
             if args.use_process_isolation:
                 self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
-                try:
-                    remaining_models = []
-                    for loaded in list(comfy.model_management.current_loaded_models):
-                        model_obj = getattr(loaded, "model", None)
-                        if model_obj is not None:
-                            remaining_models.append(model_obj)
-                            
-                    sender_shm_files = self._list_sender_shm_files()
-                    persistent_sender_shm_files = sender_shm_files & self._previous_sender_shm_files
-                    if (
-                        not remaining_models
-                        and persistent_sender_shm_files
-                    ):
-                        self._purge_named_sender_shm_files(persistent_sender_shm_files)
-                        sender_shm_files = self._list_sender_shm_files()
-                    self._previous_sender_shm_files = sender_shm_files
-                except Exception:
-                    logging.debug("][ EX:sender_shm_boundary_cleanup failed", exc_info=True)
             self.server.last_node_id = None
             if comfy.model_management.DISABLE_SMART_MEMORY:
                 comfy.model_management.unload_all_models()

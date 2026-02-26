@@ -46,6 +46,24 @@ def _flush_tensor_transport_state(marker: str) -> int:
     return flushed
 
 
+def _relieve_child_vram_pressure(marker: str) -> None:
+    import comfy.model_management as model_management
+
+    model_management.cleanup_models_gc()
+    model_management.cleanup_models()
+
+    device = model_management.get_torch_device()
+    if not hasattr(device, "type") or device.type == "cpu":
+        return
+
+    required = model_management.minimum_inference_memory()
+    if model_management.get_free_memory(device) < required:
+        model_management.free_memory(required, device, for_dynamic=True)
+        model_management.cleanup_models()
+        model_management.soft_empty_cache()
+        logger.debug("%s %s free_memory target=%d", LOG_PREFIX, marker, required)
+
+
 def _sanitize_for_transport(value):
     primitives = (str, int, float, bool, type(None))
     if isinstance(value, primitives):
@@ -234,6 +252,7 @@ class ComfyNodeExtension(ExtensionBase):
     async def execute_node(self, node_name: str, **inputs: Any) -> Tuple[Any, ...]:
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
             _flush_tensor_transport_state("EXT:pre_execute")
+            _relieve_child_vram_pressure("EXT:pre_execute")
 
         resolved_inputs = self._resolve_remote_objects(inputs)
 

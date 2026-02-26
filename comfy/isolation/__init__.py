@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -156,7 +157,9 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             logger.info(
                 f"][ {ext_name} isolated custom_node not in execution graph, evicting"
             )
-            extension.stop()
+            stop_result = extension.stop()
+            if inspect.isawaitable(stop_result):
+                await stop_result
             del _RUNNING_EXTENSIONS[ext_name]
 
 
