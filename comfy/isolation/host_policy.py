@@ -39,7 +39,7 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
     policy = _default_policy()
 
     if not config_path.exists():
-        logger.info("Host policy file missing at %s, using defaults.", config_path)
+        logger.debug("Host policy file missing at %s, using defaults.", config_path)
         return policy
 
     try:
@@ -51,7 +51,7 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
 
     tool_config = data.get("tool", {}).get("comfy", {}).get("host", {})
     if not isinstance(tool_config, dict):
-        logger.info("No [tool.comfy.host] section found, using defaults.")
+        logger.debug("No [tool.comfy.host] section found, using defaults.")
         return policy
 
     if "allow_network" in tool_config:

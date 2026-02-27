@@ -256,7 +256,7 @@ class ComfyNodeExtension(ExtensionBase):
         return {}
 
     async def execute_node(self, node_name: str, **inputs: Any) -> Tuple[Any, ...]:
-        logger.info(
+        logger.debug(
             "%s ISO:child_execute_start ext=%s node=%s input_keys=%d",
             LOG_PREFIX,
             getattr(self, "name", "?"),
@@ -337,7 +337,7 @@ class ComfyNodeExtension(ExtensionBase):
         if type(result).__name__ == 'NodeOutput':
             result = result.args
         if self._is_comfy_protocol_return(result):
-            logger.info(
+            logger.debug(
                 "%s ISO:child_execute_done ext=%s node=%s protocol_return=1",
                 LOG_PREFIX,
                 getattr(self, "name", "?"),
@@ -347,7 +347,7 @@ class ComfyNodeExtension(ExtensionBase):
 
         if not isinstance(result, tuple):
             result = (result,)
-        logger.info(
+        logger.debug(
             "%s ISO:child_execute_done ext=%s node=%s protocol_return=0 outputs=%d",
             LOG_PREFIX,
             getattr(self, "name", "?"),
@@ -359,7 +359,7 @@ class ComfyNodeExtension(ExtensionBase):
     async def flush_transport_state(self) -> int:
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
             return 0
-        logger.info("%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?"))
+        logger.debug("%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?"))
         flushed = _flush_tensor_transport_state("EXT:workflow_end")
         try:
             from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
@@ -369,7 +369,7 @@ class ComfyNodeExtension(ExtensionBase):
                 logger.debug("%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed)
         except Exception:
             logger.debug("%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True)
-        logger.info("%s ISO:child_flush_done ext=%s flushed=%d", LOG_PREFIX, getattr(self, "name", "?"), flushed)
+        logger.debug("%s ISO:child_flush_done ext=%s flushed=%d", LOG_PREFIX, getattr(self, "name", "?"), flushed)
         return flushed
 
     async def get_remote_object(self, object_id: str) -> Any:

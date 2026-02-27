@@ -36,7 +36,7 @@ if os.path.exists("/dev/shm"):
     # Only override if not already set or if default is not /dev/shm
     current_tmp = tempfile.gettempdir()
     if not current_tmp.startswith("/dev/shm"):
-        logger.info(
+        logger.debug(
             f"Configuring shared memory: Changing TMPDIR from {current_tmp} to /dev/shm"
         )
         os.environ["TMPDIR"] = "/dev/shm"

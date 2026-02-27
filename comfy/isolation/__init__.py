@@ -152,14 +152,14 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
     async def _stop_extension(ext_name: str, extension: "ComfyNodeExtension", reason: str) -> None:
         logger.info("%s ISO:eject_start ext=%s reason=%s", LOG_PREFIX, ext_name, reason)
-        logger.info("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
+        logger.debug("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
         stop_result = extension.stop()
         if inspect.isawaitable(stop_result):
             await stop_result
         _RUNNING_EXTENSIONS.pop(ext_name, None)
-        logger.info("%s ISO:stop_done ext=%s", LOG_PREFIX, ext_name)
+        logger.debug("%s ISO:stop_done ext=%s", LOG_PREFIX, ext_name)
 
-    logger.info(
+    logger.debug(
         "%s ISO:notify_graph_start running=%d needed=%d",
         LOG_PREFIX,
         len(_RUNNING_EXTENSIONS),
@@ -201,7 +201,7 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     except Exception:
         logger.debug("%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True)
     finally:
-        logger.info("%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS))
+        logger.debug("%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS))
 
 
 async def flush_running_extensions_transport_state() -> int:

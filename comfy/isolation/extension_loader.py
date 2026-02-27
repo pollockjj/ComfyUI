@@ -167,9 +167,9 @@ async def load_isolated_node(
         cached_data = load_from_cache(node_dir, venv_root)
         if cached_data:
             if _is_stale_node_cache(cached_data):
-                logger.info("][ %s cache is stale/incompatible; rebuilding metadata", extension_name)
+                logger.debug("][ %s cache is stale/incompatible; rebuilding metadata", extension_name)
             else:
-                logger.info(f"][ {extension_name} loaded from cache")
+                logger.debug(f"][ {extension_name} loaded from cache")
                 specs: List[Tuple[str, str, type]] = []
                 for node_name, details in cached_data.items():
                     stub_cls = build_stub_class(node_name, details, extension)
@@ -177,7 +177,7 @@ async def load_isolated_node(
                 return specs
 
     # Cache miss - spawn process and get metadata
-    logger.info(f"][ {extension_name} cache miss, spawning process for metadata")
+    logger.debug(f"][ {extension_name} cache miss, spawning process for metadata")
 
     try:
         remote_nodes: Dict[str, str] = await extension.list_nodes()
@@ -187,7 +187,7 @@ async def load_isolated_node(
         return []
 
     if not remote_nodes:
-        logger.info("][ %s exposed no isolated nodes; skipping", extension_name)
+        logger.debug("][ %s exposed no isolated nodes; skipping", extension_name)
         await _stop_extension_safe(extension, extension_name)
         return []
 
@@ -212,12 +212,10 @@ async def load_isolated_node(
 
     # Save metadata to cache for future runs
     save_to_cache(node_dir, venv_root, cache_data, manifest_path)
-    logger.info(f"][ {extension_name} metadata cached")
+    logger.debug(f"][ {extension_name} metadata cached")
 
     # EJECT: Kill process after getting metadata (will respawn on first execution)
-    logger.info("%s ISO:metadata_eject_start ext=%s", "][", extension_name)
     await _stop_extension_safe(extension, extension_name)
-    logger.info("%s ISO:metadata_eject_done ext=%s", "][", extension_name)
 
     return specs
 

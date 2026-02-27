@@ -200,7 +200,7 @@ class PromptServerService(ProxiedSingleton):
 
     async def register_route_rpc(self, method: str, path: str, child_handler_proxy):
         """RPC Target: Register a route that forwards to the Child."""
-        logger.info(f"{LOG_PREFIX} Registering Isolated Route {method} {path}")
+        logger.debug(f"{LOG_PREFIX} Registering Isolated Route {method} {path}")
 
         async def route_wrapper(request: web.Request) -> web.Response:
             # 1. Capture request data

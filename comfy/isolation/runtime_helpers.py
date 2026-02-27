@@ -155,7 +155,7 @@ def build_stub_class(
         node_unique_id = _extract_hidden_unique_id(inputs)
         summary = _tensor_transport_summary(inputs)
         resources = _resource_snapshot()
-        logger.info(
+        logger.debug(
             "%s ISO:execute_start ext=%s node=%s uid=%s tensors=%d cpu=%d cuda=%d shared_cpu=%d bytes=%d fds=%d sender_shm=%d",
             LOG_PREFIX,
             extension.name,
@@ -177,7 +177,7 @@ def build_stub_class(
                 deserialize_from_isolation,
             )
             prev_child = os.environ.pop("PYISOLATE_CHILD", None)
-            logger.info(
+            logger.debug(
                 "%s ISO:serialize_start ext=%s node=%s uid=%s",
                 LOG_PREFIX,
                 extension.name,
@@ -185,14 +185,14 @@ def build_stub_class(
                 node_unique_id or "-",
             )
             serialized = serialize_for_isolation(inputs)
-            logger.info(
+            logger.debug(
                 "%s ISO:serialize_done ext=%s node=%s uid=%s",
                 LOG_PREFIX,
                 extension.name,
                 node_name,
                 node_unique_id or "-",
             )
-            logger.info(
+            logger.debug(
                 "%s ISO:dispatch_start ext=%s node=%s uid=%s",
                 LOG_PREFIX,
                 extension.name,
@@ -200,7 +200,7 @@ def build_stub_class(
                 node_unique_id or "-",
             )
             result = await extension.execute_node(node_name, **serialized)
-            logger.info(
+            logger.debug(
                 "%s ISO:dispatch_done ext=%s node=%s uid=%s",
                 LOG_PREFIX,
                 extension.name,
@@ -223,7 +223,7 @@ def build_stub_class(
         finally:
             if prev_child is not None:
                 os.environ["PYISOLATE_CHILD"] = prev_child
-            logger.info(
+            logger.debug(
                 "%s ISO:execute_end ext=%s node=%s uid=%s",
                 LOG_PREFIX,
                 extension.name,
