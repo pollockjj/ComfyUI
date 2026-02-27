@@ -1,3 +1,4 @@
+# pylint: disable=cyclic-import,import-outside-toplevel,redefined-outer-name
 from __future__ import annotations
 
 import logging
@@ -24,7 +25,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-async def _stop_extension_safe(extension: ComfyNodeExtension, extension_name: str) -> None:
+async def _stop_extension_safe(
+    extension: ComfyNodeExtension, extension_name: str
+) -> None:
     try:
         stop_result = extension.stop()
         if inspect.isawaitable(stop_result):
@@ -131,10 +134,15 @@ async def load_isolated_node(
     import folder_paths
 
     base_paths = [Path(folder_paths.base_path), node_dir]
-    dependencies = [_normalize_dependency_spec(dep, base_paths) if isinstance(dep, str) else dep for dep in dependencies]
+    dependencies = [
+        _normalize_dependency_spec(dep, base_paths) if isinstance(dep, str) else dep
+        for dep in dependencies
+    ]
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
-    manager: ExtensionManager = pyisolate.ExtensionManager(ComfyNodeExtension, manager_config)
+    manager: ExtensionManager = pyisolate.ExtensionManager(
+        ComfyNodeExtension, manager_config
+    )
     extension_managers.append(manager)
 
     host_policy = load_host_policy(Path(folder_paths.base_path))
@@ -167,13 +175,18 @@ async def load_isolated_node(
         cached_data = load_from_cache(node_dir, venv_root)
         if cached_data:
             if _is_stale_node_cache(cached_data):
-                logger.debug("][ %s cache is stale/incompatible; rebuilding metadata", extension_name)
+                logger.debug(
+                    "][ %s cache is stale/incompatible; rebuilding metadata",
+                    extension_name,
+                )
             else:
                 logger.debug(f"][ {extension_name} loaded from cache")
                 specs: List[Tuple[str, str, type]] = []
                 for node_name, details in cached_data.items():
                     stub_cls = build_stub_class(node_name, details, extension)
-                    specs.append((node_name, details.get("display_name", node_name), stub_cls))
+                    specs.append(
+                        (node_name, details.get("display_name", node_name), stub_cls)
+                    )
                 return specs
 
     # Cache miss - spawn process and get metadata
@@ -182,7 +195,11 @@ async def load_isolated_node(
     try:
         remote_nodes: Dict[str, str] = await extension.list_nodes()
     except Exception as exc:
-        logger.warning("][ %s metadata discovery failed, skipping isolated load: %s", extension_name, exc)
+        logger.warning(
+            "][ %s metadata discovery failed, skipping isolated load: %s",
+            extension_name,
+            exc,
+        )
         await _stop_extension_safe(extension, extension_name)
         return []
 
@@ -198,7 +215,12 @@ async def load_isolated_node(
         try:
             details = await extension.get_node_details(node_name)
         except Exception as exc:
-            logger.warning("][ %s failed to load metadata for %s, skipping node: %s", extension_name, node_name, exc)
+            logger.warning(
+                "][ %s failed to load metadata for %s, skipping node: %s",
+                extension_name,
+                node_name,
+                exc,
+            )
             continue
         details["display_name"] = display_name
         cache_data[node_name] = details
@@ -206,7 +228,10 @@ async def load_isolated_node(
         specs.append((node_name, display_name, stub_cls))
 
     if not specs:
-        logger.warning("][ %s produced no usable nodes after metadata scan; skipping", extension_name)
+        logger.warning(
+            "][ %s produced no usable nodes after metadata scan; skipping",
+            extension_name,
+        )
         await _stop_extension_safe(extension, extension_name)
         return []
 

@@ -1,3 +1,4 @@
+# pylint: disable=consider-using-from-import,import-outside-toplevel
 from __future__ import annotations
 
 import atexit
@@ -37,7 +38,9 @@ class _SHMForensicsTracker:
             return
         self._tracked_files = self._snapshot_shm()
         self._started = True
-        logger.debug("%s SHM:forensics_enabled tracked=%d", LOG_PREFIX, len(self._tracked_files))
+        logger.debug(
+            "%s SHM:forensics_enabled tracked=%d", LOG_PREFIX, len(self._tracked_files)
+        )
 
     def stop(self) -> None:
         if not self._started:
@@ -55,7 +58,11 @@ class _SHMForensicsTracker:
 
             import torch
 
-            real_model = model_patcher.model if hasattr(model_patcher, "model") else model_patcher
+            real_model = (
+                model_patcher.model
+                if hasattr(model_patcher, "model")
+                else model_patcher
+            )
             tensor = None
             if hasattr(real_model, "parameters"):
                 for p in real_model.parameters():
@@ -131,7 +138,11 @@ class _SHMForensicsTracker:
                 selected = live_models[-1]
 
         if selected is None:
-            self._current_model_context = {"id": "unknown", "name": "unknown", "hash": "????"}
+            self._current_model_context = {
+                "id": "unknown",
+                "name": "unknown",
+                "hash": "????",
+            }
             return
 
         self._current_model_context = {

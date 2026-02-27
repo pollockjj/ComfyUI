@@ -1,3 +1,4 @@
+# pylint: disable=attribute-defined-outside-init
 import logging
 from typing import Any
 
@@ -30,9 +31,11 @@ class FirstStageModelProxy(BaseProxy[FirstStageModelRegistry]):
 
     def __getattr__(self, name: str) -> Any:
         try:
-             return self._call_rpc("get_property", name)
+            return self._call_rpc("get_property", name)
         except Exception as e:
-             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") from e
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute '{name}'"
+            ) from e
 
     def __repr__(self) -> str:
         return f"<FirstStageModelProxy {self._instance_id}>"
@@ -53,20 +56,35 @@ class VAERegistry(BaseRegistry[Any]):
         return detach_if_grad(self._get_instance(instance_id).encode(pixels))
 
     async def encode_tiled(
-        self, instance_id: str, pixels: Any, tile_x: int = 512, tile_y: int = 512, overlap: int = 64
+        self,
+        instance_id: str,
+        pixels: Any,
+        tile_x: int = 512,
+        tile_y: int = 512,
+        overlap: int = 64,
     ) -> Any:
         return detach_if_grad(
-            self._get_instance(instance_id).encode_tiled(pixels, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
+            self._get_instance(instance_id).encode_tiled(
+                pixels, tile_x=tile_x, tile_y=tile_y, overlap=overlap
+            )
         )
 
     async def decode(self, instance_id: str, samples: Any, **kwargs: Any) -> Any:
         return detach_if_grad(self._get_instance(instance_id).decode(samples, **kwargs))
 
     async def decode_tiled(
-        self, instance_id: str, samples: Any, tile_x: int = 64, tile_y: int = 64, overlap: int = 16, **kwargs: Any
+        self,
+        instance_id: str,
+        samples: Any,
+        tile_x: int = 64,
+        tile_y: int = 64,
+        overlap: int = 16,
+        **kwargs: Any,
     ) -> Any:
         return detach_if_grad(
-            self._get_instance(instance_id).decode_tiled(samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs)
+            self._get_instance(instance_id).decode_tiled(
+                samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap, **kwargs
+            )
         )
 
     async def get_property(self, instance_id: str, name: str) -> Any:
@@ -100,7 +118,9 @@ class VAEProxy(BaseProxy[VAERegistry]):
     def first_stage_model(self) -> FirstStageModelProxy:
         if not hasattr(self, "_first_stage_model_proxy"):
             fsm_id = self._call_rpc("get_first_stage_model_id")
-            self._first_stage_model_proxy = FirstStageModelProxy(fsm_id, manage_lifecycle=False)
+            self._first_stage_model_proxy = FirstStageModelProxy(
+                fsm_id, manage_lifecycle=False
+            )
         return self._first_stage_model_proxy
 
     @property
@@ -110,16 +130,25 @@ class VAEProxy(BaseProxy[VAERegistry]):
     def encode(self, pixels: Any) -> Any:
         return self._call_rpc("encode", pixels)
 
-    def encode_tiled(self, pixels: Any, tile_x: int = 512, tile_y: int = 512, overlap: int = 64) -> Any:
+    def encode_tiled(
+        self, pixels: Any, tile_x: int = 512, tile_y: int = 512, overlap: int = 64
+    ) -> Any:
         return self._call_rpc("encode_tiled", pixels, tile_x, tile_y, overlap)
 
     def decode(self, samples: Any, **kwargs: Any) -> Any:
         return self._call_rpc("decode", samples, **kwargs)
 
     def decode_tiled(
-        self, samples: Any, tile_x: int = 64, tile_y: int = 64, overlap: int = 16, **kwargs: Any
+        self,
+        samples: Any,
+        tile_x: int = 64,
+        tile_y: int = 64,
+        overlap: int = 16,
+        **kwargs: Any,
     ) -> Any:
-        return self._call_rpc("decode_tiled", samples, tile_x, tile_y, overlap, **kwargs)
+        return self._call_rpc(
+            "decode_tiled", samples, tile_x, tile_y, overlap, **kwargs
+        )
 
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")

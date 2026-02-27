@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel
 from __future__ import annotations
 
 import asyncio
@@ -59,15 +60,26 @@ class ModelSamplingRegistry(BaseRegistry[Any]):
         self, instance_id: str, sigma: Any, model_output: Any, model_input: Any
     ) -> Any:
         sampling = self._get_instance(instance_id)
-        return detach_if_grad(sampling.calculate_denoised(sigma, model_output, model_input))
+        return detach_if_grad(
+            sampling.calculate_denoised(sigma, model_output, model_input)
+        )
 
     async def noise_scaling(
-        self, instance_id: str, sigma: Any, noise: Any, latent_image: Any, max_denoise: bool = False
+        self,
+        instance_id: str,
+        sigma: Any,
+        noise: Any,
+        latent_image: Any,
+        max_denoise: bool = False,
     ) -> Any:
         sampling = self._get_instance(instance_id)
-        return detach_if_grad(sampling.noise_scaling(sigma, noise, latent_image, max_denoise=max_denoise))
+        return detach_if_grad(
+            sampling.noise_scaling(sigma, noise, latent_image, max_denoise=max_denoise)
+        )
 
-    async def inverse_noise_scaling(self, instance_id: str, sigma: Any, latent: Any) -> Any:
+    async def inverse_noise_scaling(
+        self, instance_id: str, sigma: Any, latent: Any
+    ) -> Any:
         sampling = self._get_instance(instance_id)
         return detach_if_grad(sampling.inverse_noise_scaling(sigma, latent))
 
@@ -121,13 +133,21 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                 registry = ModelSamplingRegistry()
 
                 class _LocalCaller:
-                    def calculate_input(self, instance_id: str, sigma: Any, noise: Any) -> Any:
+                    def calculate_input(
+                        self, instance_id: str, sigma: Any, noise: Any
+                    ) -> Any:
                         return registry.calculate_input(instance_id, sigma, noise)
 
                     def calculate_denoised(
-                        self, instance_id: str, sigma: Any, model_output: Any, model_input: Any
+                        self,
+                        instance_id: str,
+                        sigma: Any,
+                        model_output: Any,
+                        model_input: Any,
                     ) -> Any:
-                        return registry.calculate_denoised(instance_id, sigma, model_output, model_input)
+                        return registry.calculate_denoised(
+                            instance_id, sigma, model_output, model_input
+                        )
 
                     def noise_scaling(
                         self,
@@ -137,10 +157,16 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                         latent_image: Any,
                         max_denoise: bool = False,
                     ) -> Any:
-                        return registry.noise_scaling(instance_id, sigma, noise, latent_image, max_denoise)
+                        return registry.noise_scaling(
+                            instance_id, sigma, noise, latent_image, max_denoise
+                        )
 
-                    def inverse_noise_scaling(self, instance_id: str, sigma: Any, latent: Any) -> Any:
-                        return registry.inverse_noise_scaling(instance_id, sigma, latent)
+                    def inverse_noise_scaling(
+                        self, instance_id: str, sigma: Any, latent: Any
+                    ) -> Any:
+                        return registry.inverse_noise_scaling(
+                            instance_id, sigma, latent
+                        )
 
                     def timestep(self, instance_id: str, sigma: Any) -> Any:
                         return registry.timestep(instance_id, sigma)
@@ -201,10 +227,14 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
     def calculate_input(self, sigma: Any, noise: Any) -> Any:
         return self._call("calculate_input", sigma, noise)
 
-    def calculate_denoised(self, sigma: Any, model_output: Any, model_input: Any) -> Any:
+    def calculate_denoised(
+        self, sigma: Any, model_output: Any, model_input: Any
+    ) -> Any:
         return self._call("calculate_denoised", sigma, model_output, model_input)
 
-    def noise_scaling(self, sigma: Any, noise: Any, latent_image: Any, max_denoise: bool = False) -> Any:
+    def noise_scaling(
+        self, sigma: Any, noise: Any, latent_image: Any, max_denoise: bool = False
+    ) -> Any:
         return self._call("noise_scaling", sigma, noise, latent_image, max_denoise)
 
     def inverse_noise_scaling(self, sigma: Any, latent: Any) -> Any:
@@ -221,4 +251,3 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
 
     def set_sigmas(self, sigmas: Any) -> None:
         return self._call("set_sigmas", sigmas)
-

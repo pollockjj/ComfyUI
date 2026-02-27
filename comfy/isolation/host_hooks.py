@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel
 # Host process initialization for PyIsolate
 import logging
 

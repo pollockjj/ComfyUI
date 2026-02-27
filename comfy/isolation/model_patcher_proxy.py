@@ -1,3 +1,4 @@
+# pylint: disable=bare-except,consider-using-from-import,import-outside-toplevel,protected-access
 # RPC proxy for ModelPatcher (parent process)
 from __future__ import annotations
 
@@ -8,7 +9,10 @@ from comfy.isolation.proxies.base import (
     IS_CHILD_PROCESS,
     BaseProxy,
 )
-from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry, AutoPatcherEjector
+from comfy.isolation.model_patcher_proxy_registry import (
+    ModelPatcherRegistry,
+    AutoPatcherEjector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +25,12 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
             from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+
             rpc = get_child_rpc_instance()
             if rpc is not None:
-                self._rpc_caller = rpc.create_caller(self._registry_class, self._registry_class.get_remote_id())
+                self._rpc_caller = rpc.create_caller(
+                    self._registry_class, self._registry_class.get_remote_id()
+                )
             else:
                 self._rpc_caller = self._registry
         return self._rpc_caller
@@ -37,11 +44,23 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def _load_list(self, *args, **kwargs) -> Any:
         return self._call_rpc("load_list_internal", *args, **kwargs)
 
-    def prepare_hook_patches_current_keyframe(self, t: Any, hook_group: Any, model_options: Any) -> None:
-        self._call_rpc("prepare_hook_patches_current_keyframe", t, hook_group, model_options)
+    def prepare_hook_patches_current_keyframe(
+        self, t: Any, hook_group: Any, model_options: Any
+    ) -> None:
+        self._call_rpc(
+            "prepare_hook_patches_current_keyframe", t, hook_group, model_options
+        )
 
-    def add_hook_patches(self, hook: Any, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0) -> None:
-        self._call_rpc("add_hook_patches", hook, patches, strength_patch, strength_model)
+    def add_hook_patches(
+        self,
+        hook: Any,
+        patches: Any,
+        strength_patch: float = 1.0,
+        strength_model: float = 1.0,
+    ) -> None:
+        self._call_rpc(
+            "add_hook_patches", hook, patches, strength_patch, strength_model
+        )
 
     def clear_cached_hook_weights(self) -> None:
         self._call_rpc("clear_cached_hook_weights")
@@ -50,32 +69,32 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         return self._call_rpc("get_combined_hook_patches", hooks)
 
     def get_additional_models_with_key(self, key: str) -> Any:
-         return self._call_rpc("get_additional_models_with_key", key)
+        return self._call_rpc("get_additional_models_with_key", key)
 
     @property
     def object_patches(self) -> Any:
-         return self._call_rpc("get_object_patches")
+        return self._call_rpc("get_object_patches")
 
     @property
     def patches(self) -> Any:
         res = self._call_rpc("get_patches")
         if isinstance(res, dict):
-             new_res = {}
-             for k, v in res.items():
-                 new_list = []
-                 for item in v:
-                     if isinstance(item, list):
-                         new_list.append(tuple(item))
-                     else:
-                         new_list.append(item)
-                 new_res[k] = new_list
-             return new_res
+            new_res = {}
+            for k, v in res.items():
+                new_list = []
+                for item in v:
+                    if isinstance(item, list):
+                        new_list.append(tuple(item))
+                    else:
+                        new_list.append(item)
+                new_res[k] = new_list
+            return new_res
         return res
 
     @property
     def pinned(self) -> Set:
-         val = self._call_rpc("get_patcher_attr", "pinned")
-         return set(val) if val is not None else set()
+        val = self._call_rpc("get_patcher_attr", "pinned")
+        return set(val) if val is not None else set()
 
     @property
     def hook_patches(self) -> Dict:
@@ -85,6 +104,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         try:
             from comfy.hooks import _HookRef
             import json
+
             new_val = {}
             for k, v in val.items():
                 if isinstance(k, str):
@@ -95,12 +115,16 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
                         new_val[h] = v
                     elif k.startswith("__pyisolate_key__"):
                         try:
-                            json_str = k[len("__pyisolate_key__"):]
+                            json_str = k[len("__pyisolate_key__") :]
                             data = json.loads(json_str)
                             ref_id = None
                             if isinstance(data, list):
                                 for item in data:
-                                    if isinstance(item, list) and len(item) == 2 and item[0] == "id":
+                                    if (
+                                        isinstance(item, list)
+                                        and len(item) == 2
+                                        and item[0] == "id"
+                                    ):
                                         ref_id = item[1]
                                         break
                             if ref_id:
@@ -122,8 +146,16 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def set_hook_mode(self, hook_mode: Any) -> None:
         self._call_rpc("set_hook_mode", hook_mode)
 
-    def register_all_hook_patches(self, hooks: Any, target_dict: Any, model_options: Any = None, registered: Any = None) -> None:
-        self._call_rpc("register_all_hook_patches", hooks, target_dict, model_options, registered)
+    def register_all_hook_patches(
+        self,
+        hooks: Any,
+        target_dict: Any,
+        model_options: Any = None,
+        registered: Any = None,
+    ) -> None:
+        self._call_rpc(
+            "register_all_hook_patches", hooks, target_dict, model_options, registered
+        )
 
     def is_clone(self, other: Any) -> bool:
         if isinstance(other, ModelPatcherProxy):
@@ -132,7 +164,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def clone(self) -> ModelPatcherProxy:
         new_id = self._call_rpc("clone")
-        return ModelPatcherProxy(new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+        return ModelPatcherProxy(
+            new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS
+        )
 
     def clone_has_same_weights(self, clone: Any) -> bool:
         if isinstance(clone, ModelPatcherProxy):
@@ -148,6 +182,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def model_options(self) -> dict:
         data = self._call_rpc("get_model_options")
         import json
+
         def _decode_keys(obj):
             if isinstance(obj, dict):
                 new_d = {}
@@ -167,6 +202,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
             if isinstance(obj, list):
                 return [_decode_keys(x) for x in obj]
             return obj
+
         return _decode_keys(data)
 
     @model_options.setter
@@ -188,20 +224,50 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def model_patches_to(self, device: Any) -> Any:
         return self._call_rpc("model_patches_to", device)
 
-    def partially_load(self, device: Any, extra_memory: Any, force_patch_weights: bool = False) -> Any:
-        return self._call_rpc("partially_load", device, extra_memory, force_patch_weights)
+    def partially_load(
+        self, device: Any, extra_memory: Any, force_patch_weights: bool = False
+    ) -> Any:
+        return self._call_rpc(
+            "partially_load", device, extra_memory, force_patch_weights
+        )
 
-    def partially_unload(self, device_to: Any, memory_to_free: int = 0, force_patch_weights: bool = False) -> int:
-        return self._call_rpc("partially_unload", device_to, memory_to_free, force_patch_weights)
+    def partially_unload(
+        self, device_to: Any, memory_to_free: int = 0, force_patch_weights: bool = False
+    ) -> int:
+        return self._call_rpc(
+            "partially_unload", device_to, memory_to_free, force_patch_weights
+        )
 
-    def load(self, device_to: Any = None, lowvram_model_memory: int = 0, force_patch_weights: bool = False, full_load: bool = False) -> None:
-        self._call_rpc("load", device_to, lowvram_model_memory, force_patch_weights, full_load)
+    def load(
+        self,
+        device_to: Any = None,
+        lowvram_model_memory: int = 0,
+        force_patch_weights: bool = False,
+        full_load: bool = False,
+    ) -> None:
+        self._call_rpc(
+            "load", device_to, lowvram_model_memory, force_patch_weights, full_load
+        )
 
-    def patch_model(self, device_to: Any = None, lowvram_model_memory: int = 0, load_weights: bool = True, force_patch_weights: bool = False) -> Any:
-        self._call_rpc("patch_model", device_to, lowvram_model_memory, load_weights, force_patch_weights)
+    def patch_model(
+        self,
+        device_to: Any = None,
+        lowvram_model_memory: int = 0,
+        load_weights: bool = True,
+        force_patch_weights: bool = False,
+    ) -> Any:
+        self._call_rpc(
+            "patch_model",
+            device_to,
+            lowvram_model_memory,
+            load_weights,
+            force_patch_weights,
+        )
         return self
 
-    def unpatch_model(self, device_to: Any = None, unpatch_weights: bool = True) -> None:
+    def unpatch_model(
+        self, device_to: Any = None, unpatch_weights: bool = True
+    ) -> None:
         self._call_rpc("unpatch_model", device_to, unpatch_weights)
 
     def detach(self, unpatch_all: bool = True) -> Any:
@@ -210,6 +276,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def _cpu_tensor_bytes(self, obj: Any) -> int:
         import torch
+
         if isinstance(obj, torch.Tensor):
             if obj.device.type == "cpu":
                 return obj.nbytes
@@ -321,7 +388,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("unpin_all_weights")
 
     def calculate_weight(self, patches, weight, key, intermediate_dtype=None):
-        return self._call_rpc("calculate_weight", patches, weight, key, intermediate_dtype)
+        return self._call_rpc(
+            "calculate_weight", patches, weight, key, intermediate_dtype
+        )
 
     def inject_model(self) -> None:
         self._call_rpc("inject_model")
@@ -330,7 +399,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         self._call_rpc("eject_model")
 
     def use_ejected(self, skip_and_inject_on_exit_only: bool = False) -> Any:
-        return AutoPatcherEjector(self, skip_and_inject_on_exit_only=skip_and_inject_on_exit_only)
+        return AutoPatcherEjector(
+            self, skip_and_inject_on_exit_only=skip_and_inject_on_exit_only
+        )
 
     @property
     def is_injected(self) -> bool:
@@ -354,7 +425,11 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         try:
             self._call_rpc("cleanup")
         except Exception:
-            logger.debug("ModelPatcherProxy cleanup RPC failed for %s", self._instance_id, exc_info=True)
+            logger.debug(
+                "ModelPatcherProxy cleanup RPC failed for %s",
+                self._instance_id,
+                exc_info=True,
+            )
         finally:
             super().cleanup()
 
@@ -363,22 +438,57 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         return _InnerModelProxy(self)
 
     def __getattr__(self, name: str) -> Any:
-        _whitelisted_attrs = {"hook_patches_backup", "hook_backup", "cached_hook_patches", "current_hooks", "forced_hooks", "is_clip", "patches_uuid", "pinned", "attachments", "additional_models", "injections", "hook_patches", "model_lowvram", "model_loaded_weight_memory", "backup", "object_patches_backup", "weight_wrapper_patches", "weight_inplace_update", "force_cast_weights"}
+        _whitelisted_attrs = {
+            "hook_patches_backup",
+            "hook_backup",
+            "cached_hook_patches",
+            "current_hooks",
+            "forced_hooks",
+            "is_clip",
+            "patches_uuid",
+            "pinned",
+            "attachments",
+            "additional_models",
+            "injections",
+            "hook_patches",
+            "model_lowvram",
+            "model_loaded_weight_memory",
+            "backup",
+            "object_patches_backup",
+            "weight_wrapper_patches",
+            "weight_inplace_update",
+            "force_cast_weights",
+        }
         if name in _whitelisted_attrs:
             return self._call_rpc("get_patcher_attr", name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
-    def load_lora(self, lora_path: str, strength_model: float, clip: Optional[Any] = None, strength_clip: float = 1.0) -> tuple:
+    def load_lora(
+        self,
+        lora_path: str,
+        strength_model: float,
+        clip: Optional[Any] = None,
+        strength_clip: float = 1.0,
+    ) -> tuple:
         clip_id = None
         if clip is not None:
-            clip_id = getattr(clip, '_instance_id', getattr(clip, '_clip_id', None))
-        result = self._call_rpc("load_lora", lora_path, strength_model, clip_id, strength_clip)
+            clip_id = getattr(clip, "_instance_id", getattr(clip, "_clip_id", None))
+        result = self._call_rpc(
+            "load_lora", lora_path, strength_model, clip_id, strength_clip
+        )
         new_model = None
         if result.get("model_id"):
-            new_model = ModelPatcherProxy(result["model_id"], self._registry, manage_lifecycle=not IS_CHILD_PROCESS)
+            new_model = ModelPatcherProxy(
+                result["model_id"],
+                self._registry,
+                manage_lifecycle=not IS_CHILD_PROCESS,
+            )
         new_clip = None
         if result.get("clip_id"):
             from comfy.isolation.clip_proxy import CLIPProxy
+
             new_clip = CLIPProxy(result["clip_id"])
         return (new_model, new_clip)
 
@@ -430,6 +540,7 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         if isinstance(res, str) and res.startswith("torch."):
             try:
                 import torch
+
                 attr = res.split(".")[-1]
                 if hasattr(torch, attr):
                     return getattr(torch, attr)
@@ -445,14 +556,32 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def hook_mode(self, value: Any) -> None:
         self._call_rpc("set_hook_mode", value)
 
-    def set_model_sampler_cfg_function(self, sampler_cfg_function: Any, disable_cfg1_optimization: bool = False) -> None:
-        self._call_rpc("set_model_sampler_cfg_function", sampler_cfg_function, disable_cfg1_optimization)
+    def set_model_sampler_cfg_function(
+        self, sampler_cfg_function: Any, disable_cfg1_optimization: bool = False
+    ) -> None:
+        self._call_rpc(
+            "set_model_sampler_cfg_function",
+            sampler_cfg_function,
+            disable_cfg1_optimization,
+        )
 
-    def set_model_sampler_post_cfg_function(self, post_cfg_function: Any, disable_cfg1_optimization: bool = False) -> None:
-        self._call_rpc("set_model_sampler_post_cfg_function", post_cfg_function, disable_cfg1_optimization)
+    def set_model_sampler_post_cfg_function(
+        self, post_cfg_function: Any, disable_cfg1_optimization: bool = False
+    ) -> None:
+        self._call_rpc(
+            "set_model_sampler_post_cfg_function",
+            post_cfg_function,
+            disable_cfg1_optimization,
+        )
 
-    def set_model_sampler_pre_cfg_function(self, pre_cfg_function: Any, disable_cfg1_optimization: bool = False) -> None:
-        self._call_rpc("set_model_sampler_pre_cfg_function", pre_cfg_function, disable_cfg1_optimization)
+    def set_model_sampler_pre_cfg_function(
+        self, pre_cfg_function: Any, disable_cfg1_optimization: bool = False
+    ) -> None:
+        self._call_rpc(
+            "set_model_sampler_pre_cfg_function",
+            pre_cfg_function,
+            disable_cfg1_optimization,
+        )
 
     def set_model_sampler_calc_cond_batch_function(self, fn: Any) -> None:
         self._call_rpc("set_model_sampler_calc_cond_batch_function", fn)
@@ -466,8 +595,22 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def set_model_patch(self, patch: Any, name: str) -> None:
         self._call_rpc("set_model_patch", patch, name)
 
-    def set_model_patch_replace(self, patch: Any, name: str, block_name: str, number: int, transformer_index: Optional[int] = None) -> None:
-        self._call_rpc("set_model_patch_replace", patch, name, block_name, number, transformer_index)
+    def set_model_patch_replace(
+        self,
+        patch: Any,
+        name: str,
+        block_name: str,
+        number: int,
+        transformer_index: Optional[int] = None,
+    ) -> None:
+        self._call_rpc(
+            "set_model_patch_replace",
+            patch,
+            name,
+            block_name,
+            number,
+            transformer_index,
+        )
 
     def set_model_attn1_patch(self, patch: Any) -> None:
         self.set_model_patch(patch, "attn1_patch")
@@ -475,11 +618,27 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def set_model_attn2_patch(self, patch: Any) -> None:
         self.set_model_patch(patch, "attn2_patch")
 
-    def set_model_attn1_replace(self, patch: Any, block_name: str, number: int, transformer_index: Optional[int] = None) -> None:
-        self.set_model_patch_replace(patch, "attn1", block_name, number, transformer_index)
+    def set_model_attn1_replace(
+        self,
+        patch: Any,
+        block_name: str,
+        number: int,
+        transformer_index: Optional[int] = None,
+    ) -> None:
+        self.set_model_patch_replace(
+            patch, "attn1", block_name, number, transformer_index
+        )
 
-    def set_model_attn2_replace(self, patch: Any, block_name: str, number: int, transformer_index: Optional[int] = None) -> None:
-        self.set_model_patch_replace(patch, "attn2", block_name, number, transformer_index)
+    def set_model_attn2_replace(
+        self,
+        patch: Any,
+        block_name: str,
+        number: int,
+        transformer_index: Optional[int] = None,
+    ) -> None:
+        self.set_model_patch_replace(
+            patch, "attn2", block_name, number, transformer_index
+        )
 
     def set_model_attn1_output_patch(self, patch: Any) -> None:
         self.set_model_patch(patch, "attn1_output_patch")
@@ -508,8 +667,24 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def set_model_post_input_patch(self, patch: Any) -> None:
         self.set_model_patch(patch, "post_input")
 
-    def set_model_rope_options(self, scale_x=1.0, shift_x=0.0, scale_y=1.0, shift_y=0.0, scale_t=1.0, shift_t=0.0, **kwargs: Any) -> None:
-        options = {"scale_x": scale_x, "shift_x": shift_x, "scale_y": scale_y, "shift_y": shift_y, "scale_t": scale_t, "shift_t": shift_t}
+    def set_model_rope_options(
+        self,
+        scale_x=1.0,
+        shift_x=0.0,
+        scale_y=1.0,
+        shift_y=0.0,
+        scale_t=1.0,
+        shift_t=0.0,
+        **kwargs: Any,
+    ) -> None:
+        options = {
+            "scale_x": scale_x,
+            "shift_x": shift_x,
+            "scale_y": scale_y,
+            "shift_y": shift_y,
+            "scale_t": scale_t,
+            "shift_t": shift_t,
+        }
         options.update(kwargs)
         self._call_rpc("set_model_rope_options", options)
 
@@ -578,7 +753,12 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def get_additional_models(self) -> List[ModelPatcherProxy]:
         ids = self._call_rpc("get_additional_models")
-        return [ModelPatcherProxy(mid, self._registry, manage_lifecycle=not IS_CHILD_PROCESS) for mid in ids]
+        return [
+            ModelPatcherProxy(
+                mid, self._registry, manage_lifecycle=not IS_CHILD_PROCESS
+            )
+            for mid in ids
+        ]
 
     def model_patches_models(self) -> Any:
         return self._call_rpc("model_patches_models")
@@ -593,33 +773,48 @@ class _InnerModelProxy:
         self._parent = parent
 
     def __getattr__(self, name: str) -> Any:
-        if name.startswith('_'):
+        if name.startswith("_"):
             raise AttributeError(name)
-        if name in ('model_config', 'latent_format', 'model_type', 'current_weight_patches_uuid'):
+        if name in (
+            "model_config",
+            "latent_format",
+            "model_type",
+            "current_weight_patches_uuid",
+        ):
             return self._parent._call_rpc("get_inner_model_attr", name)
-        if name == 'load_device':
-            return self._parent._call_rpc("get_inner_model_attr", 'load_device')
-        if name == 'device':
-            return self._parent._call_rpc("get_inner_model_attr", 'device')
-        if name == 'current_patcher':
-             return ModelPatcherProxy(self._parent._instance_id, self._parent._registry, manage_lifecycle=False)
-        if name == 'model_sampling':
+        if name == "load_device":
+            return self._parent._call_rpc("get_inner_model_attr", "load_device")
+        if name == "device":
+            return self._parent._call_rpc("get_inner_model_attr", "device")
+        if name == "current_patcher":
+            return ModelPatcherProxy(
+                self._parent._instance_id,
+                self._parent._registry,
+                manage_lifecycle=False,
+            )
+        if name == "model_sampling":
             return self._parent._call_rpc("get_model_object", "model_sampling")
-        if name == 'extra_conds_shapes':
-            return lambda *a, **k: self._parent._call_rpc("inner_model_extra_conds_shapes", a, k)
-        if name == 'extra_conds':
-            return lambda *a, **k: self._parent._call_rpc("inner_model_extra_conds", a, k)
-        if name == 'memory_required':
-            return lambda *a, **k: self._parent._call_rpc("inner_model_memory_required", a, k)
-        if name == 'apply_model':
+        if name == "extra_conds_shapes":
+            return lambda *a, **k: self._parent._call_rpc(
+                "inner_model_extra_conds_shapes", a, k
+            )
+        if name == "extra_conds":
+            return lambda *a, **k: self._parent._call_rpc(
+                "inner_model_extra_conds", a, k
+            )
+        if name == "memory_required":
+            return lambda *a, **k: self._parent._call_rpc(
+                "inner_model_memory_required", a, k
+            )
+        if name == "apply_model":
             # Delegate to parent's method to get the CPU->CUDA optimization
             return self._parent.apply_model
-        if name == 'process_latent_in':
+        if name == "process_latent_in":
             return lambda *a, **k: self._parent._call_rpc("process_latent_in", a, k)
-        if name == 'process_latent_out':
+        if name == "process_latent_out":
             return lambda *a, **k: self._parent._call_rpc("process_latent_out", a, k)
-        if name == 'scale_latent_inpaint':
+        if name == "scale_latent_inpaint":
             return lambda *a, **k: self._parent._call_rpc("scale_latent_inpaint", a, k)
-        if name == 'diffusion_model':
-            return self._parent._call_rpc("get_inner_model_attr", 'diffusion_model')
+        if name == "diffusion_model":
+            return self._parent._call_rpc("get_inner_model_attr", "diffusion_model")
         raise AttributeError(f"'{name}' not supported on isolated InnerModel")

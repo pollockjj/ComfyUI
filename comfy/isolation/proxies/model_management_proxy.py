@@ -1,6 +1,7 @@
 import comfy.model_management as mm
 from pyisolate import ProxiedSingleton
 
+
 class ModelManagementProxy(ProxiedSingleton):
     """
     Dynamic proxy for comfy.model_management.

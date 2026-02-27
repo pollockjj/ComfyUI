@@ -4,6 +4,7 @@ from typing import Dict
 import folder_paths
 from pyisolate import ProxiedSingleton
 
+
 class FolderPathsProxy(ProxiedSingleton):
     """
     Dynamic proxy for folder_paths.
@@ -26,4 +27,3 @@ class FolderPathsProxy(ProxiedSingleton):
     @property
     def filename_list_cache(self) -> Dict:
         return dict(folder_paths.filename_list_cache)
-

@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel
 from __future__ import annotations
 
 import hashlib
@@ -49,7 +50,11 @@ def find_manifest_directories() -> List[Tuple[Path, Path]]:
                 with manifest.open("rb") as f:
                     data = tomllib.load(f)
 
-                if "tool" in data and "comfy" in data["tool"] and "isolation" in data["tool"]["comfy"]:
+                if (
+                    "tool" in data
+                    and "comfy" in data["tool"]
+                    and "isolation" in data["tool"]["comfy"]
+                ):
                     manifest_dirs.append((entry, manifest))
 
             except Exception:
@@ -86,6 +91,7 @@ def compute_cache_key(node_dir: Path, manifest_path: Path) -> str:
 
     try:
         import pyisolate
+
         hasher.update(pyisolate.__version__.encode("utf-8"))
     except (ImportError, AttributeError):
         hasher.update(b"__pyisolate_unknown__")
@@ -109,7 +115,9 @@ def is_cache_valid(node_dir: Path, manifest_path: Path, venv_root: Path) -> bool
         stored_key = cache_key_file.read_text(encoding="utf-8").strip()
         return current_key == stored_key
     except Exception as e:
-        logger.debug("%s Cache validation error for %s: %s", LOG_PREFIX, node_dir.name, e)
+        logger.debug(
+            "%s Cache validation error for %s: %s", LOG_PREFIX, node_dir.name, e
+        )
         return False
 
 
@@ -128,10 +136,7 @@ def load_from_cache(node_dir: Path, venv_root: Path) -> Optional[Dict[str, Any]]
 
 
 def save_to_cache(
-    node_dir: Path,
-    venv_root: Path,
-    node_data: Dict[str, Any],
-    manifest_path: Path
+    node_dir: Path, venv_root: Path, node_data: Dict[str, Any], manifest_path: Path
 ) -> None:
     """Save node metadata and cache key atomically."""
     try:

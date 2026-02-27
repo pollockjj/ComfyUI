@@ -1,3 +1,4 @@
+# pylint: disable=global-statement,import-outside-toplevel,protected-access
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +11,10 @@ from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 try:
     from pyisolate import ProxiedSingleton
 except ImportError:
+
     class ProxiedSingleton:  # type: ignore[no-redef]
         pass
+
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +98,9 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
 
     def _get_instance(self, instance_id: str) -> T:
         if IS_CHILD_PROCESS:
-            raise RuntimeError(f"[{self.__class__.__name__}] _get_instance called in child")
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] _get_instance called in child"
+            )
         with self._lock:
             instance = self._registry.get(instance_id)
         if instance is None:
@@ -105,30 +110,42 @@ class BaseRegistry(ProxiedSingleton, Generic[T]):
 
 _GLOBAL_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
+
 def set_global_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _GLOBAL_LOOP
     _GLOBAL_LOOP = loop
+
 
 class BaseProxy(Generic[T]):
     _registry_class: type = BaseRegistry  # type: ignore[type-arg]
     __module__: str = "comfy.isolation.proxies.base"
 
-    def __init__(self, instance_id: str, registry: Optional[Any] = None, manage_lifecycle: bool = False) -> None:
+    def __init__(
+        self,
+        instance_id: str,
+        registry: Optional[Any] = None,
+        manage_lifecycle: bool = False,
+    ) -> None:
         self._instance_id = instance_id
         self._rpc_caller: Optional[Any] = None
         self._registry = registry if registry is not None else self._registry_class()
         self._manage_lifecycle = manage_lifecycle
         self._cleaned_up = False
         if manage_lifecycle and not IS_CHILD_PROCESS:
-            self._finalizer = weakref.finalize(self, self._registry.unregister_sync, instance_id)
+            self._finalizer = weakref.finalize(
+                self, self._registry.unregister_sync, instance_id
+            )
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
             from pyisolate._internal.rpc_protocol import get_child_rpc_instance
+
             rpc = get_child_rpc_instance()
             if rpc is None:
                 raise RuntimeError(f"[{self.__class__.__name__}] No RPC in child")
-            self._rpc_caller = rpc.create_caller(self._registry_class, self._registry_class.get_remote_id())
+            self._rpc_caller = rpc.create_caller(
+                self._registry_class, self._registry_class.get_remote_id()
+            )
         return self._rpc_caller
 
     def _call_rpc(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -144,15 +161,15 @@ class BaseProxy(Generic[T]):
                 # If called from async context in main loop, we need to handle that.
                 curr_loop = asyncio.get_running_loop()
                 if curr_loop is _GLOBAL_LOOP:
-                     # We are in the main loop. We cannot await/block here if we are just a sync function.
-                     # But proxies are often called from sync code.
-                     # If called from sync code in main loop, creating a new loop is bad.
-                     # But we can't await `coro`.
-                     # This implies proxies MUST be awaited if called from async context?
-                     # Existing code used `run_coro_in_new_loop` which is weird.
-                     # Let's trust that if we are in a thread (RuntimeError on get_running_loop),
-                     # we use run_coroutine_threadsafe.
-                     pass
+                    # We are in the main loop. We cannot await/block here if we are just a sync function.
+                    # But proxies are often called from sync code.
+                    # If called from sync code in main loop, creating a new loop is bad.
+                    # But we can't await `coro`.
+                    # This implies proxies MUST be awaited if called from async context?
+                    # Existing code used `run_coro_in_new_loop` which is weird.
+                    # Let's trust that if we are in a thread (RuntimeError on get_running_loop),
+                    # we use run_coroutine_threadsafe.
+                    pass
             except RuntimeError:
                 # No running loop - we are in a worker thread.
                 future = asyncio.run_coroutine_threadsafe(coro, _GLOBAL_LOOP)
@@ -191,5 +208,6 @@ class BaseProxy(Generic[T]):
 def create_rpc_method(method_name: str) -> Callable[..., Any]:
     def method(self: BaseProxy[Any], *args: Any, **kwargs: Any) -> Any:
         return self._call_rpc(method_name, *args, **kwargs)
+
     method.__name__ = method_name
     return method

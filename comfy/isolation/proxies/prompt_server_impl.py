@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel,logging-fstring-interpolation,redefined-outer-name,reimported,super-init-not-called
 """Stateless RPC Implementation for PromptServer.
 
 Replaces the legacy PromptServerProxy (Singleton) with a clean Service/Stub architecture.
@@ -26,14 +27,15 @@ LOG_PREFIX = "[Isolation:C<->H]"
 # CHILD SIDE: PromptServerStub
 # =============================================================================
 
+
 class PromptServerStub:
     """Stateless Stub for PromptServer."""
 
     # Masquerade as the real server module
-    __module__ = 'server'
+    __module__ = "server"
 
-    _instance: Optional['PromptServerStub'] = None
-    _rpc: Optional[Any] = None # This will be the Caller object
+    _instance: Optional["PromptServerStub"] = None
+    _rpc: Optional[Any] = None  # This will be the Caller object
     _source_file: Optional[str] = None
 
     def __init__(self):
@@ -58,14 +60,16 @@ class PromptServerStub:
         # We want to call *Remote* class.
         # If we use PromptServerStub as the type, returning object will be typed as PromptServerStub?
         # The first arg is 'service_cls'.
-        cls._rpc = rpc.create_caller(PromptServerService, target_id) # We import Service below?
+        cls._rpc = rpc.create_caller(
+            PromptServerService, target_id
+        )  # We import Service below?
 
     # We need PromptServerService available for the create_caller call?
     # Or just use the Stub class if ID matches?
     # prompt_server_impl.py defines BOTH. So PromptServerService IS available!
 
     @property
-    def instance(self) -> 'PromptServerStub':
+    def instance(self) -> "PromptServerStub":
         return self
 
     # ... Compatibility ...
@@ -73,7 +77,8 @@ class PromptServerStub:
     def _get_source_file(cls) -> str:
         if cls._source_file is None:
             import folder_paths
-            cls._source_file = os.path.join(folder_paths.base_path, 'server.py')
+
+            cls._source_file = os.path.join(folder_paths.base_path, "server.py")
         return cls._source_file
 
     @property
@@ -90,18 +95,26 @@ class PromptServerStub:
 
     @property
     def app(self):
-        raise RuntimeError("PromptServer.app is not accessible in isolated nodes. Use RPC routes instead.")
+        raise RuntimeError(
+            "PromptServer.app is not accessible in isolated nodes. Use RPC routes instead."
+        )
 
     @property
     def prompt_queue(self):
-        raise RuntimeError("PromptServer.prompt_queue is not accessible in isolated nodes.")
+        raise RuntimeError(
+            "PromptServer.prompt_queue is not accessible in isolated nodes."
+        )
 
     # --- UI Communication (RPC Delegates) ---
-    async def send_sync(self, event: str, data: Dict[str, Any], sid: Optional[str] = None) -> None:
+    async def send_sync(
+        self, event: str, data: Dict[str, Any], sid: Optional[str] = None
+    ) -> None:
         if self._rpc:
             await self._rpc.ui_send_sync(event, data, sid)
 
-    async def send(self, event: str, data: Dict[str, Any], sid: Optional[str] = None) -> None:
+    async def send(
+        self, event: str, data: Dict[str, Any], sid: Optional[str] = None
+    ) -> None:
         if self._rpc:
             await self._rpc.ui_send(event, data, sid)
 
@@ -115,11 +128,12 @@ class PromptServerStub:
             # But UtilsProxy hook wrapper creates task.
             # Does send_progress_text need to be sync? Yes, node code calls it sync.
             import asyncio
+
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._rpc.ui_send_progress_text(text, node_id, sid))
             except RuntimeError:
-                pass # Sync context without loop?
+                pass  # Sync context without loop?
 
     # --- Route Registration Logic ---
     def register_route(self, method: str, path: str, handler: Callable):
@@ -133,11 +147,12 @@ class PromptServerStub:
             loop = asyncio.get_running_loop()
             loop.create_task(self._rpc.register_route_rpc(method, path, handler))
         except RuntimeError:
-             pass
+            pass
 
 
 class RouteStub:
     """Simulates aiohttp.web.RouteTableDef."""
+
     def __init__(self, stub: PromptServerStub):
         self._stub = stub
 
@@ -145,36 +160,42 @@ class RouteStub:
         def decorator(handler):
             self._stub.register_route("GET", path, handler)
             return handler
+
         return decorator
 
     def post(self, path: str):
         def decorator(handler):
             self._stub.register_route("POST", path, handler)
             return handler
+
         return decorator
 
     def patch(self, path: str):
         def decorator(handler):
             self._stub.register_route("PATCH", path, handler)
             return handler
+
         return decorator
 
     def put(self, path: str):
         def decorator(handler):
             self._stub.register_route("PUT", path, handler)
             return handler
+
         return decorator
 
     def delete(self, path: str):
         def decorator(handler):
             self._stub.register_route("DELETE", path, handler)
             return handler
+
         return decorator
 
 
 # =============================================================================
 # HOST SIDE: PromptServerService
 # =============================================================================
+
 
 class PromptServerService(ProxiedSingleton):
     """Host-side RPC Service for PromptServer."""
@@ -186,16 +207,21 @@ class PromptServerService(ProxiedSingleton):
     @property
     def server(self):
         from server import PromptServer
+
         return PromptServer.instance
 
-    async def ui_send_sync(self, event: str, data: Dict[str, Any], sid: Optional[str] = None):
+    async def ui_send_sync(
+        self, event: str, data: Dict[str, Any], sid: Optional[str] = None
+    ):
         await self.server.send_sync(event, data, sid)
 
-    async def ui_send(self, event: str, data: Dict[str, Any], sid: Optional[str] = None):
+    async def ui_send(
+        self, event: str, data: Dict[str, Any], sid: Optional[str] = None
+    ):
         await self.server.send(event, data, sid)
 
     async def ui_send_progress_text(self, text: str, node_id: str, sid=None):
-         # Made async to be awaitable by RPC layer
+        # Made async to be awaitable by RPC layer
         self.server.send_progress_text(text, node_id, sid)
 
     async def register_route_rpc(self, method: str, path: str, child_handler_proxy):
@@ -210,7 +236,7 @@ class PromptServerService(ProxiedSingleton):
                 "query": dict(request.query),
             }
             if request.can_read_body:
-                 req_data["text"] = await request.text()
+                req_data["text"] = await request.text()
 
             try:
                 # 2. Call Child Handler via RPC (child_handler_proxy is async callable)

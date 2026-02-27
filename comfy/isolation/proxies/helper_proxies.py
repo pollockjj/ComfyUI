@@ -55,10 +55,15 @@ def _restore_special_value(value: Any) -> Any:
             )
             return FlexibleOptionalInputProxy(flex_type, data)
         if value.get("__pyisolate_tuple__") is not None:
-            return tuple(_restore_special_value(v) for v in value["__pyisolate_tuple__"])
+            return tuple(
+                _restore_special_value(v) for v in value["__pyisolate_tuple__"]
+            )
         if value.get("__pyisolate_bypass_tuple__") is not None:
             return ByPassTypeTupleProxy(
-                tuple(_restore_special_value(v) for v in value["__pyisolate_bypass_tuple__"])
+                tuple(
+                    _restore_special_value(v)
+                    for v in value["__pyisolate_bypass_tuple__"]
+                )
             )
         return {k: _restore_special_value(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -77,7 +82,9 @@ def restore_input_types(raw: Dict[str, object]) -> Dict[str, object]:
         if isinstance(entries, dict) and entries.get("__pyisolate_flexible_optional__"):
             restored[section] = _restore_special_value(entries)
         elif isinstance(entries, dict):
-            restored[section] = {k: _restore_special_value(v) for k, v in entries.items()}
+            restored[section] = {
+                k: _restore_special_value(v) for k, v in entries.items()
+            }
         else:
             restored[section] = _restore_special_value(entries)
     return restored

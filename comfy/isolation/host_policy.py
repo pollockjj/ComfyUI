@@ -1,3 +1,4 @@
+# pylint: disable=logging-fstring-interpolation
 from __future__ import annotations
 
 import logging
@@ -11,11 +12,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 class HostSecurityPolicy(TypedDict):
     allow_network: bool
     writable_paths: List[str]
     readonly_paths: List[str]
     whitelist: Dict[str, str]
+
 
 DEFAULT_POLICY: HostSecurityPolicy = {
     "allow_network": False,
@@ -46,7 +49,11 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
         with config_path.open("rb") as f:
             data = tomllib.load(f)
     except Exception:
-        logger.warning("Failed to parse host policy from %s, using defaults.", config_path, exc_info=True)
+        logger.warning(
+            "Failed to parse host policy from %s, using defaults.",
+            config_path,
+            exc_info=True,
+        )
         return policy
 
     tool_config = data.get("tool", {}).get("comfy", {}).get("host", {})
@@ -67,7 +74,10 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
     if isinstance(whitelist_raw, dict):
         policy["whitelist"] = {str(k): str(v) for k, v in whitelist_raw.items()}
 
-    logger.debug(f"Loaded Host Policy: {len(policy['whitelist'])} whitelisted nodes, Network={policy['allow_network']}")
+    logger.debug(
+        f"Loaded Host Policy: {len(policy['whitelist'])} whitelisted nodes, Network={policy['allow_network']}"
+    )
     return policy
+
 
 __all__ = ["HostSecurityPolicy", "load_host_policy", "DEFAULT_POLICY"]

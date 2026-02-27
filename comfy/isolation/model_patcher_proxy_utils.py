@@ -1,3 +1,4 @@
+# pylint: disable=import-outside-toplevel,logging-fstring-interpolation,protected-access
 # Isolation utilities and serializers for ModelPatcherProxy
 from __future__ import annotations
 
@@ -61,9 +62,9 @@ def register_hooks_serializers(registry=None):
 
     def serialize_dict_state(obj):
         d = obj.__dict__.copy()
-        d['__type__'] = type(obj).__name__
-        if 'custom_should_register' in d:
-            del d['custom_should_register']
+        d["__type__"] = type(obj).__name__
+        if "custom_should_register" in d:
+            del d["custom_should_register"]
         return d
 
     def deserialize_dict_state_generic(cls):
@@ -71,6 +72,7 @@ def register_hooks_serializers(registry=None):
             h = cls()
             h.__dict__.update(data)
             return h
+
         return _deserialize
 
     def deserialize_hook_keyframe(data):
@@ -85,7 +87,9 @@ def register_hooks_serializers(registry=None):
         h.__dict__.update(data)
         return h
 
-    registry.register("HookKeyframeGroup", serialize_dict_state, deserialize_hook_keyframe_group)
+    registry.register(
+        "HookKeyframeGroup", serialize_dict_state, deserialize_hook_keyframe_group
+    )
 
     def deserialize_hook(data):
         h = comfy.hooks.Hook()
@@ -111,6 +115,7 @@ def register_hooks_serializers(registry=None):
 
     try:
         from comfy.weight_adapter.lora import LoRAAdapter
+
         def serialize_lora(obj):
             return {"weights": {}, "loaded_keys": list(obj.loaded_keys)}
 
@@ -126,7 +131,10 @@ def register_hooks_serializers(registry=None):
         import uuid
 
         def serialize_hook_ref(obj):
-            return {"__hook_ref__": True, "id": getattr(obj, "_pyisolate_id", str(uuid.uuid4()))}
+            return {
+                "__hook_ref__": True,
+                "id": getattr(obj, "_pyisolate_id", str(uuid.uuid4())),
+            }
 
         def deserialize_hook_ref(data):
             h = _HookRef()
@@ -137,7 +145,7 @@ def register_hooks_serializers(registry=None):
     except ImportError:
         pass
     except Exception as e:
-         logger.warning(f"Failed to register _HookRef: {e}")
+        logger.warning(f"Failed to register _HookRef: {e}")
 
 
 try:

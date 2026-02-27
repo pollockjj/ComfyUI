@@ -1,3 +1,4 @@
+# pylint: disable=consider-using-from-import,cyclic-import,import-outside-toplevel,logging-fstring-interpolation,protected-access,wrong-import-position
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +14,8 @@ class AttrDict(dict):
 
     def copy(self):
         return AttrDict(super().copy())
+
+
 import importlib
 import inspect
 import json
@@ -43,7 +46,9 @@ def _flush_tensor_transport_state(marker: str) -> int:
         return 0
     flushed = flush_tensor_keeper()
     if flushed > 0:
-        logger.debug("%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed)
+        logger.debug(
+            "%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed
+        )
     return flushed
 
 
@@ -84,7 +89,11 @@ def _sanitize_for_transport(value):
     if cls_name == "AnyType":
         return {"__pyisolate_any_type__": True, "value": str(value)}
     if cls_name == "ByPassTypeTuple":
-        return {"__pyisolate_bypass_tuple__": [_sanitize_for_transport(v) for v in tuple(value)]}
+        return {
+            "__pyisolate_bypass_tuple__": [
+                _sanitize_for_transport(v) for v in tuple(value)
+            ]
+        }
 
     if isinstance(value, dict):
         return {k: _sanitize_for_transport(v) for k, v in value.items()}
@@ -123,22 +132,39 @@ class ComfyNodeExtension(ExtensionBase):
 
         try:
             from comfy_api.latest import ComfyExtension
+
             for name, obj in inspect.getmembers(module):
-                if not (inspect.isclass(obj) and issubclass(obj, ComfyExtension) and obj is not ComfyExtension):
+                if not (
+                    inspect.isclass(obj)
+                    and issubclass(obj, ComfyExtension)
+                    and obj is not ComfyExtension
+                ):
                     continue
                 if not obj.__module__.startswith(module.__name__):
                     continue
                 try:
                     ext_instance = obj()
                     try:
-                        await asyncio.wait_for(ext_instance.on_load(), timeout=V3_DISCOVERY_TIMEOUT)
+                        await asyncio.wait_for(
+                            ext_instance.on_load(), timeout=V3_DISCOVERY_TIMEOUT
+                        )
                     except asyncio.TimeoutError:
-                        logger.error("%s V3 Extension %s timed out in on_load()", LOG_PREFIX, name)
+                        logger.error(
+                            "%s V3 Extension %s timed out in on_load()",
+                            LOG_PREFIX,
+                            name,
+                        )
                         continue
                     try:
-                        v3_nodes = await asyncio.wait_for(ext_instance.get_node_list(), timeout=V3_DISCOVERY_TIMEOUT)
+                        v3_nodes = await asyncio.wait_for(
+                            ext_instance.get_node_list(), timeout=V3_DISCOVERY_TIMEOUT
+                        )
                     except asyncio.TimeoutError:
-                        logger.error("%s V3 Extension %s timed out in get_node_list()", LOG_PREFIX, name)
+                        logger.error(
+                            "%s V3 Extension %s timed out in get_node_list()",
+                            LOG_PREFIX,
+                            name,
+                        )
                         continue
                     for node_cls in v3_nodes:
                         if hasattr(node_cls, "GET_SCHEMA"):
@@ -151,9 +177,9 @@ class ComfyNodeExtension(ExtensionBase):
         except ImportError:
             pass
 
-        module_name = getattr(module, '__name__', 'isolated_nodes')
+        module_name = getattr(module, "__name__", "isolated_nodes")
         for node_cls in self.node_classes.values():
-            if hasattr(node_cls, '__module__') and '/' in str(node_cls.__module__):
+            if hasattr(node_cls, "__module__") and "/" in str(node_cls.__module__):
                 node_cls.__module__ = module_name
 
         self.node_instances = {}
@@ -168,14 +194,18 @@ class ComfyNodeExtension(ExtensionBase):
         node_cls = self._get_node_class(node_name)
         is_v3 = issubclass(node_cls, _ComfyNodeInternal)
 
-        input_types_raw = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
+        input_types_raw = (
+            node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
+        )
         output_is_list = getattr(node_cls, "OUTPUT_IS_LIST", None)
         if output_is_list is not None:
             output_is_list = tuple(bool(x) for x in output_is_list)
 
         details: Dict[str, Any] = {
             "input_types": _sanitize_for_transport(input_types_raw),
-            "return_types": tuple(str(t) for t in getattr(node_cls, "RETURN_TYPES", ())),
+            "return_types": tuple(
+                str(t) for t in getattr(node_cls, "RETURN_TYPES", ())
+            ),
             "return_names": getattr(node_cls, "RETURN_NAMES", None),
             "function": str(getattr(node_cls, "FUNCTION", "execute")),
             "category": str(getattr(node_cls, "CATEGORY", "")),
@@ -192,19 +222,30 @@ class ComfyNodeExtension(ExtensionBase):
                     schema_v3 = asdict(schema.get_v3_info(node_cls))
                 except (AttributeError, TypeError):
                     schema_v3 = self._build_schema_v3_fallback(schema)
-                details.update({
-                    "schema_v1": schema_v1,
-                    "schema_v3": schema_v3,
-                    "hidden": [h.value for h in (schema.hidden or [])],
-                    "description": getattr(schema, "description", ""),
-                    "deprecated": bool(getattr(node_cls, "DEPRECATED", False)),
-                    "experimental": bool(getattr(node_cls, "EXPERIMENTAL", False)),
-                    "api_node": bool(getattr(node_cls, "API_NODE", False)),
-                    "input_is_list": bool(getattr(node_cls, "INPUT_IS_LIST", False)),
-                    "not_idempotent": bool(getattr(node_cls, "NOT_IDEMPOTENT", False)),
-                })
+                details.update(
+                    {
+                        "schema_v1": schema_v1,
+                        "schema_v3": schema_v3,
+                        "hidden": [h.value for h in (schema.hidden or [])],
+                        "description": getattr(schema, "description", ""),
+                        "deprecated": bool(getattr(node_cls, "DEPRECATED", False)),
+                        "experimental": bool(getattr(node_cls, "EXPERIMENTAL", False)),
+                        "api_node": bool(getattr(node_cls, "API_NODE", False)),
+                        "input_is_list": bool(
+                            getattr(node_cls, "INPUT_IS_LIST", False)
+                        ),
+                        "not_idempotent": bool(
+                            getattr(node_cls, "NOT_IDEMPOTENT", False)
+                        ),
+                    }
+                )
             except Exception as exc:
-                logger.warning("%s V3 schema serialization failed for %s: %s", LOG_PREFIX, node_name, exc)
+                logger.warning(
+                    "%s V3 schema serialization failed for %s: %s",
+                    LOG_PREFIX,
+                    node_name,
+                    exc,
+                )
         return details
 
     def _build_schema_v3_fallback(self, schema) -> Dict[str, Any]:
@@ -242,7 +283,9 @@ class ComfyNodeExtension(ExtensionBase):
             return
 
         io_type_fn = getattr(io_obj, "get_io_type", None)
-        io_type = io_type_fn() if callable(io_type_fn) else getattr(io_obj, "io_type", None)
+        io_type = (
+            io_type_fn() if callable(io_type_fn) else getattr(io_obj, "io_type", None)
+        )
 
         as_dict_fn = getattr(io_obj, "as_dict", None)
         payload = as_dict_fn() if callable(as_dict_fn) else {}
@@ -305,7 +348,7 @@ class ComfyNodeExtension(ExtensionBase):
 
         # Set hidden on node class if any hidden params found
         if hidden_found:
-            if not hasattr(node_cls, 'hidden') or node_cls.hidden is None:
+            if not hasattr(node_cls, "hidden") or node_cls.hidden is None:
                 node_cls.hidden = HiddenHolder.from_dict(hidden_found)
             else:
                 # Update existing hidden holder
@@ -323,8 +366,11 @@ class ComfyNodeExtension(ExtensionBase):
                 result = await handler(**resolved_inputs)
             else:
                 import functools
+
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(None, functools.partial(handler, **resolved_inputs))
+                result = await loop.run_in_executor(
+                    None, functools.partial(handler, **resolved_inputs)
+                )
         except Exception:
             logger.exception(
                 "%s ISO:child_execute_error ext=%s node=%s",
@@ -334,7 +380,7 @@ class ComfyNodeExtension(ExtensionBase):
             )
             raise
 
-        if type(result).__name__ == 'NodeOutput':
+        if type(result).__name__ == "NodeOutput":
             result = result.args
         if self._is_comfy_protocol_return(result):
             logger.debug(
@@ -359,17 +405,31 @@ class ComfyNodeExtension(ExtensionBase):
     async def flush_transport_state(self) -> int:
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
             return 0
-        logger.debug("%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?"))
+        logger.debug(
+            "%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?")
+        )
         flushed = _flush_tensor_transport_state("EXT:workflow_end")
         try:
-            from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
+            from comfy.isolation.model_patcher_proxy_registry import (
+                ModelPatcherRegistry,
+            )
+
             registry = ModelPatcherRegistry()
             removed = registry.sweep_pending_cleanup()
             if removed > 0:
-                logger.debug("%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed)
+                logger.debug(
+                    "%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed
+                )
         except Exception:
-            logger.debug("%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True)
-        logger.debug("%s ISO:child_flush_done ext=%s flushed=%d", LOG_PREFIX, getattr(self, "name", "?"), flushed)
+            logger.debug(
+                "%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True
+            )
+        logger.debug(
+            "%s ISO:child_flush_done ext=%s flushed=%d",
+            LOG_PREFIX,
+            getattr(self, "name", "?"),
+            flushed,
+        )
         return flushed
 
     async def get_remote_object(self, object_id: str) -> Any:
@@ -386,12 +446,21 @@ class ComfyNodeExtension(ExtensionBase):
             return data.detach() if data.requires_grad else data
 
         # Special-case clip vision outputs: preserve attribute access by packing fields
-        if hasattr(data, "penultimate_hidden_states") or hasattr(data, "last_hidden_state"):
+        if hasattr(data, "penultimate_hidden_states") or hasattr(
+            data, "last_hidden_state"
+        ):
             fields = {}
-            for attr in ("penultimate_hidden_states", "last_hidden_state", "image_embeds", "text_embeds"):
+            for attr in (
+                "penultimate_hidden_states",
+                "last_hidden_state",
+                "image_embeds",
+                "text_embeds",
+            ):
                 if hasattr(data, attr):
                     try:
-                        fields[attr] = self._wrap_unpicklable_objects(getattr(data, attr))
+                        fields[attr] = self._wrap_unpicklable_objects(
+                            getattr(data, attr)
+                        )
                     except Exception:
                         pass
             if fields:
@@ -401,20 +470,22 @@ class ComfyNodeExtension(ExtensionBase):
         # They will be handled via RemoteObjectHandle below.
 
         type_name = type(data).__name__
-        if type_name == 'ModelPatcherProxy':
+        if type_name == "ModelPatcherProxy":
             return {"__type__": "ModelPatcherRef", "model_id": data._instance_id}
-        if type_name == 'CLIPProxy':
+        if type_name == "CLIPProxy":
             return {"__type__": "CLIPRef", "clip_id": data._instance_id}
-        if type_name == 'VAEProxy':
+        if type_name == "VAEProxy":
             return {"__type__": "VAERef", "vae_id": data._instance_id}
-        if type_name == 'ModelSamplingProxy':
+        if type_name == "ModelSamplingProxy":
             return {"__type__": "ModelSamplingRef", "ms_id": data._instance_id}
 
         if isinstance(data, (list, tuple)):
             wrapped = [self._wrap_unpicklable_objects(item) for item in data]
             return tuple(wrapped) if isinstance(data, tuple) else wrapped
         if isinstance(data, dict):
-            converted_dict = {k: self._wrap_unpicklable_objects(v) for k, v in data.items()}
+            converted_dict = {
+                k: self._wrap_unpicklable_objects(v) for k, v in data.items()
+            }
             return {"__pyisolate_attrdict__": True, "data": converted_dict}
 
         object_id = str(uuid.uuid4())
@@ -430,10 +501,16 @@ class ComfyNodeExtension(ExtensionBase):
         if isinstance(data, dict):
             ref_type = data.get("__type__")
             if ref_type in ("CLIPRef", "ModelPatcherRef", "VAERef"):
-                from pyisolate._internal.model_serialization import deserialize_proxy_result
+                from pyisolate._internal.model_serialization import (
+                    deserialize_proxy_result,
+                )
+
                 return deserialize_proxy_result(data)
             if ref_type == "ModelSamplingRef":
-                from pyisolate._internal.model_serialization import deserialize_proxy_result
+                from pyisolate._internal.model_serialization import (
+                    deserialize_proxy_result,
+                )
+
                 return deserialize_proxy_result(data)
             return {k: self._resolve_remote_objects(v) for k, v in data.items()}
 
@@ -455,14 +532,15 @@ class ComfyNodeExtension(ExtensionBase):
         return self.node_instances[node_name]
 
     async def before_module_loaded(self) -> None:
-
-
         # Inject initialization here if we think this is the child
         try:
             from comfy.isolation import initialize_proxies
+
             initialize_proxies()
         except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to call initialize_proxies in before_module_loaded: {e}")
+            logging.getLogger(__name__).error(
+                f"Failed to call initialize_proxies in before_module_loaded: {e}"
+            )
 
         await super().before_module_loaded()
         try:
@@ -485,7 +563,7 @@ class ComfyNodeExtension(ExtensionBase):
     ) -> Any:
         cache_key = f"{handler_module}.{handler_func}"
         if cache_key not in self._route_handlers:
-            if self._module is not None and hasattr(self._module, '__file__'):
+            if self._module is not None and hasattr(self._module, "__file__"):
                 node_dir = os.path.dirname(self._module.__file__)
                 if node_dir not in sys.path:
                     sys.path.insert(0, node_dir)
@@ -527,20 +605,32 @@ class ComfyNodeExtension(ExtensionBase):
             return {"type": "json", "body": response, "status": 200}
         if isinstance(response, str):
             return {"type": "text", "body": response, "status": 200}
-        if hasattr(response, 'text') and hasattr(response, 'status'):
+        if hasattr(response, "text") and hasattr(response, "status"):
             return {
                 "type": "text",
-                "body": response.text if hasattr(response, 'text') else str(response.body),
+                "body": response.text
+                if hasattr(response, "text")
+                else str(response.body),
                 "status": response.status,
-                "headers": dict(response.headers) if hasattr(response, 'headers') else {},
+                "headers": dict(response.headers)
+                if hasattr(response, "headers")
+                else {},
             }
-        if hasattr(response, 'body') and hasattr(response, 'status'):
+        if hasattr(response, "body") and hasattr(response, "status"):
             body = response.body
             if isinstance(body, bytes):
                 try:
-                    return {"type": "text", "body": body.decode('utf-8'), "status": response.status}
+                    return {
+                        "type": "text",
+                        "body": body.decode("utf-8"),
+                        "status": response.status,
+                    }
                 except UnicodeDecodeError:
-                    return {"type": "binary", "body": body.hex(), "status": response.status}
+                    return {
+                        "type": "binary",
+                        "body": body.hex(),
+                        "status": response.status,
+                    }
             return {"type": "json", "body": body, "status": response.status}
         return {"type": "text", "body": str(response), "status": 200}
 
@@ -553,7 +643,9 @@ class MockRequest:
         self._body = data.get("body", {})
         self._text = data.get("text", "")
         self.headers = data.get("headers", {})
-        self.content_type = data.get("content_type", self.headers.get("Content-Type", "application/json"))
+        self.content_type = data.get(
+            "content_type", self.headers.get("Content-Type", "application/json")
+        )
         self.match_info = data.get("match_info", {})
 
     async def json(self) -> Any:
@@ -578,4 +670,4 @@ class MockRequest:
         return ""
 
     async def read(self) -> bytes:
-        return (await self.text()).encode('utf-8')
+        return (await self.text()).encode("utf-8")

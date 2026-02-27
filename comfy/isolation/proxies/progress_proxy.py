@@ -6,8 +6,10 @@ from typing import Any, Optional
 try:
     from pyisolate import ProxiedSingleton
 except ImportError:
+
     class ProxiedSingleton:
         pass
+
 
 from comfy_execution.progress import get_progress_state
 

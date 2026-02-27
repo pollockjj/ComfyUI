@@ -1,3 +1,4 @@
+# pylint: disable=consider-using-from-import,cyclic-import,global-statement,global-variable-not-assigned,import-outside-toplevel,logging-fstring-interpolation
 from __future__ import annotations
 import asyncio
 import inspect
@@ -27,21 +28,21 @@ logger = logging.getLogger(__name__)
 _WORKFLOW_BOUNDARY_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024
 
 
-
-
-
 def initialize_proxies() -> None:
     from .child_hooks import is_child_process
-    is_child = is_child_process()
 
+    is_child = is_child_process()
 
     if is_child:
         from .child_hooks import initialize_child_process
+
         initialize_child_process()
     else:
         from .host_hooks import initialize_host_process
+
         initialize_host_process()
         start_shm_forensics()
+
 
 @dataclass(frozen=True)
 class IsolatedNodeSpec:
@@ -96,7 +97,9 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     concurrency_limit = max(1, (os.cpu_count() or 4) // 2)
     semaphore = asyncio.Semaphore(concurrency_limit)
 
-    async def load_with_semaphore(node_dir: Path, manifest: Path) -> List[IsolatedNodeSpec]:
+    async def load_with_semaphore(
+        node_dir: Path, manifest: Path
+    ) -> List[IsolatedNodeSpec]:
         async with semaphore:
             load_start = time.perf_counter()
             spec_list = await load_isolated_node(
@@ -104,7 +107,11 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
                 manifest,
                 logger,
                 lambda name, info, extension: build_stub_class(
-                    name, info, extension, _RUNNING_EXTENSIONS, logger,
+                    name,
+                    info,
+                    extension,
+                    _RUNNING_EXTENSIONS,
+                    logger,
                 ),
                 PYISOLATE_VENV_ROOT,
                 _EXTENSION_MANAGERS,
@@ -118,16 +125,25 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
                 )
                 for node_name, display_name, stub_cls in spec_list
             ]
-            isolated_node_timings.append((time.perf_counter() - load_start, node_dir, len(spec_list)))
+            isolated_node_timings.append(
+                (time.perf_counter() - load_start, node_dir, len(spec_list))
+            )
             return spec_list
 
-    tasks = [load_with_semaphore(node_dir, manifest) for node_dir, manifest in manifest_entries]
+    tasks = [
+        load_with_semaphore(node_dir, manifest)
+        for node_dir, manifest in manifest_entries
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     specs: List[IsolatedNodeSpec] = []
     for result in results:
         if isinstance(result, Exception):
-            logger.error("%s Isolated node failed during startup; continuing: %s", LOG_PREFIX, result)
+            logger.error(
+                "%s Isolated node failed during startup; continuing: %s",
+                LOG_PREFIX,
+                result,
+            )
             continue
         specs.extend(result)
 
@@ -152,7 +168,10 @@ def _get_class_types_for_extension(extension_name: str) -> Set[str]:
 
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
-    async def _stop_extension(ext_name: str, extension: "ComfyNodeExtension", reason: str) -> None:
+
+    async def _stop_extension(
+        ext_name: str, extension: "ComfyNodeExtension", reason: str
+    ) -> None:
         logger.info("%s ISO:eject_start ext=%s reason=%s", LOG_PREFIX, ext_name, reason)
         logger.debug("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
         stop_result = extension.stop()
@@ -174,7 +193,11 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
 
         # If NONE of this extension's nodes are in the execution graph → evict
         if not ext_class_types.intersection(needed_class_types):
-            await _stop_extension(ext_name, extension, "isolated custom_node not in execution graph, evicting")
+            await _stop_extension(
+                ext_name,
+                extension,
+                "isolated custom_node not in execution graph, evicting",
+            )
 
     # Isolated child processes add steady VRAM pressure; reclaim host-side models
     # at workflow boundaries so subsequent host nodes (e.g. CLIP encode) keep headroom.
@@ -203,10 +226,14 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
                 model_management.free_memory(required, device, for_dynamic=False)
                 model_management.soft_empty_cache()
     except Exception:
-        logger.debug("%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True)
+        logger.debug(
+            "%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True
+        )
     finally:
         scan_shm_forensics("ISO:notify_graph_done", refresh_model_context=True)
-        logger.debug("%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS))
+        logger.debug(
+            "%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS)
+        )
 
 
 async def flush_running_extensions_transport_state() -> int:
@@ -220,10 +247,19 @@ async def flush_running_extensions_transport_state() -> int:
             if isinstance(flushed, int):
                 total_flushed += flushed
                 if flushed > 0:
-                    logger.debug("%s %s workflow-end flush released=%d", LOG_PREFIX, ext_name, flushed)
+                    logger.debug(
+                        "%s %s workflow-end flush released=%d",
+                        LOG_PREFIX,
+                        ext_name,
+                        flushed,
+                    )
         except Exception:
-            logger.debug("%s %s workflow-end flush failed", LOG_PREFIX, ext_name, exc_info=True)
-    scan_shm_forensics("ISO:flush_running_extensions_transport_state", refresh_model_context=True)
+            logger.debug(
+                "%s %s workflow-end flush failed", LOG_PREFIX, ext_name, exc_info=True
+            )
+    scan_shm_forensics(
+        "ISO:flush_running_extensions_transport_state", refresh_model_context=True
+    )
     return total_flushed
 
 
@@ -251,19 +287,19 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
 
     # Update RPCs from ExtensionManagers
     for manager in _EXTENSION_MANAGERS:
-        if not hasattr(manager, 'extensions'):
+        if not hasattr(manager, "extensions"):
             continue
         for name, extension in manager.extensions.items():
-            if hasattr(extension, 'rpc') and extension.rpc is not None:
-                if hasattr(extension.rpc, 'update_event_loop'):
+            if hasattr(extension, "rpc") and extension.rpc is not None:
+                if hasattr(extension.rpc, "update_event_loop"):
                     extension.rpc.update_event_loop(loop)
                     update_count += 1
                     logger.debug(f"{LOG_PREFIX}Updated loop on extension '{name}'")
 
     # Also update RPCs from running extensions (they may have direct RPC refs)
     for name, extension in _RUNNING_EXTENSIONS.items():
-        if hasattr(extension, 'rpc') and extension.rpc is not None:
-            if hasattr(extension.rpc, 'update_event_loop'):
+        if hasattr(extension, "rpc") and extension.rpc is not None:
+            if hasattr(extension.rpc, "update_event_loop"):
                 extension.rpc.update_event_loop(loop)
                 update_count += 1
                 logger.debug(f"{LOG_PREFIX}Updated loop on running extension '{name}'")
@@ -271,7 +307,9 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
     if update_count > 0:
         logger.debug(f"{LOG_PREFIX}Updated event loop on {update_count} RPC instances")
     else:
-        logger.debug(f"{LOG_PREFIX}No RPC instances found to update (managers={len(_EXTENSION_MANAGERS)}, running={len(_RUNNING_EXTENSIONS)})")
+        logger.debug(
+            f"{LOG_PREFIX}No RPC instances found to update (managers={len(_EXTENSION_MANAGERS)}, running={len(_RUNNING_EXTENSIONS)})"
+        )
 
 
 __all__ = [

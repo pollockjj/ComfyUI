@@ -1,3 +1,4 @@
+# pylint: disable=consider-using-from-import,import-outside-toplevel,no-member
 from __future__ import annotations
 
 import copy
@@ -88,7 +89,9 @@ def _flush_tensor_transport_state(marker: str, logger: logging.Logger) -> None:
         return
     flushed = flush_tensor_keeper()
     if flushed > 0:
-        logger.debug("%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed)
+        logger.debug(
+            "%s %s flush_tensor_keeper released=%d", LOG_PREFIX, marker, flushed
+        )
 
 
 def _relieve_host_vram_pressure(marker: str, logger: logging.Logger) -> None:
@@ -149,6 +152,7 @@ def build_stub_class(
 
     async def _execute(self, **inputs):
         from comfy.isolation import _RUNNING_EXTENSIONS
+
         # Update BOTH the local dict AND the module-level dict
         running_extensions[extension.name] = extension
         _RUNNING_EXTENSIONS[extension.name] = extension
@@ -179,6 +183,7 @@ def build_stub_class(
                 serialize_for_isolation,
                 deserialize_from_isolation,
             )
+
             prev_child = os.environ.pop("PYISOLATE_CHILD", None)
             logger.debug(
                 "%s ISO:serialize_start ext=%s node=%s uid=%s",
@@ -235,7 +240,13 @@ def build_stub_class(
                 node_unique_id or "-",
             )
             scan_shm_forensics("RUNTIME:execute_end", refresh_model_context=True)
-    def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
+
+    def _input_types(
+        cls,
+        include_hidden: bool = True,
+        return_schema: bool = False,
+        live_inputs: Any = None,
+    ):
         if not is_v3:
             return restored_input_types
 
@@ -298,7 +309,6 @@ def build_stub_class(
         attributes["API_NODE"] = info.get("api_node", False)
         attributes["NOT_IDEMPOTENT"] = info.get("not_idempotent", False)
         attributes["INPUT_IS_LIST"] = info.get("input_is_list", False)
-
 
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
     bases = (_ComfyNodeInternal,) if is_v3 else ()
