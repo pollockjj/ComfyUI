@@ -11,6 +11,7 @@ import folder_paths
 from .extension_loader import load_isolated_node
 from .manifest_loader import find_manifest_directories
 from .runtime_helpers import build_stub_class, get_class_types_for_extension
+from .shm_forensics import scan_shm_forensics, start_shm_forensics
 
 if TYPE_CHECKING:
     from pyisolate import ExtensionManager
@@ -40,6 +41,7 @@ def initialize_proxies() -> None:
     else:
         from .host_hooks import initialize_host_process
         initialize_host_process()
+        start_shm_forensics()
 
 @dataclass(frozen=True)
 class IsolatedNodeSpec:
@@ -158,7 +160,9 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             await stop_result
         _RUNNING_EXTENSIONS.pop(ext_name, None)
         logger.debug("%s ISO:stop_done ext=%s", LOG_PREFIX, ext_name)
+        scan_shm_forensics("ISO:stop_extension", refresh_model_context=True)
 
+    scan_shm_forensics("ISO:notify_graph_start", refresh_model_context=True)
     logger.debug(
         "%s ISO:notify_graph_start running=%d needed=%d",
         LOG_PREFIX,
@@ -201,6 +205,7 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     except Exception:
         logger.debug("%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True)
     finally:
+        scan_shm_forensics("ISO:notify_graph_done", refresh_model_context=True)
         logger.debug("%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS))
 
 
@@ -218,6 +223,7 @@ async def flush_running_extensions_transport_state() -> int:
                     logger.debug("%s %s workflow-end flush released=%d", LOG_PREFIX, ext_name, flushed)
         except Exception:
             logger.debug("%s %s workflow-end flush failed", LOG_PREFIX, ext_name, exc_info=True)
+    scan_shm_forensics("ISO:flush_running_extensions_transport_state", refresh_model_context=True)
     return total_flushed
 
 

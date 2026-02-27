@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Set, TYPE_CHECKING
 from .proxies.helper_proxies import restore_input_types
 from comfy_api.internal import _ComfyNodeInternal
 from comfy_api.latest import _io as latest_io
+from .shm_forensics import scan_shm_forensics
 
 if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
@@ -169,9 +170,11 @@ def build_stub_class(
             resources["fd_count"],
             resources["shm_sender_files"],
         )
+        scan_shm_forensics("RUNTIME:execute_start", refresh_model_context=True)
         try:
             if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
                 _relieve_host_vram_pressure("RUNTIME:pre_execute", logger)
+                scan_shm_forensics("RUNTIME:pre_execute", refresh_model_context=True)
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,
                 deserialize_from_isolation,
@@ -208,6 +211,7 @@ def build_stub_class(
                 node_unique_id or "-",
             )
             deserialized = await deserialize_from_isolation(result, extension)
+            scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
             return _detach_shared_cpu_tensors(deserialized)
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
@@ -230,6 +234,7 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
+            scan_shm_forensics("RUNTIME:execute_end", refresh_model_context=True)
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
             return restored_input_types
