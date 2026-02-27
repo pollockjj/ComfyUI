@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Optional, List, Set, Dict, Callable
 
 from comfy.isolation.proxies.base import (
@@ -17,8 +16,7 @@ logger = logging.getLogger(__name__)
 class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     _registry_class = ModelPatcherRegistry
     __module__ = "comfy.model_patcher"
-    _APPLY_MODEL_GUARD_INTERVAL_S = 0.25
-    _APPLY_MODEL_GUARD_PADDING_BYTES = 64 * 1024 * 1024
+    _APPLY_MODEL_GUARD_PADDING_BYTES = 32 * 1024 * 1024
 
     def _get_rpc(self) -> Any:
         if self._rpc_caller is None:
@@ -222,36 +220,44 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
             return sum(self._cpu_tensor_bytes(v) for v in obj)
         return 0
 
-    def _ensure_apply_model_headroom(self, required_bytes: int) -> None:
+    def _ensure_apply_model_headroom(self, required_bytes: int) -> bool:
         if required_bytes <= 0:
-            return
+            return True
 
+        import torch
         import comfy.model_management as model_management
 
-        target = self.load_device
-        if not hasattr(target, "type") or target.type != "cuda":
-            return
+        target_raw = self.load_device
+        try:
+            if isinstance(target_raw, torch.device):
+                target = target_raw
+            elif isinstance(target_raw, str):
+                target = torch.device(target_raw)
+            elif isinstance(target_raw, int):
+                target = torch.device(f"cuda:{target_raw}")
+            else:
+                target = torch.device(target_raw)
+        except Exception:
+            return True
 
-        required = max(
-            required_bytes + self._APPLY_MODEL_GUARD_PADDING_BYTES,
-            model_management.minimum_inference_memory(),
-        )
-        free_now = model_management.get_free_memory(target)
-        if free_now >= required:
-            return
+        if target.type != "cuda":
+            return True
 
-        now = time.monotonic()
-        last = getattr(self, "_last_apply_model_guard_at", 0.0)
-        if now - last < self._APPLY_MODEL_GUARD_INTERVAL_S:
-            return
-        self._last_apply_model_guard_at = now
+        required = required_bytes + self._APPLY_MODEL_GUARD_PADDING_BYTES
+        if model_management.get_free_memory(target) >= required:
+            return True
 
         model_management.cleanup_models_gc()
         model_management.cleanup_models()
+        model_management.soft_empty_cache()
 
-        free_after_cleanup = model_management.get_free_memory(target)
-        if free_after_cleanup < required:
+        if model_management.get_free_memory(target) < required:
             model_management.free_memory(required, target, for_dynamic=True)
+            model_management.soft_empty_cache()
+
+        if model_management.get_free_memory(target) < required:
+            # Escalate to non-dynamic unloading before dispatching CUDA transfer.
+            model_management.free_memory(required, target, for_dynamic=False)
             model_management.soft_empty_cache()
 
         if model_management.get_free_memory(target) < required:
@@ -259,6 +265,8 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
                 [self],
                 minimum_memory_required=required,
             )
+
+        return model_management.get_free_memory(target) >= required
 
     def apply_model(self, *args, **kwargs) -> Any:
         import torch
@@ -277,9 +285,15 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
                 return tuple(_to_cuda(v) for v in obj)
             return obj
 
-        args = _to_cuda(args)
-        kwargs = _to_cuda(kwargs)
-        return self._call_rpc("inner_model_apply_model", args, kwargs)
+        try:
+            args_cuda = _to_cuda(args)
+            kwargs_cuda = _to_cuda(kwargs)
+        except torch.OutOfMemoryError:
+            self._ensure_apply_model_headroom(required_bytes)
+            args_cuda = _to_cuda(args)
+            kwargs_cuda = _to_cuda(kwargs)
+
+        return self._call_rpc("inner_model_apply_model", args_cuda, kwargs_cuda)
 
     def model_state_dict(self, filter_prefix: Optional[str] = None) -> Any:
         keys = self._call_rpc("model_state_dict", filter_prefix)

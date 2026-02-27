@@ -684,22 +684,6 @@ class PromptExecutor:
         except Exception:
             logging.debug("][ EX:flush_running_extensions_transport_state failed", exc_info=True)
 
-    def _flush_tensor_keeper_safe(self) -> None:
-        try:
-            from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
-        except Exception:
-            flush_tensor_keeper = None
-        if callable(flush_tensor_keeper):
-            flush_tensor_keeper()
-
-    def _purge_orphan_sender_shm_files_safe(self, min_age_seconds: float = 15.0) -> None:
-        try:
-            from pyisolate import purge_orphan_sender_shm_files  # type: ignore[attr-defined]
-        except Exception:
-            purge_orphan_sender_shm_files = None
-        if callable(purge_orphan_sender_shm_files):
-            purge_orphan_sender_shm_files(min_age_seconds=min_age_seconds)
-
     def add_message(self, event, data: dict, broadcast: bool):
         data = {
             **data,
@@ -776,8 +760,6 @@ class PromptExecutor:
                     comfy.model_management.cleanup_models()
                     gc.collect()
                     comfy.model_management.soft_empty_cache()
-                    self._flush_tensor_keeper_safe()
-                    self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
                 except Exception:
                     logging.debug("][ EX:isolation_boundary_cleanup_start failed", exc_info=True)
 
@@ -845,9 +827,6 @@ class PromptExecutor:
                 "meta": meta_outputs,
             }
             comfy.model_management.cleanup_models_gc()
-            self._flush_tensor_keeper_safe()
-            if args.use_process_isolation:
-                self._purge_orphan_sender_shm_files_safe(min_age_seconds=1.0)
             self.server.last_node_id = None
             if comfy.model_management.DISABLE_SMART_MEMORY:
                 comfy.model_management.unload_all_models()

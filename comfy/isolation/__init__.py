@@ -23,6 +23,7 @@ PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
 PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
+_WORKFLOW_BOUNDARY_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024
 
 
 
@@ -149,18 +150,67 @@ def _get_class_types_for_extension(extension_name: str) -> Set[str]:
 
 async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
+    async def _stop_extension(ext_name: str, extension: "ComfyNodeExtension", reason: str) -> None:
+        logger.info("%s ISO:eject_start ext=%s reason=%s", LOG_PREFIX, ext_name, reason)
+        proxy = getattr(extension, "proxy", None)
+        if proxy is not None:
+            remote_stop = getattr(proxy, "stop", None)
+            if callable(remote_stop):
+                logger.info("%s ISO:remote_stop_start ext=%s", LOG_PREFIX, ext_name)
+                remote_stop_result = remote_stop()
+                if inspect.isawaitable(remote_stop_result):
+                    await remote_stop_result
+                logger.info("%s ISO:remote_stop_done ext=%s", LOG_PREFIX, ext_name)
+        logger.info("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
+        stop_result = extension.stop()
+        if inspect.isawaitable(stop_result):
+            await stop_result
+        _RUNNING_EXTENSIONS.pop(ext_name, None)
+        logger.info("%s ISO:stop_done ext=%s", LOG_PREFIX, ext_name)
+
+    logger.info(
+        "%s ISO:notify_graph_start running=%d needed=%d",
+        LOG_PREFIX,
+        len(_RUNNING_EXTENSIONS),
+        len(needed_class_types),
+    )
     for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
         ext_class_types = _get_class_types_for_extension(ext_name)
 
         # If NONE of this extension's nodes are in the execution graph → evict
         if not ext_class_types.intersection(needed_class_types):
-            logger.info(
-                f"][ {ext_name} isolated custom_node not in execution graph, evicting"
+            await _stop_extension(ext_name, extension, "isolated custom_node not in execution graph, evicting")
+
+    # Isolated child processes add steady VRAM pressure; reclaim host-side models
+    # at workflow boundaries so subsequent host nodes (e.g. CLIP encode) keep headroom.
+    try:
+        import comfy.model_management as model_management
+
+        device = model_management.get_torch_device()
+        if getattr(device, "type", None) == "cuda":
+            required = max(
+                model_management.minimum_inference_memory(),
+                _WORKFLOW_BOUNDARY_MIN_FREE_VRAM_BYTES,
             )
-            stop_result = extension.stop()
-            if inspect.isawaitable(stop_result):
-                await stop_result
-            del _RUNNING_EXTENSIONS[ext_name]
+            free_before = model_management.get_free_memory(device)
+            if free_before < required and _RUNNING_EXTENSIONS:
+                for ext_name, extension in list(_RUNNING_EXTENSIONS.items()):
+                    await _stop_extension(
+                        ext_name,
+                        extension,
+                        f"boundary low-vram restart (free={int(free_before)} target={int(required)})",
+                    )
+            if model_management.get_free_memory(device) < required:
+                model_management.unload_all_models()
+            model_management.cleanup_models_gc()
+            model_management.cleanup_models()
+            if model_management.get_free_memory(device) < required:
+                model_management.free_memory(required, device, for_dynamic=False)
+                model_management.soft_empty_cache()
+    except Exception:
+        logger.debug("%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True)
+    finally:
+        logger.info("%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS))
 
 
 async def flush_running_extensions_transport_state() -> int:

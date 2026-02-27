@@ -29,6 +29,7 @@ from comfy_api.internal import _ComfyNodeInternal
 
 LOG_PREFIX = "]["
 V3_DISCOVERY_TIMEOUT = 30
+_PRE_EXEC_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,14 @@ def _relieve_child_vram_pressure(marker: str) -> None:
     if not hasattr(device, "type") or device.type == "cpu":
         return
 
-    required = model_management.minimum_inference_memory()
+    required = max(
+        model_management.minimum_inference_memory(),
+        _PRE_EXEC_MIN_FREE_VRAM_BYTES,
+    )
     if model_management.get_free_memory(device) < required:
         model_management.free_memory(required, device, for_dynamic=True)
+        if model_management.get_free_memory(device) < required:
+            model_management.free_memory(required, device, for_dynamic=False)
         model_management.cleanup_models()
         model_management.soft_empty_cache()
         logger.debug("%s %s free_memory target=%d", LOG_PREFIX, marker, required)
@@ -250,8 +256,14 @@ class ComfyNodeExtension(ExtensionBase):
         return {}
 
     async def execute_node(self, node_name: str, **inputs: Any) -> Tuple[Any, ...]:
+        logger.info(
+            "%s ISO:child_execute_start ext=%s node=%s input_keys=%d",
+            LOG_PREFIX,
+            getattr(self, "name", "?"),
+            node_name,
+            len(inputs),
+        )
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-            _flush_tensor_transport_state("EXT:pre_execute")
             _relieve_child_vram_pressure("EXT:pre_execute")
 
         resolved_inputs = self._resolve_remote_objects(inputs)
@@ -306,26 +318,48 @@ class ComfyNodeExtension(ExtensionBase):
 
         handler = getattr(instance, function_name)
 
-        if asyncio.iscoroutinefunction(handler):
-            result = await handler(**resolved_inputs)
-        else:
-
-            import functools
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, functools.partial(handler, **resolved_inputs))
+        try:
+            if asyncio.iscoroutinefunction(handler):
+                result = await handler(**resolved_inputs)
+            else:
+                import functools
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, functools.partial(handler, **resolved_inputs))
+        except Exception:
+            logger.exception(
+                "%s ISO:child_execute_error ext=%s node=%s",
+                LOG_PREFIX,
+                getattr(self, "name", "?"),
+                node_name,
+            )
+            raise
 
         if type(result).__name__ == 'NodeOutput':
             result = result.args
         if self._is_comfy_protocol_return(result):
+            logger.info(
+                "%s ISO:child_execute_done ext=%s node=%s protocol_return=1",
+                LOG_PREFIX,
+                getattr(self, "name", "?"),
+                node_name,
+            )
             return self._wrap_unpicklable_objects(result)
 
         if not isinstance(result, tuple):
             result = (result,)
+        logger.info(
+            "%s ISO:child_execute_done ext=%s node=%s protocol_return=0 outputs=%d",
+            LOG_PREFIX,
+            getattr(self, "name", "?"),
+            node_name,
+            len(result),
+        )
         return self._wrap_unpicklable_objects(result)
 
     async def flush_transport_state(self) -> int:
         if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
             return 0
+        logger.info("%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?"))
         flushed = _flush_tensor_transport_state("EXT:workflow_end")
         try:
             from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
@@ -335,6 +369,7 @@ class ComfyNodeExtension(ExtensionBase):
                 logger.debug("%s EXT:workflow_end registry sweep removed=%d", LOG_PREFIX, removed)
         except Exception:
             logger.debug("%s EXT:workflow_end registry sweep failed", LOG_PREFIX, exc_info=True)
+        logger.info("%s ISO:child_flush_done ext=%s flushed=%d", LOG_PREFIX, getattr(self, "name", "?"), flushed)
         return flushed
 
     async def get_remote_object(self, object_id: str) -> Any:

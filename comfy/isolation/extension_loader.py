@@ -215,8 +215,9 @@ async def load_isolated_node(
     logger.info(f"][ {extension_name} metadata cached")
 
     # EJECT: Kill process after getting metadata (will respawn on first execution)
-    logger.info(f"][ {extension_name} ejecting after metadata extraction")
+    logger.info("%s ISO:metadata_eject_start ext=%s", "][", extension_name)
     await _stop_extension_safe(extension, extension_name)
+    logger.info("%s ISO:metadata_eject_done ext=%s", "][", extension_name)
 
     return specs
 

@@ -14,6 +14,106 @@ if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
 
 LOG_PREFIX = "]["
+_PRE_EXEC_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _resource_snapshot() -> Dict[str, int]:
+    fd_count = -1
+    shm_sender_files = 0
+    try:
+        fd_count = len(os.listdir("/proc/self/fd"))
+    except Exception:
+        pass
+    try:
+        shm_root = Path("/dev/shm")
+        if shm_root.exists():
+            prefix = f"torch_{os.getpid()}_"
+            shm_sender_files = sum(1 for _ in shm_root.glob(f"{prefix}*"))
+    except Exception:
+        pass
+    return {"fd_count": fd_count, "shm_sender_files": shm_sender_files}
+
+
+def _clone_cpu_tensors(value: Any) -> Any:
+    try:
+        import torch
+    except Exception:
+        return value
+
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "cpu":
+            cloned = value.clone()
+            if value.requires_grad:
+                cloned.requires_grad_(True)
+            return cloned
+        return value
+    if isinstance(value, list):
+        return [_clone_cpu_tensors(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_cpu_tensors(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _clone_cpu_tensors(v) for k, v in value.items()}
+    return value
+
+
+def _reset_torch_sharing_state(logger: logging.Logger) -> None:
+    try:
+        import gc
+        import torch
+
+        # Force reinitialization path for file-system sharing state.
+        try:
+            torch.multiprocessing.set_sharing_strategy("file_descriptor")
+        except Exception:
+            pass
+        torch.multiprocessing.set_sharing_strategy("file_system")
+        gc.collect()
+    except Exception:
+        logger.debug("%s ISO:sharing_state_reset_failed", LOG_PREFIX, exc_info=True)
+
+
+def _tensor_transport_summary(value: Any) -> Dict[str, int]:
+    summary: Dict[str, int] = {
+        "tensor_count": 0,
+        "cpu_tensors": 0,
+        "cuda_tensors": 0,
+        "shared_cpu_tensors": 0,
+        "tensor_bytes": 0,
+    }
+    try:
+        import torch
+    except Exception:
+        return summary
+
+    def visit(node: Any) -> None:
+        if isinstance(node, torch.Tensor):
+            summary["tensor_count"] += 1
+            summary["tensor_bytes"] += int(node.numel() * node.element_size())
+            if node.device.type == "cpu":
+                summary["cpu_tensors"] += 1
+                if node.is_shared():
+                    summary["shared_cpu_tensors"] += 1
+            elif node.device.type == "cuda":
+                summary["cuda_tensors"] += 1
+            return
+        if isinstance(node, dict):
+            for v in node.values():
+                visit(v)
+            return
+        if isinstance(node, (list, tuple)):
+            for v in node:
+                visit(v)
+
+    visit(value)
+    return summary
+
+
+def _extract_hidden_unique_id(inputs: Dict[str, Any]) -> str | None:
+    for key, value in inputs.items():
+        key_text = str(key)
+        if "unique_id" in key_text:
+            return str(value)
+    return None
 
 
 def _flush_tensor_transport_state(marker: str, logger: logging.Logger) -> None:
@@ -38,12 +138,39 @@ def _relieve_host_vram_pressure(marker: str, logger: logging.Logger) -> None:
     if not hasattr(device, "type") or device.type == "cpu":
         return
 
-    required = model_management.minimum_inference_memory()
+    required = max(
+        model_management.minimum_inference_memory(),
+        _PRE_EXEC_MIN_FREE_VRAM_BYTES,
+    )
     if model_management.get_free_memory(device) < required:
         model_management.free_memory(required, device, for_dynamic=True)
+        if model_management.get_free_memory(device) < required:
+            model_management.free_memory(required, device, for_dynamic=False)
         model_management.cleanup_models()
         model_management.soft_empty_cache()
         logger.debug("%s %s free_memory target=%d", LOG_PREFIX, marker, required)
+
+
+def _detach_shared_cpu_tensors(value: Any) -> Any:
+    try:
+        import torch
+    except Exception:
+        return value
+
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "cpu" and value.is_shared():
+            clone = value.clone()
+            if value.requires_grad:
+                clone.requires_grad_(True)
+            return clone
+        return value
+    if isinstance(value, list):
+        return [_detach_shared_cpu_tensors(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_detach_shared_cpu_tensors(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _detach_shared_cpu_tensors(v) for k, v in value.items()}
+    return value
 
 
 def build_stub_class(
@@ -63,28 +190,97 @@ def build_stub_class(
         running_extensions[extension.name] = extension
         _RUNNING_EXTENSIONS[extension.name] = extension
         prev_child = None
+        node_unique_id = _extract_hidden_unique_id(inputs)
+        summary = _tensor_transport_summary(inputs)
+        resources = _resource_snapshot()
+        logger.info(
+            "%s ISO:execute_start ext=%s node=%s uid=%s tensors=%d cpu=%d cuda=%d shared_cpu=%d bytes=%d fds=%d sender_shm=%d",
+            LOG_PREFIX,
+            extension.name,
+            node_name,
+            node_unique_id or "-",
+            summary["tensor_count"],
+            summary["cpu_tensors"],
+            summary["cuda_tensors"],
+            summary["shared_cpu_tensors"],
+            summary["tensor_bytes"],
+            resources["fd_count"],
+            resources["shm_sender_files"],
+        )
         try:
             if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
                 _relieve_host_vram_pressure("RUNTIME:pre_execute", logger)
-                _flush_tensor_transport_state("RUNTIME:pre_execute", logger)
             from pyisolate._internal.model_serialization import (
                 serialize_for_isolation,
                 deserialize_from_isolation,
             )
             prev_child = os.environ.pop("PYISOLATE_CHILD", None)
-            serialized = serialize_for_isolation(inputs)
+            logger.info(
+                "%s ISO:serialize_start ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
+            try:
+                serialized = serialize_for_isolation(inputs)
+            except RuntimeError as exc:
+                if "Broken pipe" not in str(exc):
+                    raise
+                logger.warning(
+                    "%s ISO:serialize_broken_pipe_retry ext=%s node=%s uid=%s",
+                    LOG_PREFIX,
+                    extension.name,
+                    node_name,
+                    node_unique_id or "-",
+                )
+                _reset_torch_sharing_state(logger)
+                serialized = serialize_for_isolation(_clone_cpu_tensors(inputs))
+            logger.info(
+                "%s ISO:serialize_done ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
+            logger.info(
+                "%s ISO:dispatch_start ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
             result = await extension.execute_node(node_name, **serialized)
+            logger.info(
+                "%s ISO:dispatch_done ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
             deserialized = await deserialize_from_isolation(result, extension)
-            return deserialized
+            return _detach_shared_cpu_tensors(deserialized)
         except ImportError:
             return await extension.execute_node(node_name, **inputs)
         except Exception:
+            logger.exception(
+                "%s ISO:execute_error ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
             raise
         finally:
             if prev_child is not None:
                 os.environ["PYISOLATE_CHILD"] = prev_child
-            if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
-                _flush_tensor_transport_state("RUNTIME:post_execute", logger)
+            logger.info(
+                "%s ISO:execute_end ext=%s node=%s uid=%s",
+                LOG_PREFIX,
+                extension.name,
+                node_name,
+                node_unique_id or "-",
+            )
     def _input_types(cls, include_hidden: bool = True, return_schema: bool = False, live_inputs: Any = None):
         if not is_v3:
             return restored_input_types
