@@ -152,15 +152,6 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
     """Evict running extensions not needed for current execution."""
     async def _stop_extension(ext_name: str, extension: "ComfyNodeExtension", reason: str) -> None:
         logger.info("%s ISO:eject_start ext=%s reason=%s", LOG_PREFIX, ext_name, reason)
-        proxy = getattr(extension, "proxy", None)
-        if proxy is not None:
-            remote_stop = getattr(proxy, "stop", None)
-            if callable(remote_stop):
-                logger.info("%s ISO:remote_stop_start ext=%s", LOG_PREFIX, ext_name)
-                remote_stop_result = remote_stop()
-                if inspect.isawaitable(remote_stop_result):
-                    await remote_stop_result
-                logger.info("%s ISO:remote_stop_done ext=%s", LOG_PREFIX, ext_name)
         logger.info("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
         stop_result = extension.stop()
         if inspect.isawaitable(stop_result):

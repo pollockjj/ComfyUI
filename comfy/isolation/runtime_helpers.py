@@ -34,44 +34,6 @@ def _resource_snapshot() -> Dict[str, int]:
     return {"fd_count": fd_count, "shm_sender_files": shm_sender_files}
 
 
-def _clone_cpu_tensors(value: Any) -> Any:
-    try:
-        import torch
-    except Exception:
-        return value
-
-    if isinstance(value, torch.Tensor):
-        if value.device.type == "cpu":
-            cloned = value.clone()
-            if value.requires_grad:
-                cloned.requires_grad_(True)
-            return cloned
-        return value
-    if isinstance(value, list):
-        return [_clone_cpu_tensors(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_clone_cpu_tensors(v) for v in value)
-    if isinstance(value, dict):
-        return {k: _clone_cpu_tensors(v) for k, v in value.items()}
-    return value
-
-
-def _reset_torch_sharing_state(logger: logging.Logger) -> None:
-    try:
-        import gc
-        import torch
-
-        # Force reinitialization path for file-system sharing state.
-        try:
-            torch.multiprocessing.set_sharing_strategy("file_descriptor")
-        except Exception:
-            pass
-        torch.multiprocessing.set_sharing_strategy("file_system")
-        gc.collect()
-    except Exception:
-        logger.debug("%s ISO:sharing_state_reset_failed", LOG_PREFIX, exc_info=True)
-
-
 def _tensor_transport_summary(value: Any) -> Dict[str, int]:
     summary: Dict[str, int] = {
         "tensor_count": 0,
@@ -222,20 +184,7 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
-            try:
-                serialized = serialize_for_isolation(inputs)
-            except RuntimeError as exc:
-                if "Broken pipe" not in str(exc):
-                    raise
-                logger.warning(
-                    "%s ISO:serialize_broken_pipe_retry ext=%s node=%s uid=%s",
-                    LOG_PREFIX,
-                    extension.name,
-                    node_name,
-                    node_unique_id or "-",
-                )
-                _reset_torch_sharing_state(logger)
-                serialized = serialize_for_isolation(_clone_cpu_tensors(inputs))
+            serialized = serialize_for_isolation(inputs)
             logger.info(
                 "%s ISO:serialize_done ext=%s node=%s uid=%s",
                 LOG_PREFIX,
