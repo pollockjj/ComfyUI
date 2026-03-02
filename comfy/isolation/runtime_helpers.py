@@ -150,6 +150,11 @@ def build_stub_class(
     function_name = "_pyisolate_execute"
     restored_input_types = restore_input_types(info.get("input_types", {}))
 
+    return_types = tuple(info.get("return_types", ()) or ())
+    preserve_remote_handles = any(
+        return_type in {"MODEL", "CLIP", "VAE"} for return_type in return_types
+    )
+
     async def _execute(self, **inputs):
         from comfy.isolation import _RUNNING_EXTENSIONS
 
@@ -215,7 +220,11 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
-            deserialized = await deserialize_from_isolation(result, extension)
+            deserialized = await deserialize_from_isolation(
+                result,
+                extension,
+                _nested=preserve_remote_handles,
+            )
             scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
             return _detach_shared_cpu_tensors(deserialized)
         except ImportError:
