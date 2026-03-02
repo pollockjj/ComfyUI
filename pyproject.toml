@@ -1,4 +1,4 @@
-[project]
+ [project]
 name = "ComfyUI"
 version = "0.15.1"
 readme = "README.md"
@@ -16,19 +16,9 @@ writable_paths = ["/dev/shm", "/tmp"]
 
 [tool.comfy.host.whitelist]
 "ComfyUI-Crystools" = "*"
-"ComfyUI-Florence2" = "*"
-"ComfyUI-GGUF" = "*"
-"ComfyUI-KJNodes" = "*"
-"ComfyUI-LTXVideo" = "*"
-"ComfyUI-Manager" = "*"
-"comfyui-depthanythingv2" = "*"
+"comfyui-florence2" = "*"
 "comfyui-kjnodes" = "*"
-"comfyui-videohelpersuite" = "*"
-"comfyui_controlnet_aux" = "*"
-"rgthree-comfy" = "*"
 "was-ns" = "*"
-"websocket_image_save.py" = "*"
-"ComfyUI-StabilityTest" = "*"
 
 [tool.ruff]
 lint.select = [
