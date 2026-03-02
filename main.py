@@ -44,6 +44,11 @@ if '--use-process-isolation' in sys.argv:
         if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:native'
 
+import comfy_aimdo.control
+
+if enables_dynamic_vram():
+    comfy_aimdo.control.init()
+
 if not IS_PYISOLATE_CHILD:
     from comfy_execution.progress import get_progress_state
     from comfy_execution.utils import get_executing_context
@@ -208,10 +213,6 @@ import gc
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
-import comfy_aimdo.control
-
-if enables_dynamic_vram():
-    comfy_aimdo.control.init()
 
 import comfy.utils
 
@@ -228,7 +229,7 @@ if not IS_PYISOLATE_CHILD:
 import comfy.memory_management
 import comfy.model_patcher
 
-if enables_dynamic_vram():
+if enables_dynamic_vram() and comfy.model_management.is_nvidia() and not comfy.model_management.is_wsl():
     if comfy.model_management.torch_version_numeric < (2, 8):
         logging.warning("Unsupported Pytorch detected. DynamicVRAM support requires Pytorch version 2.8 or later. Falling back to legacy ModelPatcher. VRAM estimates may be unreliable especially on Windows")
     elif comfy_aimdo.control.init_device(comfy.model_management.get_torch_device().index):
