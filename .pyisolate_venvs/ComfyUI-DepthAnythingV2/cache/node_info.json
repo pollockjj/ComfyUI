@@ -1,0 +1,81 @@
+{
+  "DepthAnything_V2": {
+    "input_types": {
+      "required": {
+        "da_model": {
+          "__pyisolate_tuple__": [
+            "DAMODEL"
+          ]
+        },
+        "images": {
+          "__pyisolate_tuple__": [
+            "IMAGE"
+          ]
+        }
+      }
+    },
+    "return_types": [
+      "IMAGE"
+    ],
+    "return_names": [
+      "image"
+    ],
+    "function": "process",
+    "category": "DepthAnythingV2",
+    "output_node": false,
+    "output_is_list": null,
+    "is_v3": false,
+    "display_name": "Depth Anything V2"
+  },
+  "DownloadAndLoadDepthAnythingV2Model": {
+    "input_types": {
+      "required": {
+        "model": {
+          "__pyisolate_tuple__": [
+            [
+              "depth_anything_v2_vits_fp16.safetensors",
+              "depth_anything_v2_vits_fp32.safetensors",
+              "depth_anything_v2_vitb_fp16.safetensors",
+              "depth_anything_v2_vitb_fp32.safetensors",
+              "depth_anything_v2_vitl_fp16.safetensors",
+              "depth_anything_v2_vitl_fp32.safetensors",
+              "depth_anything_v2_vitg_fp32.safetensors",
+              "depth_anything_v2_metric_hypersim_vitl_fp32.safetensors",
+              "depth_anything_v2_metric_vkitti_vitl_fp32.safetensors"
+            ],
+            {
+              "default": "depth_anything_v2_vitl_fp32.safetensors"
+            }
+          ]
+        }
+      },
+      "optional": {
+        "precision": {
+          "__pyisolate_tuple__": [
+            [
+              "auto",
+              "bf16",
+              "fp16",
+              "fp32"
+            ],
+            {
+              "default": "auto"
+            }
+          ]
+        }
+      }
+    },
+    "return_types": [
+      "DAMODEL"
+    ],
+    "return_names": [
+      "da_v2_model"
+    ],
+    "function": "loadmodel",
+    "category": "DepthAnythingV2",
+    "output_node": false,
+    "output_is_list": null,
+    "is_v3": false,
+    "display_name": "DownloadAndLoadDepthAnythingV2Model"
+  }
+}
