@@ -10,6 +10,25 @@ homepage = "https://www.comfy.org/"
 repository = "https://github.com/comfyanonymous/ComfyUI"
 documentation = "https://docs.comfy.org/"
 
+[tool.comfy.host]
+allow_network = false
+writable_paths = ["/dev/shm", "/tmp"]
+
+[tool.comfy.host.whitelist]
+"ComfyUI-Crystools" = "*"
+"ComfyUI-Florence2" = "*"
+"ComfyUI-GGUF" = "*"
+"ComfyUI-KJNodes" = "*"
+"ComfyUI-LTXVideo" = "*"
+"ComfyUI-Manager" = "*"
+"comfyui-depthanythingv2" = "*"
+"comfyui-kjnodes" = "*"
+"comfyui-videohelpersuite" = "*"
+"comfyui_controlnet_aux" = "*"
+"rgthree-comfy" = "*"
+"was-ns" = "*"
+"websocket_image_save.py" = "*"
+
 [tool.ruff]
 lint.select = [
   "N805", # invalid-first-argument-name-for-method
