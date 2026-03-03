@@ -43,6 +43,8 @@ from comfy_execution.utils import CurrentNodeContext
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 
+_AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED = False
+
 
 class ExecutionResult(Enum):
     SUCCESS = 0
@@ -540,7 +542,17 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     if args.verbose == "DEBUG":
                         comfy_aimdo.control.analyze()
                     comfy.model_management.reset_cast_buffers()
-                    comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                    vbar_lib = getattr(comfy_aimdo.model_vbar, "lib", None)
+                    if vbar_lib is not None:
+                        comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                    else:
+                        global _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED
+                        if not _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED:
+                            logging.warning(
+                                "DynamicVRAM backend unavailable for watermark reset; "
+                                "skipping vbar reset for this process."
+                            )
+                            _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED = True
 
             if has_pending_tasks:
                 pending_async_nodes[unique_id] = output_data
