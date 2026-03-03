@@ -76,6 +76,7 @@ class ModelType(Enum):
     FLUX = 8
     IMG_TO_IMG = 9
     FLOW_COSMOS = 10
+    IMG_TO_IMG_FLOW = 11
 
 
 def model_sampling(model_config, model_type):
@@ -108,6 +109,8 @@ def model_sampling(model_config, model_type):
     elif model_type == ModelType.FLOW_COSMOS:
         c = comfy.model_sampling.COSMOS_RFLOW
         s = comfy.model_sampling.ModelSamplingCosmosRFlow
+    elif model_type == ModelType.IMG_TO_IMG_FLOW:
+        c = comfy.model_sampling.IMG_TO_IMG_FLOW
 
     class ModelSampling(s, c):
         def __reduce__(self):
@@ -998,6 +1001,10 @@ class LTXV(BaseModel):
         if keyframe_idxs is not None:
             out['keyframe_idxs'] = comfy.conds.CONDRegular(keyframe_idxs)
 
+        guide_attention_entries = kwargs.get("guide_attention_entries", None)
+        if guide_attention_entries is not None:
+            out['guide_attention_entries'] = comfy.conds.CONDConstant(guide_attention_entries)
+
         return out
 
     def process_timestep(self, timestep, x, denoise_mask=None, **kwargs):
@@ -1049,6 +1056,10 @@ class LTXAV(BaseModel):
         latent_shapes = kwargs.get("latent_shapes", None)
         if latent_shapes is not None:
             out['latent_shapes'] = comfy.conds.CONDConstant(latent_shapes)
+
+        guide_attention_entries = kwargs.get("guide_attention_entries", None)
+        if guide_attention_entries is not None:
+            out['guide_attention_entries'] = comfy.conds.CONDConstant(guide_attention_entries)
 
         return out
 
