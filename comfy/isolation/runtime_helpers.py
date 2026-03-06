@@ -176,7 +176,7 @@ def build_stub_class(
         )
         scan_shm_forensics("RUNTIME:execute_start", refresh_model_context=True)
         try:
-            if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+            if os.environ.get("PYISOLATE_CHILD") != "1":
                 _relieve_host_vram_pressure("RUNTIME:pre_execute", logger)
                 scan_shm_forensics("RUNTIME:pre_execute", refresh_model_context=True)
             from pyisolate._internal.model_serialization import (

@@ -306,7 +306,7 @@ class ComfyNodeExtension(ExtensionBase):
             node_name,
             len(inputs),
         )
-        if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1":
+        if os.environ.get("PYISOLATE_CHILD") == "1":
             _relieve_child_vram_pressure("EXT:pre_execute")
 
         resolved_inputs = self._resolve_remote_objects(inputs)
@@ -405,7 +405,7 @@ class ComfyNodeExtension(ExtensionBase):
         return wrapped
 
     async def flush_transport_state(self) -> int:
-        if os.environ.get("PYISOLATE_ISOLATION_ACTIVE") != "1":
+        if os.environ.get("PYISOLATE_CHILD") != "1":
             return 0
         logger.debug(
             "%s ISO:child_flush_start ext=%s", LOG_PREFIX, getattr(self, "name", "?")

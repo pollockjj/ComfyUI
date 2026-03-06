@@ -12,6 +12,8 @@ from typing import Callable, Dict, List, Tuple
 
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
@@ -61,6 +63,94 @@ def _normalize_dependency_spec(dep: str, base_paths: list[Path]) -> str:
                 return f"file://{resolved}{marker_suffix}"
 
     return dep
+
+
+def _dependency_name_from_spec(dep: str) -> str | None:
+    stripped = dep.strip()
+    if not stripped or stripped == "-e" or stripped.startswith("-e "):
+        return None
+    if stripped.startswith(("/", "./", "../", "file://")):
+        return None
+
+    try:
+        return canonicalize_name(Requirement(stripped).name)
+    except InvalidRequirement:
+        return None
+
+
+def _parse_cuda_wheels_config(
+    tool_config: dict[str, object], dependencies: list[str]
+) -> dict[str, object] | None:
+    raw_config = tool_config.get("cuda_wheels")
+    if raw_config is None:
+        return None
+    if not isinstance(raw_config, dict):
+        raise ExtensionLoadError(
+            "[tool.comfy.isolation.cuda_wheels] must be a table"
+        )
+
+    index_url = raw_config.get("index_url")
+    if not isinstance(index_url, str) or not index_url.strip():
+        raise ExtensionLoadError(
+            "[tool.comfy.isolation.cuda_wheels.index_url] must be a non-empty string"
+        )
+
+    packages = raw_config.get("packages")
+    if not isinstance(packages, list) or not all(
+        isinstance(package_name, str) and package_name.strip()
+        for package_name in packages
+    ):
+        raise ExtensionLoadError(
+            "[tool.comfy.isolation.cuda_wheels.packages] must be a list of non-empty strings"
+        )
+
+    declared_dependencies = {
+        dependency_name
+        for dep in dependencies
+        if (dependency_name := _dependency_name_from_spec(dep)) is not None
+    }
+    normalized_packages = [canonicalize_name(package_name) for package_name in packages]
+    missing = [
+        package_name
+        for package_name in normalized_packages
+        if package_name not in declared_dependencies
+    ]
+    if missing:
+        missing_joined = ", ".join(sorted(missing))
+        raise ExtensionLoadError(
+            "[tool.comfy.isolation.cuda_wheels.packages] references undeclared dependencies: "
+            f"{missing_joined}"
+        )
+
+    package_map = raw_config.get("package_map", {})
+    if not isinstance(package_map, dict):
+        raise ExtensionLoadError(
+            "[tool.comfy.isolation.cuda_wheels.package_map] must be a table"
+        )
+
+    normalized_package_map: dict[str, str] = {}
+    for dependency_name, index_package_name in package_map.items():
+        if not isinstance(dependency_name, str) or not dependency_name.strip():
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.cuda_wheels.package_map] keys must be non-empty strings"
+            )
+        if not isinstance(index_package_name, str) or not index_package_name.strip():
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.cuda_wheels.package_map] values must be non-empty strings"
+            )
+        canonical_dependency_name = canonicalize_name(dependency_name)
+        if canonical_dependency_name not in normalized_packages:
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.cuda_wheels.package_map] can only override packages listed in "
+                "[tool.comfy.isolation.cuda_wheels.packages]"
+            )
+        normalized_package_map[canonical_dependency_name] = index_package_name.strip()
+
+    return {
+        "index_url": index_url.rstrip("/") + "/",
+        "packages": normalized_packages,
+        "package_map": normalized_package_map,
+    }
 
 
 def get_enforcement_policy() -> Dict[str, bool]:
@@ -138,6 +228,7 @@ async def load_isolated_node(
         _normalize_dependency_spec(dep, base_paths) if isinstance(dep, str) else dep
         for dep in dependencies
     ]
+    cuda_wheels = _parse_cuda_wheels_config(tool_config, dependencies)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
     manager: ExtensionManager = pyisolate.ExtensionManager(
@@ -166,6 +257,8 @@ async def load_isolated_node(
         "share_cuda_ipc": share_cuda_ipc,
         "sandbox": sandbox_config,
     }
+    if cuda_wheels is not None:
+        extension_config["cuda_wheels"] = cuda_wheels
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)

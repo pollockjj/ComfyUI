@@ -6,6 +6,8 @@ import logging
 import os
 from typing import Any
 
+from comfy.cli_args import args
+
 logger = logging.getLogger(__name__)
 
 
@@ -13,8 +15,8 @@ def maybe_wrap_model_for_isolation(model_patcher: Any) -> Any:
     from comfy.isolation.model_patcher_proxy_registry import ModelPatcherRegistry
     from comfy.isolation.model_patcher_proxy import ModelPatcherProxy
 
-    isolation_active = os.environ.get("PYISOLATE_ISOLATION_ACTIVE") == "1"
     is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+    isolation_active = args.use_process_isolation or is_child
 
     if not isolation_active:
         return model_patcher
