@@ -383,24 +383,11 @@ class ComfyNodeExtension(ExtensionBase):
         if type(result).__name__ == "NodeOutput":
             result = result.args
         if self._is_comfy_protocol_return(result):
-            logger.debug(
-                "%s ISO:child_execute_done ext=%s node=%s protocol_return=1",
-                LOG_PREFIX,
-                getattr(self, "name", "?"),
-                node_name,
-            )
             wrapped = self._wrap_unpicklable_objects(result)
             return wrapped
 
         if not isinstance(result, tuple):
             result = (result,)
-        logger.debug(
-            "%s ISO:child_execute_done ext=%s node=%s protocol_return=0 outputs=%d",
-            LOG_PREFIX,
-            getattr(self, "name", "?"),
-            node_name,
-            len(result),
-        )
         wrapped = self._wrap_unpicklable_objects(result)
         return wrapped
 
