@@ -32,9 +32,6 @@ import comfy.memory_management
 import comfy.utils
 import comfy.quant_ops
 
-import comfy_aimdo.torch
-import comfy_aimdo.model_vbar
-
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
     NO_VRAM = 1     #Very low vram: enable all the options to save vram
@@ -272,6 +269,23 @@ try:
     OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 except:
     OOM_EXCEPTION = Exception
+
+try:
+    ACCELERATOR_ERROR = torch.AcceleratorError
+except AttributeError:
+    ACCELERATOR_ERROR = RuntimeError
+
+def is_oom(e):
+    if isinstance(e, OOM_EXCEPTION):
+        return True
+    if isinstance(e, ACCELERATOR_ERROR) and (getattr(e, 'error_code', None) == 2 or "out of memory" in str(e).lower()):
+        discard_cuda_async_error()
+        return True
+    return False
+
+def raise_non_oom(e):
+    if not is_oom(e):
+        raise e
 
 XFORMERS_VERSION = ""
 XFORMERS_ENABLED_VAE = True
@@ -867,6 +881,8 @@ def archive_model_dtypes(model):
     for name, module in model.named_modules():
         for param_name, param in module.named_parameters(recurse=False):
             setattr(module, f"{param_name}_comfy_model_dtype", param.dtype)
+        for buf_name, buf in module.named_buffers(recurse=False):
+            setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
 
 
 def cleanup_models():
@@ -908,11 +924,14 @@ def unet_offload_device():
         return torch.device("cpu")
 
 def unet_inital_load_device(parameters, dtype):
+    cpu_dev = torch.device("cpu")
+    if comfy.memory_management.aimdo_enabled:
+        return cpu_dev
+
     torch_dev = get_torch_device()
     if vram_state == VRAMState.HIGH_VRAM or vram_state == VRAMState.SHARED:
         return torch_dev
 
-    cpu_dev = torch.device("cpu")
     if DISABLE_SMART_MEMORY or vram_state == VRAMState.NO_VRAM:
         return cpu_dev
 
@@ -920,7 +939,7 @@ def unet_inital_load_device(parameters, dtype):
 
     mem_dev = get_free_memory(torch_dev)
     mem_cpu = get_free_memory(cpu_dev)
-    if mem_dev > mem_cpu and model_size < mem_dev and comfy.memory_management.aimdo_enabled:
+    if mem_dev > mem_cpu and model_size < mem_dev:
         return torch_dev
     else:
         return cpu_dev
@@ -1014,7 +1033,7 @@ def text_encoder_offload_device():
 def text_encoder_device():
     if args.gpu_only:
         return get_torch_device()
-    elif vram_state == VRAMState.HIGH_VRAM or vram_state == VRAMState.NORMAL_VRAM:
+    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM) or comfy.memory_management.aimdo_enabled:
         if should_use_fp16(prioritize_performance=False):
             return get_torch_device()
         else:
@@ -1023,6 +1042,9 @@ def text_encoder_device():
         return torch.device("cpu")
 
 def text_encoder_initial_device(load_device, offload_device, model_size=0):
+    if comfy.memory_management.aimdo_enabled:
+        return offload_device
+
     if load_device == offload_device or model_size <= 1024 * 1024 * 1024:
         return offload_device
 
@@ -1220,6 +1242,7 @@ def reset_cast_buffers():
     LARGEST_CASTED_WEIGHT = (None, 0)
     for offload_stream in STREAM_CAST_BUFFERS:
         offload_stream.synchronize()
+    synchronize()
     STREAM_CAST_BUFFERS.clear()
     soft_empty_cache()
 
@@ -1283,43 +1306,6 @@ def cast_to_gathered(tensors, r, non_blocking=False, stream=None):
 
 
 def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None, r=None):
-    if hasattr(weight, "_v"):
-        #Unexpected usage patterns. There is no reason these don't work but they
-        #have no testing and no callers do this.
-        assert r is None
-        assert stream is None
-
-        cast_geometry = comfy.memory_management.tensors_to_geometries([ weight ])
-
-        if dtype is None:
-            dtype = weight._model_dtype
-
-        signature = comfy_aimdo.model_vbar.vbar_fault(weight._v)
-        if signature is not None:
-            if comfy_aimdo.model_vbar.vbar_signature_compare(signature, weight._v_signature):
-                v_tensor = weight._v_tensor
-            else:
-                raw_tensor = comfy_aimdo.torch.aimdo_to_tensor(weight._v, device)
-                v_tensor = comfy.memory_management.interpret_gathered_like(cast_geometry, raw_tensor)[0]
-                weight._v_tensor = v_tensor
-                weight._v_signature = signature
-                #Send it over
-                v_tensor.copy_(weight, non_blocking=non_blocking)
-            return v_tensor.to(dtype=dtype)
-
-        r = torch.empty_like(weight, dtype=dtype, device=device)
-
-        if weight.dtype != r.dtype and weight.dtype != weight._model_dtype:
-            #Offloaded casting could skip this, however it would make the quantizations
-            #inconsistent between loaded and offloaded weights. So force the double casting
-            #that would happen in regular flow to make offload deterministic.
-            cast_buffer = torch.empty_like(weight, dtype=weight._model_dtype, device=device)
-            cast_buffer.copy_(weight, non_blocking=non_blocking)
-            weight = cast_buffer
-        r.copy_(weight, non_blocking=non_blocking)
-
-        return r
-
     if device is None or weight.device == device:
         if not copy:
             if dtype is None or weight.dtype == dtype:
@@ -1371,7 +1357,7 @@ def discard_cuda_async_error():
         b = torch.tensor([1], dtype=torch.uint8, device=get_torch_device())
         _ = a + b
         synchronize()
-    except torch.AcceleratorError:
+    except RuntimeError:
         #Dump it! We already know about it from the synchronous return
         pass
 
@@ -1775,12 +1761,16 @@ def lora_compute_dtype(device):
     return dtype
 
 def synchronize():
+    if cpu_mode():
+        return
     if is_intel_xpu():
         torch.xpu.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 
 def soft_empty_cache(force=False):
+    if cpu_mode():
+        return
     global cpu_state
     if cpu_state == CPUState.MPS:
         torch.mps.empty_cache()

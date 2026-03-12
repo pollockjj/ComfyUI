@@ -645,7 +645,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
         logging.error(traceback.format_exc())
         tips = ""
 
-        if isinstance(ex, comfy.model_management.OOM_EXCEPTION):
+        if comfy.model_management.is_oom(ex):
             tips = "This error means you ran out of memory on your GPU.\n\nTIPS: If the workflow worked before you might have accidentally set the batch_size to a large number."
             logging.info("Memory summary: {}".format(comfy.model_management.debug_memory_summary()))
             logging.error("Got an OOM, unloading all loaded models.")
@@ -993,12 +993,14 @@ async def validate_inputs(prompt_id, prompt, item, validated):
                 continue
         else:
             try:
-                # Unwraps values wrapped in __value__ key. This is used to pass
-                # list widget value to execution, as by default list value is
-                # reserved to represent the connection between nodes.
-                if isinstance(val, dict) and "__value__" in val:
-                    val = val["__value__"]
-                    inputs[x] = val
+                # Unwraps values wrapped in __value__ key or typed wrapper.
+                # This is used to pass list widget values to execution,
+                # as by default list value is reserved to represent the
+                # connection between nodes.
+                if isinstance(val, dict):
+                    if "__value__" in val:
+                        val = val["__value__"]
+                        inputs[x] = val
 
                 if input_type == "INT":
                     val = int(val)
