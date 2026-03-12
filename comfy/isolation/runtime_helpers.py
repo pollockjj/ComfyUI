@@ -278,7 +278,12 @@ def build_stub_class(
         return True
 
     def _get_node_info_v1(cls):
-        return info.get("schema_v1", {})
+        node_info = copy.deepcopy(info.get("schema_v1", {}))
+        relative_python_module = node_info.get("python_module")
+        if not isinstance(relative_python_module, str) or not relative_python_module:
+            relative_python_module = f"custom_nodes.{extension.name}"
+        node_info["python_module"] = relative_python_module
+        return node_info
 
     def _get_base_class(cls):
         return latest_io.ComfyNode
