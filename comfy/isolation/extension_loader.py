@@ -243,6 +243,13 @@ async def load_isolated_node(
     tool_config = manifest_data.get("tool", {}).get("comfy", {}).get("isolation", {})
     can_isolate = tool_config.get("can_isolate", False)
     share_torch = tool_config.get("share_torch", False)
+    package_manager = tool_config.get("package_manager", "uv")
+    is_conda = package_manager == "conda"
+
+    # Conda-specific manifest fields
+    conda_channels: list[str] = tool_config.get("conda_channels", []) if is_conda else []
+    conda_dependencies: list[str] = tool_config.get("conda_dependencies", []) if is_conda else []
+    conda_platforms: list[str] = tool_config.get("conda_platforms", []) if is_conda else []
 
     # Parse [project] dependencies
     project_config = manifest_data.get("project", {})
@@ -281,15 +288,23 @@ async def load_isolated_node(
 
     sandbox_config = {}
     is_linux = platform.system() == "Linux"
-    if is_linux and isolated:
-        sandbox_config = {
-            "network": host_policy["allow_network"],
-            "writable_paths": host_policy["writable_paths"],
-            "readonly_paths": host_policy["readonly_paths"],
-        }
-    share_cuda_ipc = share_torch and is_linux
 
-    extension_config = {
+    # Conda: force incompatible options off
+    if is_conda:
+        share_torch = False
+        share_cuda_ipc = False
+        # Conda + bwrap are mutually exclusive; pixi manages its own isolation
+        sandbox_config = {}
+    else:
+        if is_linux and isolated:
+            sandbox_config = {
+                "network": host_policy["allow_network"],
+                "writable_paths": host_policy["writable_paths"],
+                "readonly_paths": host_policy["readonly_paths"],
+            }
+        share_cuda_ipc = share_torch and is_linux
+
+    extension_config: dict = {
         "name": extension_name,
         "module_path": str(node_dir),
         "isolated": True,
@@ -301,6 +316,14 @@ async def load_isolated_node(
     }
     if cuda_wheels is not None:
         extension_config["cuda_wheels"] = cuda_wheels
+
+    # Conda-specific keys
+    if is_conda:
+        extension_config["package_manager"] = "conda"
+        extension_config["conda_channels"] = conda_channels
+        extension_config["conda_dependencies"] = conda_dependencies
+        if conda_platforms:
+            extension_config["conda_platforms"] = conda_platforms
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
