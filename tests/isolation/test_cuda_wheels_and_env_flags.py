@@ -69,6 +69,7 @@ flash_attn = "flash-attn-special"
     monkeypatch.setattr(
         "comfy.isolation.extension_loader.load_host_policy",
         lambda base_path: {
+            "sandbox_mode": "required",
             "allow_network": False,
             "writable_paths": [],
             "readonly_paths": [],
@@ -95,6 +96,7 @@ flash_attn = "flash-attn-special"
     )
 
     assert len(specs) == 1
+    assert captured["sandbox_mode"] == "required"
     assert captured["cuda_wheels"] == {
         "index_url": "https://example.invalid/cuda-wheels/",
         "packages": ["flash-attn", "sageattention"],
@@ -171,6 +173,7 @@ can_isolate = true
     monkeypatch.setattr(
         "comfy.isolation.extension_loader.load_host_policy",
         lambda base_path: {
+            "sandbox_mode": "disabled",
             "allow_network": False,
             "writable_paths": [],
             "readonly_paths": [],
@@ -196,6 +199,7 @@ can_isolate = true
         )
     )
 
+    assert captured["sandbox_mode"] == "disabled"
     assert "cuda_wheels" not in captured
 
 
