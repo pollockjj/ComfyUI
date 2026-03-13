@@ -255,6 +255,7 @@ async def load_isolated_node(
         "dependencies": dependencies,
         "share_torch": share_torch,
         "share_cuda_ipc": share_cuda_ipc,
+        "sandbox_mode": host_policy["sandbox_mode"],
         "sandbox": sandbox_config,
     }
     if cuda_wheels is not None:

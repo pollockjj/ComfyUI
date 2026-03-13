@@ -2815,8 +2815,10 @@
                 "back.png",
                 "baldurs-gate-3-githyanki-close.jpg",
                 "baloons.png",
+                "bas_relief.png",
                 "baselline.png",
                 "blob-design-shape-with-transparent-background-png.webp",
+                "bridge.jpg",
                 "c1f03b9e-797b-4148-8e44-792d44f30bdd (1).png",
                 "comfy_in_1 (1).png",
                 "comfyworkflows_3e83739d-cb2d-43c3-b137-24ca7146b628.png",
@@ -2851,6 +2853,7 @@
                 "hunyuanvideo distorch DEPRECATED (1).jpg",
                 "hunyuanvideo distorch DEPRECATED.jpg",
                 "hunyuanvideo distorch DEPRECATED.png",
+                "image.png",
                 "images.jpg",
                 "input_scribble_example.png",
                 "is-it-real-v0-xn69sg9i975e1.webp",
@@ -2876,6 +2879,7 @@
                 "janpollock-011.jpg",
                 "janpollock-012 (1).jpg",
                 "janpollock-012.jpg",
+                "kaffi.jpg",
                 "kristibentler-006 (1).jpg",
                 "kristibentler-006.jpg",
                 "kristibentler-010.jpg",
@@ -3518,8 +3522,10 @@
                 "back.png",
                 "baldurs-gate-3-githyanki-close.jpg",
                 "baloons.png",
+                "bas_relief.png",
                 "baselline.png",
                 "blob-design-shape-with-transparent-background-png.webp",
+                "bridge.jpg",
                 "c1f03b9e-797b-4148-8e44-792d44f30bdd (1).png",
                 "comfy_in_1 (1).png",
                 "comfyworkflows_3e83739d-cb2d-43c3-b137-24ca7146b628.png",
@@ -3554,6 +3560,7 @@
                 "hunyuanvideo distorch DEPRECATED (1).jpg",
                 "hunyuanvideo distorch DEPRECATED.jpg",
                 "hunyuanvideo distorch DEPRECATED.png",
+                "image.png",
                 "images.jpg",
                 "input_scribble_example.png",
                 "is-it-real-v0-xn69sg9i975e1.webp",
@@ -3579,6 +3586,7 @@
                 "janpollock-011.jpg",
                 "janpollock-012 (1).jpg",
                 "janpollock-012.jpg",
+                "kaffi.jpg",
                 "kristibentler-006 (1).jpg",
                 "kristibentler-006.jpg",
                 "kristibentler-010.jpg",
@@ -4241,8 +4249,10 @@
               "back.png",
               "baldurs-gate-3-githyanki-close.jpg",
               "baloons.png",
+              "bas_relief.png",
               "baselline.png",
               "blob-design-shape-with-transparent-background-png.webp",
+              "bridge.jpg",
               "c1f03b9e-797b-4148-8e44-792d44f30bdd (1).png",
               "comfy_in_1 (1).png",
               "comfyworkflows_3e83739d-cb2d-43c3-b137-24ca7146b628.png",
@@ -4277,6 +4287,7 @@
               "hunyuanvideo distorch DEPRECATED (1).jpg",
               "hunyuanvideo distorch DEPRECATED.jpg",
               "hunyuanvideo distorch DEPRECATED.png",
+              "image.png",
               "images.jpg",
               "input_scribble_example.png",
               "is-it-real-v0-xn69sg9i975e1.webp",
@@ -4302,6 +4313,7 @@
               "janpollock-011.jpg",
               "janpollock-012 (1).jpg",
               "janpollock-012.jpg",
+              "kaffi.jpg",
               "kristibentler-006 (1).jpg",
               "kristibentler-006.jpg",
               "kristibentler-010.jpg",
@@ -15867,8 +15879,10 @@
               "multiselect": false,
               "options": [
                 "3d",
+                "SOH",
                 "clipspace",
-                "pasted"
+                "pasted",
+                "robotframes"
               ]
             }
           ]
@@ -15898,8 +15912,10 @@
               "multiselect": false,
               "options": [
                 "3d",
+                "SOH",
                 "clipspace",
-                "pasted"
+                "pasted",
+                "robotframes"
               ]
             }
           ]
@@ -15948,8 +15964,10 @@
             "multiselect": false,
             "options": [
               "3d",
+              "SOH",
               "clipspace",
-              "pasted"
+              "pasted",
+              "robotframes"
             ]
           }
         ]
@@ -15994,8 +16012,10 @@
               "multiselect": false,
               "options": [
                 "3d",
+                "SOH",
                 "clipspace",
-                "pasted"
+                "pasted",
+                "robotframes"
               ]
             }
           ]
@@ -16028,8 +16048,10 @@
               "multiselect": false,
               "options": [
                 "3d",
+                "SOH",
                 "clipspace",
-                "pasted"
+                "pasted",
+                "robotframes"
               ]
             }
           ]
@@ -16082,8 +16104,10 @@
             "multiselect": false,
             "options": [
               "3d",
+              "SOH",
               "clipspace",
-              "pasted"
+              "pasted",
+              "robotframes"
             ]
           }
         ]
@@ -44414,6 +44438,7 @@
                 "bedroom.mp4",
                 "jeep.mp4",
                 "leftv4.mp4",
+                "robot_unitree.mp4",
                 "video.mp4",
                 "video_2024-11-24_05-05-52.mp4",
                 "wWSUzClgoVJbNGwgKn1Gu.mp4",
@@ -44457,6 +44482,7 @@
                 "bedroom.mp4",
                 "jeep.mp4",
                 "leftv4.mp4",
+                "robot_unitree.mp4",
                 "video.mp4",
                 "video_2024-11-24_05-05-52.mp4",
                 "wWSUzClgoVJbNGwgKn1Gu.mp4",
@@ -44519,6 +44545,7 @@
               "bedroom.mp4",
               "jeep.mp4",
               "leftv4.mp4",
+              "robot_unitree.mp4",
               "video.mp4",
               "video_2024-11-24_05-05-52.mp4",
               "wWSUzClgoVJbNGwgKn1Gu.mp4",
