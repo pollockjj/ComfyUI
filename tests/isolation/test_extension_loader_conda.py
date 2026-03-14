@@ -97,9 +97,11 @@ def mock_pyisolate():
 
     mock_manager = MagicMock()
     mock_manager.load_extension = MagicMock(return_value=mock_ext)
+    sealed_type = type("SealedNodeExtension", (), {})
 
     with patch("comfy.isolation.extension_loader.pyisolate") as mock_pi:
         mock_pi.ExtensionManager = MagicMock(return_value=mock_manager)
+        mock_pi.SealedNodeExtension = sealed_type
         yield mock_pi, mock_manager, mock_ext
 
 
@@ -315,6 +317,34 @@ class TestCondaForcedOverrides:
         config = mock_manager.load_extension.call_args[0][0]
         assert config.get("sandbox") == {} or "sandbox" not in config
 
+    @pytest.mark.asyncio
+    async def test_conda_uses_sealed_extension_type(
+        self, mock_pyisolate, manifest_file, tmp_path
+    ):
+        """Conda must not launch through ComfyNodeExtension."""
+
+        mock_pi, _, _ = mock_pyisolate
+        manifest = _make_manifest(
+            package_manager="conda",
+            conda_channels=["conda-forge"],
+            conda_dependencies=["eccodes"],
+        )
+
+        with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+            mock_tomllib.load.return_value = manifest
+            await load_isolated_node(
+                node_dir=tmp_path,
+                manifest_path=manifest_file,
+                logger=MagicMock(),
+                build_stub_class=MagicMock(),
+                venv_root=tmp_path / "venvs",
+                extension_managers=[],
+            )
+
+        extension_type = mock_pi.ExtensionManager.call_args[0][0]
+        assert extension_type.__name__ == "SealedNodeExtension"
+        assert extension_type is not _mock_wrapper.ComfyNodeExtension
+
 
 class TestUvUnchanged:
     """Verify uv extensions are NOT affected by conda changes."""
@@ -345,3 +375,26 @@ class TestUvUnchanged:
         assert config.get("package_manager", "uv") == "uv"
         assert "conda_channels" not in config
         assert "conda_dependencies" not in config
+
+    @pytest.mark.asyncio
+    async def test_uv_keeps_comfy_extension_type(
+        self, mock_pyisolate, manifest_file, tmp_path
+    ):
+        """uv keeps the existing ComfyNodeExtension path."""
+
+        mock_pi, _, _ = mock_pyisolate
+        manifest = _make_manifest()
+
+        with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+            mock_tomllib.load.return_value = manifest
+            await load_isolated_node(
+                node_dir=tmp_path,
+                manifest_path=manifest_file,
+                logger=MagicMock(),
+                build_stub_class=MagicMock(),
+                venv_root=tmp_path / "venvs",
+                extension_managers=[],
+            )
+
+        extension_type = mock_pi.ExtensionManager.call_args[0][0]
+        assert extension_type is _mock_wrapper.ComfyNodeExtension

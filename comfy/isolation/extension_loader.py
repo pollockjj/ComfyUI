@@ -8,7 +8,7 @@ import sys
 import types
 import platform
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import pyisolate
 from pyisolate import ExtensionManager, ExtensionManagerConfig
@@ -68,8 +68,17 @@ def _register_web_directory(extension_name: str, node_dir: Path) -> None:
             pass
 
 
+def _get_extension_type(package_manager: str) -> type[Any]:
+    if package_manager == "conda":
+        return pyisolate.SealedNodeExtension
+
+    from .extension_wrapper import ComfyNodeExtension
+
+    return ComfyNodeExtension
+
+
 async def _stop_extension_safe(
-    extension: ComfyNodeExtension, extension_name: str
+    extension: Any, extension_name: str
 ) -> None:
     try:
         stop_result = extension.stop()
@@ -228,7 +237,7 @@ async def load_isolated_node(
     node_dir: Path,
     manifest_path: Path,
     logger: logging.Logger,
-    build_stub_class: Callable[[str, Dict[str, object], ComfyNodeExtension], type],
+    build_stub_class: Callable[[str, Dict[str, object], Any], type],
     venv_root: Path,
     extension_managers: List[ExtensionManager],
 ) -> List[Tuple[str, str, type]]:
@@ -279,8 +288,9 @@ async def load_isolated_node(
     cuda_wheels = _parse_cuda_wheels_config(tool_config, dependencies)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
+    extension_type = _get_extension_type(package_manager)
     manager: ExtensionManager = pyisolate.ExtensionManager(
-        ComfyNodeExtension, manager_config
+        extension_type, manager_config
     )
     extension_managers.append(manager)
 
