@@ -15,7 +15,6 @@ from pyisolate import ExtensionManager, ExtensionManagerConfig
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
-from .extension_wrapper import ComfyNodeExtension
 from .manifest_loader import is_cache_valid, load_from_cache, save_to_cache
 from .host_policy import load_host_policy
 
@@ -68,8 +67,8 @@ def _register_web_directory(extension_name: str, node_dir: Path) -> None:
             pass
 
 
-def _get_extension_type(package_manager: str) -> type[Any]:
-    if package_manager == "conda":
+def _get_extension_type(execution_model: str) -> type[Any]:
+    if execution_model == "sealed_worker":
         return pyisolate.SealedNodeExtension
 
     from .extension_wrapper import ComfyNodeExtension
@@ -254,6 +253,9 @@ async def load_isolated_node(
     share_torch = tool_config.get("share_torch", False)
     package_manager = tool_config.get("package_manager", "uv")
     is_conda = package_manager == "conda"
+    execution_model = tool_config.get("execution_model")
+    if execution_model is None:
+        execution_model = "sealed_worker" if is_conda else "host-coupled"
 
     # Conda-specific manifest fields
     conda_channels: list[str] = tool_config.get("conda_channels", []) if is_conda else []
@@ -288,7 +290,7 @@ async def load_isolated_node(
     cuda_wheels = _parse_cuda_wheels_config(tool_config, dependencies)
 
     manager_config = ExtensionManagerConfig(venv_root_path=str(venv_root))
-    extension_type = _get_extension_type(package_manager)
+    extension_type = _get_extension_type(execution_model)
     manager: ExtensionManager = pyisolate.ExtensionManager(
         extension_type, manager_config
     )
@@ -334,6 +336,9 @@ async def load_isolated_node(
         extension_config["conda_dependencies"] = conda_dependencies
         if conda_platforms:
             extension_config["conda_platforms"] = conda_platforms
+
+    if execution_model != "host-coupled":
+        extension_config["execution_model"] = execution_model
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
