@@ -5,6 +5,7 @@ fields from pyproject.toml manifests and passes them into the extension config
 dict given to pyisolate. The torch import chain is broken by pre-mocking
 extension_wrapper before importing extension_loader.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -122,7 +123,9 @@ def mock_pyisolate(loader_module):
 
 
 def load_isolated_node(*args, **kwargs):
-    return sys.modules["comfy.isolation.extension_loader"].load_isolated_node(*args, **kwargs)
+    return sys.modules["comfy.isolation.extension_loader"].load_isolated_node(
+        *args, **kwargs
+    )
 
 
 class TestCondaPackageManagerParsing:
@@ -304,10 +307,10 @@ class TestCondaForcedOverrides:
         assert config["share_cuda_ipc"] is False
 
     @pytest.mark.asyncio
-    async def test_conda_skips_sandbox_config(
+    async def test_conda_sealed_worker_uses_host_policy_sandbox_config(
         self, mock_pyisolate, manifest_file, tmp_path
     ):
-        """sandbox config must be empty for conda (no bwrap)."""
+        """Conda sealed_worker must carry the host-policy sandbox config on Linux."""
 
         manifest = _make_manifest(
             package_manager="conda",
@@ -335,7 +338,11 @@ class TestCondaForcedOverrides:
             )
 
         config = mock_manager.load_extension.call_args[0][0]
-        assert config.get("sandbox") == {} or "sandbox" not in config
+        assert config["sandbox"] == {
+            "network": False,
+            "writable_paths": [],
+            "readonly_paths": [],
+        }
 
     @pytest.mark.asyncio
     async def test_conda_uses_sealed_extension_type(

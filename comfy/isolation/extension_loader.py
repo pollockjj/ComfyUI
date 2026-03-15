@@ -41,7 +41,11 @@ def _register_web_directory(extension_name: str, node_dir: Path) -> None:
                 web_dir_path = str(node_dir / web_dir_name)
                 if os.path.isdir(web_dir_path):
                     nodes.EXTENSION_WEB_DIRS[extension_name] = web_dir_path
-                    logger.debug("][ Registered web dir for isolated %s: %s", extension_name, web_dir_path)
+                    logger.debug(
+                        "][ Registered web dir for isolated %s: %s",
+                        extension_name,
+                        web_dir_path,
+                    )
                     return
         except Exception:
             pass
@@ -61,7 +65,11 @@ def _register_web_directory(extension_name: str, node_dir: Path) -> None:
                         web_dir_path = str((node_dir / value).resolve())
                         if os.path.isdir(web_dir_path):
                             nodes.EXTENSION_WEB_DIRS[extension_name] = web_dir_path
-                            logger.debug("][ Registered web dir for isolated %s: %s", extension_name, web_dir_path)
+                            logger.debug(
+                                "][ Registered web dir for isolated %s: %s",
+                                extension_name,
+                                web_dir_path,
+                            )
                             return
         except Exception:
             pass
@@ -76,9 +84,7 @@ def _get_extension_type(execution_model: str) -> type[Any]:
     return ComfyNodeExtension
 
 
-async def _stop_extension_safe(
-    extension: Any, extension_name: str
-) -> None:
+async def _stop_extension_safe(extension: Any, extension_name: str) -> None:
     try:
         stop_result = extension.stop()
         if inspect.isawaitable(stop_result):
@@ -134,9 +140,7 @@ def _parse_cuda_wheels_config(
     if raw_config is None:
         return None
     if not isinstance(raw_config, dict):
-        raise ExtensionLoadError(
-            "[tool.comfy.isolation.cuda_wheels] must be a table"
-        )
+        raise ExtensionLoadError("[tool.comfy.isolation.cuda_wheels] must be a table")
 
     index_url = raw_config.get("index_url")
     if not isinstance(index_url, str) or not index_url.strip():
@@ -258,9 +262,15 @@ async def load_isolated_node(
         execution_model = "sealed_worker" if is_conda else "host-coupled"
 
     # Conda-specific manifest fields
-    conda_channels: list[str] = tool_config.get("conda_channels", []) if is_conda else []
-    conda_dependencies: list[str] = tool_config.get("conda_dependencies", []) if is_conda else []
-    conda_platforms: list[str] = tool_config.get("conda_platforms", []) if is_conda else []
+    conda_channels: list[str] = (
+        tool_config.get("conda_channels", []) if is_conda else []
+    )
+    conda_dependencies: list[str] = (
+        tool_config.get("conda_dependencies", []) if is_conda else []
+    )
+    conda_platforms: list[str] = (
+        tool_config.get("conda_platforms", []) if is_conda else []
+    )
 
     # Parse [project] dependencies
     project_config = manifest_data.get("project", {})
@@ -301,20 +311,18 @@ async def load_isolated_node(
     sandbox_config = {}
     is_linux = platform.system() == "Linux"
 
-    # Conda: force incompatible options off
     if is_conda:
         share_torch = False
         share_cuda_ipc = False
-        # Conda + bwrap are mutually exclusive; pixi manages its own isolation
-        sandbox_config = {}
     else:
-        if is_linux and isolated:
-            sandbox_config = {
-                "network": host_policy["allow_network"],
-                "writable_paths": host_policy["writable_paths"],
-                "readonly_paths": host_policy["readonly_paths"],
-            }
         share_cuda_ipc = share_torch and is_linux
+
+    if is_linux and isolated:
+        sandbox_config = {
+            "network": host_policy["allow_network"],
+            "writable_paths": host_policy["writable_paths"],
+            "readonly_paths": host_policy["readonly_paths"],
+        }
 
     extension_config: dict = {
         "name": extension_name,
