@@ -339,6 +339,8 @@ async def load_isolated_node(
 
     if execution_model != "host-coupled":
         extension_config["execution_model"] = execution_model
+    if execution_model == "sealed_worker":
+        extension_config["apis"] = []
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)

@@ -99,6 +99,7 @@ async def test_uv_sealed_worker_selects_sealed_extension_type(
     config = mock_manager.load_extension.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
+    assert config["apis"] == []
 
 
 @pytest.mark.asyncio
