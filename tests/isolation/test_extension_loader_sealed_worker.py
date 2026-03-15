@@ -2,34 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-_mock_wrapper = MagicMock()
-_mock_wrapper.ComfyNodeExtension = type("ComfyNodeExtension", (), {})
-
-if "comfy.isolation" not in sys.modules:
-    _iso_mod = types.ModuleType("comfy.isolation")
-    _iso_mod.__path__ = [  # type: ignore[attr-defined]
-        str(Path(__file__).resolve().parent.parent.parent / "comfy" / "isolation")
-    ]
-    _iso_mod.__package__ = "comfy.isolation"
-    sys.modules["comfy.isolation"] = _iso_mod
-
-sys.modules["comfy.isolation.extension_wrapper"] = _mock_wrapper
-sys.modules.setdefault("comfy.isolation.runtime_helpers", MagicMock())
-sys.modules.setdefault("comfy.isolation.manifest_loader", MagicMock())
-sys.modules.setdefault("comfy.isolation.host_policy", MagicMock())
-
-_mock_fp = MagicMock()
-_mock_fp.base_path = "/fake/comfyui"
-sys.modules.setdefault("folder_paths", _mock_fp)
-
-from comfy.isolation.extension_loader import load_isolated_node  # noqa: E402
 
 
 def _make_manifest(
@@ -62,7 +41,51 @@ def manifest_file(tmp_path):
 
 
 @pytest.fixture
-def mock_pyisolate():
+def loader_module(monkeypatch):
+    mock_wrapper = MagicMock()
+    mock_wrapper.ComfyNodeExtension = type("ComfyNodeExtension", (), {})
+
+    iso_mod = types.ModuleType("comfy.isolation")
+    iso_mod.__path__ = [  # type: ignore[attr-defined]
+        str(Path(__file__).resolve().parent.parent.parent / "comfy" / "isolation")
+    ]
+    iso_mod.__package__ = "comfy.isolation"
+
+    manifest_loader = types.SimpleNamespace(
+        is_cache_valid=lambda *args, **kwargs: False,
+        load_from_cache=lambda *args, **kwargs: None,
+        save_to_cache=lambda *args, **kwargs: None,
+    )
+    host_policy = types.SimpleNamespace(
+        load_host_policy=lambda base_path: {
+            "sandbox_mode": "required",
+            "allow_network": False,
+            "writable_paths": [],
+            "readonly_paths": [],
+        }
+    )
+    folder_paths = types.SimpleNamespace(base_path="/fake/comfyui")
+
+    monkeypatch.setitem(sys.modules, "comfy.isolation", iso_mod)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.extension_wrapper", mock_wrapper)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.runtime_helpers", MagicMock())
+    monkeypatch.setitem(sys.modules, "comfy.isolation.manifest_loader", manifest_loader)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.host_policy", host_policy)
+    monkeypatch.setitem(sys.modules, "folder_paths", folder_paths)
+    sys.modules.pop("comfy.isolation.extension_loader", None)
+
+    module = importlib.import_module("comfy.isolation.extension_loader")
+    try:
+        yield module
+    finally:
+        sys.modules.pop("comfy.isolation.extension_loader", None)
+        comfy_pkg = sys.modules.get("comfy")
+        if comfy_pkg is not None and hasattr(comfy_pkg, "isolation"):
+            delattr(comfy_pkg, "isolation")
+
+
+@pytest.fixture
+def mock_pyisolate(loader_module):
     mock_ext = AsyncMock()
     mock_ext.list_nodes = AsyncMock(return_value={})
 
@@ -70,10 +93,14 @@ def mock_pyisolate():
     mock_manager.load_extension = MagicMock(return_value=mock_ext)
     sealed_type = type("SealedNodeExtension", (), {})
 
-    with patch("comfy.isolation.extension_loader.pyisolate") as mock_pi:
+    with patch.object(loader_module, "pyisolate") as mock_pi:
         mock_pi.ExtensionManager = MagicMock(return_value=mock_manager)
         mock_pi.SealedNodeExtension = sealed_type
-        yield mock_pi, mock_manager, mock_ext, sealed_type
+        yield loader_module, mock_pi, mock_manager, mock_ext, sealed_type
+
+
+def load_isolated_node(*args, **kwargs):
+    return sys.modules["comfy.isolation.extension_loader"].load_isolated_node(*args, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -82,7 +109,7 @@ async def test_uv_sealed_worker_selects_sealed_extension_type(
 ):
     manifest = _make_manifest(execution_model="sealed_worker")
 
-    _, mock_manager, _, sealed_type = mock_pyisolate
+    _, mock_pi, mock_manager, _, sealed_type = mock_pyisolate
 
     with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
         mock_tomllib.load.return_value = manifest
@@ -95,7 +122,7 @@ async def test_uv_sealed_worker_selects_sealed_extension_type(
             extension_managers=[],
         )
 
-    extension_type = sys.modules["comfy.isolation.extension_loader"].pyisolate.ExtensionManager.call_args[0][0]
+    extension_type = mock_pi.ExtensionManager.call_args[0][0]
     config = mock_manager.load_extension.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
@@ -108,7 +135,7 @@ async def test_default_uv_keeps_host_coupled_extension_type(
 ):
     manifest = _make_manifest()
 
-    _, mock_manager, _, sealed_type = mock_pyisolate
+    _, mock_pi, mock_manager, _, sealed_type = mock_pyisolate
 
     with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
         mock_tomllib.load.return_value = manifest
@@ -121,7 +148,7 @@ async def test_default_uv_keeps_host_coupled_extension_type(
             extension_managers=[],
         )
 
-    extension_type = sys.modules["comfy.isolation.extension_loader"].pyisolate.ExtensionManager.call_args[0][0]
+    extension_type = mock_pi.ExtensionManager.call_args[0][0]
     config = mock_manager.load_extension.call_args[0][0]
     assert extension_type is not sealed_type
     assert "execution_model" not in config
@@ -135,7 +162,7 @@ async def test_conda_without_execution_model_remains_sealed_worker(
     manifest["tool"]["comfy"]["isolation"]["conda_channels"] = ["conda-forge"]
     manifest["tool"]["comfy"]["isolation"]["conda_dependencies"] = ["eccodes"]
 
-    _, mock_manager, _, sealed_type = mock_pyisolate
+    _, mock_pi, mock_manager, _, sealed_type = mock_pyisolate
 
     with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
         mock_tomllib.load.return_value = manifest
@@ -148,7 +175,7 @@ async def test_conda_without_execution_model_remains_sealed_worker(
             extension_managers=[],
         )
 
-    extension_type = sys.modules["comfy.isolation.extension_loader"].pyisolate.ExtensionManager.call_args[0][0]
+    extension_type = mock_pi.ExtensionManager.call_args[0][0]
     config = mock_manager.load_extension.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"

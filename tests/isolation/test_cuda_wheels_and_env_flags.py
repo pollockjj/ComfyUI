@@ -12,6 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from comfy.isolation import runtime_helpers
+from comfy.isolation import extension_loader as extension_loader_module
+from comfy.isolation import extension_wrapper as extension_wrapper_module
+from comfy.isolation import model_patcher_proxy_utils
 from comfy.isolation.extension_loader import ExtensionLoadError, load_isolated_node
 from comfy.isolation.extension_wrapper import ComfyNodeExtension
 from comfy.isolation.model_patcher_proxy_utils import maybe_wrap_model_for_isolation
@@ -63,11 +66,10 @@ flash_attn = "flash-attn-special"
             captured.update(config)
             return _DummyExtension()
 
+    monkeypatch.setattr(extension_loader_module.pyisolate, "ExtensionManager", DummyManager)
     monkeypatch.setattr(
-        "comfy.isolation.extension_loader.pyisolate.ExtensionManager", DummyManager
-    )
-    monkeypatch.setattr(
-        "comfy.isolation.extension_loader.load_host_policy",
+        extension_loader_module,
+        "load_host_policy",
         lambda base_path: {
             "sandbox_mode": "required",
             "allow_network": False,
@@ -75,11 +77,10 @@ flash_attn = "flash-attn-special"
             "readonly_paths": [],
         },
     )
+    monkeypatch.setattr(extension_loader_module, "is_cache_valid", lambda *args, **kwargs: True)
     monkeypatch.setattr(
-        "comfy.isolation.extension_loader.is_cache_valid", lambda *args, **kwargs: True
-    )
-    monkeypatch.setattr(
-        "comfy.isolation.extension_loader.load_from_cache",
+        extension_loader_module,
+        "load_from_cache",
         lambda *args, **kwargs: {"Node": {"display_name": "Node", "schema_v1": {}}},
     )
     monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(base_path=str(tmp_path)))
@@ -167,11 +168,10 @@ can_isolate = true
             captured.update(config)
             return _DummyExtension()
 
+    monkeypatch.setattr(extension_loader_module.pyisolate, "ExtensionManager", DummyManager)
     monkeypatch.setattr(
-        "comfy.isolation.extension_loader.pyisolate.ExtensionManager", DummyManager
-    )
-    monkeypatch.setattr(
-        "comfy.isolation.extension_loader.load_host_policy",
+        extension_loader_module,
+        "load_host_policy",
         lambda base_path: {
             "sandbox_mode": "disabled",
             "allow_network": False,
@@ -179,11 +179,10 @@ can_isolate = true
             "readonly_paths": [],
         },
     )
+    monkeypatch.setattr(extension_loader_module, "is_cache_valid", lambda *args, **kwargs: True)
     monkeypatch.setattr(
-        "comfy.isolation.extension_loader.is_cache_valid", lambda *args, **kwargs: True
-    )
-    monkeypatch.setattr(
-        "comfy.isolation.extension_loader.load_from_cache",
+        extension_loader_module,
+        "load_from_cache",
         lambda *args, **kwargs: {"Node": {"display_name": "Node", "schema_v1": {}}},
     )
     monkeypatch.setitem(sys.modules, "folder_paths", SimpleNamespace(base_path=str(tmp_path)))
@@ -214,7 +213,7 @@ def test_maybe_wrap_model_for_isolation_uses_runtime_flag(monkeypatch):
             self.registry = registry
             self.manage_lifecycle = manage_lifecycle
 
-    monkeypatch.setattr("comfy.isolation.model_patcher_proxy_utils.args.use_process_isolation", True)
+    monkeypatch.setattr(model_patcher_proxy_utils.args, "use_process_isolation", True)
     monkeypatch.delenv("PYISOLATE_ISOLATION_ACTIVE", raising=False)
     monkeypatch.delenv("PYISOLATE_CHILD", raising=False)
     monkeypatch.setitem(
@@ -238,10 +237,7 @@ def test_maybe_wrap_model_for_isolation_uses_runtime_flag(monkeypatch):
 def test_flush_transport_state_uses_child_env_without_legacy_flag(monkeypatch):
     monkeypatch.setenv("PYISOLATE_CHILD", "1")
     monkeypatch.delenv("PYISOLATE_ISOLATION_ACTIVE", raising=False)
-    monkeypatch.setattr(
-        "comfy.isolation.extension_wrapper._flush_tensor_transport_state",
-        lambda marker: 3,
-    )
+    monkeypatch.setattr(extension_wrapper_module, "_flush_tensor_transport_state", lambda marker: 3)
     monkeypatch.setitem(
         sys.modules,
         "comfy.isolation.model_patcher_proxy_registry",

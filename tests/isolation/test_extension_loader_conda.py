@@ -7,43 +7,13 @@ extension_wrapper before importing extension_loader.
 """
 from __future__ import annotations
 
+import importlib
 import sys
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-# ── Break the import chain ────────────────────────────────────────────
-# comfy.isolation.__init__ imports runtime_helpers → comfy_api → av (missing),
-# and extension_wrapper → torch (docstring collision). We create a bare
-# namespace module for comfy.isolation so __init__.py never executes, then
-# mock the problematic submodules before importing extension_loader.
-import types
-
-_mock_wrapper = MagicMock()
-_mock_wrapper.ComfyNodeExtension = type("ComfyNodeExtension", (), {})
-
-# Create comfy.isolation as bare namespace (skip __init__.py)
-if "comfy.isolation" not in sys.modules:
-    _iso_mod = types.ModuleType("comfy.isolation")
-    _iso_mod.__path__ = [  # type: ignore[attr-defined]
-        str(Path(__file__).resolve().parent.parent.parent / "comfy" / "isolation")
-    ]
-    _iso_mod.__package__ = "comfy.isolation"
-    sys.modules["comfy.isolation"] = _iso_mod
-
-sys.modules["comfy.isolation.extension_wrapper"] = _mock_wrapper
-sys.modules.setdefault("comfy.isolation.runtime_helpers", MagicMock())
-sys.modules.setdefault("comfy.isolation.manifest_loader", MagicMock())
-sys.modules.setdefault("comfy.isolation.host_policy", MagicMock())
-
-# Mock folder_paths (ComfyUI internal)
-_mock_fp = MagicMock()
-_mock_fp.base_path = "/fake/comfyui"
-sys.modules.setdefault("folder_paths", _mock_fp)
-
-# Now safe to import extension_loader
-from comfy.isolation.extension_loader import load_isolated_node  # noqa: E402
 
 
 def _make_manifest(
@@ -90,8 +60,54 @@ def manifest_file(tmp_path):
 
 
 @pytest.fixture
-def mock_pyisolate():
+def loader_module(monkeypatch):
+    """Import extension_loader under a mocked isolation package for this test only."""
+    mock_wrapper = MagicMock()
+    mock_wrapper.ComfyNodeExtension = type("ComfyNodeExtension", (), {})
+
+    iso_mod = types.ModuleType("comfy.isolation")
+    iso_mod.__path__ = [  # type: ignore[attr-defined]
+        str(Path(__file__).resolve().parent.parent.parent / "comfy" / "isolation")
+    ]
+    iso_mod.__package__ = "comfy.isolation"
+
+    manifest_loader = types.SimpleNamespace(
+        is_cache_valid=lambda *args, **kwargs: False,
+        load_from_cache=lambda *args, **kwargs: None,
+        save_to_cache=lambda *args, **kwargs: None,
+    )
+    host_policy = types.SimpleNamespace(
+        load_host_policy=lambda base_path: {
+            "sandbox_mode": "required",
+            "allow_network": False,
+            "writable_paths": [],
+            "readonly_paths": [],
+        }
+    )
+    folder_paths = types.SimpleNamespace(base_path="/fake/comfyui")
+
+    monkeypatch.setitem(sys.modules, "comfy.isolation", iso_mod)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.extension_wrapper", mock_wrapper)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.runtime_helpers", MagicMock())
+    monkeypatch.setitem(sys.modules, "comfy.isolation.manifest_loader", manifest_loader)
+    monkeypatch.setitem(sys.modules, "comfy.isolation.host_policy", host_policy)
+    monkeypatch.setitem(sys.modules, "folder_paths", folder_paths)
+    sys.modules.pop("comfy.isolation.extension_loader", None)
+
+    module = importlib.import_module("comfy.isolation.extension_loader")
+    try:
+        yield module, mock_wrapper
+    finally:
+        sys.modules.pop("comfy.isolation.extension_loader", None)
+        comfy_pkg = sys.modules.get("comfy")
+        if comfy_pkg is not None and hasattr(comfy_pkg, "isolation"):
+            delattr(comfy_pkg, "isolation")
+
+
+@pytest.fixture
+def mock_pyisolate(loader_module):
     """Mock pyisolate to avoid real venv creation."""
+    module, mock_wrapper = loader_module
     mock_ext = AsyncMock()
     mock_ext.list_nodes = AsyncMock(return_value={})
 
@@ -99,10 +115,14 @@ def mock_pyisolate():
     mock_manager.load_extension = MagicMock(return_value=mock_ext)
     sealed_type = type("SealedNodeExtension", (), {})
 
-    with patch("comfy.isolation.extension_loader.pyisolate") as mock_pi:
+    with patch.object(module, "pyisolate") as mock_pi:
         mock_pi.ExtensionManager = MagicMock(return_value=mock_manager)
         mock_pi.SealedNodeExtension = sealed_type
-        yield mock_pi, mock_manager, mock_ext
+        yield module, mock_pi, mock_manager, mock_ext, mock_wrapper
+
+
+def load_isolated_node(*args, **kwargs):
+    return sys.modules["comfy.isolation.extension_loader"].load_isolated_node(*args, **kwargs)
 
 
 class TestCondaPackageManagerParsing:
@@ -120,7 +140,7 @@ class TestCondaPackageManagerParsing:
             conda_dependencies=["eccodes"],
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -148,7 +168,7 @@ class TestCondaPackageManagerParsing:
             conda_dependencies=["eccodes"],
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -176,7 +196,7 @@ class TestCondaPackageManagerParsing:
             conda_dependencies=["eccodes", "cfgrib"],
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -205,7 +225,7 @@ class TestCondaPackageManagerParsing:
             conda_platforms=["linux-64"],
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -238,7 +258,7 @@ class TestCondaForcedOverrides:
             share_torch=True,  # manifest requests True — must be overridden
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -267,7 +287,7 @@ class TestCondaForcedOverrides:
             share_torch=True,
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -295,7 +315,7 @@ class TestCondaForcedOverrides:
             conda_dependencies=["eccodes"],
         )
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with (
             patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib,
@@ -323,7 +343,7 @@ class TestCondaForcedOverrides:
     ):
         """Conda must not launch through ComfyNodeExtension."""
 
-        mock_pi, _, _ = mock_pyisolate
+        _, mock_pi, _, _, mock_wrapper = mock_pyisolate
         manifest = _make_manifest(
             package_manager="conda",
             conda_channels=["conda-forge"],
@@ -343,7 +363,7 @@ class TestCondaForcedOverrides:
 
         extension_type = mock_pi.ExtensionManager.call_args[0][0]
         assert extension_type.__name__ == "SealedNodeExtension"
-        assert extension_type is not _mock_wrapper.ComfyNodeExtension
+        assert extension_type is not mock_wrapper.ComfyNodeExtension
 
 
 class TestUvUnchanged:
@@ -357,7 +377,7 @@ class TestUvUnchanged:
 
         manifest = _make_manifest()  # defaults: uv, no conda fields
 
-        _, mock_manager, _ = mock_pyisolate
+        _, _, mock_manager, _, _ = mock_pyisolate
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
             mock_tomllib.load.return_value = manifest
@@ -382,7 +402,7 @@ class TestUvUnchanged:
     ):
         """uv keeps the existing ComfyNodeExtension path."""
 
-        mock_pi, _, _ = mock_pyisolate
+        _, mock_pi, _, _, _ = mock_pyisolate
         manifest = _make_manifest()
 
         with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
@@ -397,4 +417,5 @@ class TestUvUnchanged:
             )
 
         extension_type = mock_pi.ExtensionManager.call_args[0][0]
-        assert extension_type is _mock_wrapper.ComfyNodeExtension
+        assert extension_type.__name__ == "ComfyNodeExtension"
+        assert extension_type is not mock_pi.SealedNodeExtension

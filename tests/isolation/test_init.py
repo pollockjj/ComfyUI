@@ -1,5 +1,6 @@
 """Unit tests for PyIsolate isolation system initialization."""
 
+import importlib
 
 
 def test_log_prefix():
@@ -11,9 +12,9 @@ def test_log_prefix():
 
 def test_module_initialization():
     """Verify module initializes without errors."""
-    import comfy.isolation
-    assert hasattr(comfy.isolation, 'LOG_PREFIX')
-    assert hasattr(comfy.isolation, 'initialize_proxies')
+    isolation_pkg = importlib.import_module("comfy.isolation")
+    assert hasattr(isolation_pkg, "LOG_PREFIX")
+    assert hasattr(isolation_pkg, "initialize_proxies")
 
 
 class TestInitializeProxies:
