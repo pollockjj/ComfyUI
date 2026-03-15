@@ -237,6 +237,9 @@ class ComfyNodeExtension(ExtensionBase):
                         "not_idempotent": bool(
                             getattr(node_cls, "NOT_IDEMPOTENT", False)
                         ),
+                        "accept_all_inputs": bool(
+                            getattr(node_cls, "ACCEPT_ALL_INPUTS", False)
+                        ),
                     }
                 )
             except Exception as exc:
@@ -369,14 +372,20 @@ class ComfyNodeExtension(ExtensionBase):
         handler = getattr(instance, function_name)
 
         try:
+            import torch
             if asyncio.iscoroutinefunction(handler):
-                result = await handler(**resolved_inputs)
+                with torch.inference_mode():
+                    result = await handler(**resolved_inputs)
             else:
                 import functools
 
+                def _run_with_inference_mode(**kwargs):
+                    with torch.inference_mode():
+                        return handler(**kwargs)
+
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
-                    None, functools.partial(handler, **resolved_inputs)
+                    None, functools.partial(_run_with_inference_mode, **resolved_inputs)
                 )
         except Exception:
             logger.exception(
@@ -388,7 +397,17 @@ class ComfyNodeExtension(ExtensionBase):
             raise
 
         if type(result).__name__ == "NodeOutput":
-            result = result.args
+            node_output_dict = {
+                "__node_output__": True,
+                "args": self._wrap_unpicklable_objects(result.args),
+            }
+            if result.ui is not None:
+                node_output_dict["ui"] = result.ui
+            if getattr(result, "expand", None) is not None:
+                node_output_dict["expand"] = result.expand
+            if getattr(result, "block_execution", None) is not None:
+                node_output_dict["block_execution"] = result.block_execution
+            return node_output_dict
         if self._is_comfy_protocol_return(result):
             wrapped = self._wrap_unpicklable_objects(result)
             return wrapped

@@ -27,6 +27,47 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _register_web_directory(extension_name: str, node_dir: Path) -> None:
+    """Register an isolated extension's web directory on the host side."""
+    import nodes
+
+    # Method 1: pyproject.toml [tool.comfy] web field
+    pyproject = node_dir / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            with pyproject.open("rb") as f:
+                data = tomllib.load(f)
+            web_dir_name = data.get("tool", {}).get("comfy", {}).get("web")
+            if web_dir_name:
+                web_dir_path = str(node_dir / web_dir_name)
+                if os.path.isdir(web_dir_path):
+                    nodes.EXTENSION_WEB_DIRS[extension_name] = web_dir_path
+                    logger.debug("][ Registered web dir for isolated %s: %s", extension_name, web_dir_path)
+                    return
+        except Exception:
+            pass
+
+    # Method 2: __init__.py WEB_DIRECTORY constant (parse without importing)
+    init_file = node_dir / "__init__.py"
+    if init_file.exists():
+        try:
+            source = init_file.read_text()
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("WEB_DIRECTORY"):
+                    # Parse: WEB_DIRECTORY = "./web" or WEB_DIRECTORY = "web"
+                    _, _, value = stripped.partition("=")
+                    value = value.strip().strip("\"'")
+                    if value:
+                        web_dir_path = str((node_dir / value).resolve())
+                        if os.path.isdir(web_dir_path):
+                            nodes.EXTENSION_WEB_DIRS[extension_name] = web_dir_path
+                            logger.debug("][ Registered web dir for isolated %s: %s", extension_name, web_dir_path)
+                            return
+        except Exception:
+            pass
+
+
 async def _stop_extension_safe(
     extension: ComfyNodeExtension, extension_name: str
 ) -> None:
@@ -263,6 +304,11 @@ async def load_isolated_node(
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
+
+    # Register web directory on the host — only when sandbox is disabled.
+    # In sandbox mode, serving untrusted JS to the browser is not safe.
+    if host_policy["sandbox_mode"] == "disabled":
+        _register_web_directory(extension_name, node_dir)
 
     # Try cache first (lazy spawn)
     if is_cache_valid(node_dir, manifest_path, venv_root):

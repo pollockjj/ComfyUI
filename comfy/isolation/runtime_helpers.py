@@ -215,6 +215,19 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
+            # Reconstruct NodeOutput if the child serialized one
+            if isinstance(result, dict) and result.get("__node_output__"):
+                from comfy_api.latest import io as latest_io
+                args_raw = result.get("args", ())
+                deserialized_args = await deserialize_from_isolation(args_raw, extension)
+                deserialized_args = _detach_shared_cpu_tensors(deserialized_args)
+                scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
+                return latest_io.NodeOutput(
+                    *deserialized_args,
+                    ui=result.get("ui"),
+                    expand=result.get("expand"),
+                    block_execution=result.get("block_execution"),
+                )
             deserialized = await deserialize_from_isolation(result, extension)
             scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
             return _detach_shared_cpu_tensors(deserialized)
@@ -313,6 +326,8 @@ def build_stub_class(
         attributes["DEPRECATED"] = info.get("deprecated", False)
         attributes["API_NODE"] = info.get("api_node", False)
         attributes["NOT_IDEMPOTENT"] = info.get("not_idempotent", False)
+        attributes["ACCEPT_ALL_INPUTS"] = info.get("accept_all_inputs", False)
+        attributes["_ACCEPT_ALL_INPUTS"] = info.get("accept_all_inputs", False)
         attributes["INPUT_IS_LIST"] = info.get("input_is_list", False)
 
     class_name = f"PyIsolate_{node_name}".replace(" ", "_")
