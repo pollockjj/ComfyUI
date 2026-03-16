@@ -111,3 +111,28 @@ allow_network = true
 
     assert policy["sandbox_mode"] == "disabled"
     assert policy["allow_network"] is True
+
+
+def test_disallows_host_tmp_default_or_override_defaults(tmp_path):
+    from comfy.isolation.host_policy import DEFAULT_POLICY, load_host_policy
+
+    policy = load_host_policy(tmp_path)
+
+    assert "/tmp" not in DEFAULT_POLICY["writable_paths"]
+    assert "/tmp" not in policy["writable_paths"]
+
+
+def test_disallows_host_tmp_default_or_override_config(tmp_path):
+    from comfy.isolation.host_policy import load_host_policy
+
+    _write_pyproject(
+        tmp_path / "pyproject.toml",
+        """
+[tool.comfy.host]
+writable_paths = ["/dev/shm", "/tmp", "/tmp/", "/work/cache"]
+""".strip(),
+    )
+
+    policy = load_host_policy(tmp_path)
+
+    assert policy["writable_paths"] == ["/dev/shm", "/work/cache"]
