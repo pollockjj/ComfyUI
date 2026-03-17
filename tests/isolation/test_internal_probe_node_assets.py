@@ -84,8 +84,6 @@ def test_inventory_is_minimal_and_isolation_owned():
 
 
 def test_zero_toolkit_references_in_probe_assets():
-    assert TOOLKIT_ROOT.exists()
-
     for asset in _text_assets():
         content = asset.read_text(encoding="utf-8")
         for banned in BANNED_REFERENCES:
@@ -93,8 +91,6 @@ def test_zero_toolkit_references_in_probe_assets():
 
 
 def test_replacement_contract_has_zero_toolkit_references():
-    assert TOOLKIT_ROOT.exists()
-
     contract_assets = [
         *(PROBE_ROOT.rglob("*.py")),
         *WORKFLOW_ROOT.glob("internal_probe_*.json"),

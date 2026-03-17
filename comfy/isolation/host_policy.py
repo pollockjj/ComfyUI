@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Dict, List, TypedDict
 
 try:
@@ -48,7 +49,9 @@ def _default_policy() -> HostSecurityPolicy:
 def _normalize_writable_paths(paths: list[object]) -> list[str]:
     normalized_paths: list[str] = []
     for raw_path in paths:
-        normalized_path = os.path.normpath(str(raw_path))
+        # Host-policy paths are contract-style POSIX paths; keep representation
+        # stable across Windows/Linux so tests and config behavior stay consistent.
+        normalized_path = str(PurePosixPath(str(raw_path).replace("\\", "/")))
         if normalized_path in FORBIDDEN_WRITABLE_PATHS:
             continue
         normalized_paths.append(normalized_path)
