@@ -90,3 +90,20 @@ def test_zero_toolkit_references_in_probe_assets():
         content = asset.read_text(encoding="utf-8")
         for banned in BANNED_REFERENCES:
             assert banned not in content, f"{asset} unexpectedly references {banned}"
+
+
+def test_replacement_contract_has_zero_toolkit_references():
+    assert TOOLKIT_ROOT.exists()
+
+    contract_assets = [
+        *(PROBE_ROOT.rglob("*.py")),
+        *WORKFLOW_ROOT.glob("internal_probe_*.json"),
+        ISOLATION_ROOT / "stage_internal_probe_node.py",
+        ISOLATION_ROOT / "internal_probe_host_policy.toml",
+    ]
+
+    for asset in sorted(contract_assets):
+        assert asset.exists(), f"Missing replacement-contract asset: {asset}"
+        content = asset.read_text(encoding="utf-8")
+        for banned in BANNED_REFERENCES:
+            assert banned not in content, f"{asset} unexpectedly references {banned}"
