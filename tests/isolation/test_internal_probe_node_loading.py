@@ -18,6 +18,7 @@ PROBE_SOURCE_ROOT = ISOLATION_ROOT / "internal_probe_node"
 EXPECTED_NODE_IDS = [
     "InternalIsolationProbeAudio",
     "InternalIsolationProbeImage",
+    "InternalIsolationProbeUI3D",
 ]
 
 CLIENT_SCRIPT = """

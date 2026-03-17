@@ -62,16 +62,25 @@ def test_inventory_is_minimal_and_isolation_owned():
     assert sorted(mappings.keys()) == [
         "InternalIsolationProbeAudio",
         "InternalIsolationProbeImage",
+        "InternalIsolationProbeUI3D",
     ]
 
-    preview_workflow = json.loads((WORKFLOW_ROOT / "internal_probe_preview_image_audio.json").read_text(encoding="utf-8"))
-    ui3d_workflow = json.loads((WORKFLOW_ROOT / "internal_probe_ui3d.json").read_text(encoding="utf-8"))
+    preview_workflow = json.loads(
+        (WORKFLOW_ROOT / "internal_probe_preview_image_audio.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    ui3d_workflow = json.loads(
+        (WORKFLOW_ROOT / "internal_probe_ui3d.json").read_text(encoding="utf-8")
+    )
 
-    assert [node["type"] for node in preview_workflow["nodes"]] == [
+    assert [preview_workflow[node_id]["class_type"] for node_id in ("1", "2")] == [
         "InternalIsolationProbeImage",
         "InternalIsolationProbeAudio",
     ]
-    assert [node["type"] for node in ui3d_workflow["nodes"]] == ["InternalIsolationProbeImage"]
+    assert [ui3d_workflow[node_id]["class_type"] for node_id in ("1",)] == [
+        "InternalIsolationProbeUI3D",
+    ]
 
 
 def test_zero_toolkit_references_in_probe_assets():
