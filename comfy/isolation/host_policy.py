@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 HOST_POLICY_PATH_ENV = "COMFY_HOST_POLICY_PATH"
 VALID_SANDBOX_MODES = frozenset({"required", "disabled"})
+FORBIDDEN_WRITABLE_PATHS = frozenset({"/tmp"})
 
 
 class HostSecurityPolicy(TypedDict):
@@ -28,7 +29,7 @@ class HostSecurityPolicy(TypedDict):
 DEFAULT_POLICY: HostSecurityPolicy = {
     "sandbox_mode": "required",
     "allow_network": False,
-    "writable_paths": ["/dev/shm", "/tmp"],
+    "writable_paths": ["/dev/shm"],
     "readonly_paths": [],
     "whitelist": {},
 }
@@ -42,6 +43,16 @@ def _default_policy() -> HostSecurityPolicy:
         "readonly_paths": list(DEFAULT_POLICY["readonly_paths"]),
         "whitelist": dict(DEFAULT_POLICY["whitelist"]),
     }
+
+
+def _normalize_writable_paths(paths: list[object]) -> list[str]:
+    normalized_paths: list[str] = []
+    for raw_path in paths:
+        normalized_path = os.path.normpath(str(raw_path))
+        if normalized_path in FORBIDDEN_WRITABLE_PATHS:
+            continue
+        normalized_paths.append(normalized_path)
+    return normalized_paths
 
 
 def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
@@ -86,7 +97,7 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
         policy["allow_network"] = bool(tool_config["allow_network"])
 
     if "writable_paths" in tool_config:
-        policy["writable_paths"] = [str(p) for p in tool_config["writable_paths"]]
+        policy["writable_paths"] = _normalize_writable_paths(tool_config["writable_paths"])
 
     if "readonly_paths" in tool_config:
         policy["readonly_paths"] = [str(p) for p in tool_config["readonly_paths"]]

@@ -13,7 +13,7 @@ documentation = "https://docs.comfy.org/"
 [tool.comfy.host]
 sandbox_mode = "required"
 allow_network = false
-writable_paths = ["/dev/shm", "/tmp"]
+writable_paths = ["/dev/shm"]
 
 [tool.comfy.host.whitelist]
 "ComfyUI-Crystools" = "*"
