@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -10,6 +11,49 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+COMFYUI_ROOT = Path(__file__).resolve().parents[2]
+TOOLKIT_WORKFLOW_ROOT = (
+    COMFYUI_ROOT / "custom_nodes" / "ComfyUI-IsolationToolkit" / "example_workflows"
+)
+SEALED_WORKFLOW_CLASS_TYPES: dict[str, set[str]] = {
+    "quick_6_uv_sealed_worker.json": {
+        "EmptyLatentImage",
+        "ProxyTestSealedWorker",
+        "UVSealedBoltonsSlugify",
+        "UVSealedLatentEcho",
+        "UVSealedRuntimeProbe",
+    },
+    "isolation_7_uv_sealed_worker.json": {
+        "EmptyLatentImage",
+        "ProxyTestSealedWorker",
+        "UVSealedBoltonsSlugify",
+        "UVSealedLatentEcho",
+        "UVSealedRuntimeProbe",
+    },
+    "quick_8_conda_sealed_worker.json": {
+        "CondaSealedLatentEcho",
+        "CondaSealedOpenWeatherDataset",
+        "CondaSealedRuntimeProbe",
+        "EmptyLatentImage",
+        "ProxyTestCondaSealedWorker",
+    },
+    "isolation_9_conda_sealed_worker.json": {
+        "CondaSealedLatentEcho",
+        "CondaSealedOpenWeatherDataset",
+        "CondaSealedRuntimeProbe",
+        "EmptyLatentImage",
+        "ProxyTestCondaSealedWorker",
+    },
+}
+
+
+def _workflow_class_types(path: Path) -> set[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        node["class_type"]
+        for node in payload.values()
+        if isinstance(node, dict) and "class_type" in node
+    }
 
 
 def _make_manifest(
@@ -221,3 +265,25 @@ async def test_conda_sandbox_policy_applied(mocked_loader, manifest_file: Path, 
         "writable_paths": ["/data/write"],
         "readonly_paths": ["/data/read"],
     }
+
+
+def test_sealed_worker_workflow_templates_present() -> None:
+    missing = [
+        filename
+        for filename in SEALED_WORKFLOW_CLASS_TYPES
+        if not (TOOLKIT_WORKFLOW_ROOT / filename).is_file()
+    ]
+    assert not missing, f"missing sealed-worker workflow templates: {missing}"
+
+
+@pytest.mark.parametrize(
+    "workflow_name,expected_class_types",
+    SEALED_WORKFLOW_CLASS_TYPES.items(),
+)
+def test_sealed_worker_workflow_class_type_contract(
+    workflow_name: str, expected_class_types: set[str]
+) -> None:
+    workflow_path = TOOLKIT_WORKFLOW_ROOT / workflow_name
+    assert workflow_path.is_file(), f"workflow missing: {workflow_path}"
+
+    assert _workflow_class_types(workflow_path) == expected_class_types
