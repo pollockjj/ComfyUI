@@ -24,6 +24,7 @@ class HostSecurityPolicy(TypedDict):
     allow_network: bool
     writable_paths: List[str]
     readonly_paths: List[str]
+    sealed_worker_ro_import_paths: List[str]
     whitelist: Dict[str, str]
 
 
@@ -32,6 +33,7 @@ DEFAULT_POLICY: HostSecurityPolicy = {
     "allow_network": False,
     "writable_paths": ["/dev/shm"],
     "readonly_paths": [],
+    "sealed_worker_ro_import_paths": [],
     "whitelist": {},
 }
 
@@ -42,6 +44,7 @@ def _default_policy() -> HostSecurityPolicy:
         "allow_network": DEFAULT_POLICY["allow_network"],
         "writable_paths": list(DEFAULT_POLICY["writable_paths"]),
         "readonly_paths": list(DEFAULT_POLICY["readonly_paths"]),
+        "sealed_worker_ro_import_paths": list(DEFAULT_POLICY["sealed_worker_ro_import_paths"]),
         "whitelist": dict(DEFAULT_POLICY["whitelist"]),
     }
 
@@ -55,6 +58,31 @@ def _normalize_writable_paths(paths: list[object]) -> list[str]:
         if normalized_path in FORBIDDEN_WRITABLE_PATHS:
             continue
         normalized_paths.append(normalized_path)
+    return normalized_paths
+
+
+def _normalize_sealed_worker_ro_import_paths(raw_paths: object) -> list[str]:
+    if not isinstance(raw_paths, list):
+        raise ValueError(
+            "tool.comfy.host.sealed_worker_ro_import_paths must be a list of absolute paths."
+        )
+
+    normalized_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(
+                "tool.comfy.host.sealed_worker_ro_import_paths entries must be non-empty strings."
+            )
+        normalized_path = str(PurePosixPath(raw_path.replace("\\", "/")))
+        if not normalized_path.startswith("/"):
+            raise ValueError(
+                "tool.comfy.host.sealed_worker_ro_import_paths entries must be absolute paths."
+            )
+        if normalized_path not in seen:
+            seen.add(normalized_path)
+            normalized_paths.append(normalized_path)
+
     return normalized_paths
 
 
@@ -104,6 +132,11 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
 
     if "readonly_paths" in tool_config:
         policy["readonly_paths"] = [str(p) for p in tool_config["readonly_paths"]]
+
+    if "sealed_worker_ro_import_paths" in tool_config:
+        policy["sealed_worker_ro_import_paths"] = _normalize_sealed_worker_ro_import_paths(
+            tool_config["sealed_worker_ro_import_paths"]
+        )
 
     whitelist_raw = tool_config.get("whitelist")
     if isinstance(whitelist_raw, dict):
