@@ -63,6 +63,7 @@ def _make_manifest(
     can_isolate: bool = True,
     dependencies: list[str] | None = None,
     share_torch: bool = False,
+    sealed_host_ro_paths: list[str] | None = None,
 ) -> dict:
     isolation: dict[str, object] = {
         "can_isolate": can_isolate,
@@ -73,6 +74,8 @@ def _make_manifest(
         isolation["execution_model"] = execution_model
     if share_torch:
         isolation["share_torch"] = True
+    if sealed_host_ro_paths is not None:
+        isolation["sealed_host_ro_paths"] = sealed_host_ro_paths
 
     if package_manager == "conda":
         isolation["conda_channels"] = ["conda-forge"]
@@ -287,3 +290,26 @@ def test_sealed_worker_workflow_class_type_contract(
     assert workflow_path.is_file(), f"workflow missing: {workflow_path}"
 
     assert _workflow_class_types(workflow_path) == expected_class_types
+
+
+@pytest.mark.asyncio
+async def test_sealed_worker_comfy_api_visibility_opt_in_matrix(
+    mocked_loader, manifest_file: Path, tmp_path: Path
+):
+    module, _mock_pi, _mock_manager, _sealed_type, _ = mocked_loader
+    manifest_default = _make_manifest(package_manager="uv", execution_model="sealed_worker")
+    manifest_opt_in = _make_manifest(
+        package_manager="uv",
+        execution_model="sealed_worker",
+        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+    )
+
+    default_config = await _load_node(module, manifest_default, manifest_file, tmp_path)
+    opt_in_config = await _load_node(module, manifest_opt_in, manifest_file, tmp_path)
+
+    assert default_config["execution_model"] == "sealed_worker"
+    assert "sealed_host_ro_paths" not in default_config
+
+    assert opt_in_config["execution_model"] == "sealed_worker"
+    assert opt_in_config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
+    assert opt_in_config["apis"] == []
