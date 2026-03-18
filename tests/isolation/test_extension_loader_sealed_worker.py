@@ -65,6 +65,7 @@ def loader_module(monkeypatch):
             "allow_network": False,
             "writable_paths": [],
             "readonly_paths": [],
+            "sealed_worker_ro_import_paths": [],
         }
     )
     folder_paths = types.SimpleNamespace(base_path="/fake/comfyui")
@@ -185,17 +186,27 @@ async def test_conda_without_execution_model_remains_sealed_worker(
 
 
 @pytest.mark.asyncio
-async def test_passes_sealed_host_ro_paths_for_sealed_worker(
+async def test_sealed_worker_uses_host_policy_ro_import_paths(
     mock_pyisolate, manifest_file, tmp_path
 ):
-    manifest = _make_manifest(
-        execution_model="sealed_worker",
-        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
-    )
+    manifest = _make_manifest(execution_model="sealed_worker")
 
-    _, _, mock_manager, _, _ = mock_pyisolate
+    module, _, mock_manager, _, _ = mock_pyisolate
 
-    with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+    with (
+        patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib,
+        patch.object(
+            module,
+            "load_host_policy",
+            return_value={
+                "sandbox_mode": "required",
+                "allow_network": False,
+                "writable_paths": [],
+                "readonly_paths": [],
+                "sealed_worker_ro_import_paths": ["/home/johnj/ComfyUI"],
+            },
+        ),
+    ):
         mock_tomllib.load.return_value = manifest
         await load_isolated_node(
             node_dir=tmp_path,
@@ -214,14 +225,24 @@ async def test_passes_sealed_host_ro_paths_for_sealed_worker(
 async def test_host_coupled_does_not_emit_sealed_host_ro_paths(
     mock_pyisolate, manifest_file, tmp_path
 ):
-    manifest = _make_manifest(
-        execution_model="host-coupled",
-        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
-    )
+    manifest = _make_manifest(execution_model="host-coupled")
 
-    _, _, mock_manager, _, _ = mock_pyisolate
+    module, _, mock_manager, _, _ = mock_pyisolate
 
-    with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+    with (
+        patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib,
+        patch.object(
+            module,
+            "load_host_policy",
+            return_value={
+                "sandbox_mode": "required",
+                "allow_network": False,
+                "writable_paths": [],
+                "readonly_paths": [],
+                "sealed_worker_ro_import_paths": ["/home/johnj/ComfyUI"],
+            },
+        ),
+    ):
         mock_tomllib.load.return_value = manifest
         await load_isolated_node(
             node_dir=tmp_path,
@@ -237,7 +258,7 @@ async def test_host_coupled_does_not_emit_sealed_host_ro_paths(
 
 
 @pytest.mark.asyncio
-async def test_sealed_host_ro_paths_passthrough_preserves_apis_empty_contract(
+async def test_sealed_worker_manifest_ro_import_paths_blocked(
     mock_pyisolate, manifest_file, tmp_path
 ):
     manifest = _make_manifest(
@@ -245,19 +266,16 @@ async def test_sealed_host_ro_paths_passthrough_preserves_apis_empty_contract(
         sealed_host_ro_paths=["/home/johnj/ComfyUI"],
     )
 
-    _, _, mock_manager, _, _ = mock_pyisolate
+    _, _, _mock_manager, _, _ = mock_pyisolate
 
     with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
         mock_tomllib.load.return_value = manifest
-        await load_isolated_node(
-            node_dir=tmp_path,
-            manifest_path=manifest_file,
-            logger=MagicMock(),
-            build_stub_class=MagicMock(),
-            venv_root=tmp_path / "venvs",
-            extension_managers=[],
-        )
-
-    config = mock_manager.load_extension.call_args[0][0]
-    assert config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
-    assert config["apis"] == []
+        with pytest.raises(ValueError, match="Manifest field 'sealed_host_ro_paths' is not allowed"):
+            await load_isolated_node(
+                node_dir=tmp_path,
+                manifest_path=manifest_file,
+                logger=MagicMock(),
+                build_stub_class=MagicMock(),
+                venv_root=tmp_path / "venvs",
+                extension_managers=[],
+            )

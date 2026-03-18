@@ -119,6 +119,7 @@ def loader_module(monkeypatch: pytest.MonkeyPatch):
             "allow_network": False,
             "writable_paths": [],
             "readonly_paths": [],
+            "sealed_worker_ro_import_paths": [],
         }
     )
     folder_paths = types.SimpleNamespace(base_path="/fake/comfyui")
@@ -293,19 +294,37 @@ def test_sealed_worker_workflow_class_type_contract(
 
 
 @pytest.mark.asyncio
-async def test_sealed_worker_comfy_api_visibility_opt_in_matrix(
+async def test_sealed_worker_host_policy_ro_import_matrix(
     mocked_loader, manifest_file: Path, tmp_path: Path
 ):
     module, _mock_pi, _mock_manager, _sealed_type, _ = mocked_loader
-    manifest_default = _make_manifest(package_manager="uv", execution_model="sealed_worker")
-    manifest_opt_in = _make_manifest(
-        package_manager="uv",
-        execution_model="sealed_worker",
-        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
-    )
+    manifest = _make_manifest(package_manager="uv", execution_model="sealed_worker")
 
-    default_config = await _load_node(module, manifest_default, manifest_file, tmp_path)
-    opt_in_config = await _load_node(module, manifest_opt_in, manifest_file, tmp_path)
+    with patch.object(
+        module,
+        "load_host_policy",
+        return_value={
+            "sandbox_mode": "required",
+            "allow_network": False,
+            "writable_paths": [],
+            "readonly_paths": [],
+            "sealed_worker_ro_import_paths": [],
+        },
+    ):
+        default_config = await _load_node(module, manifest, manifest_file, tmp_path)
+
+    with patch.object(
+        module,
+        "load_host_policy",
+        return_value={
+            "sandbox_mode": "required",
+            "allow_network": False,
+            "writable_paths": [],
+            "readonly_paths": [],
+            "sealed_worker_ro_import_paths": ["/home/johnj/ComfyUI"],
+        },
+    ):
+        opt_in_config = await _load_node(module, manifest, manifest_file, tmp_path)
 
     assert default_config["execution_model"] == "sealed_worker"
     assert "sealed_host_ro_paths" not in default_config
