@@ -260,6 +260,7 @@ async def load_isolated_node(
     execution_model = tool_config.get("execution_model")
     if execution_model is None:
         execution_model = "sealed_worker" if is_conda else "host-coupled"
+    sealed_host_ro_paths = tool_config.get("sealed_host_ro_paths", [])
 
     # Conda-specific manifest fields
     conda_channels: list[str] = (
@@ -349,6 +350,8 @@ async def load_isolated_node(
         extension_config["execution_model"] = execution_model
     if execution_model == "sealed_worker":
         extension_config["apis"] = []
+        if isinstance(sealed_host_ro_paths, list) and sealed_host_ro_paths:
+            extension_config["sealed_host_ro_paths"] = list(sealed_host_ro_paths)
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
