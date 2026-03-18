@@ -17,12 +17,15 @@ def _make_manifest(
     execution_model: str | None = None,
     can_isolate: bool = True,
     dependencies: list[str] | None = None,
+    sealed_host_ro_paths: list[str] | None = None,
 ) -> dict:
     isolation: dict = {"can_isolate": can_isolate}
     if package_manager != "uv":
         isolation["package_manager"] = package_manager
     if execution_model is not None:
         isolation["execution_model"] = execution_model
+    if sealed_host_ro_paths is not None:
+        isolation["sealed_host_ro_paths"] = sealed_host_ro_paths
 
     return {
         "project": {
@@ -179,3 +182,82 @@ async def test_conda_without_execution_model_remains_sealed_worker(
     config = mock_manager.load_extension.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
+
+
+@pytest.mark.asyncio
+async def test_passes_sealed_host_ro_paths_for_sealed_worker(
+    mock_pyisolate, manifest_file, tmp_path
+):
+    manifest = _make_manifest(
+        execution_model="sealed_worker",
+        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+    )
+
+    _, _, mock_manager, _, _ = mock_pyisolate
+
+    with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+        mock_tomllib.load.return_value = manifest
+        await load_isolated_node(
+            node_dir=tmp_path,
+            manifest_path=manifest_file,
+            logger=MagicMock(),
+            build_stub_class=MagicMock(),
+            venv_root=tmp_path / "venvs",
+            extension_managers=[],
+        )
+
+    config = mock_manager.load_extension.call_args[0][0]
+    assert config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
+
+
+@pytest.mark.asyncio
+async def test_host_coupled_does_not_emit_sealed_host_ro_paths(
+    mock_pyisolate, manifest_file, tmp_path
+):
+    manifest = _make_manifest(
+        execution_model="host-coupled",
+        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+    )
+
+    _, _, mock_manager, _, _ = mock_pyisolate
+
+    with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+        mock_tomllib.load.return_value = manifest
+        await load_isolated_node(
+            node_dir=tmp_path,
+            manifest_path=manifest_file,
+            logger=MagicMock(),
+            build_stub_class=MagicMock(),
+            venv_root=tmp_path / "venvs",
+            extension_managers=[],
+        )
+
+    config = mock_manager.load_extension.call_args[0][0]
+    assert "sealed_host_ro_paths" not in config
+
+
+@pytest.mark.asyncio
+async def test_sealed_host_ro_paths_passthrough_preserves_apis_empty_contract(
+    mock_pyisolate, manifest_file, tmp_path
+):
+    manifest = _make_manifest(
+        execution_model="sealed_worker",
+        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+    )
+
+    _, _, mock_manager, _, _ = mock_pyisolate
+
+    with patch("comfy.isolation.extension_loader.tomllib") as mock_tomllib:
+        mock_tomllib.load.return_value = manifest
+        await load_isolated_node(
+            node_dir=tmp_path,
+            manifest_path=manifest_file,
+            logger=MagicMock(),
+            build_stub_class=MagicMock(),
+            venv_root=tmp_path / "venvs",
+            extension_managers=[],
+        )
+
+    config = mock_manager.load_extension.call_args[0][0]
+    assert config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
+    assert config["apis"] == []

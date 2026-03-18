@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -10,6 +11,49 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+COMFYUI_ROOT = Path(__file__).resolve().parents[2]
+TOOLKIT_WORKFLOW_ROOT = (
+    COMFYUI_ROOT / "custom_nodes" / "ComfyUI-IsolationToolkit" / "example_workflows"
+)
+SEALED_WORKFLOW_CLASS_TYPES: dict[str, set[str]] = {
+    "quick_6_uv_sealed_worker.json": {
+        "EmptyLatentImage",
+        "ProxyTestSealedWorker",
+        "UVSealedBoltonsSlugify",
+        "UVSealedLatentEcho",
+        "UVSealedRuntimeProbe",
+    },
+    "isolation_7_uv_sealed_worker.json": {
+        "EmptyLatentImage",
+        "ProxyTestSealedWorker",
+        "UVSealedBoltonsSlugify",
+        "UVSealedLatentEcho",
+        "UVSealedRuntimeProbe",
+    },
+    "quick_8_conda_sealed_worker.json": {
+        "CondaSealedLatentEcho",
+        "CondaSealedOpenWeatherDataset",
+        "CondaSealedRuntimeProbe",
+        "EmptyLatentImage",
+        "ProxyTestCondaSealedWorker",
+    },
+    "isolation_9_conda_sealed_worker.json": {
+        "CondaSealedLatentEcho",
+        "CondaSealedOpenWeatherDataset",
+        "CondaSealedRuntimeProbe",
+        "EmptyLatentImage",
+        "ProxyTestCondaSealedWorker",
+    },
+}
+
+
+def _workflow_class_types(path: Path) -> set[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        node["class_type"]
+        for node in payload.values()
+        if isinstance(node, dict) and "class_type" in node
+    }
 
 
 def _make_manifest(
@@ -19,6 +63,7 @@ def _make_manifest(
     can_isolate: bool = True,
     dependencies: list[str] | None = None,
     share_torch: bool = False,
+    sealed_host_ro_paths: list[str] | None = None,
 ) -> dict:
     isolation: dict[str, object] = {
         "can_isolate": can_isolate,
@@ -29,6 +74,8 @@ def _make_manifest(
         isolation["execution_model"] = execution_model
     if share_torch:
         isolation["share_torch"] = True
+    if sealed_host_ro_paths is not None:
+        isolation["sealed_host_ro_paths"] = sealed_host_ro_paths
 
     if package_manager == "conda":
         isolation["conda_channels"] = ["conda-forge"]
@@ -221,3 +268,48 @@ async def test_conda_sandbox_policy_applied(mocked_loader, manifest_file: Path, 
         "writable_paths": ["/data/write"],
         "readonly_paths": ["/data/read"],
     }
+
+
+def test_sealed_worker_workflow_templates_present() -> None:
+    missing = [
+        filename
+        for filename in SEALED_WORKFLOW_CLASS_TYPES
+        if not (TOOLKIT_WORKFLOW_ROOT / filename).is_file()
+    ]
+    assert not missing, f"missing sealed-worker workflow templates: {missing}"
+
+
+@pytest.mark.parametrize(
+    "workflow_name,expected_class_types",
+    SEALED_WORKFLOW_CLASS_TYPES.items(),
+)
+def test_sealed_worker_workflow_class_type_contract(
+    workflow_name: str, expected_class_types: set[str]
+) -> None:
+    workflow_path = TOOLKIT_WORKFLOW_ROOT / workflow_name
+    assert workflow_path.is_file(), f"workflow missing: {workflow_path}"
+
+    assert _workflow_class_types(workflow_path) == expected_class_types
+
+
+@pytest.mark.asyncio
+async def test_sealed_worker_comfy_api_visibility_opt_in_matrix(
+    mocked_loader, manifest_file: Path, tmp_path: Path
+):
+    module, _mock_pi, _mock_manager, _sealed_type, _ = mocked_loader
+    manifest_default = _make_manifest(package_manager="uv", execution_model="sealed_worker")
+    manifest_opt_in = _make_manifest(
+        package_manager="uv",
+        execution_model="sealed_worker",
+        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+    )
+
+    default_config = await _load_node(module, manifest_default, manifest_file, tmp_path)
+    opt_in_config = await _load_node(module, manifest_opt_in, manifest_file, tmp_path)
+
+    assert default_config["execution_model"] == "sealed_worker"
+    assert "sealed_host_ro_paths" not in default_config
+
+    assert opt_in_config["execution_model"] == "sealed_worker"
+    assert opt_in_config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
+    assert opt_in_config["apis"] == []
