@@ -62,6 +62,7 @@ class ComfyUIAdapter(IsolationAdapter):
                         os.path.join(comfy_root, "custom_nodes"),
                         os.path.join(comfy_root, "comfy"),
                     ],
+                    "filtered_subdirs": ["comfy", "app", "comfy_execution", "utils"],
                 }
         return None
 
