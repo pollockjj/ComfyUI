@@ -12,6 +12,7 @@ add their serializers to this file.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
 
 from pyisolate.interfaces import SerializerRegistryProtocol  # type: ignore[import-untyped]
@@ -171,7 +172,8 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     registry.register("TRIMESH", serialize_trimesh, deserialize_trimesh, data_type=True)
     registry.register("Trimesh", serialize_trimesh, deserialize_trimesh, data_type=True)
     registry.register("TrimeshData", serialize_trimesh, deserialize_trimesh, data_type=True)
-    print("][ Serializer registered: TRIMESH")
+    if not os.environ.get("PYISOLATE_CHILD"):
+        print("][ Serializer registered: TRIMESH")
 
     # -- SKELETON (GeometryPack skeleton dict) ----------------------------------
     # Custom dict type invented by GeometryPack for skeleton extraction.
@@ -203,4 +205,5 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         }
 
     registry.register("SKELETON", serialize_skeleton, deserialize_skeleton, data_type=True)
-    print("][ Serializer registered: SKELETON")
+    if not os.environ.get("PYISOLATE_CHILD"):
+        print("][ Serializer registered: SKELETON")
