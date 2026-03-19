@@ -16,6 +16,7 @@ def initialize_host_process() -> None:
     from .proxies.progress_proxy import ProgressProxy
     from .proxies.prompt_server_impl import PromptServerService
     from .proxies.utils_proxy import UtilsProxy
+    from .proxies.web_directory_proxy import WebDirectoryProxy
     from .vae_proxy import VAERegistry
 
     FolderPathsProxy()
@@ -23,4 +24,5 @@ def initialize_host_process() -> None:
     ProgressProxy()
     PromptServerService()
     UtilsProxy()
+    WebDirectoryProxy()
     VAERegistry()

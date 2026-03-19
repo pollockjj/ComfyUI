@@ -367,6 +367,13 @@ async def load_isolated_node(
     if host_policy["sandbox_mode"] == "disabled":
         _register_web_directory(extension_name, node_dir)
 
+    # Register for proxied web serving — the child's web dir may have
+    # content that doesn't exist on the host (e.g., pip-installed viewer
+    # bundles). The WebDirectoryCache will lazily fetch via RPC.
+    from .proxies.web_directory_proxy import WebDirectoryProxy, get_web_directory_cache
+    cache = get_web_directory_cache()
+    cache.register_proxy(extension_name, WebDirectoryProxy())
+
     # Try cache first (lazy spawn)
     if is_cache_valid(node_dir, manifest_path, venv_root):
         cached_data = load_from_cache(node_dir, venv_root)

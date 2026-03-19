@@ -37,6 +37,88 @@ _PRE_EXEC_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+def _run_prestartup_web_copy(module: Any, module_dir: str, web_dir_path: str) -> None:
+    """Run the web asset copy step that prestartup_script.py used to do.
+
+    If the module's web/ directory is empty and the module had a
+    prestartup_script.py that copied assets from pip packages, this
+    function replicates that work inside the child process.
+
+    Generic pattern: reads _PRESTARTUP_WEB_COPY from the module if
+    defined, otherwise falls back to detecting common asset packages.
+    """
+    import shutil
+
+    # Already populated — nothing to do
+    if os.path.isdir(web_dir_path) and any(os.scandir(web_dir_path)):
+        return
+
+    os.makedirs(web_dir_path, exist_ok=True)
+
+    # Try module-defined copy spec first (generic hook for any node pack)
+    copy_spec = getattr(module, "_PRESTARTUP_WEB_COPY", None)
+    if copy_spec is not None and callable(copy_spec):
+        try:
+            copy_spec(web_dir_path)
+            logger.info(
+                "%s Ran _PRESTARTUP_WEB_COPY for %s", LOG_PREFIX, module_dir
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                "%s _PRESTARTUP_WEB_COPY failed for %s: %s",
+                LOG_PREFIX, module_dir, e,
+            )
+
+    # Fallback: detect comfy_3d_viewers and run copy_viewer()
+    try:
+        from comfy_3d_viewers import copy_viewer, VIEWER_FILES
+        viewers = list(VIEWER_FILES.keys())
+        for viewer in viewers:
+            try:
+                copy_viewer(viewer, web_dir_path)
+            except Exception:
+                pass
+        if any(os.scandir(web_dir_path)):
+            logger.info(
+                "%s Copied %d viewer types from comfy_3d_viewers to %s",
+                LOG_PREFIX, len(viewers), web_dir_path,
+            )
+    except ImportError:
+        pass
+
+    # Fallback: detect comfy_dynamic_widgets
+    try:
+        from comfy_dynamic_widgets import get_js_path
+        src = os.path.realpath(get_js_path())
+        if os.path.exists(src):
+            dst_dir = os.path.join(web_dir_path, "js")
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, "dynamic_widgets.js")
+            shutil.copy2(src, dst)
+    except ImportError:
+        pass
+
+
+def _read_extension_name(module_dir: str) -> str:
+    """Read extension name from pyproject.toml, falling back to directory name."""
+    pyproject = os.path.join(module_dir, "pyproject.toml")
+    if os.path.exists(pyproject):
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        try:
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+            name = data.get("project", {}).get("name")
+            if name:
+                return name
+        except Exception:
+            pass
+    return os.path.basename(module_dir)
+
+
 def _flush_tensor_transport_state(marker: str) -> int:
     try:
         from pyisolate import flush_tensor_keeper  # type: ignore[attr-defined]
@@ -129,6 +211,20 @@ class ComfyNodeExtension(ExtensionBase):
 
         self.node_classes = getattr(module, "NODE_CLASS_MAPPINGS", {}) or {}
         self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
+
+        # Register web directory with WebDirectoryProxy (child-side)
+        web_dir_attr = getattr(module, "WEB_DIRECTORY", None)
+        if web_dir_attr is not None:
+            module_dir = os.path.dirname(os.path.abspath(module.__file__))
+            web_dir_path = os.path.abspath(os.path.join(module_dir, web_dir_attr))
+            ext_name = _read_extension_name(module_dir)
+
+            # If web dir is empty, run the copy step that prestartup_script.py did
+            _run_prestartup_web_copy(module, module_dir, web_dir_path)
+
+            if os.path.isdir(web_dir_path) and any(os.scandir(web_dir_path)):
+                from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
+                WebDirectoryProxy.register_web_dir(ext_name, web_dir_path)
 
         try:
             from comfy_api.latest import ComfyExtension
