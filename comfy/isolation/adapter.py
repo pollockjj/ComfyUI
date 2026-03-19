@@ -11,16 +11,11 @@ from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type:
 
 _IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
 
-# Singleton service proxies — no torch dependency, available everywhere
-from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
-from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
-from comfy.isolation.proxies.prompt_server_impl import PromptServerService
-from comfy.isolation.proxies.utils_proxy import UtilsProxy
-from comfy.isolation.proxies.progress_proxy import ProgressProxy
-from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
-
-# Object proxies — require torch for tensor-bearing model/CLIP/VAE types
-_HAS_OBJECT_PROXIES = False
+# All proxies depend on host modules (folder_paths, comfy.model_management, etc.)
+# Only import when running on the host or in a host-coupled child with torch.
+# Sealed workers (IMPORT_TORCH=0) get serializer registration only — proxies
+# are resolved by the RPC layer via use_remote() without importing the class.
+_HAS_PROXIES = False
 if _IMPORT_TORCH:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import (
@@ -32,7 +27,13 @@ if _IMPORT_TORCH:
         ModelSamplingRegistry,
     )
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry, FirstStageModelRegistry
-    _HAS_OBJECT_PROXIES = True
+    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+    from comfy.isolation.proxies.prompt_server_impl import PromptServerService
+    from comfy.isolation.proxies.utils_proxy import UtilsProxy
+    from comfy.isolation.proxies.progress_proxy import ProgressProxy
+    from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
+    _HAS_PROXIES = True
 
 logger = logging.getLogger(__name__)
 
@@ -473,25 +474,21 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        # Singleton service proxies — always available
-        services: List[type[ProxiedSingleton]] = [
+        if not _HAS_PROXIES:
+            return []
+        return [
             PromptServerService,
             FolderPathsProxy,
             ModelManagementProxy,
             UtilsProxy,
             ProgressProxy,
             WebDirectoryProxy,
+            VAERegistry,
+            CLIPRegistry,
+            ModelPatcherRegistry,
+            ModelSamplingRegistry,
+            FirstStageModelRegistry,
         ]
-        # Object proxies — only when torch is available
-        if _HAS_OBJECT_PROXIES:
-            services.extend([
-                VAERegistry,
-                CLIPRegistry,
-                ModelPatcherRegistry,
-                ModelSamplingRegistry,
-                FirstStageModelRegistry,
-            ])
-        return services
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         # Resolve the real name whether it's an instance or the Singleton class itself
