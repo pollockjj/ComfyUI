@@ -94,90 +94,77 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     def serialize_trimesh(obj: Any) -> Dict[str, Any]:
         _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (tensors, dict) for ComfyUI-GeometryPack")
-        import numpy as np
         import torch
+        from comfy_api.latest._util.trimesh_types import TrimeshData
+
+        # Handle both trimesh.Trimesh and TrimeshData (host round-trip)
+        if isinstance(obj, TrimeshData):
+            td = obj
+        else:
+            td = TrimeshData.from_trimesh(obj)
 
         result: Dict[str, Any] = {
             "__type__": "TRIMESH",
-            "vertices": torch.from_numpy(np.asarray(obj.vertices, dtype=np.float64)),
-            "faces": torch.from_numpy(np.asarray(obj.faces, dtype=np.int64)),
+            "vertices": torch.from_numpy(td.vertices),
+            "faces": torch.from_numpy(td.faces),
         }
-
-        # Vertex normals (computed lazily by trimesh — only serialize if cached)
-        if obj._cache.cache.get("vertex_normals") is not None:
-            result["vertex_normals"] = torch.from_numpy(np.asarray(obj.vertex_normals, dtype=np.float64))
-
-        # Face normals
-        if obj._cache.cache.get("face_normals") is not None:
-            result["face_normals"] = torch.from_numpy(np.asarray(obj.face_normals, dtype=np.float64))
-
-        # Vertex colors (RGBA uint8)
-        try:
-            vc = obj.visual.vertex_colors
-            if vc is not None and len(vc) > 0:
-                result["vertex_colors"] = torch.from_numpy(np.asarray(vc, dtype=np.uint8))
-        except Exception:
-            pass
-
-        # Vertex attributes (dict of ndarray — scalar fields per vertex)
-        if hasattr(obj, "vertex_attributes") and obj.vertex_attributes:
-            va: Dict[str, Any] = {}
-            for k, v in obj.vertex_attributes.items():
-                if isinstance(v, np.ndarray):
-                    va[k] = torch.from_numpy(v.copy())
-                else:
-                    va[k] = v
-            result["vertex_attributes"] = va
-
-        # Face attributes (dict of ndarray — scalar fields per face)
-        if hasattr(obj, "face_attributes") and obj.face_attributes:
-            fa: Dict[str, Any] = {}
-            for k, v in obj.face_attributes.items():
-                if isinstance(v, np.ndarray):
-                    fa[k] = torch.from_numpy(v.copy())
-                else:
-                    fa[k] = v
-            result["face_attributes"] = fa
-
-        # Metadata (dict of JSON-compatible primitives)
-        if obj.metadata:
-            result["metadata"] = obj.metadata
+        if td.vertex_normals is not None:
+            result["vertex_normals"] = torch.from_numpy(td.vertex_normals)
+        if td.face_normals is not None:
+            result["face_normals"] = torch.from_numpy(td.face_normals)
+        if td.vertex_colors is not None:
+            result["vertex_colors"] = torch.from_numpy(td.vertex_colors)
+        if td.vertex_attributes:
+            import numpy as np
+            result["vertex_attributes"] = {
+                k: torch.from_numpy(np.asarray(v)) if hasattr(v, "__array__") else v
+                for k, v in td.vertex_attributes.items()
+            }
+        if td.face_attributes:
+            import numpy as np
+            result["face_attributes"] = {
+                k: torch.from_numpy(np.asarray(v)) if hasattr(v, "__array__") else v
+                for k, v in td.face_attributes.items()
+            }
+        if td.metadata:
+            result["metadata"] = td.metadata
 
         return result
 
     def deserialize_trimesh(data: Any) -> Any:
-        import trimesh
-        import numpy as np
+        import os
+        from comfy_api.latest._util.trimesh_types import TrimeshData
 
-        vertices = data["vertices"].numpy()
-        faces = data["faces"].numpy()
+        def _to_np(v):
+            return v.numpy() if hasattr(v, "numpy") else v
 
-        kwargs: Dict[str, Any] = {}
-
-        if "vertex_normals" in data:
-            kwargs["vertex_normals"] = data["vertex_normals"].numpy()
-        if "face_normals" in data:
-            kwargs["face_normals"] = data["face_normals"].numpy()
-        if "metadata" in data:
-            kwargs["metadata"] = data["metadata"]
-
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False, **kwargs)
-
-        if "vertex_colors" in data:
-            mesh.visual.vertex_colors = data["vertex_colors"].numpy()
-
+        va = None
         if "vertex_attributes" in data:
-            for k, v in data["vertex_attributes"].items():
-                mesh.vertex_attributes[k] = v.numpy() if hasattr(v, "numpy") else v
+            va = {k: _to_np(v) for k, v in data["vertex_attributes"].items()}
 
+        fa = None
         if "face_attributes" in data:
-            for k, v in data["face_attributes"].items():
-                mesh.face_attributes[k] = v.numpy() if hasattr(v, "numpy") else v
+            fa = {k: _to_np(v) for k, v in data["face_attributes"].items()}
 
-        return mesh
+        td = TrimeshData(
+            vertices=data["vertices"].numpy(),
+            faces=data["faces"].numpy(),
+            vertex_normals=data["vertex_normals"].numpy() if "vertex_normals" in data else None,
+            face_normals=data["face_normals"].numpy() if "face_normals" in data else None,
+            vertex_colors=data["vertex_colors"].numpy() if "vertex_colors" in data else None,
+            vertex_attributes=va,
+            face_attributes=fa,
+            metadata=data.get("metadata"),
+        )
+
+        # Child process has trimesh installed — return real Trimesh object
+        if os.environ.get("PYISOLATE_CHILD") == "1":
+            return td.to_trimesh()
+        return td
 
     registry.register("TRIMESH", serialize_trimesh, deserialize_trimesh, data_type=True)
     registry.register("Trimesh", serialize_trimesh, deserialize_trimesh, data_type=True)
+    registry.register("TrimeshData", serialize_trimesh, deserialize_trimesh, data_type=True)
     print("][ Serializer registered: TRIMESH")
 
     # -- SKELETON (GeometryPack skeleton dict) ----------------------------------
