@@ -25,6 +25,7 @@ try:
     from comfy.isolation.proxies.prompt_server_impl import PromptServerService
     from comfy.isolation.proxies.utils_proxy import UtilsProxy
     from comfy.isolation.proxies.progress_proxy import ProgressProxy
+    from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
 except ImportError as exc:  # Fail loud if Comfy environment is incomplete
     raise ImportError(f"ComfyUI environment incomplete: {exc}")
 
@@ -467,6 +468,7 @@ class ComfyUIAdapter(IsolationAdapter):
             ModelManagementProxy,
             UtilsProxy,
             ProgressProxy,
+            WebDirectoryProxy,
             VAERegistry,
             CLIPRegistry,
             ModelPatcherRegistry,
