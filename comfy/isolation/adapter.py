@@ -85,7 +85,13 @@ class ComfyUIAdapter(IsolationAdapter):
                     logging.getLogger(pkg_name).setLevel(logging.ERROR)
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
-        import torch
+        try:
+            import torch
+        except ImportError:
+            # Sealed worker without torch — register only data serializers
+            from comfy.isolation.custom_node_serializers import register_custom_node_serializers
+            register_custom_node_serializers(registry)
+            return
 
         def serialize_device(obj: Any) -> Dict[str, Any]:
             return {"__type__": "device", "device_str": str(obj)}
