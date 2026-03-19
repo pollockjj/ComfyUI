@@ -41,7 +41,29 @@ class TrimeshData:
         )
         self.vertex_attributes = vertex_attributes or {}
         self.face_attributes = face_attributes or {}
-        self.metadata = metadata or {}
+        self.metadata = self._detensorize_dict(metadata) if metadata else {}
+
+    @staticmethod
+    def _detensorize_dict(d):
+        """Recursively convert any tensors in a dict back to numpy arrays."""
+        if not isinstance(d, dict):
+            return d
+        result = {}
+        for k, v in d.items():
+            if hasattr(v, "numpy"):
+                result[k] = v.cpu().numpy() if hasattr(v, "cpu") else v.numpy()
+            elif isinstance(v, dict):
+                result[k] = TrimeshData._detensorize_dict(v)
+            elif isinstance(v, list):
+                result[k] = [
+                    item.cpu().numpy() if hasattr(item, "numpy") and hasattr(item, "cpu")
+                    else item.numpy() if hasattr(item, "numpy")
+                    else item
+                    for item in v
+                ]
+            else:
+                result[k] = v
+        return result
 
     @staticmethod
     def _to_numpy(arr, dtype):
