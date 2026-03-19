@@ -8,17 +8,32 @@ serializers to this file.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 from pyisolate.interfaces import SerializerRegistryProtocol  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
+
+_announced: set[str] = set()
+
+
+def _announce(name: str, desc: str) -> None:
+    if name not in _announced:
+        _announced.add(name)
+        logger.info("][ Serializer: %s — %s", name, desc)
 
 
 def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> None:
     """Register all custom-node-originated serializers."""
 
-    # -- PLY (DA3 / GeometryPack point clouds) --------------------------------
+    # -- PLY (comfy_api.latest._util.ply_types) --------------------------------
+    # PLY point cloud container from comfy_api.
+    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
 
     def serialize_ply(obj: Any) -> Dict[str, Any]:
+        _announce("PLY", "comfy_api PLY (by ComfyOrg) serializer 1.0 (base64/tensors) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
         import base64
         import torch
         if obj.raw_data is not None:
@@ -49,9 +64,13 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     registry.register("PLY", serialize_ply, deserialize_ply, data_type=True)
 
-    # -- NPZ (DA3 depth maps) -------------------------------------------------
+    # -- NPZ (comfy_api.latest._util.npz_types) --------------------------------
+    # NPZ depth map frame container from comfy_api.
+    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # Used by: ComfyUI-DepthAnythingV3
 
     def serialize_npz(obj: Any) -> Dict[str, Any]:
+        _announce("NPZ", "comfy_api NPZ (by ComfyOrg) serializer 1.0 (base64 frames) for ComfyUI-DepthAnythingV3")
         import base64
         return {
             "__type__": "NPZ",
@@ -65,9 +84,13 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     registry.register("NPZ", serialize_npz, deserialize_npz, data_type=True)
 
-    # -- File3D (GeometryPack 3D geometry) -------------------------------------
+    # -- File3D (comfy_api.latest._util.geometry_types) -------------------------
+    # 3D geometry file container from comfy_api.
+    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
 
     def serialize_file3d(obj: Any) -> Dict[str, Any]:
+        _announce("File3D", "comfy_api File3D (by ComfyOrg/Alexander Piskun) serializer 1.0 (base64, format) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
         import base64
         return {
             "__type__": "File3D",
@@ -83,9 +106,13 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     registry.register("File3D", serialize_file3d, deserialize_file3d, data_type=True)
 
-    # -- VIDEO (video node packs) ----------------------------------------------
+    # -- VIDEO (comfy_api.latest._input_impl.video_types) -----------------------
+    # Video frame/audio container from comfy_api.
+    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # Used by: ComfyUI-VideoHelperSuite, ComfyUI-WanVideoWrapper, and other video node packs
 
     def serialize_video(obj: Any) -> Dict[str, Any]:
+        _announce("VIDEO", "comfy_api Video (by ComfyOrg/Alexander Piskun) serializer 1.0 (tensors, fraction, dict) for video node packs")
         components = obj.get_components()
         images = components.images.detach() if components.images.requires_grad else components.images
         result: Dict[str, Any] = {
