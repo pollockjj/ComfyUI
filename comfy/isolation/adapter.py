@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from pyisolate.interfaces import IsolationAdapter, SerializerRegistryProtocol  # type: ignore[import-untyped]
 from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type: ignore[import-untyped]
 
+_HAS_TORCH_PROXIES = False
 try:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import (
@@ -26,8 +27,10 @@ try:
     from comfy.isolation.proxies.utils_proxy import UtilsProxy
     from comfy.isolation.proxies.progress_proxy import ProgressProxy
     from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
-except ImportError as exc:  # Fail loud if Comfy environment is incomplete
-    raise ImportError(f"ComfyUI environment incomplete: {exc}")
+    _HAS_TORCH_PROXIES = True
+except ImportError:
+    # Sealed workers without torch can still use the adapter for data serializers
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +471,8 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
+        if not _HAS_TORCH_PROXIES:
+            return []
         return [
             PromptServerService,
             FolderPathsProxy,
