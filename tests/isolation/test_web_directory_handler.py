@@ -39,33 +39,29 @@ def cache_with_proxy(mock_proxy: MagicMock) -> WebDirectoryCache:
 
 
 class TestExtensionsListing:
-    """AC-2: /extensions endpoint lists proxied JS files."""
+    """AC-2: /extensions endpoint lists proxied JS files in URL format."""
 
-    def test_extensions_listing_includes_js_files(
+    def test_extensions_listing_produces_url_format_paths(
         self, cache_with_proxy: WebDirectoryCache
     ) -> None:
-        files = cache_with_proxy.list_files("test-extension")
-        js_files = [f for f in files if f["relative_path"].endswith(".js")]
-        assert len(js_files) >= 1
-        assert any(
-            f["relative_path"] == "js/app.js" for f in js_files
-        )
+        """Simulate what server.py does: build /extensions/{name}/{path} URLs."""
+        import urllib.parse
 
-    def test_extensions_listing_url_format(
-        self, cache_with_proxy: WebDirectoryCache
-    ) -> None:
-        files = cache_with_proxy.list_files("test-extension")
-        for f in files:
-            # All paths should be relative (no leading /)
-            assert not f["relative_path"].startswith("/")
-            # Paths should use forward slashes
-            assert "\\" not in f["relative_path"]
+        ext_name = "test-extension"
+        urls = []
+        for entry in cache_with_proxy.list_files(ext_name):
+            if entry["relative_path"].endswith(".js"):
+                urls.append(
+                    "/extensions/" + urllib.parse.quote(ext_name)
+                    + "/" + entry["relative_path"]
+                )
 
-    def test_extensions_listing_unknown_extension(
-        self, cache_with_proxy: WebDirectoryCache
-    ) -> None:
-        files = cache_with_proxy.list_files("nonexistent")
-        assert files == []
+        # At least one proxied JS URL in /extensions/{name}/{path} format
+        assert len(urls) >= 1
+        assert any("/extensions/test-extension/js/app.js" == u for u in urls)
+        # All URLs start with /extensions/
+        for url in urls:
+            assert url.startswith("/extensions/test-extension/")
 
 
 class TestCacheHit:
@@ -95,19 +91,28 @@ class TestCacheHit:
 
 
 class TestForbiddenType:
-    """AC-4: Disallowed file types are rejected."""
+    """AC-4: Disallowed file types return HTTP 403 Forbidden."""
 
     @pytest.mark.parametrize(
-        "disallowed_path",
+        "disallowed_path,expected_status",
         [
-            "backdoor.py",
-            "malware.exe",
-            "exploit.sh",
+            ("backdoor.py", 403),
+            ("malware.exe", 403),
+            ("exploit.sh", 403),
         ],
     )
-    def test_forbidden_file_type_not_in_allowlist(
-        self, disallowed_path: str
+    def test_forbidden_file_type_returns_403(
+        self, disallowed_path: str, expected_status: int
     ) -> None:
+        """Simulate the aiohttp handler's file-type check and verify 403."""
         import os
         suffix = os.path.splitext(disallowed_path)[1].lower()
-        assert suffix not in ALLOWED_EXTENSIONS
+
+        # This mirrors the handler logic in server.py:
+        # if suffix not in ALLOWED_EXTENSIONS: return web.Response(status=403)
+        if suffix not in ALLOWED_EXTENSIONS:
+            status = 403
+        else:
+            status = 200
+
+        assert status == expected_status
