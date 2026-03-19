@@ -358,10 +358,13 @@ async def load_isolated_node(
     if execution_model != "host-coupled":
         extension_config["execution_model"] = execution_model
     if execution_model == "sealed_worker":
-        extension_config["apis"] = []
         policy_ro_paths = host_policy.get("sealed_worker_ro_import_paths", [])
         if isinstance(policy_ro_paths, list) and policy_ro_paths:
             extension_config["sealed_host_ro_paths"] = list(policy_ro_paths)
+            # RO paths give sealed child access to framework — keep APIs for
+            # adapter rehydration and serializer registration
+        else:
+            extension_config["apis"] = []
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
