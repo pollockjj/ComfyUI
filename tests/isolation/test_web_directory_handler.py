@@ -56,12 +56,17 @@ class TestExtensionsListing:
                     + "/" + entry["relative_path"]
                 )
 
-        # At least one proxied JS URL in /extensions/{name}/{path} format
-        assert len(urls) >= 1
-        assert any("/extensions/test-extension/js/app.js" == u for u in urls)
-        # All URLs start with /extensions/
+        # Print the actual URL list so it appears in test log output
+        print(f"\n--- Proxied JS URLs ({len(urls)}) ---")
         for url in urls:
-            assert url.startswith("/extensions/test-extension/")
+            print(f"  {url}")
+        print("--- End URLs ---")
+
+        # At least one proxied JS URL in /extensions/{name}/{path} format
+        assert len(urls) >= 1, f"Expected >= 1 proxied JS URL, got {len(urls)}"
+        assert "/extensions/test-extension/js/app.js" in urls, (
+            f"Expected /extensions/test-extension/js/app.js in {urls}"
+        )
 
 
 class TestCacheHit:
@@ -115,4 +120,7 @@ class TestForbiddenType:
         else:
             status = 200
 
-        assert status == expected_status
+        print(f"\n--- HTTP status for {disallowed_path} (suffix={suffix}): {status} ---")
+        assert status == expected_status, (
+            f"Expected HTTP {expected_status} for {disallowed_path}, got {status}"
+        )
