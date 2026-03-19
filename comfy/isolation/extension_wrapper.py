@@ -365,6 +365,12 @@ class ComfyNodeExtension(ExtensionBase):
                 for key, value in hidden_found.items():
                     setattr(node_cls.hidden, key.value.lower(), value)
 
+        # INPUT_IS_LIST: ComfyUI's executor passes all inputs as lists when this
+        # flag is set.  The isolation RPC delivers unwrapped values, so we must
+        # wrap each input in a single-element list to match the contract.
+        if getattr(node_cls, "INPUT_IS_LIST", False):
+            resolved_inputs = {k: [v] for k, v in resolved_inputs.items()}
+
         function_name = getattr(node_cls, "FUNCTION", "execute")
         if not hasattr(instance, function_name):
             raise AttributeError(f"Node {node_name} missing callable '{function_name}'")
