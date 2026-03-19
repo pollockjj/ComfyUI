@@ -177,7 +177,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         return mesh
 
     registry.register("TRIMESH", serialize_trimesh, deserialize_trimesh, data_type=True)
-    logger.info("][ Serializer registered: TRIMESH")
+    print("][ Serializer registered: TRIMESH")
 
     # -- SKELETON (GeometryPack skeleton dict) ----------------------------------
     # Custom dict type invented by GeometryPack for skeleton extraction.
@@ -209,4 +209,4 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         }
 
     registry.register("SKELETON", serialize_skeleton, deserialize_skeleton, data_type=True)
-    logger.info("][ Serializer registered: SKELETON")
+    print("][ Serializer registered: SKELETON")
