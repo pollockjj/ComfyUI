@@ -114,6 +114,10 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             result["face_normals"] = torch.from_numpy(td.face_normals)
         if td.vertex_colors is not None:
             result["vertex_colors"] = torch.from_numpy(td.vertex_colors)
+        if td.uv is not None:
+            result["uv"] = torch.from_numpy(td.uv)
+        if td.material is not None:
+            result["material"] = td.material
         if td.vertex_attributes:
             import numpy as np
             result["vertex_attributes"] = {
@@ -152,6 +156,8 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             vertex_normals=data["vertex_normals"].numpy() if "vertex_normals" in data else None,
             face_normals=data["face_normals"].numpy() if "face_normals" in data else None,
             vertex_colors=data["vertex_colors"].numpy() if "vertex_colors" in data else None,
+            uv=data["uv"].numpy() if "uv" in data else None,
+            material=data.get("material"),
             vertex_attributes=va,
             face_attributes=fa,
             metadata=data.get("metadata"),
