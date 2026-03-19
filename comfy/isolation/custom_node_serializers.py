@@ -177,6 +177,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         return mesh
 
     registry.register("TRIMESH", serialize_trimesh, deserialize_trimesh, data_type=True)
+    registry.register("Trimesh", serialize_trimesh, deserialize_trimesh, data_type=True)
     print("][ Serializer registered: TRIMESH")
 
     # -- SKELETON (GeometryPack skeleton dict) ----------------------------------
