@@ -123,3 +123,97 @@ def _validate_path(relative_path: str) -> None:
         raise ValueError(f"Absolute paths are not allowed: {relative_path}")
     if ".." in PurePosixPath(relative_path).parts:
         raise ValueError(f"Directory traversal is not allowed: {relative_path}")
+
+
+# ---------------------------------------------------------------------------
+# Host-side cache and aiohttp handler
+# ---------------------------------------------------------------------------
+
+
+class WebDirectoryCache:
+    """Host-side in-memory cache for proxied web directory contents.
+
+    Populated lazily via RPC calls to the child's WebDirectoryProxy.
+    Once a file is cached, subsequent requests are served from memory.
+    """
+
+    def __init__(self) -> None:
+        # {extension_name: {relative_path: {"content": bytes, "content_type": str}}}
+        self._file_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        # {extension_name: [{"relative_path": str, "content_type": str}, ...]}
+        self._listing_cache: dict[str, list[dict[str, str]]] = {}
+        # {extension_name: WebDirectoryProxy (RPC proxy instance)}
+        self._proxies: dict[str, Any] = {}
+
+    def register_proxy(self, extension_name: str, proxy: Any) -> None:
+        """Register an RPC proxy for an extension's web directory."""
+        self._proxies[extension_name] = proxy
+        logger.info(
+            "][ WebDirectoryCache: registered proxy for %s", extension_name
+        )
+
+    @property
+    def extension_names(self) -> list[str]:
+        return list(self._proxies.keys())
+
+    def list_files(self, extension_name: str) -> list[dict[str, str]]:
+        """List servable files for an extension (cached after first call)."""
+        if extension_name not in self._listing_cache:
+            proxy = self._proxies.get(extension_name)
+            if proxy is None:
+                return []
+            try:
+                self._listing_cache[extension_name] = proxy.list_web_files(
+                    extension_name
+                )
+            except Exception:
+                logger.warning(
+                    "][ WebDirectoryCache: failed to list files for %s",
+                    extension_name,
+                    exc_info=True,
+                )
+                return []
+        return self._listing_cache[extension_name]
+
+    def get_file(
+        self, extension_name: str, relative_path: str
+    ) -> dict[str, Any] | None:
+        """Get file content (cached after first fetch). Returns None on miss."""
+        ext_cache = self._file_cache.get(extension_name)
+        if ext_cache and relative_path in ext_cache:
+            return ext_cache[relative_path]
+
+        proxy = self._proxies.get(extension_name)
+        if proxy is None:
+            return None
+
+        try:
+            result = proxy.get_web_file(extension_name, relative_path)
+        except (FileNotFoundError, ValueError):
+            return None
+        except Exception:
+            logger.warning(
+                "][ WebDirectoryCache: failed to fetch %s/%s",
+                extension_name,
+                relative_path,
+                exc_info=True,
+            )
+            return None
+
+        decoded = {
+            "content": base64.b64decode(result["content"]),
+            "content_type": result["content_type"],
+        }
+
+        if extension_name not in self._file_cache:
+            self._file_cache[extension_name] = {}
+        self._file_cache[extension_name][relative_path] = decoded
+        return decoded
+
+
+# Global cache instance — populated during isolation loading
+_web_directory_cache = WebDirectoryCache()
+
+
+def get_web_directory_cache() -> WebDirectoryCache:
+    return _web_directory_cache
