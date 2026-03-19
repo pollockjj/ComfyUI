@@ -8,11 +8,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
-import folder_paths
-from .extension_loader import load_isolated_node
-from .manifest_loader import find_manifest_directories
-from .runtime_helpers import build_stub_class, get_class_types_for_extension
-from .shm_forensics import scan_shm_forensics, start_shm_forensics
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
+if _IMPORT_TORCH:
+    import folder_paths
+    from .extension_loader import load_isolated_node
+    from .manifest_loader import find_manifest_directories
+    from .runtime_helpers import build_stub_class, get_class_types_for_extension
+    from .shm_forensics import scan_shm_forensics, start_shm_forensics
 
 if TYPE_CHECKING:
     from pyisolate import ExtensionManager
@@ -21,8 +24,9 @@ if TYPE_CHECKING:
 LOG_PREFIX = "]["
 isolated_node_timings: List[tuple[float, Path, int]] = []
 
-PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
-PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
+if _IMPORT_TORCH:
+    PYISOLATE_VENV_ROOT = Path(folder_paths.base_path) / ".pyisolate_venvs"
+    PYISOLATE_VENV_ROOT.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 _WORKFLOW_BOUNDARY_MIN_FREE_VRAM_BYTES = 2 * 1024 * 1024 * 1024

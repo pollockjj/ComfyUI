@@ -9,8 +9,19 @@ from typing import Any, Callable, Dict, List, Optional
 from pyisolate.interfaces import IsolationAdapter, SerializerRegistryProtocol  # type: ignore[import-untyped]
 from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type: ignore[import-untyped]
 
-_HAS_TORCH_PROXIES = False
-try:
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
+# Singleton service proxies — no torch dependency, available everywhere
+from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+from comfy.isolation.proxies.prompt_server_impl import PromptServerService
+from comfy.isolation.proxies.utils_proxy import UtilsProxy
+from comfy.isolation.proxies.progress_proxy import ProgressProxy
+from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
+
+# Object proxies — require torch for tensor-bearing model/CLIP/VAE types
+_HAS_OBJECT_PROXIES = False
+if _IMPORT_TORCH:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import (
         ModelPatcherProxy,
@@ -21,16 +32,7 @@ try:
         ModelSamplingRegistry,
     )
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry, FirstStageModelRegistry
-    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
-    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
-    from comfy.isolation.proxies.prompt_server_impl import PromptServerService
-    from comfy.isolation.proxies.utils_proxy import UtilsProxy
-    from comfy.isolation.proxies.progress_proxy import ProgressProxy
-    from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
-    _HAS_TORCH_PROXIES = True
-except ImportError:
-    # Sealed workers without torch can still use the adapter for data serializers
-    pass
+    _HAS_OBJECT_PROXIES = True
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +90,13 @@ class ComfyUIAdapter(IsolationAdapter):
                     logging.getLogger(pkg_name).setLevel(logging.ERROR)
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
-        try:
-            import torch
-        except ImportError:
+        if not _IMPORT_TORCH:
             # Sealed worker without torch — register only data serializers
             from comfy.isolation.custom_node_serializers import register_custom_node_serializers
             register_custom_node_serializers(registry)
             return
+
+        import torch
 
         def serialize_device(obj: Any) -> Dict[str, Any]:
             return {"__type__": "device", "device_str": str(obj)}
@@ -471,21 +473,25 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        if not _HAS_TORCH_PROXIES:
-            return []
-        return [
+        # Singleton service proxies — always available
+        services: List[type[ProxiedSingleton]] = [
             PromptServerService,
             FolderPathsProxy,
             ModelManagementProxy,
             UtilsProxy,
             ProgressProxy,
             WebDirectoryProxy,
-            VAERegistry,
-            CLIPRegistry,
-            ModelPatcherRegistry,
-            ModelSamplingRegistry,
-            FirstStageModelRegistry,
         ]
+        # Object proxies — only when torch is available
+        if _HAS_OBJECT_PROXIES:
+            services.extend([
+                VAERegistry,
+                CLIPRegistry,
+                ModelPatcherRegistry,
+                ModelSamplingRegistry,
+                FirstStageModelRegistry,
+            ])
+        return services
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         # Resolve the real name whether it's an instance or the Singleton class itself
