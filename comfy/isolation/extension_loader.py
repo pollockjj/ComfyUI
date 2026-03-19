@@ -277,6 +277,9 @@ async def load_isolated_node(
     conda_platforms: list[str] = (
         tool_config.get("conda_platforms", []) if is_conda else []
     )
+    conda_python: str = (
+        tool_config.get("conda_python", "*") if is_conda else "*"
+    )
 
     # Parse [project] dependencies
     project_config = manifest_data.get("project", {})
@@ -348,6 +351,7 @@ async def load_isolated_node(
         extension_config["package_manager"] = "conda"
         extension_config["conda_channels"] = conda_channels
         extension_config["conda_dependencies"] = conda_dependencies
+        extension_config["conda_python"] = conda_python
         if conda_platforms:
             extension_config["conda_platforms"] = conda_platforms
 
