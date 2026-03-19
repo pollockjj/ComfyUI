@@ -396,7 +396,67 @@ class ComfyUIAdapter(IsolationAdapter):
 
         registry.register("ndarray", serialize_numpy, None)
 
-        # Custom node serializers (PLY, NPZ, File3D, VIDEO) live in their own file
+        # -- File3D (comfy_api.latest._util.geometry_types) ---------------------
+        # Origin: comfy_api by ComfyOrg (Alexander Piskun), PR #12129
+
+        def serialize_file3d(obj: Any) -> Dict[str, Any]:
+            import base64
+            return {
+                "__type__": "File3D",
+                "format": obj.format,
+                "data": base64.b64encode(obj.get_bytes()).decode("ascii"),
+            }
+
+        def deserialize_file3d(data: Any) -> Any:
+            import base64
+            from io import BytesIO
+            from comfy_api.latest._util.geometry_types import File3D
+            return File3D(BytesIO(base64.b64decode(data["data"])), file_format=data["format"])
+
+        registry.register("File3D", serialize_file3d, deserialize_file3d, data_type=True)
+
+        # -- VIDEO (comfy_api.latest._input_impl.video_types) -------------------
+        # Origin: ComfyAPI Core v0.0.2 by ComfyOrg (guill), PR #8962
+
+        def serialize_video(obj: Any) -> Dict[str, Any]:
+            components = obj.get_components()
+            images = components.images.detach() if components.images.requires_grad else components.images
+            result: Dict[str, Any] = {
+                "__type__": "VIDEO",
+                "images": images,
+                "frame_rate_num": components.frame_rate.numerator,
+                "frame_rate_den": components.frame_rate.denominator,
+            }
+            if components.audio is not None:
+                waveform = components.audio["waveform"]
+                if waveform.requires_grad:
+                    waveform = waveform.detach()
+                result["audio_waveform"] = waveform
+                result["audio_sample_rate"] = components.audio["sample_rate"]
+            if components.metadata is not None:
+                result["metadata"] = components.metadata
+            return result
+
+        def deserialize_video(data: Any) -> Any:
+            from fractions import Fraction
+            from comfy_api.latest._input_impl.video_types import VideoFromComponents
+            from comfy_api.latest._util.video_types import VideoComponents
+            audio = None
+            if "audio_waveform" in data:
+                audio = {"waveform": data["audio_waveform"], "sample_rate": data["audio_sample_rate"]}
+            components = VideoComponents(
+                images=data["images"],
+                frame_rate=Fraction(data["frame_rate_num"], data["frame_rate_den"]),
+                audio=audio,
+                metadata=data.get("metadata"),
+            )
+            return VideoFromComponents(components)
+
+        registry.register("VIDEO", serialize_video, deserialize_video, data_type=True)
+        registry.register("VideoFromFile", serialize_video, deserialize_video, data_type=True)
+        registry.register("VideoFromComponents", serialize_video, deserialize_video, data_type=True)
+
+        # Custom node serializers (PLY, NPZ, etc.) live in their own file
         from comfy.isolation.custom_node_serializers import register_custom_node_serializers
         register_custom_node_serializers(registry)
 

@@ -1,9 +1,12 @@
 """Serializers for custom node data types.
 
-These serializers exist because of specific custom node conversions (DA3,
-GeometryPack, etc.) and are not required by core ComfyUI.  New custom node
-conversions that introduce types not covered here should add their
-serializers to this file.
+These serializers exist because of specific custom node conversions and are
+not required by core ComfyUI.  Types defined in comfy_api (File3D, VIDEO,
+etc.) belong in adapter.py.  Only types invented by custom node packs that
+don't exist in comfy_api belong here.
+
+New custom node conversions that introduce types not covered here should
+add their serializers to this file.
 """
 
 from __future__ import annotations
@@ -28,12 +31,12 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     """Register all custom-node-originated serializers."""
 
     # -- PLY (comfy_api.latest._util.ply_types) --------------------------------
-    # PLY point cloud container from comfy_api.
-    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # PLY point cloud container created for DA3 isolation conversion.
+    # Origin: pollockjj for ComfyUI-DepthAnythingV3 isolation (commit 99d90b29)
     # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
 
     def serialize_ply(obj: Any) -> Dict[str, Any]:
-        _announce("PLY", "comfy_api PLY (by ComfyOrg) serializer 1.0 (base64/tensors) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
+        _announce("PLY", "PLY (by pollockjj for DA3 isolation) serializer 1.0 (base64/tensors) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
         import base64
         import torch
         if obj.raw_data is not None:
@@ -65,12 +68,12 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     registry.register("PLY", serialize_ply, deserialize_ply, data_type=True)
 
     # -- NPZ (comfy_api.latest._util.npz_types) --------------------------------
-    # NPZ depth map frame container from comfy_api.
-    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
+    # NPZ depth map frame container created for DA3 isolation conversion.
+    # Origin: pollockjj for ComfyUI-DepthAnythingV3 isolation (commit 99d90b29)
     # Used by: ComfyUI-DepthAnythingV3
 
     def serialize_npz(obj: Any) -> Dict[str, Any]:
-        _announce("NPZ", "comfy_api NPZ (by ComfyOrg) serializer 1.0 (base64 frames) for ComfyUI-DepthAnythingV3")
+        _announce("NPZ", "NPZ (by pollockjj for DA3 isolation) serializer 1.0 (base64 frames) for ComfyUI-DepthAnythingV3")
         import base64
         return {
             "__type__": "NPZ",
@@ -83,69 +86,3 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         return NPZ(frames=[base64.b64decode(f) for f in data["frames"]])
 
     registry.register("NPZ", serialize_npz, deserialize_npz, data_type=True)
-
-    # -- File3D (comfy_api.latest._util.geometry_types) -------------------------
-    # 3D geometry file container from comfy_api.
-    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
-    # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
-
-    def serialize_file3d(obj: Any) -> Dict[str, Any]:
-        _announce("File3D", "comfy_api File3D (by ComfyOrg/Alexander Piskun) serializer 1.0 (base64, format) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
-        import base64
-        return {
-            "__type__": "File3D",
-            "format": obj.format,
-            "data": base64.b64encode(obj.get_bytes()).decode("ascii"),
-        }
-
-    def deserialize_file3d(data: Any) -> Any:
-        import base64
-        from io import BytesIO
-        from comfy_api.latest._util.geometry_types import File3D
-        return File3D(BytesIO(base64.b64decode(data["data"])), file_format=data["format"])
-
-    registry.register("File3D", serialize_file3d, deserialize_file3d, data_type=True)
-
-    # -- VIDEO (comfy_api.latest._input_impl.video_types) -----------------------
-    # Video frame/audio container from comfy_api.
-    # Origin: ComfyUI comfy_api by ComfyOrg (Alexander Piskun)
-    # Used by: ComfyUI-VideoHelperSuite, ComfyUI-WanVideoWrapper, and other video node packs
-
-    def serialize_video(obj: Any) -> Dict[str, Any]:
-        _announce("VIDEO", "comfy_api Video (by ComfyOrg/Alexander Piskun) serializer 1.0 (tensors, fraction, dict) for video node packs")
-        components = obj.get_components()
-        images = components.images.detach() if components.images.requires_grad else components.images
-        result: Dict[str, Any] = {
-            "__type__": "VIDEO",
-            "images": images,
-            "frame_rate_num": components.frame_rate.numerator,
-            "frame_rate_den": components.frame_rate.denominator,
-        }
-        if components.audio is not None:
-            waveform = components.audio["waveform"]
-            if waveform.requires_grad:
-                waveform = waveform.detach()
-            result["audio_waveform"] = waveform
-            result["audio_sample_rate"] = components.audio["sample_rate"]
-        if components.metadata is not None:
-            result["metadata"] = components.metadata
-        return result
-
-    def deserialize_video(data: Any) -> Any:
-        from fractions import Fraction
-        from comfy_api.latest._input_impl.video_types import VideoFromComponents
-        from comfy_api.latest._util.video_types import VideoComponents
-        audio = None
-        if "audio_waveform" in data:
-            audio = {"waveform": data["audio_waveform"], "sample_rate": data["audio_sample_rate"]}
-        components = VideoComponents(
-            images=data["images"],
-            frame_rate=Fraction(data["frame_rate_num"], data["frame_rate_den"]),
-            audio=audio,
-            metadata=data.get("metadata"),
-        )
-        return VideoFromComponents(components)
-
-    registry.register("VIDEO", serialize_video, deserialize_video, data_type=True)
-    registry.register("VideoFromFile", serialize_video, deserialize_video, data_type=True)
-    registry.register("VideoFromComponents", serialize_video, deserialize_video, data_type=True)
