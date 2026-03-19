@@ -61,6 +61,22 @@ def _normalize_writable_paths(paths: list[object]) -> list[str]:
     return normalized_paths
 
 
+def _load_whitelist_file(file_path: Path, config_path: Path) -> Dict[str, str]:
+    if not file_path.is_absolute():
+        file_path = config_path.parent / file_path
+    if not file_path.exists():
+        logger.warning("whitelist_file %s not found, skipping.", file_path)
+        return {}
+    entries: Dict[str, str] = {}
+    for line in file_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        entries[line] = "*"
+    logger.debug("Loaded %d whitelist entries from %s", len(entries), file_path)
+    return entries
+
+
 def _normalize_sealed_worker_ro_import_paths(raw_paths: object) -> list[str]:
     if not isinstance(raw_paths, list):
         raise ValueError(
@@ -138,9 +154,13 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
             tool_config["sealed_worker_ro_import_paths"]
         )
 
+    whitelist_file = tool_config.get("whitelist_file")
+    if isinstance(whitelist_file, str):
+        policy["whitelist"].update(_load_whitelist_file(Path(whitelist_file), config_path))
+
     whitelist_raw = tool_config.get("whitelist")
     if isinstance(whitelist_raw, dict):
-        policy["whitelist"] = {str(k): str(v) for k, v in whitelist_raw.items()}
+        policy["whitelist"].update({str(k): str(v) for k, v in whitelist_raw.items()})
 
     logger.debug(
         "Loaded Host Policy: %d whitelisted nodes, Sandbox=%s, Network=%s",
