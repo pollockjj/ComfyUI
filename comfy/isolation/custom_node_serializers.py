@@ -37,33 +37,34 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
 
     def serialize_ply(obj: Any) -> Dict[str, Any]:
-        _announce("PLY", "PLY (by pollockjj for DA3 isolation) serializer 1.0 (base64/tensors) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
+        _announce("PLY", "PLY (by pollockjj for DA3 isolation) serializer 1.0 (base64/lists) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
         import base64
-        import torch
+        import numpy as np
         if obj.raw_data is not None:
             return {
                 "__type__": "PLY",
                 "raw_data": base64.b64encode(obj.raw_data).decode("ascii"),
             }
-        result: Dict[str, Any] = {"__type__": "PLY", "points": torch.from_numpy(obj.points)}
+        result: Dict[str, Any] = {"__type__": "PLY", "points": np.asarray(obj.points).tolist()}
         if obj.colors is not None:
-            result["colors"] = torch.from_numpy(obj.colors)
+            result["colors"] = np.asarray(obj.colors).tolist()
         if obj.confidence is not None:
-            result["confidence"] = torch.from_numpy(obj.confidence)
+            result["confidence"] = np.asarray(obj.confidence).tolist()
         if obj.view_id is not None:
-            result["view_id"] = torch.from_numpy(obj.view_id)
+            result["view_id"] = np.asarray(obj.view_id).tolist()
         return result
 
     def deserialize_ply(data: Any) -> Any:
         import base64
+        import numpy as np
         from comfy_api.latest._util.ply_types import PLY
         if "raw_data" in data:
             return PLY(raw_data=base64.b64decode(data["raw_data"]))
         return PLY(
-            points=data["points"],
-            colors=data.get("colors"),
-            confidence=data.get("confidence"),
-            view_id=data.get("view_id"),
+            points=np.array(data["points"]),
+            colors=np.array(data["colors"]) if data.get("colors") is not None else None,
+            confidence=np.array(data["confidence"]) if data.get("confidence") is not None else None,
+            view_id=np.array(data["view_id"]) if data.get("view_id") is not None else None,
         )
 
     registry.register("PLY", serialize_ply, deserialize_ply, data_type=True)
@@ -94,8 +95,8 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: ComfyUI-GeometryPack (62 nodes)
 
     def serialize_trimesh(obj: Any) -> Dict[str, Any]:
-        _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (tensors, dict) for ComfyUI-GeometryPack")
-        import torch
+        _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
+        import numpy as np
         from comfy_api.latest._util.trimesh_types import TrimeshData
 
         # Handle both trimesh.Trimesh and TrimeshData (host round-trip)
@@ -106,29 +107,27 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
         result: Dict[str, Any] = {
             "__type__": "TRIMESH",
-            "vertices": torch.from_numpy(td.vertices),
-            "faces": torch.from_numpy(td.faces),
+            "vertices": td.vertices.tolist(),
+            "faces": td.faces.tolist(),
         }
         if td.vertex_normals is not None:
-            result["vertex_normals"] = torch.from_numpy(td.vertex_normals)
+            result["vertex_normals"] = td.vertex_normals.tolist()
         if td.face_normals is not None:
-            result["face_normals"] = torch.from_numpy(td.face_normals)
+            result["face_normals"] = td.face_normals.tolist()
         if td.vertex_colors is not None:
-            result["vertex_colors"] = torch.from_numpy(td.vertex_colors)
+            result["vertex_colors"] = td.vertex_colors.tolist()
         if td.uv is not None:
-            result["uv"] = torch.from_numpy(td.uv)
+            result["uv"] = td.uv.tolist()
         if td.material is not None:
             result["material"] = td.material
         if td.vertex_attributes:
-            import numpy as np
             result["vertex_attributes"] = {
-                k: torch.from_numpy(np.asarray(v)) if hasattr(v, "__array__") else v
+                k: np.asarray(v).tolist() if hasattr(v, "__array__") else v
                 for k, v in td.vertex_attributes.items()
             }
         if td.face_attributes:
-            import numpy as np
             result["face_attributes"] = {
-                k: torch.from_numpy(np.asarray(v)) if hasattr(v, "__array__") else v
+                k: np.asarray(v).tolist() if hasattr(v, "__array__") else v
                 for k, v in td.face_attributes.items()
             }
         if td.metadata:
@@ -137,10 +136,12 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         return result
 
     def deserialize_trimesh(data: Any) -> Any:
-        import os
+        import numpy as np
         from comfy_api.latest._util.trimesh_types import TrimeshData
 
         def _to_np(v):
+            if isinstance(v, list):
+                return np.array(v)
             return v.numpy() if hasattr(v, "numpy") else v
 
         va = None
@@ -152,12 +153,12 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             fa = {k: _to_np(v) for k, v in data["face_attributes"].items()}
 
         td = TrimeshData(
-            vertices=data["vertices"].numpy(),
-            faces=data["faces"].numpy(),
-            vertex_normals=data["vertex_normals"].numpy() if "vertex_normals" in data else None,
-            face_normals=data["face_normals"].numpy() if "face_normals" in data else None,
-            vertex_colors=data["vertex_colors"].numpy() if "vertex_colors" in data else None,
-            uv=data["uv"].numpy() if "uv" in data else None,
+            vertices=np.array(data["vertices"]),
+            faces=np.array(data["faces"]),
+            vertex_normals=np.array(data["vertex_normals"]) if "vertex_normals" in data else None,
+            face_normals=np.array(data["face_normals"]) if "face_normals" in data else None,
+            vertex_colors=np.array(data["vertex_colors"]) if "vertex_colors" in data else None,
+            uv=np.array(data["uv"]) if "uv" in data else None,
             material=data.get("material"),
             vertex_attributes=va,
             face_attributes=fa,
@@ -181,14 +182,13 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: GeomPackExtractSkeleton, GeomPackMeshFromSkeleton
 
     def serialize_skeleton(obj: Any) -> Dict[str, Any]:
-        _announce("SKELETON", "GeometryPack SKELETON (by PozzettiAndrea) serializer 1.0 (tensors, dict) for ComfyUI-GeometryPack")
+        _announce("SKELETON", "GeometryPack SKELETON (by PozzettiAndrea) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
         import numpy as np
-        import torch
 
         result: Dict[str, Any] = {
             "__type__": "SKELETON",
-            "vertices": torch.from_numpy(np.asarray(obj["vertices"], dtype=np.float64)),
-            "edges": torch.from_numpy(np.asarray(obj["edges"], dtype=np.int64)),
+            "vertices": np.asarray(obj["vertices"], dtype=np.float64).tolist(),
+            "edges": np.asarray(obj["edges"], dtype=np.int64).tolist(),
             "scale": obj["scale"],
             "center": obj["center"],
             "normalized": obj["normalized"],
@@ -196,9 +196,10 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         return result
 
     def deserialize_skeleton(data: Any) -> Any:
+        import numpy as np
         return {
-            "vertices": data["vertices"].numpy(),
-            "edges": data["edges"].numpy(),
+            "vertices": np.array(data["vertices"], dtype=np.float64),
+            "edges": np.array(data["edges"], dtype=np.int64),
             "scale": data["scale"],
             "center": data["center"],
             "normalized": data["normalized"],
