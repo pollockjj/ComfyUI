@@ -363,7 +363,6 @@ class FakeExactRelayRPC:
 def capture_exact_small_proxy_relay() -> dict[str, object]:
     reset_forbidden_singleton_modules()
     fake_rpc = FakeExactRelayRPC()
-    before = set(sys.modules)
     prepare_sealed_singleton_proxies(fake_rpc)
 
     from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
@@ -374,6 +373,7 @@ def capture_exact_small_proxy_relay() -> dict[str, object]:
     folder_proxy = FolderPathsProxy()
     utils_proxy = UtilsProxy()
     progress_proxy = ProgressProxy()
+    before = set(sys.modules)
 
     restored = restore_input_types(
         {
