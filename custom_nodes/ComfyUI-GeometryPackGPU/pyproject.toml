@@ -1,0 +1,33 @@
+[project]
+name = "comfyui-geometrypackgpu"
+version = "0.1.0"
+description = "GeometryPack GPU nodes — sealed worker isolation"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "trimesh[easy]>=4.0.0",
+    "tqdm",
+    "cumesh",
+    "typing_extensions",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.comfy]
+PublisherId = "pollockjj"
+DisplayName = "GeometryPackGPU"
+Icon = ""
+
+[tool.comfy.isolation]
+can_isolate = true
+package_manager = "conda"
+share_torch = false
+conda_channels = ["conda-forge", "pytorch"]
+conda_dependencies = []
+conda_python = "3.12.*"
+sandbox_mode = "disabled"
+
+[tool.comfy.isolation.cuda_wheels]
+index_url = "https://pozzettiandrea.github.io/cuda-wheels/"
+packages = ["cumesh"]
