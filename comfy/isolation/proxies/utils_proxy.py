@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from typing import Optional, Any
-import comfy.utils
 from pyisolate import ProxiedSingleton
 
 import os
+
+
+def _comfy_utils():
+    import comfy.utils
+    return comfy.utils
 
 
 class UtilsProxy(ProxiedSingleton):
@@ -56,9 +60,10 @@ class UtilsProxy(ProxiedSingleton):
             return None
 
         # Host Execution
-        if comfy.utils.PROGRESS_BAR_HOOK is not None:
-            comfy.utils.PROGRESS_BAR_HOOK(value, total, preview, node_id)
+        utils = _comfy_utils()
+        if utils.PROGRESS_BAR_HOOK is not None:
+            utils.PROGRESS_BAR_HOOK(value, total, preview, node_id)
 
     def set_progress_bar_global_hook(self, hook: Any) -> None:
         """Forward hook registration (though usually not needed from child)."""
-        comfy.utils.set_progress_bar_global_hook(hook)
+        _comfy_utils().set_progress_bar_global_hook(hook)

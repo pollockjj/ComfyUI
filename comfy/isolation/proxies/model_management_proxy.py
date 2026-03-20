@@ -1,5 +1,9 @@
-import comfy.model_management as mm
 from pyisolate import ProxiedSingleton
+
+
+def _mm():
+    import comfy.model_management
+    return comfy.model_management
 
 
 class ModelManagementProxy(ProxiedSingleton):
@@ -12,16 +16,16 @@ class ModelManagementProxy(ProxiedSingleton):
     # Explicitly expose Enums/Classes as properties
     @property
     def VRAMState(self):
-        return mm.VRAMState
+        return _mm().VRAMState
 
     @property
     def CPUState(self):
-        return mm.CPUState
+        return _mm().CPUState
 
     @property
     def OOM_EXCEPTION(self):
-        return mm.OOM_EXCEPTION
+        return _mm().OOM_EXCEPTION
 
     def __getattr__(self, name):
         """Forward all other attribute access to the module."""
-        return getattr(mm, name)
+        return getattr(_mm(), name)
