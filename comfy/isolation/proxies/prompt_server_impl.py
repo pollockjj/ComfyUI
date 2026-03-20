@@ -13,7 +13,6 @@ import os
 from typing import Any, Dict, Optional, Callable
 
 import logging
-from aiohttp import web
 
 # IMPORTS
 from pyisolate import ProxiedSingleton
@@ -226,6 +225,7 @@ class PromptServerService(ProxiedSingleton):
 
     async def register_route_rpc(self, method: str, path: str, child_handler_proxy):
         """RPC Target: Register a route that forwards to the Child."""
+        from aiohttp import web
         logger.debug(f"{LOG_PREFIX} Registering Isolated Route {method} {path}")
 
         async def route_wrapper(request: web.Request) -> web.Response:
@@ -251,8 +251,9 @@ class PromptServerService(ProxiedSingleton):
         # Register loop
         self.server.app.router.add_route(method, path, route_wrapper)
 
-    def _serialize_response(self, result: Any) -> web.Response:
+    def _serialize_response(self, result: Any) -> Any:
         """Helper to convert Child result -> web.Response"""
+        from aiohttp import web
         if isinstance(result, web.Response):
             return result
         # Handle dict (json)

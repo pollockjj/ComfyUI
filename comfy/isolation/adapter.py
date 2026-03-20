@@ -11,11 +11,15 @@ from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type:
 
 _IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
 
-# All proxies depend on host modules (folder_paths, comfy.model_management, etc.)
-# Only import when running on the host or in a host-coupled child with torch.
-# Sealed workers (IMPORT_TORCH=0) get serializer registration only — proxies
-# are resolved by the RPC layer via use_remote() without importing the class.
-_HAS_PROXIES = False
+# Singleton proxies that do NOT transitively import torch/psutil/aiohttp.
+# Safe to import in sealed workers without torch.
+from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+from comfy.isolation.proxies.progress_proxy import ProgressProxy
+from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
+
+# Singleton proxies that transitively import torch or heavy host modules.
+# Only available when torch is present.
+_HAS_TORCH_PROXIES = False
 if _IMPORT_TORCH:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
     from comfy.isolation.model_patcher_proxy import (
@@ -27,13 +31,10 @@ if _IMPORT_TORCH:
         ModelSamplingRegistry,
     )
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry, FirstStageModelRegistry
-    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
     from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
     from comfy.isolation.proxies.prompt_server_impl import PromptServerService
     from comfy.isolation.proxies.utils_proxy import UtilsProxy
-    from comfy.isolation.proxies.progress_proxy import ProgressProxy
-    from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
-    _HAS_PROXIES = True
+    _HAS_TORCH_PROXIES = True
 
 logger = logging.getLogger(__name__)
 
@@ -474,21 +475,25 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        if not _HAS_PROXIES:
-            return []
-        return [
-            PromptServerService,
+        # Always available — no torch dependency
+        services: List[type[ProxiedSingleton]] = [
             FolderPathsProxy,
-            ModelManagementProxy,
-            UtilsProxy,
             ProgressProxy,
             WebDirectoryProxy,
-            VAERegistry,
-            CLIPRegistry,
-            ModelPatcherRegistry,
-            ModelSamplingRegistry,
-            FirstStageModelRegistry,
         ]
+        # Torch-dependent proxies
+        if _HAS_TORCH_PROXIES:
+            services.extend([
+                PromptServerService,
+                ModelManagementProxy,
+                UtilsProxy,
+                VAERegistry,
+                CLIPRegistry,
+                ModelPatcherRegistry,
+                ModelSamplingRegistry,
+                FirstStageModelRegistry,
+            ])
+        return services
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         # Resolve the real name whether it's an instance or the Singleton class itself
@@ -514,17 +519,19 @@ class ComfyUIAdapter(IsolationAdapter):
             return
 
         if api_name == "ModelManagementProxy":
-            import comfy.model_management
+            if _IMPORT_TORCH:
+                import comfy.model_management
 
-            instance = api() if isinstance(api, type) else api
-            # Replace module-level functions with proxy methods
-            for name in dir(instance):
-                if not name.startswith("_"):
-                    setattr(comfy.model_management, name, getattr(instance, name))
+                instance = api() if isinstance(api, type) else api
+                # Replace module-level functions with proxy methods
+                for name in dir(instance):
+                    if not name.startswith("_"):
+                        setattr(comfy.model_management, name, getattr(instance, name))
             return
 
         if api_name == "UtilsProxy":
-            import comfy.utils
+            if _IMPORT_TORCH:
+                import comfy.utils
 
             # Static Injection of RPC mechanism to ensure Child can access it
             # independent of instance lifecycle.
@@ -534,6 +541,8 @@ class ComfyUIAdapter(IsolationAdapter):
             return
 
         if api_name == "PromptServerProxy":
+            if not _IMPORT_TORCH:
+                return
             # Defer heavy import to child context
             import server
 

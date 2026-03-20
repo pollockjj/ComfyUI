@@ -23,6 +23,8 @@ from pyisolate.interfaces import SerializerRegistryProtocol  # type: ignore[impo
 
 logger = logging.getLogger(__name__)
 
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
 _announced: set[str] = set()
 
 
@@ -32,8 +34,41 @@ def _announce(name: str, desc: str) -> None:
         logger.info("][ Serializer: %s — %s", name, desc)
 
 
+def _get_trimesh_data():
+    if _IMPORT_TORCH:
+        from comfy_api.latest._util.trimesh_types import TrimeshData
+    else:
+        from comfy_api_sealed_worker.trimesh_types import TrimeshData
+    return TrimeshData
+
+
+def _get_ply():
+    if _IMPORT_TORCH:
+        from comfy_api.latest._util.ply_types import PLY
+    else:
+        from comfy_api_sealed_worker.ply_types import PLY
+    return PLY
+
+
+def _get_npz():
+    if _IMPORT_TORCH:
+        from comfy_api.latest._util.npz_types import NPZ
+    else:
+        from comfy_api_sealed_worker.npz_types import NPZ
+    return NPZ
+
+
 def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> None:
     """Register all custom-node-originated serializers."""
+
+    # -- ndarray (numpy) -------------------------------------------------------
+    # Torch-free ndarray serializer for sealed workers.
+    # The adapter.py version uses torch.from_numpy(); this one uses .tolist().
+    if not _IMPORT_TORCH:
+        def serialize_ndarray(obj: Any) -> Any:
+            return obj.tolist()
+
+        registry.register("ndarray", serialize_ndarray, None)
 
     # -- PLY (comfy_api.latest._util.ply_types) --------------------------------
     # PLY point cloud container created for DA3 isolation conversion.
@@ -61,7 +96,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     def deserialize_ply(data: Any) -> Any:
         import base64
         import numpy as np
-        from comfy_api.latest._util.ply_types import PLY
+        PLY = _get_ply()
         if "raw_data" in data:
             return PLY(raw_data=base64.b64decode(data["raw_data"]))
         return PLY(
@@ -88,7 +123,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     def deserialize_npz(data: Any) -> Any:
         import base64
-        from comfy_api.latest._util.npz_types import NPZ
+        NPZ = _get_npz()
         return NPZ(frames=[base64.b64decode(f) for f in data["frames"]])
 
     registry.register("NPZ", serialize_npz, deserialize_npz, data_type=True)
@@ -100,9 +135,8 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     def serialize_trimesh(obj: Any) -> Dict[str, Any]:
         _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
-        logger.warning("][ TRIMESH_SERIALIZE_DIAG: entry, type(obj)=%s", type(obj).__name__)
         import numpy as np
-        from comfy_api.latest._util.trimesh_types import TrimeshData
+        TrimeshData = _get_trimesh_data()
 
         # Handle both trimesh.Trimesh and TrimeshData (host round-trip)
         if isinstance(obj, TrimeshData):
@@ -138,12 +172,17 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         if td.metadata:
             result["metadata"] = td.metadata
 
-        logger.warning("][ TRIMESH_SERIALIZE_DIAG: complete, keys=%s, vertices_len=%d", list(result.keys()), len(result["vertices"]))
         return result
 
     def deserialize_trimesh(data: Any) -> Any:
+        is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+        logger.warning("][ TRIMESH_DESERIALIZE_DIAG: entry, child=%s, type(data)=%s, keys=%s", is_child, type(data).__name__, list(data.keys()) if isinstance(data, dict) else "N/A")
         import numpy as np
-        from comfy_api.latest._util.trimesh_types import TrimeshData
+        try:
+            TrimeshData = _get_trimesh_data()
+        except Exception as e:
+            logger.error("][ TRIMESH_DESERIALIZE_DIAG: FAILED to get TrimeshData: %s", e)
+            raise
 
         def _to_np(v):
             if isinstance(v, list):
@@ -163,7 +202,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             faces=np.array(data["faces"]),
             vertex_normals=np.array(data["vertex_normals"]) if "vertex_normals" in data else None,
             face_normals=np.array(data["face_normals"]) if "face_normals" in data else None,
-            vertex_colors=np.array(data["vertex_colors"]) if "vertex_colors" in data else None,
+            vertex_colors=np.array(data["vertex_colors"], dtype=np.uint8) if "vertex_colors" in data else None,
             uv=np.array(data["uv"]) if "uv" in data else None,
             material=data.get("material"),
             vertex_attributes=va,
@@ -173,7 +212,10 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
         # Child process has trimesh installed — return real Trimesh object
         if os.environ.get("PYISOLATE_CHILD") == "1":
-            return td.to_trimesh()
+            result = td.to_trimesh()
+            logger.warning("][ TRIMESH_DESERIALIZE_DIAG: complete, child=True, returning type=%s", type(result).__name__)
+            return result
+        logger.warning("][ TRIMESH_DESERIALIZE_DIAG: complete, child=False, returning TrimeshData")
         return td
 
     registry.register("TRIMESH", serialize_trimesh, deserialize_trimesh, data_type=True)

@@ -192,6 +192,13 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
+            for _ik, _iv in inputs.items():
+                logger.warning(
+                    "%s ISO:INPUT_DIAG ext=%s node=%s input=%s type=%s%s",
+                    LOG_PREFIX, extension.name, node_name, _ik,
+                    type(_iv).__name__,
+                    f" keys={list(_iv.keys())}" if isinstance(_iv, dict) else "",
+                )
             serialized = serialize_for_isolation(inputs)
             logger.debug(
                 "%s ISO:serialize_done ext=%s node=%s uid=%s",
