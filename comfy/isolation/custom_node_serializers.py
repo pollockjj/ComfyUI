@@ -7,6 +7,10 @@ don't exist in comfy_api belong here.
 
 New custom node conversions that introduce types not covered here should
 add their serializers to this file.
+
+IMPORTANT: Data serializers MUST NOT depend on torch. Use numpy .tolist()
+and np.array() for serialization. The original comfy-env worker environments
+do not have torch installed.
 """
 
 from __future__ import annotations
@@ -96,6 +100,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     def serialize_trimesh(obj: Any) -> Dict[str, Any]:
         _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
+        logger.warning("][ TRIMESH_SERIALIZE_DIAG: entry, type(obj)=%s", type(obj).__name__)
         import numpy as np
         from comfy_api.latest._util.trimesh_types import TrimeshData
 
@@ -133,6 +138,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         if td.metadata:
             result["metadata"] = td.metadata
 
+        logger.warning("][ TRIMESH_SERIALIZE_DIAG: complete, keys=%s, vertices_len=%d", list(result.keys()), len(result["vertices"]))
         return result
 
     def deserialize_trimesh(data: Any) -> Any:

@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from comfy_api.internal import ComfyAPIBase
 from comfy_api.internal.singleton import ProxiedSingleton
 from comfy_api.internal.async_to_sync import create_sync_class
-from ._input import ImageInput, AudioInput, MaskInput, LatentInput, VideoInput
-from ._input_impl import VideoFromFile, VideoFromComponents
+
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
+if _IMPORT_TORCH:
+    from ._input import ImageInput, AudioInput, MaskInput, LatentInput, VideoInput
+    from ._input_impl import VideoFromFile, VideoFromComponents
+    from . import _io_public as io
+    from . import _ui_public as ui
+    from comfy_execution.utils import get_executing_context
+    from comfy_execution.progress import get_progress_state, PreviewImageTuple
+    from PIL import Image
+    from comfy.cli_args import args
+    import numpy as np
+
 from ._util import VideoCodec, VideoContainer, VideoComponents, MESH, VOXEL, File3D
-from . import _io_public as io
-from . import _ui_public as ui
-from comfy_execution.utils import get_executing_context
-from comfy_execution.progress import get_progress_state, PreviewImageTuple
-from PIL import Image
-from comfy.cli_args import args
-import numpy as np
 
 
 class ComfyAPI_latest(ComfyAPIBase):
