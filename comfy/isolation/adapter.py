@@ -11,14 +11,13 @@ from pyisolate._internal.rpc_protocol import AsyncRPC, ProxiedSingleton  # type:
 
 _IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
 
-# Singleton proxies that do NOT transitively import torch/psutil/aiohttp.
-# Safe to import in sealed workers without torch.
+# Singleton proxies that do NOT transitively import torch/PIL/psutil/aiohttp.
+# Safe to import in sealed workers without host framework modules.
 from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
-from comfy.isolation.proxies.progress_proxy import ProgressProxy
 from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
 
-# Singleton proxies that transitively import torch or heavy host modules.
-# Only available when torch is present.
+# Singleton proxies that transitively import torch, PIL, or heavy host modules.
+# Only available when torch/host framework is present.
 _HAS_TORCH_PROXIES = False
 if _IMPORT_TORCH:
     from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
@@ -33,6 +32,7 @@ if _IMPORT_TORCH:
     from comfy.isolation.vae_proxy import VAEProxy, VAERegistry, FirstStageModelRegistry
     from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
     from comfy.isolation.proxies.prompt_server_impl import PromptServerService
+    from comfy.isolation.proxies.progress_proxy import ProgressProxy
     from comfy.isolation.proxies.utils_proxy import UtilsProxy
     _HAS_TORCH_PROXIES = True
 
@@ -475,18 +475,18 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        # Always available — no torch dependency
+        # Always available — no torch/PIL dependency
         services: List[type[ProxiedSingleton]] = [
             FolderPathsProxy,
-            ProgressProxy,
             WebDirectoryProxy,
         ]
-        # Torch-dependent proxies
+        # Torch/PIL-dependent proxies
         if _HAS_TORCH_PROXIES:
             services.extend([
                 PromptServerService,
                 ModelManagementProxy,
                 UtilsProxy,
+                ProgressProxy,
                 VAERegistry,
                 CLIPRegistry,
                 ModelPatcherRegistry,
