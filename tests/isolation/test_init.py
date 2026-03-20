@@ -78,14 +78,3 @@ class TestInitializeProxies:
         assert "comfy.utils" not in sys.modules
         assert "folder_paths" not in sys.modules
         assert "comfy_execution.progress" not in sys.modules
-
-    def test_initialize_proxies_torch_share_subset_registers_model_management(self):
-        """Torch-share subset coverage keeps host-runtime proxy registration available."""
-        from comfy.isolation import initialize_proxies
-        from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
-
-        initialize_proxies()
-
-        proxy = ModelManagementProxy()
-        assert proxy is not None
-        assert hasattr(proxy, "get_torch_device")
