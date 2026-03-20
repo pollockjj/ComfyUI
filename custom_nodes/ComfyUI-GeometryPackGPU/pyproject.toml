@@ -9,6 +9,7 @@ dependencies = [
     "tqdm",
     "cumesh",
     "typing_extensions",
+    "pillow",
 ]
 
 [tool.setuptools]
