@@ -48,3 +48,15 @@ class TestModelManagementProxy:
         assert isinstance(result, str), f"Expected str, got {type(result)}"
         # Should contain device identifier
         assert len(result) > 0, "CUDA device name is empty"
+
+    def test_get_torch_device_torch_share_subset(self, proxy):
+        """Torch-share subset coverage keeps model-management behavior available."""
+        result = proxy.get_torch_device()
+        assert isinstance(result, torch.device), f"Expected torch.device, got {type(result)}"
+
+    def test_get_torch_device_name_torch_share_subset(self, proxy):
+        """Torch-share subset coverage still supports device name lookup."""
+        cpu_device = torch.device("cpu")
+        result = proxy.get_torch_device_name(cpu_device)
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert result
