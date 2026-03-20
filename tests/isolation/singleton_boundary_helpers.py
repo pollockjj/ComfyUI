@@ -782,6 +782,8 @@ def capture_exact_proxy_bootstrap_contract() -> dict[str, object]:
     for module_name in FORBIDDEN_EXACT_BOOTSTRAP_MODULES:
         sys.modules.pop(module_name, None)
 
+    previous_child = os.environ.get("PYISOLATE_CHILD")
+    previous_import_torch = os.environ.get("PYISOLATE_IMPORT_TORCH")
     os.environ["PYISOLATE_CHILD"] = "1"
     os.environ["PYISOLATE_IMPORT_TORCH"] = "0"
 
@@ -833,6 +835,14 @@ def capture_exact_proxy_bootstrap_contract() -> dict[str, object]:
         }
     finally:
         set_child_rpc_instance(None)
+        if previous_child is None:
+            os.environ.pop("PYISOLATE_CHILD", None)
+        else:
+            os.environ["PYISOLATE_CHILD"] = previous_child
+        if previous_import_torch is None:
+            os.environ.pop("PYISOLATE_IMPORT_TORCH", None)
+        else:
+            os.environ["PYISOLATE_IMPORT_TORCH"] = previous_import_torch
 
     omitted = sorted(name for name, status in matrix.items() if not status["bound"])
     return {
@@ -842,6 +852,95 @@ def capture_exact_proxy_bootstrap_contract() -> dict[str, object]:
         "omitted_proxies": omitted,
         "modules": sorted(imported),
         "forbidden_matches": matching_modules(FORBIDDEN_EXACT_BOOTSTRAP_MODULES, imported),
+    }
+
+
+def capture_exact_proxy_mode_parity() -> dict[str, object]:
+    from pyisolate._internal.environment import validate_backend_config
+
+    baseline = capture_exact_proxy_bootstrap_contract()
+    inventory = sorted(baseline["matrix"].keys())
+
+    def _row_from_matrix(mode_name: str, matrix: dict[str, dict[str, object]], config_valid: bool) -> dict[str, object]:
+        return {
+            "mode": mode_name,
+            "config_valid": config_valid,
+            "entries": {
+                name: {
+                    "available": bool(details["bound"]),
+                    "reduced": False,
+                }
+                for name, details in matrix.items()
+            },
+        }
+
+    share_torch_error = None
+    try:
+        validate_backend_config(
+            {
+                "name": "torch_share_mode",
+                "module_path": "/fake/path",
+                "isolated": True,
+                "dependencies": [],
+                "apis": [],
+                "share_torch": True,
+                "share_cuda_ipc": False,
+                "sandbox": {},
+                "sandbox_mode": "disabled",
+                "env": {},
+                "package_manager": "uv",
+                "execution_model": "sealed_worker",
+            }
+        )
+        torch_share_row = _row_from_matrix("sealed_worker share_torch=true", baseline["matrix"], True)
+    except Exception as exc:
+        share_torch_error = str(exc)
+        torch_share_row = {
+            "mode": "sealed_worker share_torch=true",
+            "config_valid": False,
+            "entries": {name: {"available": False, "reduced": True} for name in inventory},
+        }
+
+    validate_backend_config(
+        {
+            "name": "host_coupled_mode",
+            "module_path": "/fake/path",
+            "isolated": True,
+            "dependencies": [],
+            "apis": [],
+            "share_torch": True,
+            "share_cuda_ipc": False,
+            "sandbox": {},
+            "sandbox_mode": "disabled",
+            "env": {},
+            "package_manager": "uv",
+            "execution_model": "host-coupled",
+        }
+    )
+    host_coupled_row = _row_from_matrix("host_coupled", baseline["matrix"], True)
+    sealed_row = _row_from_matrix("sealed_worker share_torch=false", baseline["matrix"], True)
+
+    def _missing_or_reduced(row: dict[str, object]) -> list[str]:
+        entries = row["entries"]
+        return sorted(
+            name
+            for name, details in entries.items()
+            if not details["available"] or details["reduced"]
+        )
+
+    rows = {
+        sealed_row["mode"]: sealed_row,
+        torch_share_row["mode"]: torch_share_row,
+        host_coupled_row["mode"]: host_coupled_row,
+    }
+    return {
+        "inventory": inventory,
+        "rows": rows,
+        "share_torch_validation_error": share_torch_error,
+        "missing_or_reduced": {
+            mode_name: _missing_or_reduced(row)
+            for mode_name, row in rows.items()
+        },
     }
 
 
