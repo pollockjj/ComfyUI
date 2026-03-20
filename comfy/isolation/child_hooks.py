@@ -11,6 +11,8 @@ def is_child_process() -> bool:
 
 
 def initialize_child_process() -> None:
+    _setup_child_loop_bridge()
+
     # Manual RPC injection
     try:
         from pyisolate._internal.rpc_protocol import get_child_rpc_instance
@@ -18,17 +20,40 @@ def initialize_child_process() -> None:
         rpc = get_child_rpc_instance()
         if rpc:
             _setup_prompt_server_stub(rpc)
-            _setup_utils_proxy(rpc)
+            _setup_proxy_callers(rpc)
         else:
             logger.warning("Could not get child RPC instance for manual injection")
             _setup_prompt_server_stub()
-            _setup_utils_proxy()
+            _setup_proxy_callers()
     except Exception as e:
         logger.error(f"Manual RPC Injection failed: {e}")
         _setup_prompt_server_stub()
-        _setup_utils_proxy()
+        _setup_proxy_callers()
 
     _setup_logging()
+
+
+def _setup_child_loop_bridge() -> None:
+    import asyncio
+
+    main_loop = None
+    try:
+        main_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            main_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            pass
+
+    if main_loop is None:
+        return
+
+    try:
+        from .proxies.base import set_global_loop
+
+        set_global_loop(main_loop)
+    except ImportError:
+        pass
 
 
 def _setup_prompt_server_stub(rpc=None) -> None:
@@ -64,77 +89,23 @@ def _setup_prompt_server_stub(rpc=None) -> None:
         logger.error(f"Failed to setup PromptServerStub: {e}")
 
 
-def _setup_utils_proxy(rpc=None) -> None:
+def _setup_proxy_callers(rpc=None) -> None:
     try:
-        import comfy.utils
-        import asyncio
+        from .proxies.folder_paths_proxy import FolderPathsProxy
+        from .proxies.progress_proxy import ProgressProxy
+        from .proxies.utils_proxy import UtilsProxy
 
-        # Capture main loop during initialization (safe context)
-        main_loop = None
-        try:
-            main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                main_loop = asyncio.get_event_loop()
-            except RuntimeError:
-                pass
+        if rpc is None:
+            FolderPathsProxy.clear_rpc()
+            ProgressProxy.clear_rpc()
+            UtilsProxy.clear_rpc()
+            return
 
-        try:
-            from .proxies.base import set_global_loop
-
-            if main_loop:
-                set_global_loop(main_loop)
-        except ImportError:
-            pass
-
-        # Sync hook wrapper for progress updates
-        def sync_hook_wrapper(
-            value: int, total: int, preview: None = None, node_id: None = None
-        ) -> None:
-            if node_id is None:
-                try:
-                    from comfy_execution.utils import get_executing_context
-
-                    ctx = get_executing_context()
-                    if ctx:
-                        node_id = ctx.node_id
-                    else:
-                        pass
-                except Exception:
-                    pass
-
-            # Bypass blocked event loop by direct outbox injection
-            if rpc:
-                try:
-                    # Use captured main loop if available (for threaded execution), or current loop
-                    loop = main_loop
-                    if loop is None:
-                        loop = asyncio.get_event_loop()
-
-                    rpc.outbox.put(
-                        {
-                            "kind": "call",
-                            "object_id": "UtilsProxy",
-                            "parent_call_id": None,  # We are root here usually
-                            "calling_loop": loop,
-                            "future": loop.create_future(),  # Dummy future
-                            "method": "progress_bar_hook",
-                            "args": (value, total, preview, node_id),
-                            "kwargs": {},
-                        }
-                    )
-
-                except Exception as e:
-                    logging.getLogger(__name__).error(f"Manual Inject Failed: {e}")
-            else:
-                logging.getLogger(__name__).warning(
-                    "No RPC instance available for progress update"
-                )
-
-        comfy.utils.PROGRESS_BAR_HOOK = sync_hook_wrapper
-
+        FolderPathsProxy.set_rpc(rpc)
+        ProgressProxy.set_rpc(rpc)
+        UtilsProxy.set_rpc(rpc)
     except Exception as e:
-        logger.error(f"Failed to setup UtilsProxy hook: {e}")
+        logger.error(f"Failed to setup child singleton proxy callers: {e}")
 
 
 def _setup_logging() -> None:

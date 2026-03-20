@@ -1,77 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-import importlib.util
 import json
 import sys
-from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-from pyisolate.sealed import SealedNodeExtension
-
-
-COMFYUI_ROOT = Path(__file__).resolve().parents[2]
-UV_SEALED_WORKER_MODULE = COMFYUI_ROOT / "tests" / "isolation" / "uv_sealed_worker" / "__init__.py"
-FORBIDDEN_MINIMAL_SEALED_MODULES = (
-    "torch",
-    "folder_paths",
-    "comfy.utils",
-    "comfy.model_management",
-    "main",
-    "comfy.isolation.extension_wrapper",
+from tests.isolation.singleton_boundary_helpers import (
+    capture_minimal_sealed_worker_imports,
+    capture_sealed_singleton_imports,
 )
-
-
-def _load_module_from_path(module_name: str, module_path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"unable to build import spec for {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        sys.modules.pop(module_name, None)
-        raise
-    return module
-
-
-def _matching_modules(prefixes: tuple[str, ...], modules: set[str]) -> list[str]:
-    return sorted(
-        module_name
-        for module_name in modules
-        if any(
-            module_name == prefix or module_name.startswith(f"{prefix}.")
-            for prefix in prefixes
-        )
-    )
-
-
-async def _capture_minimal_sealed_worker_imports() -> dict[str, object]:
-    module_name = "tests.isolation.uv_sealed_worker_boundary_probe"
-    before = set(sys.modules)
-    extension = SealedNodeExtension()
-    module = _load_module_from_path(module_name, UV_SEALED_WORKER_MODULE)
-    try:
-        await extension.on_module_loaded(module)
-        node_list = await extension.list_nodes()
-        node_details = await extension.get_node_details("UVSealedRuntimeProbe")
-        imported = set(sys.modules) - before
-        return {
-            "mode": "minimal_sealed_worker",
-            "node_names": sorted(node_list),
-            "runtime_probe_function": node_details["function"],
-            "modules": sorted(imported),
-            "forbidden_matches": _matching_modules(FORBIDDEN_MINIMAL_SEALED_MODULES, imported),
-        }
-    finally:
-        sys.modules.pop(module_name, None)
-
-
-def capture_minimal_sealed_worker_imports() -> dict[str, object]:
-    return asyncio.run(_capture_minimal_sealed_worker_imports())
 
 
 def test_minimal_sealed_worker_forbidden_imports() -> None:
@@ -106,3 +43,39 @@ def test_capture_payload_is_json_serializable() -> None:
     encoded = json.dumps(payload, sort_keys=True)
 
     assert "\"minimal_sealed_worker\"" in encoded
+
+
+def test_folder_paths_child_safe() -> None:
+    payload = capture_sealed_singleton_imports()
+
+    assert payload["mode"] == "sealed_singletons"
+    assert payload["folder_path"] == "/sandbox/input/demo.png"
+    assert payload["temp_dir"] == "/sandbox/temp"
+    assert payload["models_dir"] == "/sandbox/models"
+    assert payload["forbidden_matches"] == []
+
+
+def test_utils_child_safe() -> None:
+    payload = capture_sealed_singleton_imports()
+
+    progress_calls = [
+        call
+        for call in payload["rpc_calls"]
+        if call["object_id"] == "UtilsProxy" and call["method"] == "progress_bar_hook"
+    ]
+
+    assert progress_calls
+    assert payload["forbidden_matches"] == []
+
+
+def test_progress_child_safe() -> None:
+    payload = capture_sealed_singleton_imports()
+
+    progress_calls = [
+        call
+        for call in payload["rpc_calls"]
+        if call["object_id"] == "ProgressProxy" and call["method"] == "rpc_set_progress"
+    ]
+
+    assert progress_calls
+    assert payload["forbidden_matches"] == []

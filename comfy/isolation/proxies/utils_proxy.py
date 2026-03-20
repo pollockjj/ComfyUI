@@ -27,6 +27,10 @@ class UtilsProxy(ProxiedSingleton):
         # Create caller using class name as ID (standard for Singletons)
         cls._rpc = rpc.create_caller(cls, "UtilsProxy")
 
+    @classmethod
+    def clear_rpc(cls) -> None:
+        cls._rpc = None
+
     async def progress_bar_hook(
         self,
         value: int,
@@ -66,4 +70,6 @@ class UtilsProxy(ProxiedSingleton):
 
     def set_progress_bar_global_hook(self, hook: Any) -> None:
         """Forward hook registration (though usually not needed from child)."""
+        if os.environ.get("PYISOLATE_CHILD") == "1":
+            return None
         _comfy_utils().set_progress_bar_global_hook(hook)
