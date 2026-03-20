@@ -39,17 +39,14 @@ class FolderPathsProxy(ProxiedSingleton):
     """
 
     _rpc: Optional[Any] = None
-    _snapshot_cache: Optional[dict[str, Any]] = None
 
     @classmethod
     def set_rpc(cls, rpc: Any) -> None:
         cls._rpc = rpc.create_caller(cls, cls.get_remote_id())
-        cls._snapshot_cache = None
 
     @classmethod
     def clear_rpc(cls) -> None:
         cls._rpc = None
-        cls._snapshot_cache = None
 
     @classmethod
     def _get_caller(cls) -> Any:
@@ -57,52 +54,43 @@ class FolderPathsProxy(ProxiedSingleton):
             raise RuntimeError("FolderPathsProxy RPC caller is not configured")
         return cls._rpc
 
-    @classmethod
-    def _get_snapshot(cls, force_refresh: bool = False) -> dict[str, Any]:
-        if not _is_child_process():
-            fp = _folder_paths()
-            return {
-                "models_dir": fp.models_dir,
-                "input_directory": fp.get_input_directory(),
-                "output_directory": fp.get_output_directory(),
-                "temp_directory": fp.get_temp_directory(),
-                "user_directory": fp.get_user_directory(),
-                "supported_pt_extensions": sorted(list(fp.supported_pt_extensions)),
-                "folder_names_and_paths": _serialize_folder_names_and_paths(fp.folder_names_and_paths),
-                "extension_mimetypes_cache": dict(fp.extension_mimetypes_cache),
-                "filename_list_cache": dict(fp.filename_list_cache),
-            }
-        if force_refresh or cls._snapshot_cache is None:
-            cls._snapshot_cache = call_singleton_rpc(cls._get_caller(), "rpc_snapshot")
-        return cls._snapshot_cache
-
     def __getattr__(self, name):
         if _is_child_process():
-            snapshot = self._get_snapshot()
-            if name in snapshot:
-                return snapshot[name]
+            property_rpc = {
+                "models_dir": "rpc_get_models_dir",
+                "folder_names_and_paths": "rpc_get_folder_names_and_paths",
+                "extension_mimetypes_cache": "rpc_get_extension_mimetypes_cache",
+                "filename_list_cache": "rpc_get_filename_list_cache",
+            }
+            rpc_name = property_rpc.get(name)
+            if rpc_name is not None:
+                return call_singleton_rpc(self._get_caller(), rpc_name)
             raise AttributeError(name)
         return getattr(_folder_paths(), name)
 
     @property
     def folder_names_and_paths(self) -> Dict:
-        snapshot = self._get_snapshot()
-        return _deserialize_folder_names_and_paths(snapshot["folder_names_and_paths"])
+        if _is_child_process():
+            payload = call_singleton_rpc(self._get_caller(), "rpc_get_folder_names_and_paths")
+            return _deserialize_folder_names_and_paths(payload)
+        return _folder_paths().folder_names_and_paths
 
     @property
     def extension_mimetypes_cache(self) -> Dict:
-        snapshot = self._get_snapshot()
-        return dict(snapshot["extension_mimetypes_cache"])
+        if _is_child_process():
+            return dict(call_singleton_rpc(self._get_caller(), "rpc_get_extension_mimetypes_cache"))
+        return dict(_folder_paths().extension_mimetypes_cache)
 
     @property
     def filename_list_cache(self) -> Dict:
-        snapshot = self._get_snapshot()
-        return dict(snapshot["filename_list_cache"])
+        if _is_child_process():
+            return dict(call_singleton_rpc(self._get_caller(), "rpc_get_filename_list_cache"))
+        return dict(_folder_paths().filename_list_cache)
 
     @property
     def models_dir(self) -> str:
         if _is_child_process():
-            return str(self._get_snapshot()["models_dir"])
+            return str(call_singleton_rpc(self._get_caller(), "rpc_get_models_dir"))
         return _folder_paths().models_dir
 
     def get_temp_directory(self) -> str:
@@ -150,7 +138,6 @@ class FolderPathsProxy(ProxiedSingleton):
                 full_folder_path,
                 is_default,
             )
-            self.__class__._snapshot_cache = None
             return None
         _folder_paths().add_model_folder_path(folder_name, full_folder_path, is_default)
         return None
@@ -170,8 +157,17 @@ class FolderPathsProxy(ProxiedSingleton):
             return call_singleton_rpc(self._get_caller(), "rpc_get_full_path", folder_name, filename)
         return _folder_paths().get_full_path(folder_name, filename)
 
-    async def rpc_snapshot(self) -> dict[str, Any]:
-        return self.__class__._get_snapshot(force_refresh=True)
+    async def rpc_get_models_dir(self) -> str:
+        return _folder_paths().models_dir
+
+    async def rpc_get_folder_names_and_paths(self) -> dict[str, dict[str, list[str]]]:
+        return _serialize_folder_names_and_paths(_folder_paths().folder_names_and_paths)
+
+    async def rpc_get_extension_mimetypes_cache(self) -> dict[str, Any]:
+        return dict(_folder_paths().extension_mimetypes_cache)
+
+    async def rpc_get_filename_list_cache(self) -> dict[str, Any]:
+        return dict(_folder_paths().filename_list_cache)
 
     async def rpc_get_temp_directory(self) -> str:
         return _folder_paths().get_temp_directory()

@@ -43,33 +43,22 @@ class UtilsProxy(ProxiedSingleton):
         Child-side: this method call is intercepted by RPC and sent to host.
         """
         if os.environ.get("PYISOLATE_CHILD") == "1":
-            # Manual RPC dispatch for Child process
-            # Use class-level RPC storage (Static Injection)
-            if UtilsProxy._rpc:
-                return await UtilsProxy._rpc.progress_bar_hook(
-                    value, total, preview, node_id
-                )
-
-            # Fallback channel: global child rpc
-            try:
-                from pyisolate._internal.rpc_protocol import get_child_rpc_instance
-
-                get_child_rpc_instance()
-                # If we have an RPC instance but no UtilsProxy._rpc, we *could* try to use it,
-                # but we need a caller. For now, just pass to avoid crashing.
-                pass
-            except (ImportError, LookupError):
-                pass
-
-            return None
+            if UtilsProxy._rpc is None:
+                raise RuntimeError("UtilsProxy RPC caller is not configured")
+            return await UtilsProxy._rpc.progress_bar_hook(
+                value, total, preview, node_id
+            )
 
         # Host Execution
         utils = _comfy_utils()
         if utils.PROGRESS_BAR_HOOK is not None:
-            utils.PROGRESS_BAR_HOOK(value, total, preview, node_id)
+            return utils.PROGRESS_BAR_HOOK(value, total, preview, node_id)
+        return None
 
     def set_progress_bar_global_hook(self, hook: Any) -> None:
         """Forward hook registration (though usually not needed from child)."""
         if os.environ.get("PYISOLATE_CHILD") == "1":
-            return None
+            raise RuntimeError(
+                "UtilsProxy.set_progress_bar_global_hook is not available in child without exact relay support"
+            )
         _comfy_utils().set_progress_bar_global_hook(hook)

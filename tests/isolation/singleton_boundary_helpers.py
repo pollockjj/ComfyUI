@@ -24,6 +24,7 @@ FORBIDDEN_SEALED_SINGLETON_MODULES = (
     "comfy.utils",
     "comfy_execution.progress",
 )
+FORBIDDEN_EXACT_SMALL_PROXY_MODULES = FORBIDDEN_SEALED_SINGLETON_MODULES
 
 
 def _load_module_from_path(module_name: str, module_path: Path):
@@ -49,6 +50,14 @@ def matching_modules(prefixes: tuple[str, ...], modules: set[str]) -> list[str]:
             for prefix in prefixes
         )
     )
+
+
+def _load_helper_proxy_service() -> Any | None:
+    try:
+        from comfy.isolation.proxies.helper_proxies import HelperProxiesService
+    except (ImportError, AttributeError):
+        return None
+    return HelperProxiesService
 
 
 async def _capture_minimal_sealed_worker_imports() -> dict[str, object]:
@@ -108,6 +117,15 @@ class FakeSingletonRPC:
         self.calls: list[dict[str, Any]] = []
         self._services: dict[str, dict[str, Any]] = {
             "FolderPathsProxy": {
+                "rpc_get_models_dir": lambda: "/sandbox/models",
+                "rpc_get_folder_names_and_paths": lambda: {
+                    "checkpoints": {
+                        "paths": ["/sandbox/models/checkpoints"],
+                        "extensions": [".ckpt", ".safetensors"],
+                    }
+                },
+                "rpc_get_extension_mimetypes_cache": lambda: {"webp": "image"},
+                "rpc_get_filename_list_cache": lambda: {},
                 "rpc_get_temp_directory": lambda: "/sandbox/temp",
                 "rpc_get_input_directory": lambda: "/sandbox/input",
                 "rpc_get_output_directory": lambda: "/sandbox/output",
@@ -118,22 +136,6 @@ class FakeSingletonRPC:
                 "rpc_get_folder_paths": lambda folder_name: [f"/sandbox/models/{folder_name}"],
                 "rpc_get_filename_list": lambda folder_name: [f"{folder_name}_fixture.safetensors"],
                 "rpc_get_full_path": lambda folder_name, filename: f"/sandbox/models/{folder_name}/{filename}",
-                "rpc_snapshot": lambda: {
-                    "models_dir": "/sandbox/models",
-                    "input_directory": "/sandbox/input",
-                    "output_directory": "/sandbox/output",
-                    "temp_directory": "/sandbox/temp",
-                    "user_directory": "/sandbox/user",
-                    "supported_pt_extensions": [".ckpt", ".safetensors"],
-                    "folder_names_and_paths": {
-                        "checkpoints": {
-                            "paths": ["/sandbox/models/checkpoints"],
-                            "extensions": [".ckpt", ".safetensors"],
-                        }
-                    },
-                    "extension_mimetypes_cache": {"webp": "image"},
-                    "filename_list_cache": {},
-                },
             },
             "UtilsProxy": {
                 "progress_bar_hook": lambda value, total, preview=None, node_id=None: {
@@ -150,6 +152,9 @@ class FakeSingletonRPC:
                     "node_id": node_id,
                     "image": image,
                 }
+            },
+            "HelperProxiesService": {
+                "rpc_restore_input_types": lambda raw: raw,
             },
         }
 
@@ -179,6 +184,9 @@ def _clear_proxy_rpcs() -> None:
     FolderPathsProxy.clear_rpc()
     ProgressProxy.clear_rpc()
     UtilsProxy.clear_rpc()
+    helper_proxy_service = _load_helper_proxy_service()
+    if helper_proxy_service is not None:
+        helper_proxy_service.clear_rpc()
 
 
 def prepare_sealed_singleton_proxies(fake_rpc: FakeSingletonRPC) -> None:
@@ -193,6 +201,9 @@ def prepare_sealed_singleton_proxies(fake_rpc: FakeSingletonRPC) -> None:
     FolderPathsProxy.set_rpc(fake_rpc)
     ProgressProxy.set_rpc(fake_rpc)
     UtilsProxy.set_rpc(fake_rpc)
+    helper_proxy_service = _load_helper_proxy_service()
+    if helper_proxy_service is not None:
+        helper_proxy_service.set_rpc(fake_rpc)
 
 
 def reset_forbidden_singleton_modules() -> None:
@@ -203,6 +214,191 @@ def reset_forbidden_singleton_modules() -> None:
         "torch",
     ):
         sys.modules.pop(module_name, None)
+
+
+class FakeExactRelayCaller:
+    def __init__(self, methods: dict[str, Any], transcripts: list[dict[str, Any]], object_id: str):
+        self._methods = methods
+        self._transcripts = transcripts
+        self._object_id = object_id
+
+    def __getattr__(self, name: str):
+        if name not in self._methods:
+            raise AttributeError(name)
+
+        async def method(*args: Any, **kwargs: Any) -> Any:
+            self._transcripts.append(
+                {
+                    "phase": "child_call",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "args": list(args),
+                    "kwargs": dict(kwargs),
+                }
+            )
+            impl = self._methods[name]
+            self._transcripts.append(
+                {
+                    "phase": "host_invocation",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "target": impl["target"],
+                    "args": list(args),
+                    "kwargs": dict(kwargs),
+                }
+            )
+            result = impl["result"](*args, **kwargs) if callable(impl["result"]) else impl["result"]
+            self._transcripts.append(
+                {
+                    "phase": "result",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "result": result,
+                }
+            )
+            return result
+
+        return method
+
+
+class FakeExactRelayRPC:
+    def __init__(self) -> None:
+        self.transcripts: list[dict[str, Any]] = []
+        self._services: dict[str, dict[str, Any]] = {
+            "FolderPathsProxy": {
+                "rpc_get_models_dir": {
+                    "target": "folder_paths.models_dir",
+                    "result": "/sandbox/models",
+                },
+                "rpc_get_temp_directory": {
+                    "target": "folder_paths.get_temp_directory",
+                    "result": "/sandbox/temp",
+                },
+                "rpc_get_input_directory": {
+                    "target": "folder_paths.get_input_directory",
+                    "result": "/sandbox/input",
+                },
+                "rpc_get_output_directory": {
+                    "target": "folder_paths.get_output_directory",
+                    "result": "/sandbox/output",
+                },
+                "rpc_get_user_directory": {
+                    "target": "folder_paths.get_user_directory",
+                    "result": "/sandbox/user",
+                },
+                "rpc_get_folder_names_and_paths": {
+                    "target": "folder_paths.folder_names_and_paths",
+                    "result": {
+                        "checkpoints": {
+                            "paths": ["/sandbox/models/checkpoints"],
+                            "extensions": [".ckpt", ".safetensors"],
+                        }
+                    },
+                },
+                "rpc_get_extension_mimetypes_cache": {
+                    "target": "folder_paths.extension_mimetypes_cache",
+                    "result": {"webp": "image"},
+                },
+                "rpc_get_filename_list_cache": {
+                    "target": "folder_paths.filename_list_cache",
+                    "result": {},
+                },
+                "rpc_get_annotated_filepath": {
+                    "target": "folder_paths.get_annotated_filepath",
+                    "result": lambda name, default_dir=None: FakeSingletonRPC._get_annotated_filepath(name, default_dir),
+                },
+                "rpc_exists_annotated_filepath": {
+                    "target": "folder_paths.exists_annotated_filepath",
+                    "result": False,
+                },
+                "rpc_add_model_folder_path": {
+                    "target": "folder_paths.add_model_folder_path",
+                    "result": None,
+                },
+                "rpc_get_folder_paths": {
+                    "target": "folder_paths.get_folder_paths",
+                    "result": lambda folder_name: [f"/sandbox/models/{folder_name}"],
+                },
+                "rpc_get_filename_list": {
+                    "target": "folder_paths.get_filename_list",
+                    "result": lambda folder_name: [f"{folder_name}_fixture.safetensors"],
+                },
+                "rpc_get_full_path": {
+                    "target": "folder_paths.get_full_path",
+                    "result": lambda folder_name, filename: f"/sandbox/models/{folder_name}/{filename}",
+                },
+            },
+            "UtilsProxy": {
+                "progress_bar_hook": {
+                    "target": "comfy.utils.PROGRESS_BAR_HOOK",
+                    "result": lambda value, total, preview=None, node_id=None: {
+                        "value": value,
+                        "total": total,
+                        "preview": preview,
+                        "node_id": node_id,
+                    },
+                },
+            },
+            "ProgressProxy": {
+                "rpc_set_progress": {
+                    "target": "comfy_execution.progress.get_progress_state().update_progress",
+                    "result": None,
+                },
+            },
+            "HelperProxiesService": {
+                "rpc_restore_input_types": {
+                    "target": "comfy.isolation.proxies.helper_proxies.restore_input_types",
+                    "result": lambda raw: raw,
+                }
+            },
+        }
+
+    def create_caller(self, cls: Any, object_id: str):
+        methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
+        if methods is None:
+            raise KeyError(object_id)
+        return FakeExactRelayCaller(methods, self.transcripts, object_id)
+
+
+def capture_exact_small_proxy_relay() -> dict[str, object]:
+    reset_forbidden_singleton_modules()
+    fake_rpc = FakeExactRelayRPC()
+    before = set(sys.modules)
+    prepare_sealed_singleton_proxies(fake_rpc)
+
+    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+    from comfy.isolation.proxies.helper_proxies import restore_input_types
+    from comfy.isolation.proxies.progress_proxy import ProgressProxy
+    from comfy.isolation.proxies.utils_proxy import UtilsProxy
+
+    folder_proxy = FolderPathsProxy()
+    utils_proxy = UtilsProxy()
+    progress_proxy = ProgressProxy()
+
+    restored = restore_input_types(
+        {
+            "required": {
+                "image": {"__pyisolate_any_type__": True, "value": "*"},
+            }
+        }
+    )
+    folder_path = folder_proxy.get_annotated_filepath("demo.png[input]")
+    models_dir = folder_proxy.models_dir
+    folder_names_and_paths = folder_proxy.folder_names_and_paths
+    asyncio.run(utils_proxy.progress_bar_hook(2, 5, node_id="node-17"))
+    progress_proxy.set_progress(1.5, 5.0, node_id="node-17")
+
+    imported = set(sys.modules) - before
+    return {
+        "mode": "exact_small_proxy_relay",
+        "folder_path": folder_path,
+        "models_dir": models_dir,
+        "folder_names_and_paths": folder_names_and_paths,
+        "restored_any_type": str(restored["required"]["image"]),
+        "transcripts": fake_rpc.transcripts,
+        "modules": sorted(imported),
+        "forbidden_matches": matching_modules(FORBIDDEN_EXACT_SMALL_PROXY_MODULES, imported),
+    }
 
 
 def capture_sealed_singleton_imports() -> dict[str, object]:
