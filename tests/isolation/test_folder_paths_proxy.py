@@ -120,3 +120,9 @@ class TestFolderPathsProxy:
         assert payload["temp_dir"] == "/sandbox/temp"
         assert payload["models_dir"] == "/sandbox/models"
         assert "folder_paths" not in payload["modules"]
+
+    def test_get_temp_directory_torch_share_subset(self, proxy):
+        """Torch-share subset coverage keeps the direct folder-path facade working."""
+        result = proxy.get_temp_directory()
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert Path(result).is_absolute(), f"Path is not absolute: {result}"
