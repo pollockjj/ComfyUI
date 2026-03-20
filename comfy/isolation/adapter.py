@@ -14,6 +14,7 @@ _IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
 # Singleton proxies that do NOT transitively import torch/PIL/psutil/aiohttp.
 # Safe to import in sealed workers without host framework modules.
 from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+from comfy.isolation.proxies.helper_proxies import HelperProxiesService
 from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
 
 # Singleton proxies that transitively import torch, PIL, or heavy host modules.
@@ -478,6 +479,7 @@ class ComfyUIAdapter(IsolationAdapter):
         # Always available — no torch/PIL dependency
         services: List[type[ProxiedSingleton]] = [
             FolderPathsProxy,
+            HelperProxiesService,
             WebDirectoryProxy,
         ]
         # Torch/PIL-dependent proxies

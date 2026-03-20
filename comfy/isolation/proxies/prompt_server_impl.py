@@ -64,6 +64,10 @@ class PromptServerStub:
             PromptServerService, target_id
         )  # We import Service below?
 
+    @classmethod
+    def clear_rpc(cls) -> None:
+        cls._rpc = None
+
     # We need PromptServerService available for the create_caller call?
     # Or just use the Stub class if ID matches?
     # prompt_server_impl.py defines BOTH. So PromptServerService IS available!

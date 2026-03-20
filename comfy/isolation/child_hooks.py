@@ -19,15 +19,12 @@ def initialize_child_process() -> None:
 
         rpc = get_child_rpc_instance()
         if rpc:
-            _setup_prompt_server_stub(rpc)
             _setup_proxy_callers(rpc)
         else:
             logger.warning("Could not get child RPC instance for manual injection")
-            _setup_prompt_server_stub()
             _setup_proxy_callers()
     except Exception as e:
         logger.error(f"Manual RPC Injection failed: {e}")
-        _setup_prompt_server_stub()
         _setup_proxy_callers()
 
     _setup_logging()
@@ -59,31 +56,13 @@ def _setup_child_loop_bridge() -> None:
 def _setup_prompt_server_stub(rpc=None) -> None:
     try:
         from .proxies.prompt_server_impl import PromptServerStub
-        import sys
-        import types
-
-        # Mock server module
-        if "server" not in sys.modules:
-            mock_server = types.ModuleType("server")
-            sys.modules["server"] = mock_server
-
-        server = sys.modules["server"]
-
-        if not hasattr(server, "PromptServer"):
-
-            class MockPromptServer:
-                pass
-
-            server.PromptServer = MockPromptServer
-
-        stub = PromptServerStub()
 
         if rpc:
             PromptServerStub.set_rpc(rpc)
-            if hasattr(stub, "set_rpc"):
-                stub.set_rpc(rpc)
-
-        server.PromptServer.instance = stub
+        elif hasattr(PromptServerStub, "clear_rpc"):
+            PromptServerStub.clear_rpc()
+        else:
+            PromptServerStub._rpc = None  # type: ignore[attr-defined]
 
     except Exception as e:
         logger.error(f"Failed to setup PromptServerStub: {e}")
@@ -95,6 +74,7 @@ def _setup_proxy_callers(rpc=None) -> None:
         from .proxies.helper_proxies import HelperProxiesService
         from .proxies.model_management_proxy import ModelManagementProxy
         from .proxies.progress_proxy import ProgressProxy
+        from .proxies.prompt_server_impl import PromptServerStub
         from .proxies.utils_proxy import UtilsProxy
 
         if rpc is None:
@@ -102,6 +82,7 @@ def _setup_proxy_callers(rpc=None) -> None:
             HelperProxiesService.clear_rpc()
             ModelManagementProxy.clear_rpc()
             ProgressProxy.clear_rpc()
+            PromptServerStub.clear_rpc()
             UtilsProxy.clear_rpc()
             return
 
@@ -109,6 +90,7 @@ def _setup_proxy_callers(rpc=None) -> None:
         HelperProxiesService.set_rpc(rpc)
         ModelManagementProxy.set_rpc(rpc)
         ProgressProxy.set_rpc(rpc)
+        PromptServerStub.set_rpc(rpc)
         UtilsProxy.set_rpc(rpc)
     except Exception as e:
         logger.error(f"Failed to setup child singleton proxy callers: {e}")

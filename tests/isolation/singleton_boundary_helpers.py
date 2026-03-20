@@ -540,6 +540,15 @@ FORBIDDEN_PROMPT_WEB_MODULES = (
     "aiohttp",
     "comfy.isolation.extension_wrapper",
 )
+FORBIDDEN_EXACT_BOOTSTRAP_MODULES = (
+    "comfy.isolation.adapter",
+    "folder_paths",
+    "comfy.utils",
+    "comfy.model_management",
+    "server",
+    "main",
+    "comfy.isolation.extension_wrapper",
+)
 
 
 class _PromptServiceExactRelayCaller:
@@ -681,6 +690,158 @@ def capture_prompt_web_exact_relay() -> dict[str, object]:
         "transcripts": fake_rpc.transcripts,
         "modules": sorted(imported),
         "forbidden_matches": matching_modules(FORBIDDEN_PROMPT_WEB_MODULES, imported),
+    }
+
+
+class FakeExactBootstrapRPC:
+    def __init__(self) -> None:
+        self.transcripts: list[dict[str, Any]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
+        self._services: dict[str, dict[str, Any]] = {
+            "FolderPathsProxy": FakeExactRelayRPC()._services["FolderPathsProxy"],
+            "HelperProxiesService": FakeExactRelayRPC()._services["HelperProxiesService"],
+            "ProgressProxy": FakeExactRelayRPC()._services["ProgressProxy"],
+            "UtilsProxy": FakeExactRelayRPC()._services["UtilsProxy"],
+            "PromptServerService": {
+                "ui_send_sync": {
+                    "target": "server.PromptServer.instance.send_sync",
+                    "result": None,
+                },
+                "ui_send": {
+                    "target": "server.PromptServer.instance.send",
+                    "result": None,
+                },
+                "ui_send_progress_text": {
+                    "target": "server.PromptServer.instance.send_progress_text",
+                    "result": None,
+                },
+                "register_route_rpc": {
+                    "target": "server.PromptServer.instance.routes.add_route",
+                    "result": None,
+                },
+            },
+            "ModelManagementProxy": {
+                "rpc_call": self._rpc_call,
+            },
+        }
+
+    def create_caller(self, cls: Any, object_id: str):
+        methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
+        if methods is None:
+            raise KeyError(object_id)
+        if object_id == "ModelManagementProxy":
+            return _ModelManagementExactRelayCaller(methods)
+        return _PromptServiceExactRelayCaller(methods, self.transcripts, object_id)
+
+    def _rpc_call(self, method_name: str, args: Any, kwargs: Any) -> Any:
+        self.transcripts.append(
+            {
+                "phase": "child_call",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "args": _json_safe(args),
+                "kwargs": _json_safe(kwargs),
+            }
+        )
+        self.transcripts.append(
+            {
+                "phase": "host_invocation",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "target": f"comfy.model_management.{method_name}",
+                "args": _json_safe(args),
+                "kwargs": _json_safe(kwargs),
+            }
+        )
+        result = self._device if method_name == "get_torch_device" else None
+        self.transcripts.append(
+            {
+                "phase": "result",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "result": _json_safe(result),
+            }
+        )
+        return result
+
+
+def capture_exact_proxy_bootstrap_contract() -> dict[str, object]:
+    from pyisolate._internal.rpc_protocol import get_child_rpc_instance, set_child_rpc_instance
+
+    from comfy.isolation.adapter import ComfyUIAdapter
+    from comfy.isolation.child_hooks import initialize_child_process
+    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+    from comfy.isolation.proxies.helper_proxies import HelperProxiesService
+    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+    from comfy.isolation.proxies.progress_proxy import ProgressProxy
+    from comfy.isolation.proxies.prompt_server_impl import PromptServerStub
+    from comfy.isolation.proxies.utils_proxy import UtilsProxy
+
+    host_services = sorted(cls.__name__ for cls in ComfyUIAdapter().provide_rpc_services())
+
+    for module_name in FORBIDDEN_EXACT_BOOTSTRAP_MODULES:
+        sys.modules.pop(module_name, None)
+
+    os.environ["PYISOLATE_CHILD"] = "1"
+    os.environ["PYISOLATE_IMPORT_TORCH"] = "0"
+
+    _clear_proxy_rpcs()
+    if hasattr(PromptServerStub, "clear_rpc"):
+        PromptServerStub.clear_rpc()
+    else:
+        PromptServerStub._rpc = None  # type: ignore[attr-defined]
+    fake_rpc = FakeExactBootstrapRPC()
+    set_child_rpc_instance(fake_rpc)
+
+    before = set(sys.modules)
+    try:
+        initialize_child_process()
+        imported = set(sys.modules) - before
+        matrix = {
+            "base.py": {
+                "bound": get_child_rpc_instance() is fake_rpc,
+                "details": {"child_rpc_instance": get_child_rpc_instance() is fake_rpc},
+            },
+            "folder_paths_proxy.py": {
+                "bound": "FolderPathsProxy" in host_services and FolderPathsProxy._rpc is not None,
+                "details": {"host_service": "FolderPathsProxy" in host_services, "child_rpc": FolderPathsProxy._rpc is not None},
+            },
+            "helper_proxies.py": {
+                "bound": "HelperProxiesService" in host_services and HelperProxiesService._rpc is not None,
+                "details": {"host_service": "HelperProxiesService" in host_services, "child_rpc": HelperProxiesService._rpc is not None},
+            },
+            "model_management_proxy.py": {
+                "bound": "ModelManagementProxy" in host_services and ModelManagementProxy._rpc is not None,
+                "details": {"host_service": "ModelManagementProxy" in host_services, "child_rpc": ModelManagementProxy._rpc is not None},
+            },
+            "progress_proxy.py": {
+                "bound": "ProgressProxy" in host_services and ProgressProxy._rpc is not None,
+                "details": {"host_service": "ProgressProxy" in host_services, "child_rpc": ProgressProxy._rpc is not None},
+            },
+            "prompt_server_impl.py": {
+                "bound": "PromptServerService" in host_services and PromptServerStub._rpc is not None,
+                "details": {"host_service": "PromptServerService" in host_services, "child_rpc": PromptServerStub._rpc is not None},
+            },
+            "utils_proxy.py": {
+                "bound": "UtilsProxy" in host_services and UtilsProxy._rpc is not None,
+                "details": {"host_service": "UtilsProxy" in host_services, "child_rpc": UtilsProxy._rpc is not None},
+            },
+            "web_directory_proxy.py": {
+                "bound": "WebDirectoryProxy" in host_services,
+                "details": {"host_service": "WebDirectoryProxy" in host_services},
+            },
+        }
+    finally:
+        set_child_rpc_instance(None)
+
+    omitted = sorted(name for name, status in matrix.items() if not status["bound"])
+    return {
+        "mode": "exact_proxy_bootstrap_contract",
+        "host_services": host_services,
+        "matrix": matrix,
+        "omitted_proxies": omitted,
+        "modules": sorted(imported),
+        "forbidden_matches": matching_modules(FORBIDDEN_EXACT_BOOTSTRAP_MODULES, imported),
     }
 
 

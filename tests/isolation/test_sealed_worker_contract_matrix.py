@@ -227,7 +227,7 @@ async def test_uv_sealed_worker_opt_in(
     extension_type = mock_pi.ExtensionManager.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
-    assert config["apis"] == []
+    assert "apis" not in config
     assert "comfy.isolation.extension_wrapper" not in sys.modules
 
 
@@ -367,4 +367,4 @@ async def test_sealed_worker_host_policy_ro_import_matrix(
 
     assert opt_in_config["execution_model"] == "sealed_worker"
     assert opt_in_config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
-    assert opt_in_config["apis"] == []
+    assert "apis" not in opt_in_config
