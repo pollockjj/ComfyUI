@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.isolation.singleton_boundary_helpers import (
     capture_exact_small_proxy_relay,
     capture_model_management_exact_relay,
+    capture_prompt_web_exact_relay,
 )
 
 
@@ -94,3 +95,34 @@ def test_model_management_capability_preserved() -> None:
     assert payload["device_type"] == "cpu"
     assert payload["device_name"] == "cpu"
     assert payload["free_memory"] == 34359738368
+
+
+def test_prompt_server_exact_relay() -> None:
+    payload = capture_prompt_web_exact_relay()
+
+    prompt_calls = _transcripts_for(payload, "PromptServerService", "ui_send_progress_text")
+    prompt_calls += _transcripts_for(payload, "PromptServerService", "register_route_rpc")
+
+    assert payload["forbidden_matches"] == []
+    assert prompt_calls
+    host_targets = [
+        entry["target"]
+        for entry in payload["transcripts"]
+        if entry["object_id"] == "PromptServerService" and entry["phase"] == "host_invocation"
+    ]
+    assert host_targets == [
+        "server.PromptServer.instance.send_progress_text",
+        "server.PromptServer.instance.routes.add_route",
+    ]
+
+
+def test_web_directory_exact_relay() -> None:
+    payload = capture_prompt_web_exact_relay()
+
+    web_calls = _transcripts_for(payload, "WebDirectoryProxy", "get_web_file")
+
+    assert web_calls
+    host_targets = [entry["target"] for entry in web_calls if entry["phase"] == "host_invocation"]
+    assert host_targets == ["comfy.isolation.proxies.web_directory_proxy.WebDirectoryProxy.get_web_file"]
+    assert payload["web_file"]["content_type"] == "application/javascript"
+    assert payload["web_file"]["content"] == "console.log('deo');"

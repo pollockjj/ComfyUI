@@ -491,6 +491,8 @@ class _ModelManagementExactRelayCaller:
 
 
 def _json_safe(value: Any) -> Any:
+    if callable(value):
+        return f"<callable {getattr(value, '__name__', 'anonymous')}>"
     if isinstance(value, tuple):
         return [_json_safe(item) for item in value]
     if isinstance(value, list):
@@ -530,6 +532,155 @@ def capture_model_management_exact_relay() -> dict[str, object]:
         "transcripts": fake_rpc.transcripts,
         "modules": sorted(imported),
         "forbidden_matches": matching_modules(FORBIDDEN_MODEL_MANAGEMENT_MODULES, imported),
+    }
+
+
+FORBIDDEN_PROMPT_WEB_MODULES = (
+    "server",
+    "aiohttp",
+    "comfy.isolation.extension_wrapper",
+)
+
+
+class _PromptServiceExactRelayCaller:
+    def __init__(self, methods: dict[str, Any], transcripts: list[dict[str, Any]], object_id: str):
+        self._methods = methods
+        self._transcripts = transcripts
+        self._object_id = object_id
+
+    def __getattr__(self, name: str):
+        if name not in self._methods:
+            raise AttributeError(name)
+
+        async def method(*args: Any, **kwargs: Any) -> Any:
+            self._transcripts.append(
+                {
+                    "phase": "child_call",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "args": _json_safe(args),
+                    "kwargs": _json_safe(kwargs),
+                }
+            )
+            impl = self._methods[name]
+            self._transcripts.append(
+                {
+                    "phase": "host_invocation",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "target": impl["target"],
+                    "args": _json_safe(args),
+                    "kwargs": _json_safe(kwargs),
+                }
+            )
+            result = impl["result"](*args, **kwargs) if callable(impl["result"]) else impl["result"]
+            self._transcripts.append(
+                {
+                    "phase": "result",
+                    "object_id": self._object_id,
+                    "method": name,
+                    "result": _json_safe(result),
+                }
+            )
+            return result
+
+        return method
+
+
+class FakePromptWebRPC:
+    def __init__(self) -> None:
+        self.transcripts: list[dict[str, Any]] = []
+        self._services = {
+            "PromptServerService": {
+                "ui_send_progress_text": {
+                    "target": "server.PromptServer.instance.send_progress_text",
+                    "result": None,
+                },
+                "register_route_rpc": {
+                    "target": "server.PromptServer.instance.routes.add_route",
+                    "result": None,
+                },
+            }
+        }
+
+    def create_caller(self, cls: Any, object_id: str):
+        methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
+        if methods is None:
+            raise KeyError(object_id)
+        return _PromptServiceExactRelayCaller(methods, self.transcripts, object_id)
+
+
+class FakeWebDirectoryProxy:
+    def __init__(self, transcripts: list[dict[str, Any]]):
+        self._transcripts = transcripts
+
+    def get_web_file(self, extension_name: str, relative_path: str) -> dict[str, Any]:
+        self._transcripts.append(
+            {
+                "phase": "child_call",
+                "object_id": "WebDirectoryProxy",
+                "method": "get_web_file",
+                "args": [extension_name, relative_path],
+                "kwargs": {},
+            }
+        )
+        self._transcripts.append(
+            {
+                "phase": "host_invocation",
+                "object_id": "WebDirectoryProxy",
+                "method": "get_web_file",
+                "target": "comfy.isolation.proxies.web_directory_proxy.WebDirectoryProxy.get_web_file",
+                "args": [extension_name, relative_path],
+                "kwargs": {},
+            }
+        )
+        result = {
+            "content": "Y29uc29sZS5sb2coJ2RlbycpOw==",
+            "content_type": "application/javascript",
+        }
+        self._transcripts.append(
+            {
+                "phase": "result",
+                "object_id": "WebDirectoryProxy",
+                "method": "get_web_file",
+                "result": result,
+            }
+        )
+        return result
+
+
+def capture_prompt_web_exact_relay() -> dict[str, object]:
+    for module_name in FORBIDDEN_PROMPT_WEB_MODULES:
+        sys.modules.pop(module_name, None)
+
+    fake_rpc = FakePromptWebRPC()
+
+    from comfy.isolation.proxies.prompt_server_impl import PromptServerStub
+    from comfy.isolation.proxies.web_directory_proxy import WebDirectoryCache
+
+    PromptServerStub.set_rpc(fake_rpc)
+    stub = PromptServerStub()
+    cache = WebDirectoryCache()
+    cache.register_proxy("demo_ext", FakeWebDirectoryProxy(fake_rpc.transcripts))
+
+    before = set(sys.modules)
+
+    def demo_handler(_request):
+        return {"ok": True}
+
+    stub.send_progress_text("hello", "node-17")
+    stub.routes.get("/demo")(demo_handler)
+    web_file = cache.get_file("demo_ext", "js/app.js")
+    imported = set(sys.modules) - before
+    return {
+        "mode": "prompt_web_exact_relay",
+        "web_file": {
+            "content_type": web_file["content_type"] if web_file else None,
+            "content": web_file["content"].decode("utf-8") if web_file else None,
+        },
+        "transcripts": fake_rpc.transcripts,
+        "modules": sorted(imported),
+        "forbidden_matches": matching_modules(FORBIDDEN_PROMPT_WEB_MODULES, imported),
     }
 
 
