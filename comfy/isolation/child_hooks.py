@@ -93,18 +93,21 @@ def _setup_proxy_callers(rpc=None) -> None:
     try:
         from .proxies.folder_paths_proxy import FolderPathsProxy
         from .proxies.helper_proxies import HelperProxiesService
+        from .proxies.model_management_proxy import ModelManagementProxy
         from .proxies.progress_proxy import ProgressProxy
         from .proxies.utils_proxy import UtilsProxy
 
         if rpc is None:
             FolderPathsProxy.clear_rpc()
             HelperProxiesService.clear_rpc()
+            ModelManagementProxy.clear_rpc()
             ProgressProxy.clear_rpc()
             UtilsProxy.clear_rpc()
             return
 
         FolderPathsProxy.set_rpc(rpc)
         HelperProxiesService.set_rpc(rpc)
+        ModelManagementProxy.set_rpc(rpc)
         ProgressProxy.set_rpc(rpc)
         UtilsProxy.set_rpc(rpc)
     except Exception as e:

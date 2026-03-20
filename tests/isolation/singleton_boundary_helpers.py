@@ -25,6 +25,10 @@ FORBIDDEN_SEALED_SINGLETON_MODULES = (
     "comfy_execution.progress",
 )
 FORBIDDEN_EXACT_SMALL_PROXY_MODULES = FORBIDDEN_SEALED_SINGLETON_MODULES
+FORBIDDEN_MODEL_MANAGEMENT_MODULES = (
+    "comfy.model_management",
+    "torch",
+)
 
 
 def _load_module_from_path(module_name: str, module_path: Path):
@@ -58,6 +62,14 @@ def _load_helper_proxy_service() -> Any | None:
     except (ImportError, AttributeError):
         return None
     return HelperProxiesService
+
+
+def _load_model_management_proxy() -> Any | None:
+    try:
+        from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+    except (ImportError, AttributeError):
+        return None
+    return ModelManagementProxy
 
 
 async def _capture_minimal_sealed_worker_imports() -> dict[str, object]:
@@ -187,6 +199,9 @@ def _clear_proxy_rpcs() -> None:
     helper_proxy_service = _load_helper_proxy_service()
     if helper_proxy_service is not None:
         helper_proxy_service.clear_rpc()
+    model_management_proxy = _load_model_management_proxy()
+    if model_management_proxy is not None and hasattr(model_management_proxy, "clear_rpc"):
+        model_management_proxy.clear_rpc()
 
 
 def prepare_sealed_singleton_proxies(fake_rpc: FakeSingletonRPC) -> None:
@@ -204,6 +219,9 @@ def prepare_sealed_singleton_proxies(fake_rpc: FakeSingletonRPC) -> None:
     helper_proxy_service = _load_helper_proxy_service()
     if helper_proxy_service is not None:
         helper_proxy_service.set_rpc(fake_rpc)
+    model_management_proxy = _load_model_management_proxy()
+    if model_management_proxy is not None and hasattr(model_management_proxy, "set_rpc"):
+        model_management_proxy.set_rpc(fake_rpc)
 
 
 def reset_forbidden_singleton_modules() -> None:
@@ -398,6 +416,120 @@ def capture_exact_small_proxy_relay() -> dict[str, object]:
         "transcripts": fake_rpc.transcripts,
         "modules": sorted(imported),
         "forbidden_matches": matching_modules(FORBIDDEN_EXACT_SMALL_PROXY_MODULES, imported),
+    }
+
+
+class FakeModelManagementExactRelayRPC:
+    def __init__(self) -> None:
+        self.transcripts: list[dict[str, object]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
+        self._services: dict[str, dict[str, Any]] = {
+            "ModelManagementProxy": {
+                "rpc_call": self._rpc_call,
+            }
+        }
+
+    def create_caller(self, cls: Any, object_id: str):
+        methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
+        if methods is None:
+            raise KeyError(object_id)
+        return _ModelManagementExactRelayCaller(methods)
+
+    def _rpc_call(self, method_name: str, args: Any, kwargs: Any) -> Any:
+        self.transcripts.append(
+            {
+                "phase": "child_call",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "args": _json_safe(args),
+                "kwargs": _json_safe(kwargs),
+            }
+        )
+        target = f"comfy.model_management.{method_name}"
+        self.transcripts.append(
+            {
+                "phase": "host_invocation",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "target": target,
+                "args": _json_safe(args),
+                "kwargs": _json_safe(kwargs),
+            }
+        )
+        if method_name == "get_torch_device":
+            result = self._device
+        elif method_name == "get_torch_device_name":
+            result = "cpu"
+        elif method_name == "get_free_memory":
+            result = 34359738368
+        else:
+            raise AssertionError(f"unexpected exact-relay method {method_name}")
+        self.transcripts.append(
+            {
+                "phase": "result",
+                "object_id": "ModelManagementProxy",
+                "method": method_name,
+                "result": _json_safe(result),
+            }
+        )
+        return result
+
+
+class _ModelManagementExactRelayCaller:
+    def __init__(self, methods: dict[str, Any]):
+        self._methods = methods
+
+    def __getattr__(self, name: str):
+        if name not in self._methods:
+            raise AttributeError(name)
+
+        async def method(*args: Any, **kwargs: Any) -> Any:
+            impl = self._methods[name]
+            return impl(*args, **kwargs) if callable(impl) else impl
+
+        return method
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(inner) for key, inner in value.items()}
+    return value
+
+
+def capture_model_management_exact_relay() -> dict[str, object]:
+    for module_name in FORBIDDEN_MODEL_MANAGEMENT_MODULES:
+        sys.modules.pop(module_name, None)
+
+    fake_rpc = FakeModelManagementExactRelayRPC()
+    os.environ["PYISOLATE_CHILD"] = "1"
+    os.environ["PYISOLATE_IMPORT_TORCH"] = "0"
+
+    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+
+    if hasattr(ModelManagementProxy, "clear_rpc"):
+        ModelManagementProxy.clear_rpc()
+    if hasattr(ModelManagementProxy, "set_rpc"):
+        ModelManagementProxy.set_rpc(fake_rpc)
+
+    proxy = ModelManagementProxy()
+    before = set(sys.modules)
+    device = proxy.get_torch_device()
+    device_name = proxy.get_torch_device_name(device)
+    free_memory = proxy.get_free_memory(device)
+    imported = set(sys.modules) - before
+    return {
+        "mode": "model_management_exact_relay",
+        "device": str(device),
+        "device_type": getattr(device, "type", None),
+        "device_name": device_name,
+        "free_memory": free_memory,
+        "transcripts": fake_rpc.transcripts,
+        "modules": sorted(imported),
+        "forbidden_matches": matching_modules(FORBIDDEN_MODEL_MANAGEMENT_MODULES, imported),
     }
 
 

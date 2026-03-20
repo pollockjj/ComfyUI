@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from tests.isolation.singleton_boundary_helpers import capture_exact_small_proxy_relay
+from tests.isolation.singleton_boundary_helpers import (
+    capture_exact_small_proxy_relay,
+    capture_model_management_exact_relay,
+)
 
 
 def _transcripts_for(payload: dict[str, object], object_id: str, method: str) -> list[dict[str, object]]:
@@ -61,3 +64,33 @@ def test_helper_proxy_exact_relay() -> None:
     host_targets = [entry["target"] for entry in helper_calls if entry["phase"] == "host_invocation"]
     assert host_targets == ["comfy.isolation.proxies.helper_proxies.restore_input_types"]
     assert payload["restored_any_type"] == "*"
+
+
+def test_model_management_exact_relay() -> None:
+    payload = capture_model_management_exact_relay()
+
+    model_calls = _transcripts_for(payload, "ModelManagementProxy", "get_torch_device")
+    model_calls += _transcripts_for(payload, "ModelManagementProxy", "get_torch_device_name")
+    model_calls += _transcripts_for(payload, "ModelManagementProxy", "get_free_memory")
+
+    assert payload["forbidden_matches"] == []
+    assert model_calls
+    host_targets = [
+        entry["target"]
+        for entry in payload["transcripts"]
+        if entry["phase"] == "host_invocation"
+    ]
+    assert host_targets == [
+        "comfy.model_management.get_torch_device",
+        "comfy.model_management.get_torch_device_name",
+        "comfy.model_management.get_free_memory",
+    ]
+
+
+def test_model_management_capability_preserved() -> None:
+    payload = capture_model_management_exact_relay()
+
+    assert payload["device"] == "cpu"
+    assert payload["device_type"] == "cpu"
+    assert payload["device_name"] == "cpu"
+    assert payload["free_memory"] == 34359738368
