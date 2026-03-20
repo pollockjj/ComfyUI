@@ -16,6 +16,7 @@ import logging
 
 # IMPORTS
 from pyisolate import ProxiedSingleton
+from .base import call_singleton_rpc
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[Isolation:C<->H]"
@@ -62,6 +63,10 @@ class PromptServerStub:
         cls._rpc = rpc.create_caller(
             PromptServerService, target_id
         )  # We import Service below?
+
+    @classmethod
+    def clear_rpc(cls) -> None:
+        cls._rpc = None
 
     # We need PromptServerService available for the create_caller call?
     # Or just use the Stub class if ID matches?
@@ -132,7 +137,7 @@ class PromptServerStub:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._rpc.ui_send_progress_text(text, node_id, sid))
             except RuntimeError:
-                pass  # Sync context without loop?
+                call_singleton_rpc(self._rpc, "ui_send_progress_text", text, node_id, sid)
 
     # --- Route Registration Logic ---
     def register_route(self, method: str, path: str, handler: Callable):
@@ -146,7 +151,7 @@ class PromptServerStub:
             loop = asyncio.get_running_loop()
             loop.create_task(self._rpc.register_route_rpc(method, path, handler))
         except RuntimeError:
-            pass
+            call_singleton_rpc(self._rpc, "register_route_rpc", method, path, handler)
 
 
 class RouteStub:

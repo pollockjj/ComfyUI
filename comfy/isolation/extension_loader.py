@@ -373,10 +373,8 @@ async def load_isolated_node(
         policy_ro_paths = host_policy.get("sealed_worker_ro_import_paths", [])
         if isinstance(policy_ro_paths, list) and policy_ro_paths:
             extension_config["sealed_host_ro_paths"] = list(policy_ro_paths)
-            # RO paths give sealed child access to framework — keep APIs for
-            # adapter rehydration and serializer registration
-        else:
-            extension_config["apis"] = []
+        # Sealed workers keep the host RPC service inventory even when the
+        # child resolves no API classes locally.
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)

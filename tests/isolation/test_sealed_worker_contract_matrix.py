@@ -97,8 +97,9 @@ def manifest_file(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.fixture
-def loader_module(monkeypatch: pytest.MonkeyPatch):
+def _loader_module(
+    monkeypatch: pytest.MonkeyPatch, *, preload_extension_wrapper: bool
+):
     mock_wrapper = MagicMock()
     mock_wrapper.ComfyNodeExtension = type("ComfyNodeExtension", (), {})
 
@@ -125,11 +126,14 @@ def loader_module(monkeypatch: pytest.MonkeyPatch):
     folder_paths = types.SimpleNamespace(base_path="/fake/comfyui")
 
     monkeypatch.setitem(sys.modules, "comfy.isolation", iso_mod)
-    monkeypatch.setitem(sys.modules, "comfy.isolation.extension_wrapper", mock_wrapper)
     monkeypatch.setitem(sys.modules, "comfy.isolation.runtime_helpers", MagicMock())
     monkeypatch.setitem(sys.modules, "comfy.isolation.manifest_loader", manifest_loader)
     monkeypatch.setitem(sys.modules, "comfy.isolation.host_policy", host_policy)
     monkeypatch.setitem(sys.modules, "folder_paths", folder_paths)
+    if preload_extension_wrapper:
+        monkeypatch.setitem(sys.modules, "comfy.isolation.extension_wrapper", mock_wrapper)
+    else:
+        sys.modules.pop("comfy.isolation.extension_wrapper", None)
     sys.modules.pop("comfy.isolation.extension_loader", None)
 
     module = importlib.import_module("comfy.isolation.extension_loader")
@@ -143,8 +147,34 @@ def loader_module(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
+def loader_module(monkeypatch: pytest.MonkeyPatch):
+    yield from _loader_module(monkeypatch, preload_extension_wrapper=True)
+
+
+@pytest.fixture
+def sealed_loader_module(monkeypatch: pytest.MonkeyPatch):
+    yield from _loader_module(monkeypatch, preload_extension_wrapper=False)
+
+
+@pytest.fixture
 def mocked_loader(loader_module):
     module, mock_wrapper = loader_module
+    mock_ext = AsyncMock()
+    mock_ext.list_nodes = AsyncMock(return_value={})
+
+    mock_manager = MagicMock()
+    mock_manager.load_extension = MagicMock(return_value=mock_ext)
+    sealed_type = type("SealedNodeExtension", (), {})
+
+    with patch.object(module, "pyisolate") as mock_pi:
+        mock_pi.ExtensionManager = MagicMock(return_value=mock_manager)
+        mock_pi.SealedNodeExtension = sealed_type
+        yield module, mock_pi, mock_manager, sealed_type, mock_wrapper
+
+
+@pytest.fixture
+def sealed_mocked_loader(sealed_loader_module):
+    module, mock_wrapper = sealed_loader_module
     mock_ext = AsyncMock()
     mock_ext.list_nodes = AsyncMock(return_value={})
 
@@ -186,8 +216,10 @@ async def test_uv_host_coupled_default(mocked_loader, manifest_file: Path, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_uv_sealed_worker_opt_in(mocked_loader, manifest_file: Path, tmp_path: Path):
-    module, mock_pi, _mock_manager, sealed_type, _ = mocked_loader
+async def test_uv_sealed_worker_opt_in(
+    sealed_mocked_loader, manifest_file: Path, tmp_path: Path
+):
+    module, mock_pi, _mock_manager, sealed_type, _ = sealed_mocked_loader
     manifest = _make_manifest(package_manager="uv", execution_model="sealed_worker")
 
     config = await _load_node(module, manifest, manifest_file, tmp_path)
@@ -195,12 +227,15 @@ async def test_uv_sealed_worker_opt_in(mocked_loader, manifest_file: Path, tmp_p
     extension_type = mock_pi.ExtensionManager.call_args[0][0]
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
-    assert config["apis"] == []
+    assert "apis" not in config
+    assert "comfy.isolation.extension_wrapper" not in sys.modules
 
 
 @pytest.mark.asyncio
-async def test_conda_defaults_to_sealed_worker(mocked_loader, manifest_file: Path, tmp_path: Path):
-    module, mock_pi, _mock_manager, sealed_type, _ = mocked_loader
+async def test_conda_defaults_to_sealed_worker(
+    sealed_mocked_loader, manifest_file: Path, tmp_path: Path
+):
+    module, mock_pi, _mock_manager, sealed_type, _ = sealed_mocked_loader
     manifest = _make_manifest(package_manager="conda")
 
     config = await _load_node(module, manifest, manifest_file, tmp_path)
@@ -209,6 +244,7 @@ async def test_conda_defaults_to_sealed_worker(mocked_loader, manifest_file: Pat
     assert extension_type is sealed_type
     assert config["execution_model"] == "sealed_worker"
     assert config["package_manager"] == "conda"
+    assert "comfy.isolation.extension_wrapper" not in sys.modules
 
 
 @pytest.mark.asyncio
@@ -331,4 +367,4 @@ async def test_sealed_worker_host_policy_ro_import_matrix(
 
     assert opt_in_config["execution_model"] == "sealed_worker"
     assert opt_in_config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
-    assert opt_in_config["apis"] == []
+    assert "apis" not in opt_in_config
