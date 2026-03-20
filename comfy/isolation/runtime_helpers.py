@@ -8,9 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, TYPE_CHECKING
 
 from .proxies.helper_proxies import restore_input_types
-from comfy_api.internal import _ComfyNodeInternal
-from comfy_api.latest import _io as latest_io
 from .shm_forensics import scan_shm_forensics
+
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
+if _IMPORT_TORCH:
+    from comfy_api.internal import _ComfyNodeInternal
+    from comfy_api.latest import _io as latest_io
 
 if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
@@ -192,7 +196,27 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
-            serialized = serialize_for_isolation(inputs)
+            for _ik, _iv in inputs.items():
+                logger.warning(
+                    "%s ISO:INPUT_DIAG ext=%s node=%s input=%s type=%s%s",
+                    LOG_PREFIX, extension.name, node_name, _ik,
+                    type(_iv).__name__,
+                    f" keys={list(_iv.keys())}" if isinstance(_iv, dict) else "",
+                )
+            # Unwrap NodeOutput-like dicts before serialization.
+            # OUTPUT_NODE nodes return {"ui": {...}, "result": (outputs...)}
+            # and the executor may pass this dict as input to downstream nodes.
+            unwrapped_inputs = {}
+            for k, v in inputs.items():
+                if isinstance(v, dict) and "result" in v and ("ui" in v or "__node_output__" in v):
+                    result = v.get("result")
+                    if isinstance(result, (tuple, list)) and len(result) > 0:
+                        unwrapped_inputs[k] = result[0]
+                    else:
+                        unwrapped_inputs[k] = result
+                else:
+                    unwrapped_inputs[k] = v
+            serialized = serialize_for_isolation(unwrapped_inputs)
             logger.debug(
                 "%s ISO:serialize_done ext=%s node=%s uid=%s",
                 LOG_PREFIX,

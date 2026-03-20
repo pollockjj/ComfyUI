@@ -143,7 +143,15 @@ def _parse_cuda_wheels_config(
         raise ExtensionLoadError("[tool.comfy.isolation.cuda_wheels] must be a table")
 
     index_url = raw_config.get("index_url")
-    if not isinstance(index_url, str) or not index_url.strip():
+    index_urls = raw_config.get("index_urls")
+    if index_urls is not None:
+        if not isinstance(index_urls, list) or not all(
+            isinstance(u, str) and u.strip() for u in index_urls
+        ):
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.cuda_wheels.index_urls] must be a list of non-empty strings"
+            )
+    elif not isinstance(index_url, str) or not index_url.strip():
         raise ExtensionLoadError(
             "[tool.comfy.isolation.cuda_wheels.index_url] must be a non-empty string"
         )
@@ -199,11 +207,15 @@ def _parse_cuda_wheels_config(
             )
         normalized_package_map[canonical_dependency_name] = index_package_name.strip()
 
-    return {
-        "index_url": index_url.rstrip("/") + "/",
+    result: dict = {
         "packages": normalized_packages,
         "package_map": normalized_package_map,
     }
+    if index_urls is not None:
+        result["index_urls"] = [u.rstrip("/") + "/" for u in index_urls]
+    else:
+        result["index_url"] = index_url.rstrip("/") + "/"
+    return result
 
 
 def get_enforcement_policy() -> Dict[str, bool]:

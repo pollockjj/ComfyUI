@@ -25,3 +25,8 @@ openapi.yaml
 filtered-openapi.yaml
 uv.lock
 .pyisolate_venvs/
+
+# Custom node packs are separate repos, not tracked in ComfyUI
+custom_nodes/ComfyUI-GeometryPack/
+custom_nodes/ComfyUI-GeometryPackGPU/
+custom_nodes/ComfyUI-GeometryPackBlender/
