@@ -43,20 +43,6 @@ def test_provide_rpc_services():
     assert "FolderPathsProxy" in names
 
 
-def test_provide_rpc_services_for_config_minimal_sealed_excludes_heavy_shims():
-    adapter = ComfyUIAdapter()
-    services = adapter.provide_rpc_services_for_config(
-        {"execution_model": "sealed_worker", "share_torch": False},
-        host_side=True,
-    )
-    names = {s.__name__ for s in services}
-    assert "FolderPathsProxy" in names
-    assert "UtilsProxy" in names
-    assert "ProgressProxy" in names
-    assert "PromptServerService" not in names
-    assert "ModelManagementProxy" not in names
-
-
 def test_register_serializers():
     adapter = ComfyUIAdapter()
     registry = SerializerRegistry.get_instance()

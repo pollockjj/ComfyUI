@@ -55,12 +55,6 @@ if os.path.exists("/dev/shm"):
 class ComfyUIAdapter(IsolationAdapter):
     # ComfyUI-specific IsolationAdapter implementation
 
-    @staticmethod
-    def _is_minimal_sealed_worker(config: Dict[str, Any]) -> bool:
-        return config.get("execution_model") == "sealed_worker" and not bool(
-            config.get("share_torch", False)
-        )
-
     @property
     def identifier(self) -> str:
         return "comfyui"
@@ -481,46 +475,24 @@ class ComfyUIAdapter(IsolationAdapter):
         register_custom_node_serializers(registry)
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
-        return self.provide_rpc_services_for_config(
-            {"execution_model": "host-coupled", "share_torch": True}
-        )
-
-    def provide_rpc_services_for_config(
-        self,
-        config: Dict[str, Any],
-        *,
-        host_side: bool = False,
-    ) -> List[type[ProxiedSingleton]]:
         # Always available — no torch/PIL dependency
         services: List[type[ProxiedSingleton]] = [
             FolderPathsProxy,
             WebDirectoryProxy,
         ]
-
-        if not _HAS_TORCH_PROXIES:
-            return services
-
-        # These child-safe proxy surfaces are still needed for minimal sealed
-        # workers to perform path and progress RPC without importing the real
-        # host runtime modules in the child.
-        services.extend([
-            UtilsProxy,
-            ProgressProxy,
-        ])
-
-        # Heavy host-owned shims stay out of minimal sealed-worker startup.
-        if self._is_minimal_sealed_worker(config):
-            return services
-
-        services.extend([
-            PromptServerService,
-            ModelManagementProxy,
-            VAERegistry,
-            CLIPRegistry,
-            ModelPatcherRegistry,
-            ModelSamplingRegistry,
-            FirstStageModelRegistry,
-        ])
+        # Torch/PIL-dependent proxies
+        if _HAS_TORCH_PROXIES:
+            services.extend([
+                PromptServerService,
+                ModelManagementProxy,
+                UtilsProxy,
+                ProgressProxy,
+                VAERegistry,
+                CLIPRegistry,
+                ModelPatcherRegistry,
+                ModelSamplingRegistry,
+                FirstStageModelRegistry,
+            ])
         return services
 
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
