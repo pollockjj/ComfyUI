@@ -196,13 +196,6 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
-            for _ik, _iv in inputs.items():
-                logger.warning(
-                    "%s ISO:INPUT_DIAG ext=%s node=%s input=%s type=%s%s",
-                    LOG_PREFIX, extension.name, node_name, _ik,
-                    type(_iv).__name__,
-                    f" keys={list(_iv.keys())}" if isinstance(_iv, dict) else "",
-                )
             # Unwrap NodeOutput-like dicts before serialization.
             # OUTPUT_NODE nodes return {"ui": {...}, "result": (outputs...)}
             # and the executor may pass this dict as input to downstream nodes.
@@ -252,6 +245,11 @@ def build_stub_class(
                     expand=result.get("expand"),
                     block_execution=result.get("block_execution"),
                 )
+            # OUTPUT_NODE: if sealed worker returned a tuple/list whose first
+            # element is a {"ui": ...} dict, unwrap it for the executor.
+            if (isinstance(result, (tuple, list)) and len(result) == 1
+                    and isinstance(result[0], dict) and "ui" in result[0]):
+                return result[0]
             deserialized = await deserialize_from_isolation(result, extension)
             scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
             return _detach_shared_cpu_tensors(deserialized)

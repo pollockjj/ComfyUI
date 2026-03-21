@@ -460,6 +460,10 @@ async def load_isolated_node(
     save_to_cache(node_dir, venv_root, cache_data, manifest_path)
     logger.debug(f"][ {extension_name} metadata cached")
 
+    # Re-check web directory AFTER child has populated it
+    if host_policy["sandbox_mode"] == "disabled":
+        _register_web_directory(extension_name, node_dir)
+
     # EJECT: Kill process after getting metadata (will respawn on first execution)
     await _stop_extension_safe(extension, extension_name)
 
