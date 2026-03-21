@@ -8,9 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, TYPE_CHECKING
 
 from .proxies.helper_proxies import restore_input_types
-from comfy_api.internal import _ComfyNodeInternal
-from comfy_api.latest import _io as latest_io
 from .shm_forensics import scan_shm_forensics
+
+_IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
+
+if _IMPORT_TORCH:
+    from comfy_api.internal import _ComfyNodeInternal
+    from comfy_api.latest import _io as latest_io
 
 if TYPE_CHECKING:
     from .extension_wrapper import ComfyNodeExtension
@@ -192,7 +196,20 @@ def build_stub_class(
                 node_name,
                 node_unique_id or "-",
             )
-            serialized = serialize_for_isolation(inputs)
+            # Unwrap NodeOutput-like dicts before serialization.
+            # OUTPUT_NODE nodes return {"ui": {...}, "result": (outputs...)}
+            # and the executor may pass this dict as input to downstream nodes.
+            unwrapped_inputs = {}
+            for k, v in inputs.items():
+                if isinstance(v, dict) and "result" in v and ("ui" in v or "__node_output__" in v):
+                    result = v.get("result")
+                    if isinstance(result, (tuple, list)) and len(result) > 0:
+                        unwrapped_inputs[k] = result[0]
+                    else:
+                        unwrapped_inputs[k] = result
+                else:
+                    unwrapped_inputs[k] = v
+            serialized = serialize_for_isolation(unwrapped_inputs)
             logger.debug(
                 "%s ISO:serialize_done ext=%s node=%s uid=%s",
                 LOG_PREFIX,
@@ -228,6 +245,11 @@ def build_stub_class(
                     expand=result.get("expand"),
                     block_execution=result.get("block_execution"),
                 )
+            # OUTPUT_NODE: if sealed worker returned a tuple/list whose first
+            # element is a {"ui": ...} dict, unwrap it for the executor.
+            if (isinstance(result, (tuple, list)) and len(result) == 1
+                    and isinstance(result[0], dict) and "ui" in result[0]):
+                return result[0]
             deserialized = await deserialize_from_isolation(result, extension)
             scan_shm_forensics("RUNTIME:post_execute", refresh_model_context=True)
             return _detach_shared_cpu_tensors(deserialized)

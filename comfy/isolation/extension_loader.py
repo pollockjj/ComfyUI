@@ -143,7 +143,15 @@ def _parse_cuda_wheels_config(
         raise ExtensionLoadError("[tool.comfy.isolation.cuda_wheels] must be a table")
 
     index_url = raw_config.get("index_url")
-    if not isinstance(index_url, str) or not index_url.strip():
+    index_urls = raw_config.get("index_urls")
+    if index_urls is not None:
+        if not isinstance(index_urls, list) or not all(
+            isinstance(u, str) and u.strip() for u in index_urls
+        ):
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.cuda_wheels.index_urls] must be a list of non-empty strings"
+            )
+    elif not isinstance(index_url, str) or not index_url.strip():
         raise ExtensionLoadError(
             "[tool.comfy.isolation.cuda_wheels.index_url] must be a non-empty string"
         )
@@ -199,11 +207,15 @@ def _parse_cuda_wheels_config(
             )
         normalized_package_map[canonical_dependency_name] = index_package_name.strip()
 
-    return {
-        "index_url": index_url.rstrip("/") + "/",
+    result: dict = {
         "packages": normalized_packages,
         "package_map": normalized_package_map,
     }
+    if index_urls is not None:
+        result["index_urls"] = [u.rstrip("/") + "/" for u in index_urls]
+    else:
+        result["index_url"] = index_url.rstrip("/") + "/"
+    return result
 
 
 def get_enforcement_policy() -> Dict[str, bool]:
@@ -361,10 +373,8 @@ async def load_isolated_node(
         policy_ro_paths = host_policy.get("sealed_worker_ro_import_paths", [])
         if isinstance(policy_ro_paths, list) and policy_ro_paths:
             extension_config["sealed_host_ro_paths"] = list(policy_ro_paths)
-            # RO paths give sealed child access to framework — keep APIs for
-            # adapter rehydration and serializer registration
-        else:
-            extension_config["apis"] = []
+        # Sealed workers keep the host RPC service inventory even when the
+        # child resolves no API classes locally.
 
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
@@ -449,6 +459,10 @@ async def load_isolated_node(
     # Save metadata to cache for future runs
     save_to_cache(node_dir, venv_root, cache_data, manifest_path)
     logger.debug(f"][ {extension_name} metadata cached")
+
+    # Re-check web directory AFTER child has populated it
+    if host_policy["sandbox_mode"] == "disabled":
+        _register_web_directory(extension_name, node_dir)
 
     # EJECT: Kill process after getting metadata (will respawn on first execution)
     await _stop_extension_safe(extension, extension_name)

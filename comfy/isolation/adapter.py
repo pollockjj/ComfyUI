@@ -14,6 +14,7 @@ _IMPORT_TORCH = os.environ.get("PYISOLATE_IMPORT_TORCH", "1") == "1"
 # Singleton proxies that do NOT transitively import torch/PIL/psutil/aiohttp.
 # Safe to import in sealed workers without host framework modules.
 from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+from comfy.isolation.proxies.helper_proxies import HelperProxiesService
 from comfy.isolation.proxies.web_directory_proxy import WebDirectoryProxy
 
 # Singleton proxies that transitively import torch, PIL, or heavy host modules.
@@ -408,7 +409,17 @@ class ComfyUIAdapter(IsolationAdapter):
                 # Fallback for non-numeric arrays (strings, objects, mixes)
                 return obj.tolist()
 
-        registry.register("ndarray", serialize_numpy, None)
+        def deserialize_numpy_b64(data: Any) -> Any:
+            """Deserialize base64-encoded ndarray from sealed worker."""
+            import base64
+            import numpy as np
+            if isinstance(data, dict) and "data" in data and "dtype" in data:
+                raw = base64.b64decode(data["data"])
+                arr = np.frombuffer(raw, dtype=np.dtype(data["dtype"])).reshape(data["shape"])
+                return torch.from_numpy(arr.copy())
+            return data
+
+        registry.register("ndarray", serialize_numpy, deserialize_numpy_b64)
 
         # -- File3D (comfy_api.latest._util.geometry_types) ---------------------
         # Origin: comfy_api by ComfyOrg (Alexander Piskun), PR #12129
@@ -474,10 +485,86 @@ class ComfyUIAdapter(IsolationAdapter):
         from comfy.isolation.custom_node_serializers import register_custom_node_serializers
         register_custom_node_serializers(registry)
 
+    def setup_web_directory(self, module: Any) -> None:
+        """Detect WEB_DIRECTORY on a module and populate/register it.
+
+        Called by the sealed worker after loading the node module.
+        Mirrors extension_wrapper.py:216-227 for host-coupled nodes.
+        Does NOT import extension_wrapper.py (it has `import torch` at module level).
+        """
+        import shutil
+
+        web_dir_attr = getattr(module, "WEB_DIRECTORY", None)
+        if web_dir_attr is None:
+            return
+
+        module_dir = os.path.dirname(os.path.abspath(module.__file__))
+        web_dir_path = os.path.abspath(os.path.join(module_dir, web_dir_attr))
+
+        # Read extension name from pyproject.toml
+        ext_name = os.path.basename(module_dir)
+        pyproject = os.path.join(module_dir, "pyproject.toml")
+        if os.path.exists(pyproject):
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib  # type: ignore[no-redef]
+            try:
+                with open(pyproject, "rb") as f:
+                    data = tomllib.load(f)
+                name = data.get("project", {}).get("name")
+                if name:
+                    ext_name = name
+            except Exception:
+                pass
+
+        # Populate web dir if empty (mirrors _run_prestartup_web_copy)
+        if not (os.path.isdir(web_dir_path) and any(os.scandir(web_dir_path))):
+            os.makedirs(web_dir_path, exist_ok=True)
+
+            # Module-defined copy spec
+            copy_spec = getattr(module, "_PRESTARTUP_WEB_COPY", None)
+            if copy_spec is not None and callable(copy_spec):
+                try:
+                    copy_spec(web_dir_path)
+                except Exception as e:
+                    logger.warning("][ _PRESTARTUP_WEB_COPY failed: %s", e)
+
+            # Fallback: comfy_3d_viewers
+            try:
+                from comfy_3d_viewers import copy_viewer, VIEWER_FILES
+                for viewer in VIEWER_FILES:
+                    try:
+                        copy_viewer(viewer, web_dir_path)
+                    except Exception:
+                        pass
+            except ImportError:
+                pass
+
+            # Fallback: comfy_dynamic_widgets
+            try:
+                from comfy_dynamic_widgets import get_js_path
+                src = os.path.realpath(get_js_path())
+                if os.path.exists(src):
+                    dst_dir = os.path.join(web_dir_path, "js")
+                    os.makedirs(dst_dir, exist_ok=True)
+                    shutil.copy2(src, os.path.join(dst_dir, "dynamic_widgets.js"))
+            except ImportError:
+                pass
+
+        if os.path.isdir(web_dir_path) and any(os.scandir(web_dir_path)):
+            WebDirectoryProxy.register_web_dir(ext_name, web_dir_path)
+            logger.info(
+                "][ Adapter: registered web dir for %s (%d files)",
+                ext_name,
+                sum(1 for _ in Path(web_dir_path).rglob("*") if _.is_file()),
+            )
+
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         # Always available — no torch/PIL dependency
         services: List[type[ProxiedSingleton]] = [
             FolderPathsProxy,
+            HelperProxiesService,
             WebDirectoryProxy,
         ]
         # Torch/PIL-dependent proxies

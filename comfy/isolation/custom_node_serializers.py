@@ -63,12 +63,26 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
 
     # -- ndarray (numpy) -------------------------------------------------------
     # Torch-free ndarray serializer for sealed workers.
-    # The adapter.py version uses torch.from_numpy(); this one uses .tolist().
+    # Uses base64-encoded raw bytes instead of .tolist() to avoid
+    # 260MB JSON for a 2048x2048 image (base64 is ~4MB).
     if not _IMPORT_TORCH:
         def serialize_ndarray(obj: Any) -> Any:
-            return obj.tolist()
+            import base64
+            import numpy as np
+            return {
+                "__type__": "ndarray",
+                "dtype": str(obj.dtype),
+                "shape": list(obj.shape),
+                "data": base64.b64encode(np.ascontiguousarray(obj).tobytes()).decode("ascii"),
+            }
 
-        registry.register("ndarray", serialize_ndarray, None)
+        def deserialize_ndarray(data: Any) -> Any:
+            import base64
+            import numpy as np
+            raw = base64.b64decode(data["data"])
+            return np.frombuffer(raw, dtype=np.dtype(data["dtype"])).reshape(data["shape"])
+
+        registry.register("ndarray", serialize_ndarray, deserialize_ndarray, data_type=True)
 
     # -- PLY (comfy_api.latest._util.ply_types) --------------------------------
     # PLY point cloud container created for DA3 isolation conversion.
