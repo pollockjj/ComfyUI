@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Dict
 
 from pyisolate.interfaces import SerializerRegistryProtocol  # type: ignore[import-untyped]
+from pyisolate._internal.perf_trace import estimate_payload_bytes, record_event, tracing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,21 @@ def _announce(name: str, desc: str) -> None:
     if name not in _announced:
         _announced.add(name)
         logger.info("][ Serializer: %s — %s", name, desc)
+
+
+def _record_serializer_trace(type_name: str, started_at: float, payload: Any) -> None:
+    if not tracing_enabled():
+        return
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    record_event(
+        {
+            "event_kind": "serializer",
+            "type_name": type_name,
+            "serialize_ms": elapsed_ms,
+            "payload_bytes": estimate_payload_bytes(payload),
+            "process_role": "child" if os.environ.get("PYISOLATE_CHILD") == "1" else "host",
+        }
+    )
 
 
 def _get_trimesh_data():
@@ -67,14 +84,17 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # 260MB JSON for a 2048x2048 image (base64 is ~4MB).
     if not _IMPORT_TORCH:
         def serialize_ndarray(obj: Any) -> Any:
+            started_at = time.perf_counter()
             import base64
             import numpy as np
-            return {
+            payload = {
                 "__type__": "ndarray",
                 "dtype": str(obj.dtype),
                 "shape": list(obj.shape),
                 "data": base64.b64encode(np.ascontiguousarray(obj).tobytes()).decode("ascii"),
             }
+            _record_serializer_trace("ndarray", started_at, payload)
+            return payload
 
         def deserialize_ndarray(data: Any) -> Any:
             import base64
@@ -90,14 +110,17 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack
 
     def serialize_ply(obj: Any) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         _announce("PLY", "PLY (by pollockjj for DA3 isolation) serializer 1.0 (base64/lists) for ComfyUI-DepthAnythingV3, ComfyUI-GeometryPack")
         import base64
         import numpy as np
         if obj.raw_data is not None:
-            return {
+            payload = {
                 "__type__": "PLY",
                 "raw_data": base64.b64encode(obj.raw_data).decode("ascii"),
             }
+            _record_serializer_trace("PLY", started_at, payload)
+            return payload
         result: Dict[str, Any] = {"__type__": "PLY", "points": np.asarray(obj.points).tolist()}
         if obj.colors is not None:
             result["colors"] = np.asarray(obj.colors).tolist()
@@ -105,6 +128,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             result["confidence"] = np.asarray(obj.confidence).tolist()
         if obj.view_id is not None:
             result["view_id"] = np.asarray(obj.view_id).tolist()
+        _record_serializer_trace("PLY", started_at, result)
         return result
 
     def deserialize_ply(data: Any) -> Any:
@@ -128,12 +152,15 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: ComfyUI-DepthAnythingV3
 
     def serialize_npz(obj: Any) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         _announce("NPZ", "NPZ (by pollockjj for DA3 isolation) serializer 1.0 (base64 frames) for ComfyUI-DepthAnythingV3")
         import base64
-        return {
+        payload = {
             "__type__": "NPZ",
             "frames": [base64.b64encode(f).decode("ascii") for f in obj.frames],
         }
+        _record_serializer_trace("NPZ", started_at, payload)
+        return payload
 
     def deserialize_npz(data: Any) -> Any:
         import base64
@@ -148,6 +175,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: ComfyUI-GeometryPack (62 nodes)
 
     def serialize_trimesh(obj: Any) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         _announce("TRIMESH", "trimesh.Trimesh (by Michael Dawson-Haggerty) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
         import numpy as np
         TrimeshData = _get_trimesh_data()
@@ -186,6 +214,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
         if td.metadata:
             result["metadata"] = td.metadata
 
+        _record_serializer_trace("TRIMESH", started_at, result)
         return result
 
     def deserialize_trimesh(data: Any) -> Any:
@@ -235,6 +264,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
     # Used by: GeomPackExtractSkeleton, GeomPackMeshFromSkeleton
 
     def serialize_skeleton(obj: Any) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         _announce("SKELETON", "GeometryPack SKELETON (by PozzettiAndrea) serializer 1.0 (lists, dict) for ComfyUI-GeometryPack")
         import numpy as np
 
@@ -246,6 +276,7 @@ def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> No
             "center": obj["center"],
             "normalized": obj["normalized"],
         }
+        _record_serializer_trace("SKELETON", started_at, result)
         return result
 
     def deserialize_skeleton(data: Any) -> Any:
