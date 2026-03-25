@@ -76,7 +76,13 @@ def _get_npz():
 
 
 def register_custom_node_serializers(registry: SerializerRegistryProtocol) -> None:
-    """Register all custom-node-originated serializers."""
+    """Register all custom-node-originated serializers.
+
+    Set COMFY_ISO_SKIP_CUSTOM_SERIALIZERS=1 to skip registration,
+    forcing all pack-internal data through proxy handle round-trip.
+    """
+    if os.environ.get("COMFY_ISO_SKIP_CUSTOM_SERIALIZERS") == "1":
+        return
 
     # -- ndarray (numpy) -------------------------------------------------------
     # Torch-free ndarray serializer for sealed workers.
