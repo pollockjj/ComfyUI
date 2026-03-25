@@ -196,6 +196,33 @@ class BasicCache:
         self._clean_cache()
         self._clean_subcaches()
 
+    def invalidate_by_class_types(self, class_types: set[str]) -> int:
+        """Remove cache entries whose node class_type is in the given set.
+
+        Used to invalidate stale outputs when an isolated extension is evicted
+        and its child process (with all remote_objects) is destroyed.
+        Returns the number of entries removed.
+        """
+        if not self.initialized:
+            return 0
+        # Find node_ids whose class_type matches
+        node_ids_to_remove = set()
+        for node_id, subcache_key in self.cache_key_set.subcache_keys.items():
+            # subcache_key is (node_id, class_type)
+            if len(subcache_key) >= 2 and subcache_key[1] in class_types:
+                node_ids_to_remove.add(node_id)
+
+        removed = 0
+        for node_id in node_ids_to_remove:
+            data_key = self.cache_key_set.get_data_key(node_id)
+            if data_key is not None and data_key in self.cache:
+                del self.cache[data_key]
+                removed += 1
+            subcache_key = self.cache_key_set.get_subcache_key(node_id)
+            if subcache_key is not None and subcache_key in self.subcaches:
+                del self.subcaches[subcache_key]
+        return removed
+
     def poll(self, **kwargs):
         pass
 

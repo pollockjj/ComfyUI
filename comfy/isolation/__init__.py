@@ -171,17 +171,27 @@ def _get_class_types_for_extension(extension_name: str) -> Set[str]:
     return class_types
 
 
-async def notify_execution_graph(needed_class_types: Set[str]) -> None:
-    """Evict running extensions not needed for current execution."""
+async def notify_execution_graph(needed_class_types: Set[str], caches: list | None = None) -> None:
+    """Evict running extensions not needed for current execution.
+
+    When *caches* is provided, cache entries for evicted extensions' node
+    class_types are invalidated to prevent stale ``RemoteObjectHandle``
+    references from surviving in the output cache.
+    """
     await wait_for_model_patcher_quiescence(
         timeout_ms=_MODEL_PATCHER_IDLE_TIMEOUT_MS,
         fail_loud=True,
         marker="ISO:notify_graph_wait_idle",
     )
 
+    evicted_class_types: Set[str] = set()
+
     async def _stop_extension(
         ext_name: str, extension: "ComfyNodeExtension", reason: str
     ) -> None:
+        # Collect class_types BEFORE stopping so we can invalidate cache entries.
+        ext_class_types = _get_class_types_for_extension(ext_name)
+        evicted_class_types.update(ext_class_types)
         logger.info("%s ISO:eject_start ext=%s reason=%s", LOG_PREFIX, ext_name, reason)
         logger.debug("%s ISO:stop_start ext=%s", LOG_PREFIX, ext_name)
         stop_result = extension.stop()
@@ -251,6 +261,22 @@ async def notify_execution_graph(needed_class_types: Set[str]) -> None:
             "%s workflow-boundary host VRAM relief failed", LOG_PREFIX, exc_info=True
         )
     finally:
+        # Invalidate cached outputs for evicted extensions so stale
+        # RemoteObjectHandle references are not served from cache.
+        if evicted_class_types and caches:
+            total_invalidated = 0
+            for cache in caches:
+                if hasattr(cache, "invalidate_by_class_types"):
+                    total_invalidated += cache.invalidate_by_class_types(
+                        evicted_class_types
+                    )
+            if total_invalidated > 0:
+                logger.info(
+                    "%s ISO:cache_invalidated count=%d class_types=%s",
+                    LOG_PREFIX,
+                    total_invalidated,
+                    evicted_class_types,
+                )
         scan_shm_forensics("ISO:notify_graph_done", refresh_model_context=True)
         logger.debug(
             "%s ISO:notify_graph_done running=%d", LOG_PREFIX, len(_RUNNING_EXTENSIONS)

@@ -537,7 +537,15 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
             try:
-                output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
+                output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(
+                    prompt_id,
+                    unique_id,
+                    obj,
+                    input_data_all,
+                    execution_block_cb=execution_block_cb,
+                    pre_execute_cb=pre_execute_cb,
+                    v3_data=v3_data,
+                )
             finally:
                 if comfy.memory_management.aimdo_enabled:
                     if args.verbose == "DEBUG":
@@ -686,7 +694,7 @@ class PromptExecutor:
             return
         try:
             from comfy.isolation import notify_execution_graph
-            await notify_execution_graph(class_types)
+            await notify_execution_graph(class_types, caches=self.caches.all)
         except Exception:
             if fail_loud:
                 raise
