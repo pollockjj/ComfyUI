@@ -364,6 +364,9 @@ async def load_isolated_node(
         extension_config["conda_channels"] = conda_channels
         extension_config["conda_dependencies"] = conda_dependencies
         extension_config["conda_python"] = conda_python
+        find_links = tool_config.get("find_links", [])
+        if find_links:
+            extension_config["find_links"] = find_links
         if conda_platforms:
             extension_config["conda_platforms"] = conda_platforms
 
