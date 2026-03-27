@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import inspect
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -642,9 +643,15 @@ class ComfyUIAdapter(IsolationAdapter):
         Wires ``"progress"`` events from the child to ``comfy.utils.PROGRESS_BAR_HOOK``
         so the ComfyUI frontend receives progress bar updates.
         """
-        import comfy.utils
+        register_event_handler = inspect.getattr_static(
+            extension, "register_event_handler", None
+        )
+        if not callable(register_event_handler):
+            return
 
         def _host_progress_handler(payload: dict) -> None:
+            import comfy.utils
+
             hook = comfy.utils.PROGRESS_BAR_HOOK
             if hook is not None:
                 hook(

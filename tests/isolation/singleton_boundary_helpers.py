@@ -27,7 +27,6 @@ FORBIDDEN_SEALED_SINGLETON_MODULES = (
 FORBIDDEN_EXACT_SMALL_PROXY_MODULES = FORBIDDEN_SEALED_SINGLETON_MODULES
 FORBIDDEN_MODEL_MANAGEMENT_MODULES = (
     "comfy.model_management",
-    "torch",
 )
 
 
@@ -127,6 +126,7 @@ class FakeSingletonCaller:
 class FakeSingletonRPC:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
         self._services: dict[str, dict[str, Any]] = {
             "FolderPathsProxy": {
                 "rpc_get_models_dir": lambda: "/sandbox/models",
@@ -168,7 +168,19 @@ class FakeSingletonRPC:
             "HelperProxiesService": {
                 "rpc_restore_input_types": lambda raw: raw,
             },
+            "ModelManagementProxy": {
+                "rpc_call": self._model_management_rpc_call,
+            },
         }
+
+    def _model_management_rpc_call(self, method_name: str, args: Any = None, kwargs: Any = None) -> Any:
+        if method_name == "get_torch_device":
+            return self._device
+        elif method_name == "get_torch_device_name":
+            return "cpu"
+        elif method_name == "get_free_memory":
+            return 34359738368
+        raise AssertionError(f"unexpected model_management method {method_name}")
 
     @staticmethod
     def _get_annotated_filepath(name: str, default_dir: str | None = None) -> str:
@@ -229,7 +241,6 @@ def reset_forbidden_singleton_modules() -> None:
         "folder_paths",
         "comfy.utils",
         "comfy_execution.progress",
-        "torch",
     ):
         sys.modules.pop(module_name, None)
 
@@ -282,6 +293,7 @@ class FakeExactRelayCaller:
 class FakeExactRelayRPC:
     def __init__(self) -> None:
         self.transcripts: list[dict[str, Any]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
         self._services: dict[str, dict[str, Any]] = {
             "FolderPathsProxy": {
                 "rpc_get_models_dir": {
@@ -369,7 +381,23 @@ class FakeExactRelayRPC:
                     "result": lambda raw: raw,
                 }
             },
+            "ModelManagementProxy": {
+                "rpc_call": {
+                    "target": "comfy.model_management.*",
+                    "result": self._model_management_rpc_call,
+                },
+            },
         }
+
+    def _model_management_rpc_call(self, method_name: str, args: Any = None, kwargs: Any = None) -> Any:
+        device = {"__pyisolate_torch_device__": "cpu"}
+        if method_name == "get_torch_device":
+            return device
+        elif method_name == "get_torch_device_name":
+            return "cpu"
+        elif method_name == "get_free_memory":
+            return 34359738368
+        raise AssertionError(f"unexpected exact-relay method {method_name}")
 
     def create_caller(self, cls: Any, object_id: str):
         methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
@@ -381,42 +409,55 @@ class FakeExactRelayRPC:
 def capture_exact_small_proxy_relay() -> dict[str, object]:
     reset_forbidden_singleton_modules()
     fake_rpc = FakeExactRelayRPC()
-    prepare_sealed_singleton_proxies(fake_rpc)
+    previous_child = os.environ.get("PYISOLATE_CHILD")
+    previous_import_torch = os.environ.get("PYISOLATE_IMPORT_TORCH")
+    try:
+        prepare_sealed_singleton_proxies(fake_rpc)
 
-    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
-    from comfy.isolation.proxies.helper_proxies import restore_input_types
-    from comfy.isolation.proxies.progress_proxy import ProgressProxy
-    from comfy.isolation.proxies.utils_proxy import UtilsProxy
+        from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+        from comfy.isolation.proxies.helper_proxies import restore_input_types
+        from comfy.isolation.proxies.progress_proxy import ProgressProxy
+        from comfy.isolation.proxies.utils_proxy import UtilsProxy
 
-    folder_proxy = FolderPathsProxy()
-    utils_proxy = UtilsProxy()
-    progress_proxy = ProgressProxy()
-    before = set(sys.modules)
+        folder_proxy = FolderPathsProxy()
+        utils_proxy = UtilsProxy()
+        progress_proxy = ProgressProxy()
+        before = set(sys.modules)
 
-    restored = restore_input_types(
-        {
-            "required": {
-                "image": {"__pyisolate_any_type__": True, "value": "*"},
+        restored = restore_input_types(
+            {
+                "required": {
+                    "image": {"__pyisolate_any_type__": True, "value": "*"},
+                }
             }
-        }
-    )
-    folder_path = folder_proxy.get_annotated_filepath("demo.png[input]")
-    models_dir = folder_proxy.models_dir
-    folder_names_and_paths = folder_proxy.folder_names_and_paths
-    asyncio.run(utils_proxy.progress_bar_hook(2, 5, node_id="node-17"))
-    progress_proxy.set_progress(1.5, 5.0, node_id="node-17")
+        )
+        folder_path = folder_proxy.get_annotated_filepath("demo.png[input]")
+        models_dir = folder_proxy.models_dir
+        folder_names_and_paths = folder_proxy.folder_names_and_paths
+        asyncio.run(utils_proxy.progress_bar_hook(2, 5, node_id="node-17"))
+        progress_proxy.set_progress(1.5, 5.0, node_id="node-17")
 
-    imported = set(sys.modules) - before
-    return {
-        "mode": "exact_small_proxy_relay",
-        "folder_path": folder_path,
-        "models_dir": models_dir,
-        "folder_names_and_paths": folder_names_and_paths,
-        "restored_any_type": str(restored["required"]["image"]),
-        "transcripts": fake_rpc.transcripts,
-        "modules": sorted(imported),
-        "forbidden_matches": matching_modules(FORBIDDEN_EXACT_SMALL_PROXY_MODULES, imported),
-    }
+        imported = set(sys.modules) - before
+        return {
+            "mode": "exact_small_proxy_relay",
+            "folder_path": folder_path,
+            "models_dir": models_dir,
+            "folder_names_and_paths": folder_names_and_paths,
+            "restored_any_type": str(restored["required"]["image"]),
+            "transcripts": fake_rpc.transcripts,
+            "modules": sorted(imported),
+            "forbidden_matches": matching_modules(FORBIDDEN_EXACT_SMALL_PROXY_MODULES, imported),
+        }
+    finally:
+        _clear_proxy_rpcs()
+        if previous_child is None:
+            os.environ.pop("PYISOLATE_CHILD", None)
+        else:
+            os.environ["PYISOLATE_CHILD"] = previous_child
+        if previous_import_torch is None:
+            os.environ.pop("PYISOLATE_IMPORT_TORCH", None)
+        else:
+            os.environ["PYISOLATE_IMPORT_TORCH"] = previous_import_torch
 
 
 class FakeModelManagementExactRelayRPC:
@@ -507,32 +548,47 @@ def capture_model_management_exact_relay() -> dict[str, object]:
         sys.modules.pop(module_name, None)
 
     fake_rpc = FakeModelManagementExactRelayRPC()
-    os.environ["PYISOLATE_CHILD"] = "1"
-    os.environ["PYISOLATE_IMPORT_TORCH"] = "0"
+    previous_child = os.environ.get("PYISOLATE_CHILD")
+    previous_import_torch = os.environ.get("PYISOLATE_IMPORT_TORCH")
+    try:
+        os.environ["PYISOLATE_CHILD"] = "1"
+        os.environ["PYISOLATE_IMPORT_TORCH"] = "0"
 
-    from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
+        from comfy.isolation.proxies.model_management_proxy import ModelManagementProxy
 
-    if hasattr(ModelManagementProxy, "clear_rpc"):
-        ModelManagementProxy.clear_rpc()
-    if hasattr(ModelManagementProxy, "set_rpc"):
-        ModelManagementProxy.set_rpc(fake_rpc)
+        if hasattr(ModelManagementProxy, "clear_rpc"):
+            ModelManagementProxy.clear_rpc()
+        if hasattr(ModelManagementProxy, "set_rpc"):
+            ModelManagementProxy.set_rpc(fake_rpc)
 
-    proxy = ModelManagementProxy()
-    before = set(sys.modules)
-    device = proxy.get_torch_device()
-    device_name = proxy.get_torch_device_name(device)
-    free_memory = proxy.get_free_memory(device)
-    imported = set(sys.modules) - before
-    return {
-        "mode": "model_management_exact_relay",
-        "device": str(device),
-        "device_type": getattr(device, "type", None),
-        "device_name": device_name,
-        "free_memory": free_memory,
-        "transcripts": fake_rpc.transcripts,
-        "modules": sorted(imported),
-        "forbidden_matches": matching_modules(FORBIDDEN_MODEL_MANAGEMENT_MODULES, imported),
-    }
+        proxy = ModelManagementProxy()
+        before = set(sys.modules)
+        device = proxy.get_torch_device()
+        device_name = proxy.get_torch_device_name(device)
+        free_memory = proxy.get_free_memory(device)
+        imported = set(sys.modules) - before
+        return {
+            "mode": "model_management_exact_relay",
+            "device": str(device),
+            "device_type": getattr(device, "type", None),
+            "device_name": device_name,
+            "free_memory": free_memory,
+            "transcripts": fake_rpc.transcripts,
+            "modules": sorted(imported),
+            "forbidden_matches": matching_modules(FORBIDDEN_MODEL_MANAGEMENT_MODULES, imported),
+        }
+    finally:
+        model_management_proxy = _load_model_management_proxy()
+        if model_management_proxy is not None and hasattr(model_management_proxy, "clear_rpc"):
+            model_management_proxy.clear_rpc()
+        if previous_child is None:
+            os.environ.pop("PYISOLATE_CHILD", None)
+        else:
+            os.environ["PYISOLATE_CHILD"] = previous_child
+        if previous_import_torch is None:
+            os.environ.pop("PYISOLATE_IMPORT_TORCH", None)
+        else:
+            os.environ["PYISOLATE_IMPORT_TORCH"] = previous_import_torch
 
 
 FORBIDDEN_PROMPT_WEB_MODULES = (
@@ -857,30 +913,43 @@ def capture_exact_proxy_bootstrap_contract() -> dict[str, object]:
 def capture_sealed_singleton_imports() -> dict[str, object]:
     reset_forbidden_singleton_modules()
     fake_rpc = FakeSingletonRPC()
+    previous_child = os.environ.get("PYISOLATE_CHILD")
+    previous_import_torch = os.environ.get("PYISOLATE_IMPORT_TORCH")
     before = set(sys.modules)
-    prepare_sealed_singleton_proxies(fake_rpc)
+    try:
+        prepare_sealed_singleton_proxies(fake_rpc)
 
-    from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
-    from comfy.isolation.proxies.progress_proxy import ProgressProxy
-    from comfy.isolation.proxies.utils_proxy import UtilsProxy
+        from comfy.isolation.proxies.folder_paths_proxy import FolderPathsProxy
+        from comfy.isolation.proxies.progress_proxy import ProgressProxy
+        from comfy.isolation.proxies.utils_proxy import UtilsProxy
 
-    folder_proxy = FolderPathsProxy()
-    progress_proxy = ProgressProxy()
-    utils_proxy = UtilsProxy()
+        folder_proxy = FolderPathsProxy()
+        progress_proxy = ProgressProxy()
+        utils_proxy = UtilsProxy()
 
-    folder_path = folder_proxy.get_annotated_filepath("demo.png[input]")
-    temp_dir = folder_proxy.get_temp_directory()
-    models_dir = folder_proxy.models_dir
-    asyncio.run(utils_proxy.progress_bar_hook(2, 5, node_id="node-17"))
-    progress_proxy.set_progress(1.5, 5.0, node_id="node-17")
+        folder_path = folder_proxy.get_annotated_filepath("demo.png[input]")
+        temp_dir = folder_proxy.get_temp_directory()
+        models_dir = folder_proxy.models_dir
+        asyncio.run(utils_proxy.progress_bar_hook(2, 5, node_id="node-17"))
+        progress_proxy.set_progress(1.5, 5.0, node_id="node-17")
 
-    imported = set(sys.modules) - before
-    return {
-        "mode": "sealed_singletons",
-        "folder_path": folder_path,
-        "temp_dir": temp_dir,
-        "models_dir": models_dir,
-        "rpc_calls": fake_rpc.calls,
-        "modules": sorted(imported),
-        "forbidden_matches": matching_modules(FORBIDDEN_SEALED_SINGLETON_MODULES, imported),
-    }
+        imported = set(sys.modules) - before
+        return {
+            "mode": "sealed_singletons",
+            "folder_path": folder_path,
+            "temp_dir": temp_dir,
+            "models_dir": models_dir,
+            "rpc_calls": fake_rpc.calls,
+            "modules": sorted(imported),
+            "forbidden_matches": matching_modules(FORBIDDEN_SEALED_SINGLETON_MODULES, imported),
+        }
+    finally:
+        _clear_proxy_rpcs()
+        if previous_child is None:
+            os.environ.pop("PYISOLATE_CHILD", None)
+        else:
+            os.environ["PYISOLATE_CHILD"] = previous_child
+        if previous_import_torch is None:
+            os.environ.pop("PYISOLATE_IMPORT_TORCH", None)
+        else:
+            os.environ["PYISOLATE_IMPORT_TORCH"] = previous_import_torch

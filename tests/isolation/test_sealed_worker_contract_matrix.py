@@ -12,9 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 COMFYUI_ROOT = Path(__file__).resolve().parents[2]
-TOOLKIT_WORKFLOW_ROOT = (
-    COMFYUI_ROOT / "custom_nodes" / "ComfyUI-IsolationToolkit" / "example_workflows"
-)
+TEST_WORKFLOW_ROOT = COMFYUI_ROOT / "tests" / "isolation" / "workflows"
 SEALED_WORKFLOW_CLASS_TYPES: dict[str, set[str]] = {
     "quick_6_uv_sealed_worker.json": {
         "EmptyLatentImage",
@@ -311,7 +309,7 @@ def test_sealed_worker_workflow_templates_present() -> None:
     missing = [
         filename
         for filename in SEALED_WORKFLOW_CLASS_TYPES
-        if not (TOOLKIT_WORKFLOW_ROOT / filename).is_file()
+        if not (TEST_WORKFLOW_ROOT / filename).is_file()
     ]
     assert not missing, f"missing sealed-worker workflow templates: {missing}"
 
@@ -323,7 +321,7 @@ def test_sealed_worker_workflow_templates_present() -> None:
 def test_sealed_worker_workflow_class_type_contract(
     workflow_name: str, expected_class_types: set[str]
 ) -> None:
-    workflow_path = TOOLKIT_WORKFLOW_ROOT / workflow_name
+    workflow_path = TEST_WORKFLOW_ROOT / workflow_name
     assert workflow_path.is_file(), f"workflow missing: {workflow_path}"
 
     assert _workflow_class_types(workflow_path) == expected_class_types

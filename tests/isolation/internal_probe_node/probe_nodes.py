@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import torch
-
 
 class InternalIsolationProbeImage:
     CATEGORY = "tests/isolation"
@@ -15,6 +13,7 @@ class InternalIsolationProbeImage:
 
     def run(self):
         from comfy_api.latest import UI
+        import torch
 
         image = torch.zeros((1, 2, 2, 3), dtype=torch.float32)
         image[:, :, :, 0] = 1.0
@@ -34,6 +33,7 @@ class InternalIsolationProbeAudio:
 
     def run(self):
         from comfy_api.latest import UI
+        import torch
 
         waveform = torch.zeros((1, 1, 32), dtype=torch.float32)
         audio = {"waveform": waveform, "sample_rate": 44100}
@@ -53,6 +53,7 @@ class InternalIsolationProbeUI3D:
 
     def run(self):
         from comfy_api.latest import UI
+        import torch
 
         bg_image = torch.zeros((1, 2, 2, 3), dtype=torch.float32)
         bg_image[:, :, :, 1] = 1.0
