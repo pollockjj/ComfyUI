@@ -94,9 +94,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
         if not _IMPORT_TORCH:
-            # Sealed worker without torch — register only data serializers
-            from comfy.isolation.custom_node_serializers import register_custom_node_serializers
-            register_custom_node_serializers(registry)
+            # Sealed worker without torch — no framework serializers to register
             return
 
         import torch
@@ -228,27 +226,90 @@ class ComfyUIAdapter(IsolationAdapter):
         # copyreg removed - no pickle fallback allowed
 
         def serialize_model_sampling(obj: Any) -> Dict[str, Any]:
-            # Child-side: must already have _instance_id (proxy)
-            if os.environ.get("PYISOLATE_CHILD") == "1":
-                if hasattr(obj, "_instance_id"):
-                    return {"__type__": "ModelSamplingRef", "ms_id": obj._instance_id}
-                raise RuntimeError(
-                    f"ModelSampling in child lacks _instance_id: "
-                    f"{type(obj).__module__}.{type(obj).__name__}"
-                )
-            # Host-side pass-through for proxies: do not re-register a proxy as a
-            # new ModelSamplingRef, or we create proxy-of-proxy indirection.
+            # Proxy with _instance_id — return ref (works from both host and child)
             if hasattr(obj, "_instance_id"):
                 return {"__type__": "ModelSamplingRef", "ms_id": obj._instance_id}
+            # Child-side: object created locally in child (e.g. ModelSamplingAdvanced
+            # in nodes_z_image_turbo.py). Serialize as inline data so the host can
+            # reconstruct the real torch.nn.Module.
+            if os.environ.get("PYISOLATE_CHILD") == "1":
+                import comfy.model_sampling as _ms
+                import base64
+                import io as _io
+
+                # Identify base classes from comfy.model_sampling
+                bases = []
+                for base in type(obj).__mro__:
+                    if base.__module__ == "comfy.model_sampling" and base.__name__ != "object":
+                        bases.append(base.__name__)
+                # Serialize state_dict as base64 safetensors-like
+                sd = obj.state_dict()
+                sd_serialized = {}
+                for k, v in sd.items():
+                    buf = _io.BytesIO()
+                    torch.save(v, buf)
+                    sd_serialized[k] = base64.b64encode(buf.getvalue()).decode("ascii")
+                # Capture plain attrs (shift, multiplier, sigma_data, etc.)
+                plain_attrs = {}
+                for k, v in obj.__dict__.items():
+                    if k.startswith("_"):
+                        continue
+                    if isinstance(v, (bool, int, float, str)):
+                        plain_attrs[k] = v
+                return {
+                    "__type__": "ModelSamplingInline",
+                    "bases": bases,
+                    "state_dict": sd_serialized,
+                    "attrs": plain_attrs,
+                }
             # Host-side: register with ModelSamplingRegistry and return JSON-safe dict
             ms_id = ModelSamplingRegistry().register(obj)
             return {"__type__": "ModelSamplingRef", "ms_id": ms_id}
 
         def deserialize_model_sampling(data: Any) -> Any:
-            """Deserialize ModelSampling refs; pass through already-materialized objects."""
+            """Deserialize ModelSampling refs or inline data."""
             if isinstance(data, dict):
+                if data.get("__type__") == "ModelSamplingInline":
+                    return _reconstruct_model_sampling_inline(data)
                 return ModelSamplingProxy(data["ms_id"])
             return data
+
+        def _reconstruct_model_sampling_inline(data: Dict[str, Any]) -> Any:
+            """Reconstruct a ModelSampling object on the host from inline child data."""
+            import comfy.model_sampling as _ms
+            import base64
+            import io as _io
+
+            # Resolve base classes
+            base_classes = []
+            for name in data["bases"]:
+                cls = getattr(_ms, name, None)
+                if cls is not None:
+                    base_classes.append(cls)
+            if not base_classes:
+                raise RuntimeError(
+                    f"Cannot reconstruct ModelSampling: no known bases in {data['bases']}"
+                )
+            # Create dynamic class matching the child's class hierarchy
+            ReconstructedSampling = type("ReconstructedSampling", tuple(base_classes), {})
+            obj = ReconstructedSampling.__new__(ReconstructedSampling)
+            torch.nn.Module.__init__(obj)
+            # Restore plain attributes first
+            for k, v in data.get("attrs", {}).items():
+                setattr(obj, k, v)
+            # Restore state_dict (buffers like sigmas)
+            for k, v_b64 in data.get("state_dict", {}).items():
+                buf = _io.BytesIO(base64.b64decode(v_b64))
+                tensor = torch.load(buf, weights_only=True)
+                # Register as buffer so it's part of state_dict
+                parts = k.split(".")
+                if len(parts) == 1:
+                    obj.register_buffer(parts[0], tensor)
+                else:
+                    setattr(obj, parts[0], tensor)
+            # Register on host so future references use proxy pattern
+            ms_id = ModelSamplingRegistry().register(obj)
+            return obj
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelSamplingRef deserializer for both host and child."""
@@ -278,6 +339,10 @@ class ComfyUIAdapter(IsolationAdapter):
         )
         # Register ModelSamplingRef for deserialization (context-aware: host or child)
         registry.register("ModelSamplingRef", None, deserialize_model_sampling_ref)
+        # Register ModelSamplingInline for deserialization (child→host inline transfer)
+        registry.register(
+            "ModelSamplingInline", None, lambda data: _reconstruct_model_sampling_inline(data)
+        )
 
         def serialize_cond(obj: Any) -> Dict[str, Any]:
             type_key = f"{type(obj).__module__}.{type(obj).__name__}"
@@ -481,10 +546,6 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("VideoFromFile", serialize_video, deserialize_video, data_type=True)
         registry.register("VideoFromComponents", serialize_video, deserialize_video, data_type=True)
 
-        # Custom node serializers (PLY, NPZ, etc.) live in their own file
-        from comfy.isolation.custom_node_serializers import register_custom_node_serializers
-        register_custom_node_serializers(registry)
-
     def setup_web_directory(self, module: Any) -> None:
         """Detect WEB_DIRECTORY on a module and populate/register it.
 
@@ -560,6 +621,50 @@ class ComfyUIAdapter(IsolationAdapter):
                 sum(1 for _ in Path(web_dir_path).rglob("*") if _.is_file()),
             )
 
+    @staticmethod
+    def register_host_event_handlers(extension: Any) -> None:
+        """Register host-side event handlers for an isolated extension.
+
+        Wires ``"progress"`` events from the child to ``comfy.utils.PROGRESS_BAR_HOOK``
+        so the ComfyUI frontend receives progress bar updates.
+        """
+        import comfy.utils
+
+        def _host_progress_handler(payload: dict) -> None:
+            hook = comfy.utils.PROGRESS_BAR_HOOK
+            if hook is not None:
+                hook(
+                    payload.get("value", 0),
+                    payload.get("total", 0),
+                    payload.get("preview"),
+                    payload.get("node_id"),
+                )
+
+        extension.register_event_handler("progress", _host_progress_handler)
+
+    def setup_child_event_hooks(self, extension: Any) -> None:
+        """Wire PROGRESS_BAR_HOOK in the child to emit_event on the extension.
+
+        Works for both host-coupled and sealed workers — no torch dependency.
+        """
+        is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+        logger.info("][ ISO:setup_child_event_hooks called, PYISOLATE_CHILD=%s", is_child)
+        if not is_child:
+            return
+
+        import comfy.utils
+
+        def _event_progress_hook(value, total, preview=None, node_id=None):
+            logger.debug("][ ISO:event_progress value=%s/%s node_id=%s", value, total, node_id)
+            extension.emit_event("progress", {
+                "value": value,
+                "total": total,
+                "node_id": node_id,
+            })
+
+        comfy.utils.PROGRESS_BAR_HOOK = _event_progress_hook
+        logger.info("][ ISO:PROGRESS_BAR_HOOK wired to event channel")
+
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         # Always available — no torch/PIL dependency
         services: List[type[ProxiedSingleton]] = [
@@ -617,14 +722,17 @@ class ComfyUIAdapter(IsolationAdapter):
             return
 
         if api_name == "UtilsProxy":
-            if _IMPORT_TORCH:
-                import comfy.utils
+            import comfy.utils
 
             # Static Injection of RPC mechanism to ensure Child can access it
             # independent of instance lifecycle.
             api.set_rpc(rpc)
 
-            # Don't overwrite host hook (infinite recursion)
+            is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+            logger.info("][ ISO:UtilsProxy handle_api_registration PYISOLATE_CHILD=%s", is_child)
+
+            # Progress hook wiring moved to setup_child_event_hooks via event channel
+
             return
 
         if api_name == "PromptServerProxy":
