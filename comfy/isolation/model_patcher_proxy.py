@@ -812,8 +812,14 @@ class _InnerModelProxy:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
+        if name == "model_config":
+            from types import SimpleNamespace
+
+            data = self._parent._call_rpc("get_inner_model_attr", name)
+            if isinstance(data, dict):
+                return SimpleNamespace(**data)
+            return data
         if name in (
-            "model_config",
             "latent_format",
             "model_type",
             "current_weight_patches_uuid",

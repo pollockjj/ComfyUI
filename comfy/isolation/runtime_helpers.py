@@ -164,6 +164,13 @@ def build_stub_class(
         node_unique_id = _extract_hidden_unique_id(inputs)
         summary = _tensor_transport_summary(inputs)
         resources = _resource_snapshot()
+        logger.info(
+            "%s ISO:execute_start ext=%s node=%s uid=%s",
+            LOG_PREFIX,
+            extension.name,
+            node_name,
+            node_unique_id or "-",
+        )
         logger.debug(
             "%s ISO:execute_start ext=%s node=%s uid=%s tensors=%d cpu=%d cuda=%d shared_cpu=%d bytes=%d fds=%d sender_shm=%d",
             LOG_PREFIX,

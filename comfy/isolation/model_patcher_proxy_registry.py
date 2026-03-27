@@ -959,11 +959,53 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def get_inner_model_attr(self, instance_id: str, name: str) -> Any:
         try:
-            return self._sanitize_rpc_result(
-                getattr(self._get_instance(instance_id).model, name)
-            )
+            value = getattr(self._get_instance(instance_id).model, name)
+            if name == "model_config":
+                value = self._extract_model_config(value)
+            return self._sanitize_rpc_result(value)
         except AttributeError:
             return None
+
+    @staticmethod
+    def _extract_model_config(config: Any) -> dict:
+        """Extract JSON-safe attributes from a model config object.
+
+        ComfyUI model config classes (supported_models_base.BASE subclasses)
+        have a permissive __getattr__ that returns None for any unknown
+        attribute instead of raising AttributeError. This defeats hasattr-based
+        duck-typing in _sanitize_rpc_result, causing TypeError when it tries
+        to call obj.items() (which resolves to None). We extract the real
+        class-level and instance-level attributes into a plain dict.
+        """
+        # Attributes consumed by ModelSampling*.__init__ and other callers
+        _CONFIG_KEYS = (
+            "sampling_settings",
+            "unet_config",
+            "unet_extra_config",
+            "latent_format",
+            "manual_cast_dtype",
+            "custom_operations",
+            "optimizations",
+            "memory_usage_factor",
+            "supported_inference_dtypes",
+        )
+        result: dict = {}
+        for key in _CONFIG_KEYS:
+            # Use type(config).__dict__ first (class attrs), then instance __dict__
+            # to avoid triggering the permissive __getattr__
+            if key in type(config).__dict__:
+                val = type(config).__dict__[key]
+                # Skip classmethods/staticmethods/descriptors
+                if not callable(val) or isinstance(val, (dict, list, tuple)):
+                    result[key] = val
+            elif hasattr(config, "__dict__") and key in config.__dict__:
+                result[key] = config.__dict__[key]
+        # Also include instance overrides (e.g. set_inference_dtype sets unet_config['dtype'])
+        if hasattr(config, "__dict__"):
+            for key, val in config.__dict__.items():
+                if key in _CONFIG_KEYS:
+                    result[key] = val
+        return result
 
     async def inner_model_memory_required(
         self, instance_id: str, args: tuple, kwargs: dict
