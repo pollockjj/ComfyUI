@@ -75,6 +75,17 @@ class ComfyUIAdapter(IsolationAdapter):
                 }
         return None
 
+    def get_sandbox_system_paths(self) -> Optional[List[str]]:
+        """Returns required application paths to mount in the sandbox."""
+        # By inspecting where our adapter is loaded from, we can determine the comfy root
+        import inspect
+        adapter_file = inspect.getfile(self.__class__)
+        # adapter_file = /home/johnj/ComfyUI/comfy/isolation/adapter.py
+        comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(adapter_file)))
+        if os.path.exists(comfy_root):
+            return [comfy_root]
+        return None
+
     def setup_child_environment(self, snapshot: Dict[str, Any]) -> None:
         comfy_root = snapshot.get("preferred_root")
         if not comfy_root:
