@@ -228,27 +228,81 @@ class ComfyUIAdapter(IsolationAdapter):
         # copyreg removed - no pickle fallback allowed
 
         def serialize_model_sampling(obj: Any) -> Dict[str, Any]:
-            # Child-side: must already have _instance_id (proxy)
-            if os.environ.get("PYISOLATE_CHILD") == "1":
-                if hasattr(obj, "_instance_id"):
-                    return {"__type__": "ModelSamplingRef", "ms_id": obj._instance_id}
-                raise RuntimeError(
-                    f"ModelSampling in child lacks _instance_id: "
-                    f"{type(obj).__module__}.{type(obj).__name__}"
-                )
-            # Host-side pass-through for proxies: do not re-register a proxy as a
-            # new ModelSamplingRef, or we create proxy-of-proxy indirection.
+            # Proxy with _instance_id — return ref (works from both host and child)
             if hasattr(obj, "_instance_id"):
                 return {"__type__": "ModelSamplingRef", "ms_id": obj._instance_id}
+            # Child-side: object created locally in child (e.g. ModelSamplingAdvanced
+            # in nodes_z_image_turbo.py). Serialize as inline data so the host can
+            # reconstruct the real torch.nn.Module.
+            if os.environ.get("PYISOLATE_CHILD") == "1":
+                import comfy.model_sampling as _ms
+                import base64
+                import io as _io
+
+                bases = []
+                for base in type(obj).__mro__:
+                    if base.__module__ == "comfy.model_sampling" and base.__name__ != "object":
+                        bases.append(base.__name__)
+                sd = obj.state_dict()
+                sd_serialized = {}
+                for k, v in sd.items():
+                    buf = _io.BytesIO()
+                    torch.save(v, buf)
+                    sd_serialized[k] = base64.b64encode(buf.getvalue()).decode("ascii")
+                plain_attrs = {}
+                for k, v in obj.__dict__.items():
+                    if k.startswith("_"):
+                        continue
+                    if isinstance(v, (bool, int, float, str)):
+                        plain_attrs[k] = v
+                return {
+                    "__type__": "ModelSamplingInline",
+                    "bases": bases,
+                    "state_dict": sd_serialized,
+                    "attrs": plain_attrs,
+                }
             # Host-side: register with ModelSamplingRegistry and return JSON-safe dict
             ms_id = ModelSamplingRegistry().register(obj)
             return {"__type__": "ModelSamplingRef", "ms_id": ms_id}
 
         def deserialize_model_sampling(data: Any) -> Any:
-            """Deserialize ModelSampling refs; pass through already-materialized objects."""
+            """Deserialize ModelSampling refs or inline data."""
             if isinstance(data, dict):
+                if data.get("__type__") == "ModelSamplingInline":
+                    return _reconstruct_model_sampling_inline(data)
                 return ModelSamplingProxy(data["ms_id"])
             return data
+
+        def _reconstruct_model_sampling_inline(data: Dict[str, Any]) -> Any:
+            """Reconstruct a ModelSampling object on the host from inline child data."""
+            import comfy.model_sampling as _ms
+            import base64
+            import io as _io
+
+            base_classes = []
+            for name in data["bases"]:
+                cls = getattr(_ms, name, None)
+                if cls is not None:
+                    base_classes.append(cls)
+            if not base_classes:
+                raise RuntimeError(
+                    f"Cannot reconstruct ModelSampling: no known bases in {data['bases']}"
+                )
+            ReconstructedSampling = type("ReconstructedSampling", tuple(base_classes), {})
+            obj = ReconstructedSampling.__new__(ReconstructedSampling)
+            torch.nn.Module.__init__(obj)
+            for k, v in data.get("attrs", {}).items():
+                setattr(obj, k, v)
+            for k, v_b64 in data.get("state_dict", {}).items():
+                buf = _io.BytesIO(base64.b64decode(v_b64))
+                tensor = torch.load(buf, weights_only=True)
+                parts = k.split(".")
+                if len(parts) == 1:
+                    obj.register_buffer(parts[0], tensor)
+                else:
+                    setattr(obj, parts[0], tensor)
+            ms_id = ModelSamplingRegistry().register(obj)
+            return obj
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
             """Context-aware ModelSamplingRef deserializer for both host and child."""
@@ -278,6 +332,10 @@ class ComfyUIAdapter(IsolationAdapter):
         )
         # Register ModelSamplingRef for deserialization (context-aware: host or child)
         registry.register("ModelSamplingRef", None, deserialize_model_sampling_ref)
+        # Register ModelSamplingInline for deserialization (child→host inline transfer)
+        registry.register(
+            "ModelSamplingInline", None, lambda data: _reconstruct_model_sampling_inline(data)
+        )
 
         def serialize_cond(obj: Any) -> Dict[str, Any]:
             type_key = f"{type(obj).__module__}.{type(obj).__name__}"
