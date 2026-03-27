@@ -94,9 +94,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
         if not _IMPORT_TORCH:
-            # Sealed worker without torch — register only data serializers
-            from comfy.isolation.custom_node_serializers import register_custom_node_serializers
-            register_custom_node_serializers(registry)
+            # Sealed worker without torch — no framework serializers to register
             return
 
         import torch
@@ -539,10 +537,6 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register("VideoFromFile", serialize_video, deserialize_video, data_type=True)
         registry.register("VideoFromComponents", serialize_video, deserialize_video, data_type=True)
 
-        # Custom node serializers (PLY, NPZ, etc.) live in their own file
-        from comfy.isolation.custom_node_serializers import register_custom_node_serializers
-        register_custom_node_serializers(registry)
-
     def setup_web_directory(self, module: Any) -> None:
         """Detect WEB_DIRECTORY on a module and populate/register it.
 
@@ -617,6 +611,50 @@ class ComfyUIAdapter(IsolationAdapter):
                 ext_name,
                 sum(1 for _ in Path(web_dir_path).rglob("*") if _.is_file()),
             )
+
+    @staticmethod
+    def register_host_event_handlers(extension: Any) -> None:
+        """Register host-side event handlers for an isolated extension.
+
+        Wires ``"progress"`` events from the child to ``comfy.utils.PROGRESS_BAR_HOOK``
+        so the ComfyUI frontend receives progress bar updates.
+        """
+        import comfy.utils
+
+        def _host_progress_handler(payload: dict) -> None:
+            hook = comfy.utils.PROGRESS_BAR_HOOK
+            if hook is not None:
+                hook(
+                    payload.get("value", 0),
+                    payload.get("total", 0),
+                    payload.get("preview"),
+                    payload.get("node_id"),
+                )
+
+        extension.register_event_handler("progress", _host_progress_handler)
+
+    def setup_child_event_hooks(self, extension: Any) -> None:
+        """Wire PROGRESS_BAR_HOOK in the child to emit_event on the extension.
+
+        Works for both host-coupled and sealed workers — no torch dependency.
+        """
+        is_child = os.environ.get("PYISOLATE_CHILD") == "1"
+        logger.info("][ ISO:setup_child_event_hooks called, PYISOLATE_CHILD=%s", is_child)
+        if not is_child:
+            return
+
+        import comfy.utils
+
+        def _event_progress_hook(value, total, preview=None, node_id=None):
+            logger.debug("][ ISO:event_progress value=%s/%s node_id=%s", value, total, node_id)
+            extension.emit_event("progress", {
+                "value": value,
+                "total": total,
+                "node_id": node_id,
+            })
+
+        comfy.utils.PROGRESS_BAR_HOOK = _event_progress_hook
+        logger.info("][ ISO:PROGRESS_BAR_HOOK wired to event channel")
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         # Always available — no torch/PIL dependency

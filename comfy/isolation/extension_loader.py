@@ -382,6 +382,10 @@ async def load_isolated_node(
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
 
+    # Register host-side event handlers via adapter
+    from .adapter import ComfyUIAdapter
+    ComfyUIAdapter.register_host_event_handlers(extension)
+
     # Register web directory on the host — only when sandbox is disabled.
     # In sandbox mode, serving untrusted JS to the browser is not safe.
     if host_policy["sandbox_mode"] == "disabled":
