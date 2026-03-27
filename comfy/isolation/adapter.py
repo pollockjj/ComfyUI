@@ -136,6 +136,54 @@ class ComfyUIAdapter(IsolationAdapter):
 
         registry.register("dtype", serialize_dtype, deserialize_dtype)
 
+        from comfy_api.latest._io import FolderType
+        from comfy_api.latest._ui import SavedImages, SavedResult
+
+        def serialize_saved_result(obj: Any) -> Dict[str, Any]:
+            return {
+                "__type__": "SavedResult",
+                "filename": obj.filename,
+                "subfolder": obj.subfolder,
+                "folder_type": obj.type.value,
+            }
+
+        def deserialize_saved_result(data: Dict[str, Any]) -> Any:
+            if isinstance(data, SavedResult):
+                return data
+            folder_type = data["folder_type"] if "folder_type" in data else data["type"]
+            return SavedResult(
+                filename=data["filename"],
+                subfolder=data["subfolder"],
+                type=FolderType(folder_type),
+            )
+
+        registry.register(
+            "SavedResult",
+            serialize_saved_result,
+            deserialize_saved_result,
+            data_type=True,
+        )
+
+        def serialize_saved_images(obj: Any) -> Dict[str, Any]:
+            return {
+                "__type__": "SavedImages",
+                "results": [serialize_saved_result(result) for result in obj.results],
+                "is_animated": obj.is_animated,
+            }
+
+        def deserialize_saved_images(data: Dict[str, Any]) -> Any:
+            return SavedImages(
+                results=[deserialize_saved_result(result) for result in data["results"]],
+                is_animated=data.get("is_animated", False),
+            )
+
+        registry.register(
+            "SavedImages",
+            serialize_saved_images,
+            deserialize_saved_images,
+            data_type=True,
+        )
+
         def serialize_model_patcher(obj: Any) -> Dict[str, Any]:
             # Child-side: must already have _instance_id (proxy)
             if os.environ.get("PYISOLATE_CHILD") == "1":

@@ -504,7 +504,7 @@ class ComfyNodeExtension(ExtensionBase):
                 "args": self._wrap_unpicklable_objects(result.args),
             }
             if result.ui is not None:
-                node_output_dict["ui"] = result.ui
+                node_output_dict["ui"] = self._wrap_unpicklable_objects(result.ui)
             if getattr(result, "expand", None) is not None:
                 node_output_dict["expand"] = result.expand
             if getattr(result, "block_execution", None) is not None:
