@@ -92,6 +92,7 @@ def _setup_proxy_callers(rpc=None) -> None:
         ProgressProxy.set_rpc(rpc)
         PromptServerStub.set_rpc(rpc)
         UtilsProxy.set_rpc(rpc)
+
     except Exception as e:
         logger.error(f"Failed to setup child singleton proxy callers: {e}")
 
