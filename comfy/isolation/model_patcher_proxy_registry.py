@@ -250,21 +250,47 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             return f"<ModelObject: {type(instance.model).__name__}>"
         result = instance.get_model_object(name)
         if name == "model_sampling":
-            from comfy.isolation.model_sampling_proxy import (
-                ModelSamplingRegistry,
-                ModelSamplingProxy,
-            )
-
-            registry = ModelSamplingRegistry()
-            # Preserve identity when upstream already returned a proxy. Re-registering
-            # a proxy object creates proxy-of-proxy call chains.
-            if isinstance(result, ModelSamplingProxy):
-                sampling_id = result._instance_id
-            else:
-                sampling_id = registry.register(result)
-            return ModelSamplingProxy(sampling_id, registry)
+            # Return inline serialization so the child reconstructs the real
+            # class with correct isinstance behavior. Returning a
+            # ModelSamplingProxy breaks isinstance checks (e.g.
+            # offset_first_sigma_for_snr in k_diffusion/sampling.py:173).
+            return self._serialize_model_sampling_inline(result)
 
         return detach_if_grad(result)
+
+    @staticmethod
+    def _serialize_model_sampling_inline(obj: Any) -> dict:
+        """Serialize a ModelSampling object as inline data for the child to reconstruct."""
+        import torch
+        import base64
+        import io as _io
+        import comfy.model_sampling as _ms
+
+        bases = []
+        for base in type(obj).__mro__:
+            if base.__module__ == "comfy.model_sampling" and base.__name__ != "object":
+                bases.append(base.__name__)
+
+        sd = obj.state_dict()
+        sd_serialized = {}
+        for k, v in sd.items():
+            buf = _io.BytesIO()
+            torch.save(v, buf)
+            sd_serialized[k] = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        plain_attrs = {}
+        for k, v in obj.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, (bool, int, float, str)):
+                plain_attrs[k] = v
+
+        return {
+            "__type__": "ModelSamplingInline",
+            "bases": bases,
+            "state_dict": sd_serialized,
+            "attrs": plain_attrs,
+        }
 
     async def get_model_options(self, instance_id: str) -> dict:
         instance = self._get_instance(instance_id)
