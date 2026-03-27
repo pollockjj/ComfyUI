@@ -309,8 +309,6 @@ async def load_isolated_node(
     if not isolated:
         return []
 
-    logger.info(f"][ Loading isolated node: {extension_name}")
-
     import folder_paths
 
     base_paths = [Path(folder_paths.base_path), node_dir]
@@ -355,6 +353,17 @@ async def load_isolated_node(
         "sandbox_mode": host_policy["sandbox_mode"],
         "sandbox": sandbox_config,
     }
+
+    _is_sealed = execution_model == "sealed_worker"
+    _is_sandboxed = host_policy["sandbox_mode"] != "disabled" and is_linux
+    logger.info(
+        "][ Loading isolated node: %s (torch_share [%s], sealed [%s], sandboxed [%s])",
+        extension_name,
+        "x" if share_torch else " ",
+        "x" if _is_sealed else " ",
+        "x" if _is_sandboxed else " ",
+    )
+
     if cuda_wheels is not None:
         extension_config["cuda_wheels"] = cuda_wheels
 
