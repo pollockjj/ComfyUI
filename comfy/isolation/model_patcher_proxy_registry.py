@@ -348,6 +348,20 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def get_ram_usage(self, instance_id: str) -> int:
         return self._get_instance(instance_id).get_ram_usage()
 
+    async def model_mmap_residency(self, instance_id: str, free: bool = False) -> tuple:
+        return self._get_instance(instance_id).model_mmap_residency(free=free)
+
+    async def pinned_memory_size(self, instance_id: str) -> int:
+        return self._get_instance(instance_id).pinned_memory_size()
+
+    async def get_non_dynamic_delegate(self, instance_id: str) -> str:
+        instance = self._get_instance(instance_id)
+        delegate = instance.get_non_dynamic_delegate()
+        return self.register(delegate)
+
+    async def disable_model_cfg1_optimization(self, instance_id: str) -> None:
+        self._get_instance(instance_id).disable_model_cfg1_optimization()
+
     async def lowvram_patch_counter(self, instance_id: str) -> int:
         return self._get_instance(instance_id).lowvram_patch_counter()
 

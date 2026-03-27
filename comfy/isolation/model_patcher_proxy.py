@@ -803,6 +803,27 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def parent(self) -> Any:
         return self._call_rpc("get_parent")
 
+    def model_mmap_residency(self, free: bool = False) -> tuple:
+        result = self._call_rpc("model_mmap_residency", free)
+        if isinstance(result, list):
+            return tuple(result)
+        return result
+
+    def pinned_memory_size(self) -> int:
+        return self._call_rpc("pinned_memory_size")
+
+    def get_non_dynamic_delegate(self) -> ModelPatcherProxy:
+        new_id = self._call_rpc("get_non_dynamic_delegate")
+        return ModelPatcherProxy(
+            new_id, self._registry, manage_lifecycle=not IS_CHILD_PROCESS
+        )
+
+    def disable_model_cfg1_optimization(self) -> None:
+        self._call_rpc("disable_model_cfg1_optimization")
+
+    def set_model_noise_refiner_patch(self, patch: Any) -> None:
+        self.set_model_patch(patch, "noise_refiner")
+
 
 class _InnerModelProxy:
     def __init__(self, parent: ModelPatcherProxy):
