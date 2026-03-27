@@ -307,8 +307,11 @@ class ComfyUIAdapter(IsolationAdapter):
                     obj.register_buffer(parts[0], tensor)
                 else:
                     setattr(obj, parts[0], tensor)
-            # Register on host so future references use proxy pattern
-            ms_id = ModelSamplingRegistry().register(obj)
+            # Register on host so future references use proxy pattern.
+            # Skip in child process — register() is async RPC and cannot be
+            # called synchronously during deserialization.
+            if os.environ.get("PYISOLATE_CHILD") != "1":
+                ms_id = ModelSamplingRegistry().register(obj)
             return obj
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
