@@ -127,6 +127,7 @@ class FakeSingletonCaller:
 class FakeSingletonRPC:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
         self._services: dict[str, dict[str, Any]] = {
             "FolderPathsProxy": {
                 "rpc_get_models_dir": lambda: "/sandbox/models",
@@ -168,7 +169,19 @@ class FakeSingletonRPC:
             "HelperProxiesService": {
                 "rpc_restore_input_types": lambda raw: raw,
             },
+            "ModelManagementProxy": {
+                "rpc_call": self._model_management_rpc_call,
+            },
         }
+
+    def _model_management_rpc_call(self, method_name: str, args: Any = None, kwargs: Any = None) -> Any:
+        if method_name == "get_torch_device":
+            return self._device
+        elif method_name == "get_torch_device_name":
+            return "cpu"
+        elif method_name == "get_free_memory":
+            return 34359738368
+        raise AssertionError(f"unexpected model_management method {method_name}")
 
     @staticmethod
     def _get_annotated_filepath(name: str, default_dir: str | None = None) -> str:
@@ -282,6 +295,7 @@ class FakeExactRelayCaller:
 class FakeExactRelayRPC:
     def __init__(self) -> None:
         self.transcripts: list[dict[str, Any]] = []
+        self._device = {"__pyisolate_torch_device__": "cpu"}
         self._services: dict[str, dict[str, Any]] = {
             "FolderPathsProxy": {
                 "rpc_get_models_dir": {
@@ -369,7 +383,23 @@ class FakeExactRelayRPC:
                     "result": lambda raw: raw,
                 }
             },
+            "ModelManagementProxy": {
+                "rpc_call": {
+                    "target": "comfy.model_management.*",
+                    "result": self._model_management_rpc_call,
+                },
+            },
         }
+
+    def _model_management_rpc_call(self, method_name: str, args: Any = None, kwargs: Any = None) -> Any:
+        device = {"__pyisolate_torch_device__": "cpu"}
+        if method_name == "get_torch_device":
+            return device
+        elif method_name == "get_torch_device_name":
+            return "cpu"
+        elif method_name == "get_free_memory":
+            return 34359738368
+        raise AssertionError(f"unexpected exact-relay method {method_name}")
 
     def create_caller(self, cls: Any, object_id: str):
         methods = self._services.get(object_id) or self._services.get(getattr(cls, "__name__", object_id))
