@@ -556,6 +556,85 @@ class ComfyNodeExtension(ExtensionBase):
 
         return self.remote_objects[object_id]
 
+    def _store_remote_object_handle(self, obj: Any) -> RemoteObjectHandle:
+        object_id = str(uuid.uuid4())
+        self.remote_objects[object_id] = obj
+        return RemoteObjectHandle(object_id, type(obj).__name__)
+
+    async def call_remote_object_method(
+        self,
+        object_id: str,
+        method_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Invoke a method or attribute-backed accessor on a child-owned object."""
+        obj = await self.get_remote_object(object_id)
+
+        if method_name == "get_patcher_attr":
+            return getattr(obj, args[0])
+        if method_name == "get_model_options":
+            return getattr(obj, "model_options")
+        if method_name == "set_model_options":
+            setattr(obj, "model_options", args[0])
+            return None
+        if method_name == "get_object_patches":
+            return getattr(obj, "object_patches")
+        if method_name == "get_patches":
+            return getattr(obj, "patches")
+        if method_name == "get_wrappers":
+            return getattr(obj, "wrappers")
+        if method_name == "get_callbacks":
+            return getattr(obj, "callbacks")
+        if method_name == "get_load_device":
+            return getattr(obj, "load_device")
+        if method_name == "get_offload_device":
+            return getattr(obj, "offload_device")
+        if method_name == "get_hook_mode":
+            return getattr(obj, "hook_mode")
+        if method_name == "get_parent":
+            parent = getattr(obj, "parent", None)
+            if parent is None:
+                return None
+            return self._store_remote_object_handle(parent)
+        if method_name == "get_inner_model_attr":
+            attr_name = args[0]
+            if hasattr(obj.model, attr_name):
+                return getattr(obj.model, attr_name)
+            if hasattr(obj, attr_name):
+                return getattr(obj, attr_name)
+            return None
+        if method_name == "inner_model_apply_model":
+            return obj.model.apply_model(*args[0], **args[1])
+        if method_name == "inner_model_extra_conds_shapes":
+            return obj.model.extra_conds_shapes(*args[0], **args[1])
+        if method_name == "inner_model_extra_conds":
+            return obj.model.extra_conds(*args[0], **args[1])
+        if method_name == "inner_model_memory_required":
+            return obj.model.memory_required(*args[0], **args[1])
+        if method_name == "process_latent_in":
+            return obj.model.process_latent_in(*args[0], **args[1])
+        if method_name == "process_latent_out":
+            return obj.model.process_latent_out(*args[0], **args[1])
+        if method_name == "scale_latent_inpaint":
+            return obj.model.scale_latent_inpaint(*args[0], **args[1])
+        if method_name.startswith("get_"):
+            attr_name = method_name[4:]
+            if hasattr(obj, attr_name):
+                return getattr(obj, attr_name)
+
+        target = getattr(obj, method_name)
+        if callable(target):
+            result = target(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            if type(result).__name__ == "ModelPatcher":
+                return self._store_remote_object_handle(result)
+            return result
+        if args or kwargs:
+            raise TypeError(f"{method_name} is not callable on remote object {object_id}")
+        return target
+
     def _wrap_unpicklable_objects(self, data: Any) -> Any:
         if isinstance(data, (str, int, float, bool, type(None))):
             return data
@@ -616,9 +695,7 @@ class ComfyNodeExtension(ExtensionBase):
             if serializer:
                 return serializer(data)
 
-        object_id = str(uuid.uuid4())
-        self.remote_objects[object_id] = data
-        return RemoteObjectHandle(object_id, type(data).__name__)
+        return self._store_remote_object_handle(data)
 
     def _resolve_remote_objects(self, data: Any) -> Any:
         if isinstance(data, RemoteObjectHandle):
