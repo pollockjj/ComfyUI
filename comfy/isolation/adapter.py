@@ -773,7 +773,8 @@ class ComfyUIAdapter(IsolationAdapter):
 
             # Fence: isolated children get writable temp inside sandbox
             if os.environ.get("PYISOLATE_CHILD") == "1":
-                _child_temp = os.path.join("/tmp", "comfyui_temp")
+                import tempfile
+                _child_temp = os.path.join(tempfile.gettempdir(), "comfyui_temp")
                 os.makedirs(_child_temp, exist_ok=True)
                 folder_paths.temp_directory = _child_temp
 
