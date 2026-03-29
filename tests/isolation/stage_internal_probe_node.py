@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -65,4 +66,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     staged = stage_probe_node(args.target_root)
-    print(staged)
+    sys.stdout.write(f"{staged}\n")

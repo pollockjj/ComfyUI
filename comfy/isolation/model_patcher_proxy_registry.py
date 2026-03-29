@@ -264,7 +264,6 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         import torch
         import base64
         import io as _io
-        import comfy.model_sampling as _ms
 
         bases = []
         for base in type(obj).__mro__:

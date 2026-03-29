@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import sys
 
-import pytest
 
 from tests.isolation.singleton_boundary_helpers import (
     capture_minimal_sealed_worker_imports,

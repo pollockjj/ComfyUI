@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -56,11 +57,11 @@ class TestExtensionsListing:
                     + "/" + entry["relative_path"]
                 )
 
-        # Print the actual URL list so it appears in test log output
-        print(f"\n--- Proxied JS URLs ({len(urls)}) ---")
+        # Emit the actual URL list so it appears in test log output.
+        sys.stdout.write(f"\n--- Proxied JS URLs ({len(urls)}) ---\n")
         for url in urls:
-            print(f"  {url}")
-        print("--- End URLs ---")
+            sys.stdout.write(f"  {url}\n")
+        sys.stdout.write("--- End URLs ---\n")
 
         # At least one proxied JS URL in /extensions/{name}/{path} format
         assert len(urls) >= 1, f"Expected >= 1 proxied JS URL, got {len(urls)}"
@@ -120,7 +121,9 @@ class TestForbiddenType:
         else:
             status = 200
 
-        print(f"\n--- HTTP status for {disallowed_path} (suffix={suffix}): {status} ---")
+        sys.stdout.write(
+            f"\n--- HTTP status for {disallowed_path} (suffix={suffix}): {status} ---\n"
+        )
         assert status == expected_status, (
             f"Expected HTTP {expected_status} for {disallowed_path}, got {status}"
         )

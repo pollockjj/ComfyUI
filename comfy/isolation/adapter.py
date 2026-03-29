@@ -108,7 +108,6 @@ class ComfyUIAdapter(IsolationAdapter):
         if not _IMPORT_TORCH:
             # Sealed worker without torch — register torch-free TensorValue handler
             # so IMAGE/MASK/LATENT tensors arrive as numpy arrays, not raw dicts.
-            import base64
             import numpy as np
 
             _TORCH_DTYPE_TO_NUMPY = {
@@ -343,7 +342,6 @@ class ComfyUIAdapter(IsolationAdapter):
             # in nodes_z_image_turbo.py). Serialize as inline data so the host can
             # reconstruct the real torch.nn.Module.
             if os.environ.get("PYISOLATE_CHILD") == "1":
-                import comfy.model_sampling as _ms
                 import base64
                 import io as _io
 
@@ -421,7 +419,7 @@ class ComfyUIAdapter(IsolationAdapter):
             # Skip in child process — register() is async RPC and cannot be
             # called synchronously during deserialization.
             if os.environ.get("PYISOLATE_CHILD") != "1":
-                ms_id = ModelSamplingRegistry().register(obj)
+                ModelSamplingRegistry().register(obj)
             return obj
 
         def deserialize_model_sampling_ref(data: Dict[str, Any]) -> Any:
