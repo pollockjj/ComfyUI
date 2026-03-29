@@ -91,7 +91,11 @@ def _normalize_sealed_worker_ro_import_paths(raw_paths: object) -> list[str]:
                 "tool.comfy.host.sealed_worker_ro_import_paths entries must be non-empty strings."
             )
         normalized_path = str(PurePosixPath(raw_path.replace("\\", "/")))
-        if not normalized_path.startswith("/"):
+        # Accept both POSIX absolute paths (/home/...) and Windows drive-letter paths (D:/...)
+        is_absolute = normalized_path.startswith("/") or (
+            len(normalized_path) >= 3 and normalized_path[1] == ":" and normalized_path[2] == "/"
+        )
+        if not is_absolute:
             raise ValueError(
                 "tool.comfy.host.sealed_worker_ro_import_paths entries must be absolute paths."
             )
