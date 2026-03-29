@@ -226,7 +226,7 @@ def build_stub_class(
         node_unique_id = _extract_hidden_unique_id(inputs)
         summary = _tensor_transport_summary(inputs)
         resources = _resource_snapshot()
-        logger.info(
+        logger.debug(
             "%s ISO:execute_start ext=%s node=%s uid=%s",
             LOG_PREFIX,
             extension.name,
