@@ -106,7 +106,57 @@ class ComfyUIAdapter(IsolationAdapter):
 
     def register_serializers(self, registry: SerializerRegistryProtocol) -> None:
         if not _IMPORT_TORCH:
-            # Sealed worker without torch — no framework serializers to register
+            # Sealed worker without torch — register torch-free TensorValue handler
+            # so IMAGE/MASK/LATENT tensors arrive as numpy arrays, not raw dicts.
+            import base64
+            import numpy as np
+
+            _TORCH_DTYPE_TO_NUMPY = {
+                "torch.float32": np.float32,
+                "torch.float64": np.float64,
+                "torch.float16": np.float16,
+                "torch.bfloat16": np.float32,  # numpy has no bfloat16; upcast
+                "torch.int32": np.int32,
+                "torch.int64": np.int64,
+                "torch.int16": np.int16,
+                "torch.int8": np.int8,
+                "torch.uint8": np.uint8,
+                "torch.bool": np.bool_,
+            }
+
+            def _deserialize_tensor_value(data: Dict[str, Any]) -> Any:
+                dtype_str = data["dtype"]
+                np_dtype = _TORCH_DTYPE_TO_NUMPY.get(dtype_str, np.float32)
+                shape = tuple(data["tensor_size"])
+                arr = np.array(data["data"], dtype=np_dtype).reshape(shape)
+                return arr
+
+            _NUMPY_TO_TORCH_DTYPE = {
+                np.float32: "torch.float32",
+                np.float64: "torch.float64",
+                np.float16: "torch.float16",
+                np.int32: "torch.int32",
+                np.int64: "torch.int64",
+                np.int16: "torch.int16",
+                np.int8: "torch.int8",
+                np.uint8: "torch.uint8",
+                np.bool_: "torch.bool",
+            }
+
+            def _serialize_tensor_value(obj: Any) -> Dict[str, Any]:
+                arr = np.asarray(obj, dtype=np.float32) if obj.dtype not in _NUMPY_TO_TORCH_DTYPE else np.asarray(obj)
+                dtype_str = _NUMPY_TO_TORCH_DTYPE.get(arr.dtype.type, "torch.float32")
+                return {
+                    "__type__": "TensorValue",
+                    "dtype": dtype_str,
+                    "tensor_size": list(arr.shape),
+                    "requires_grad": False,
+                    "data": arr.tolist(),
+                }
+
+            registry.register("TensorValue", _serialize_tensor_value, _deserialize_tensor_value, data_type=True)
+            # ndarray output from sealed workers serializes as TensorValue for host torch reconstruction
+            registry.register("ndarray", _serialize_tensor_value, _deserialize_tensor_value, data_type=True)
             return
 
         import torch
@@ -714,11 +764,15 @@ class ComfyUIAdapter(IsolationAdapter):
     def setup_child_event_hooks(self, extension: Any) -> None:
         """Wire PROGRESS_BAR_HOOK in the child to emit_event on the extension.
 
-        Works for both host-coupled and sealed workers — no torch dependency.
+        Host-coupled only — sealed workers do not have comfy.utils (torch).
         """
         is_child = os.environ.get("PYISOLATE_CHILD") == "1"
         logger.info("][ ISO:setup_child_event_hooks called, PYISOLATE_CHILD=%s", is_child)
         if not is_child:
+            return
+
+        if not _IMPORT_TORCH:
+            logger.info("][ ISO:setup_child_event_hooks skipped — sealed worker (no torch)")
             return
 
         import comfy.utils
@@ -792,6 +846,10 @@ class ComfyUIAdapter(IsolationAdapter):
             return
 
         if api_name == "UtilsProxy":
+            if not _IMPORT_TORCH:
+                logger.info("][ ISO:UtilsProxy handle_api_registration skipped — sealed worker (no torch)")
+                return
+
             import comfy.utils
 
             # Static Injection of RPC mechanism to ensure Child can access it
