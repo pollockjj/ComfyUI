@@ -137,6 +137,7 @@ class TestBatchImagesSourceRestoreMetadata:
         assert batched is not None
         assert batched.source_image_sizes == [(4, 4), (4, 4)]
         assert getattr(batched, "source_image_samples", None) is None
+        assert getattr(batched, "preprocess_image_sizes", None) is None
 
     def test_mixed_batch_preserves_source_image_samples(self):
         first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
@@ -241,7 +242,7 @@ class TestBatchImagesSourceRestoreMetadata:
 
         assert batched is not None
         assert batched.source_restore_crop_mode == ["none", None]
-        assert batched.preprocess_image_sizes == [(4, 4), (4, 4)]
+        assert batched.preprocess_image_sizes == [(4, 4), None]
 
         def fake_upscale(sample, width, height, method, crop):
             assert sample.shape == (1, 3, 4, 4)
@@ -255,6 +256,17 @@ class TestBatchImagesSourceRestoreMetadata:
         assert result.source_restore_crop_mode == "none"
         assert result.preprocess_image_sizes == [(4, 4)]
         assert common_upscale.call_count == 1
+
+    def test_mixed_batch_preserves_optional_preprocess_sizes(self):
+        restored = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        restored.preprocess_image_sizes = [(4, 4)]
+        plain = torch.ones((1, 4, 4, 3), dtype=torch.float32)
+
+        batched = batch_images([restored, plain])
+        sliced = ImageFromBatch.execute(batched, 0, 2)[0]
+
+        assert batched.preprocess_image_sizes == [(4, 4), None]
+        assert sliced.preprocess_image_sizes == [(4, 4), None]
 
     def test_batch_images_flattens_per_sample_crop_mode_lists(self):
         mixed = torch.zeros((2, 4, 4, 3), dtype=torch.float32)

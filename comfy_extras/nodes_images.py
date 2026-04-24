@@ -170,7 +170,15 @@ class ImageFromBatch(IO.ComfyNode):
             elif crop_mode is not None:
                 s.source_restore_crop_mode = crop_mode
             if preprocess_image_sizes is not None:
-                s.preprocess_image_sizes = [tuple(size) for size in preprocess_image_sizes[batch_index:batch_index + length]]
+                selected_preprocess_sizes = [
+                    tuple(size) if size is not None else None
+                    for size in preprocess_image_sizes[batch_index:batch_index + length]
+                ]
+                if any(size is not None for size in selected_preprocess_sizes):
+                    if all(size is not None for size in selected_preprocess_sizes):
+                        s.preprocess_image_sizes = [tuple(size) for size in selected_preprocess_sizes]
+                    else:
+                        s.preprocess_image_sizes = selected_preprocess_sizes
         return IO.NodeOutput(s)
 
     frombatch = execute  # TODO: remove

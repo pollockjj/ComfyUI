@@ -511,8 +511,8 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     if len(images) == 0:
         return None
     source_image_sizes: list[tuple[int, int]] = []
-    preprocess_image_sizes: list[tuple[int, int]] = []
-    preserve_preprocess_image_sizes = True
+    preprocess_image_sizes: list[tuple[int, int] | None] = []
+    has_any_preprocess_image_sizes = False
     source_restore_crop_mode: str | None = None
     preserve_source_restore_crop_mode = True
     source_restore_crop_modes: list[str | None] = []
@@ -536,13 +536,13 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
             source_image_sizes.extend([tuple(size) for size in image_source_sizes])
         image_preprocess_sizes = getattr(image, "preprocess_image_sizes", None)
         has_valid_preprocess_sizes = image_preprocess_sizes is not None and len(image_preprocess_sizes) == image.shape[0]
-        if preserve_preprocess_image_sizes and has_valid_preprocess_sizes:
-            preprocess_image_sizes.extend([tuple(size) for size in image_preprocess_sizes])
-        elif has_valid_preprocess_sizes:
-            preprocess_image_sizes.extend([tuple(size) for size in image_preprocess_sizes])
+        if has_valid_preprocess_sizes:
+            normalized_preprocess_sizes = [tuple(size) if size is not None else None for size in image_preprocess_sizes]
+            if any(size is not None for size in normalized_preprocess_sizes):
+                has_any_preprocess_image_sizes = True
+            preprocess_image_sizes.extend(normalized_preprocess_sizes)
         else:
-            preserve_preprocess_image_sizes = False
-            preprocess_image_sizes.extend([tuple(image.shape[1:3])] * image.shape[0])
+            preprocess_image_sizes.extend([None] * image.shape[0])
         image_crop_mode = getattr(image, "source_restore_crop_mode", None)
         if isinstance(image_crop_mode, list) and len(image_crop_mode) == image.shape[0]:
             image_crop_modes = list(image_crop_mode)
@@ -595,9 +595,7 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
         batched.source_restore_crop_mode = source_restore_crop_mode
     elif any(mode is not None for mode in source_restore_crop_modes):
         batched.source_restore_crop_mode = source_restore_crop_modes
-    if preserve_preprocess_image_sizes:
-        batched.preprocess_image_sizes = preprocess_image_sizes
-    elif preprocess_image_sizes:
+    if has_any_preprocess_image_sizes:
         batched.preprocess_image_sizes = preprocess_image_sizes
     return batched
 
