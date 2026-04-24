@@ -515,6 +515,7 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     preserve_preprocess_image_sizes = True
     source_restore_crop_mode: str | None = None
     preserve_source_restore_crop_mode = True
+    source_restore_crop_modes: list[str | None] = []
     has_existing_source_samples = any(
         (getattr(image, "source_image_samples", None) is not None)
         and len(getattr(image, "source_image_samples")) == image.shape[0]
@@ -537,10 +538,13 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
         has_valid_preprocess_sizes = image_preprocess_sizes is not None and len(image_preprocess_sizes) == image.shape[0]
         if preserve_preprocess_image_sizes and has_valid_preprocess_sizes:
             preprocess_image_sizes.extend([tuple(size) for size in image_preprocess_sizes])
+        elif has_valid_preprocess_sizes:
+            preprocess_image_sizes.extend([tuple(size) for size in image_preprocess_sizes])
         else:
             preserve_preprocess_image_sizes = False
-            preprocess_image_sizes = []
+            preprocess_image_sizes.extend([tuple(image.shape[1:3])] * image.shape[0])
         image_crop_mode = getattr(image, "source_restore_crop_mode", None)
+        source_restore_crop_modes.extend([image_crop_mode] * image.shape[0])
         if not preserve_source_restore_crop_mode or image_crop_mode is None:
             preserve_source_restore_crop_mode = False
             source_restore_crop_mode = None
@@ -583,7 +587,11 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
         batched.source_image_samples = source_image_samples
     if preserve_source_restore_crop_mode and source_restore_crop_mode is not None:
         batched.source_restore_crop_mode = source_restore_crop_mode
+    elif any(mode is not None for mode in source_restore_crop_modes):
+        batched.source_restore_crop_mode = source_restore_crop_modes
     if preserve_preprocess_image_sizes:
+        batched.preprocess_image_sizes = preprocess_image_sizes
+    elif preprocess_image_sizes:
         batched.preprocess_image_sizes = preprocess_image_sizes
     return batched
 

@@ -150,6 +150,9 @@ class ImageFromBatch(IO.ComfyNode):
         source_image_samples = getattr(s_in, "source_image_samples", None)
         crop_mode = getattr(s_in, "source_restore_crop_mode", None)
         preprocess_image_sizes = getattr(s_in, "preprocess_image_sizes", None)
+        if isinstance(crop_mode, list):
+            selected_crop_modes = crop_mode[batch_index:batch_index + length]
+            crop_mode = selected_crop_modes[0] if selected_crop_modes and all(mode == selected_crop_modes[0] for mode in selected_crop_modes) else None
         if source_image_sizes is not None:
             selected_source_sizes = [tuple(size) for size in source_image_sizes[batch_index:batch_index + length]]
             if crop_mode == "none":
