@@ -391,6 +391,21 @@ class GrowMask(IO.ComfyNode):
     expand_mask = execute  # TODO: remove
 
 class ClipVisionToMask(IO.ComfyNode):
+    @staticmethod
+    def _output_value(clip_vision_output, key, default=None):
+        if isinstance(clip_vision_output, dict):
+            return clip_vision_output.get(key, default)
+        return getattr(clip_vision_output, key, default)
+
+    @classmethod
+    def _validate_source_restore_inputs(cls, clip_vision_output, mask, source_image_sizes):
+        if cls._output_value(clip_vision_output, "clip_vision_model_type") != "birefnet":
+            raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
+        if not isinstance(mask, torch.Tensor) or mask.ndim != 4 or mask.shape[1] != 1:
+            raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
+        if len(source_image_sizes) != mask.shape[0]:
+            raise ValueError("ClipVisionToMask source_image_sizes length must equal batch size")
+
     @classmethod
     def define_schema(cls):
         return IO.Schema(
@@ -407,7 +422,9 @@ class ClipVisionToMask(IO.ComfyNode):
             source_image_sizes = None
         else:
             mask = clip_vision_output["last_hidden_state"]
-            source_image_sizes = getattr(clip_vision_output, "source_image_sizes", None)
+            source_image_sizes = cls._output_value(clip_vision_output, "source_image_sizes")
+        if source_image_sizes is not None:
+            cls._validate_source_restore_inputs(clip_vision_output, mask, source_image_sizes)
         mask = mask.sigmoid()
         if mask.ndim == 3:
             mask = mask.unsqueeze(0)

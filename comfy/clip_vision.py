@@ -71,6 +71,7 @@ class ClipVisionModel():
         outputs["image_embeds"] = out[2].to(comfy.model_management.intermediate_device())
         outputs["image_sizes"] = [pixel_values.shape[1:]] * pixel_values.shape[0]
         outputs["source_image_sizes"] = source_image_sizes
+        outputs["clip_vision_model_type"] = self.model_type
         if self.return_all_hidden_states:
             all_hs = out[1].to(comfy.model_management.intermediate_device())
             outputs["penultimate_hidden_states"] = all_hs[:, -2]
