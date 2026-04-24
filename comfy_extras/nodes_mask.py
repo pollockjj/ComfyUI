@@ -402,13 +402,26 @@ class ClipVisionToMask(IO.ComfyNode):
         )
     @classmethod
     def execute(cls, clip_vision_output):
-        if not isinstance(clip_vision_output, torch.Tensor):
+        if isinstance(clip_vision_output, torch.Tensor):
+            mask = clip_vision_output
+            source_image_sizes = None
+        else:
             mask = clip_vision_output["last_hidden_state"]
+            source_image_sizes = clip_vision_output.get("source_image_sizes")
         mask = mask.sigmoid()
         if mask.ndim == 3:
             mask = mask.unsqueeze(0)
         if mask.shape[1] != 1:
             mask = mask.movedim(-1, 1)
+        if source_image_sizes is not None:
+            resized = []
+            for index, target_size in enumerate(source_image_sizes):
+                source_height, source_width = target_size
+                sample = mask[index:index + 1]
+                if sample.shape[-2] != source_height or sample.shape[-1] != source_width:
+                    sample = comfy.utils.common_upscale(sample, source_width, source_height, "bilinear", "disabled")
+                resized.append(sample)
+            mask = torch.cat(resized, dim=0)
         return IO.NodeOutput(mask)
 
     clip_vision_to_mask = execute
