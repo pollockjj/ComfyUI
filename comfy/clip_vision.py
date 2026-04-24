@@ -66,7 +66,7 @@ class ClipVisionModel():
         else:
             source_image_sizes = [tuple(size) for size in source_image_sizes]
         source_image_samples = getattr(image, "source_image_samples", None)
-        if source_image_samples is not None and len(source_image_samples) == image.shape[0]:
+        if self.model_type == "birefnet" and source_image_samples is not None and len(source_image_samples) == image.shape[0]:
             source_image_sizes = [tuple(sample.shape[1:3]) for sample in source_image_samples]
             processed = []
             for sample in source_image_samples:

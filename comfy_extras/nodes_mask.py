@@ -457,14 +457,9 @@ class ClipVisionToMask(IO.ComfyNode):
             if len(unique_source_sizes) > 1:
                 mask = cls._copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask)
                 return IO.NodeOutput(mask)
-            resized = []
-            for index, target_size in enumerate(source_image_sizes):
-                source_height, source_width = target_size
-                sample = mask[index:index + 1]
-                if sample.shape[-2] != source_height or sample.shape[-1] != source_width:
-                    sample = comfy.utils.common_upscale(sample, source_width, source_height, "bilinear", "disabled")
-                resized.append(sample)
-            mask = torch.cat(resized, dim=0)
+            source_height, source_width = next(iter(unique_source_sizes))
+            if mask.shape[-2] != source_height or mask.shape[-1] != source_width:
+                mask = comfy.utils.common_upscale(mask, source_width, source_height, "bilinear", "disabled")
             mask = cls._copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask)
         return IO.NodeOutput(mask)
 

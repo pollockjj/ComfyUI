@@ -9,10 +9,12 @@ mock_server = MagicMock()
 with patch.dict("sys.modules", {"nodes": mock_nodes, "server": mock_server}):
     import comfy_extras.nodes_mask as nodes_mask
     import comfy_extras.nodes_images as nodes_images
+    import comfy_extras.nodes_post_processing as nodes_post_processing
 
 ClipVisionToMask = nodes_mask.ClipVisionToMask
 MaskToImage = nodes_mask.MaskToImage
 ImageFromBatch = nodes_images.ImageFromBatch
+batch_images = nodes_post_processing.batch_images
 
 
 class FakeClipVisionOutput:
@@ -54,6 +56,7 @@ class TestClipVisionToMaskContract:
         )
 
         def fake_upscale(sample, width, height, method, crop):
+            assert sample.shape == (2, 1, 4, 4)
             assert (width, height, method, crop) == (6, 6, "bilinear", "disabled")
             return torch.full((sample.shape[0], sample.shape[1], height, width), 0.75, dtype=sample.dtype)
 
@@ -61,7 +64,7 @@ class TestClipVisionToMaskContract:
             result = ClipVisionToMask.execute(clip_vision_output)
 
         assert result[0].shape == (2, 1, 6, 6)
-        assert common_upscale.call_count == 2
+        assert common_upscale.call_count == 1
 
     def test_mixed_batch_source_restore_is_deferred_until_image_from_batch(self):
         clip_vision_output = FakeClipVisionOutput(
@@ -105,3 +108,28 @@ class TestClipVisionToMaskContract:
 
         assert result[0].shape == (1, 4, 4, 3)
         assert common_upscale.call_count == 0
+
+
+class TestBatchImagesSourceRestoreMetadata:
+    def test_uniform_batch_omits_source_image_samples(self):
+        first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        second = torch.ones((1, 4, 4, 3), dtype=torch.float32)
+
+        batched = batch_images([first, second])
+
+        assert batched is not None
+        assert batched.source_image_sizes == [(4, 4), (4, 4)]
+        assert getattr(batched, "source_image_samples", None) is None
+
+    def test_mixed_batch_preserves_source_image_samples(self):
+        first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        second = torch.ones((1, 6, 5, 3), dtype=torch.float32)
+
+        batched = batch_images([first, second])
+
+        assert batched is not None
+        assert batched.source_image_sizes == [(4, 4), (6, 5)]
+        assert batched.shape == (2, 4, 4, 3)
+        assert len(batched.source_image_samples) == 2
+        assert batched.source_image_samples[0].shape == (1, 4, 4, 3)
+        assert batched.source_image_samples[1].shape == (1, 6, 5, 3)
