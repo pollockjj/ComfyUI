@@ -71,28 +71,15 @@ class ClipVisionModel():
             processed = []
             for sample in source_image_samples:
                 sample = sample.to(self.load_device)
-                if self.model_type == "siglip2_vision_model":
-                    processed.append(
-                        comfy.clip_model.siglip2_preprocess(
-                            sample,
-                            size=self.image_size,
-                            patch_size=self.config.get("patch_size", 16),
-                            num_patches=self.config.get("num_patches", 256),
-                            mean=self.image_mean,
-                            std=self.image_std,
-                            crop=crop,
-                        ).float()
-                    )
-                else:
-                    processed.append(
-                        comfy.clip_model.clip_preprocess(
-                            sample,
-                            size=self.image_size,
-                            mean=self.image_mean,
-                            std=self.image_std,
-                            crop=crop,
-                        ).float()
-                    )
+                processed.append(
+                    comfy.clip_model.clip_preprocess(
+                        sample,
+                        size=self.image_size,
+                        mean=self.image_mean,
+                        std=self.image_std,
+                        crop=crop,
+                    ).float()
+                )
             pixel_values = torch.cat(processed, dim=0)
         elif self.model_type == "siglip2_vision_model":
             pixel_values = comfy.clip_model.siglip2_preprocess(image.to(self.load_device), size=self.image_size, patch_size=self.config.get("patch_size", 16), num_patches=self.config.get("num_patches", 256), mean=self.image_mean, std=self.image_std, crop=crop).float()

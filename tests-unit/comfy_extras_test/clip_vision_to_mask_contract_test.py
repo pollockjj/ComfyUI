@@ -1,3 +1,4 @@
+import sys
 import pytest
 import torch
 from unittest.mock import MagicMock, patch
@@ -6,10 +7,12 @@ mock_nodes = MagicMock()
 mock_nodes.MAX_RESOLUTION = 16384
 mock_server = MagicMock()
 
-with patch.dict("sys.modules", {"nodes": mock_nodes, "server": mock_server}):
-    import comfy_extras.nodes_mask as nodes_mask
-    import comfy_extras.nodes_images as nodes_images
-    import comfy_extras.nodes_post_processing as nodes_post_processing
+sys.modules["nodes"] = mock_nodes
+sys.modules["server"] = mock_server
+
+import comfy_extras.nodes_mask as nodes_mask
+import comfy_extras.nodes_images as nodes_images
+import comfy_extras.nodes_post_processing as nodes_post_processing
 
 ClipVisionToMask = nodes_mask.ClipVisionToMask
 MaskToImage = nodes_mask.MaskToImage
