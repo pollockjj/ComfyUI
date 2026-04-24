@@ -62,7 +62,8 @@ class ClipVisionModel():
         comfy.model_management.load_model_gpu(self.patcher)
         source_image_sizes = getattr(image, "source_image_sizes", None)
         if source_image_sizes is None or len(source_image_sizes) != image.shape[0]:
-            source_image_sizes = [tuple(image[i].shape[:2]) for i in range(image.shape[0])]
+            source_image_size = tuple(image.shape[1:3])
+            source_image_sizes = [source_image_size] * image.shape[0]
         else:
             source_image_sizes = [tuple(size) for size in source_image_sizes]
         source_image_samples = getattr(image, "source_image_samples", None)

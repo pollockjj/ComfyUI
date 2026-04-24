@@ -10,17 +10,20 @@ mock_server = MagicMock()
 
 
 def _import_test_modules():
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setitem(sys.modules, "nodes", mock_nodes)
-    monkeypatch.setitem(sys.modules, "server", mock_server)
-    try:
-        return (
+    existing_module_names = set(sys.modules)
+    with patch.dict("sys.modules", {"nodes": mock_nodes, "server": mock_server}):
+        imported_modules = (
             importlib.import_module("comfy_extras.nodes_mask"),
             importlib.import_module("comfy_extras.nodes_images"),
             importlib.import_module("comfy_extras.nodes_post_processing"),
         )
-    finally:
-        monkeypatch.undo()
+        new_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name not in existing_module_names and name not in {"nodes", "server"}
+        }
+    sys.modules.update(new_modules)
+    return imported_modules
 
 
 nodes_mask, nodes_images, nodes_post_processing = _import_test_modules()
