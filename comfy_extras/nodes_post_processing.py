@@ -544,13 +544,19 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
             preserve_preprocess_image_sizes = False
             preprocess_image_sizes.extend([tuple(image.shape[1:3])] * image.shape[0])
         image_crop_mode = getattr(image, "source_restore_crop_mode", None)
-        source_restore_crop_modes.extend([image_crop_mode] * image.shape[0])
-        if not preserve_source_restore_crop_mode or image_crop_mode is None:
+        if isinstance(image_crop_mode, list) and len(image_crop_mode) == image.shape[0]:
+            image_crop_modes = list(image_crop_mode)
+            uniform_image_crop_mode = image_crop_modes[0] if image_crop_modes and all(mode == image_crop_modes[0] for mode in image_crop_modes) else None
+        else:
+            image_crop_modes = [image_crop_mode] * image.shape[0]
+            uniform_image_crop_mode = image_crop_mode
+        source_restore_crop_modes.extend(image_crop_modes)
+        if not preserve_source_restore_crop_mode or uniform_image_crop_mode is None:
             preserve_source_restore_crop_mode = False
             source_restore_crop_mode = None
         elif source_restore_crop_mode is None:
-            source_restore_crop_mode = image_crop_mode
-        elif source_restore_crop_mode != image_crop_mode:
+            source_restore_crop_mode = uniform_image_crop_mode
+        elif source_restore_crop_mode != uniform_image_crop_mode:
             preserve_source_restore_crop_mode = False
             source_restore_crop_mode = None
         image_source_samples = getattr(image, "source_image_samples", None)

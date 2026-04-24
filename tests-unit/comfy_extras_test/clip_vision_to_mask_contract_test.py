@@ -255,3 +255,36 @@ class TestBatchImagesSourceRestoreMetadata:
         assert result.source_restore_crop_mode == "none"
         assert result.preprocess_image_sizes == [(4, 4)]
         assert common_upscale.call_count == 1
+
+    def test_batch_images_flattens_per_sample_crop_mode_lists(self):
+        mixed = torch.zeros((2, 4, 4, 3), dtype=torch.float32)
+        mixed.source_image_sizes = [(6, 5), (4, 4)]
+        mixed.source_restore_crop_mode = ["none", None]
+        mixed.preprocess_image_sizes = [(4, 4), (4, 4)]
+
+        rebatched = batch_images([mixed])
+
+        assert rebatched is not None
+        assert rebatched.source_restore_crop_mode == ["none", None]
+
+    def test_image_from_batch_preserves_mixed_crop_mode_list_for_reslicing(self):
+        mixed = torch.zeros((2, 4, 4, 3), dtype=torch.float32)
+        mixed.source_image_sizes = [(6, 5), (4, 4)]
+        mixed.source_restore_crop_mode = ["none", None]
+        mixed.preprocess_image_sizes = [(4, 4), (4, 4)]
+
+        sliced = ImageFromBatch.execute(mixed, 0, 2)[0]
+
+        assert sliced.source_restore_crop_mode == ["none", None]
+
+        def fake_upscale(sample, width, height, method, crop):
+            assert sample.shape == (1, 3, 4, 4)
+            assert (width, height, method, crop) == (5, 6, "bilinear", "disabled")
+            return torch.full((sample.shape[0], sample.shape[1], height, width), 0.5, dtype=sample.dtype)
+
+        with patch.object(nodes_images.comfy.utils, "common_upscale", side_effect=fake_upscale) as common_upscale:
+            restored = ImageFromBatch.execute(sliced, 0, 1)[0]
+
+        assert restored.shape == (1, 6, 5, 3)
+        assert restored.source_restore_crop_mode == "none"
+        assert common_upscale.call_count == 1
