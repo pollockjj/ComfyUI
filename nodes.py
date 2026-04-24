@@ -313,9 +313,29 @@ class VAEDecode:
         if latent.is_nested:
             latent = latent.unbind()[0]
 
+        trace_enabled = os.environ.get("ISSUE130_SEEDVR2_TRACE") == "1"
+        start_time = time.monotonic()
+        if trace_enabled:
+            print(
+                f"ISSUE130_TRACE {start_time:.6f} nodes VAEDecode.start "
+                f"latent_shape={tuple(latent.shape)}",
+                flush=True,
+            )
         images = vae.decode(latent)
+        if trace_enabled:
+            print(
+                f"ISSUE130_TRACE {time.monotonic():.6f} nodes VAEDecode.after_decode "
+                f"images_shape={tuple(images.shape)} elapsed={time.monotonic() - start_time:.3f}",
+                flush=True,
+            )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        if trace_enabled:
+            print(
+                f"ISSUE130_TRACE {time.monotonic():.6f} nodes VAEDecode.end "
+                f"images_shape={tuple(images.shape)} elapsed={time.monotonic() - start_time:.3f}",
+                flush=True,
+            )
         return (images, )
 
 class VAEDecodeTiled:
