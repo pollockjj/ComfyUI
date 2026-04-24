@@ -511,6 +511,10 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     if len(images) == 0:
         return None
     source_image_sizes: list[tuple[int, int]] = []
+    preprocess_image_sizes: list[tuple[int, int]] = []
+    preserve_preprocess_image_sizes = True
+    source_restore_crop_mode: str | None = None
+    preserve_source_restore_crop_mode = True
     preserve_source_samples = len({tuple(image.shape[1:3]) for image in images}) > 1
     source_image_samples: list[torch.Tensor] | None = [] if preserve_source_samples else None
     # first, get the max channels count
@@ -523,6 +527,22 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
             source_image_sizes.extend([tuple(image.shape[1:3])] * image.shape[0])
         else:
             source_image_sizes.extend([tuple(size) for size in image_source_sizes])
+        image_preprocess_sizes = getattr(image, "preprocess_image_sizes", None)
+        has_valid_preprocess_sizes = image_preprocess_sizes is not None and len(image_preprocess_sizes) == image.shape[0]
+        if preserve_preprocess_image_sizes and has_valid_preprocess_sizes:
+            preprocess_image_sizes.extend([tuple(size) for size in image_preprocess_sizes])
+        else:
+            preserve_preprocess_image_sizes = False
+            preprocess_image_sizes = []
+        image_crop_mode = getattr(image, "source_restore_crop_mode", None)
+        if not preserve_source_restore_crop_mode or image_crop_mode is None:
+            preserve_source_restore_crop_mode = False
+            source_restore_crop_mode = None
+        elif source_restore_crop_mode is None:
+            source_restore_crop_mode = image_crop_mode
+        elif source_restore_crop_mode != image_crop_mode:
+            preserve_source_restore_crop_mode = False
+            source_restore_crop_mode = None
         image_source_samples = getattr(image, "source_image_samples", None)
         has_valid_source_samples = image_source_samples is not None and len(image_source_samples) == image.shape[0]
         if has_valid_source_samples and source_image_samples is None:
@@ -533,7 +553,7 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
             else:
                 source_image_samples.extend([image[index:index + 1] for index in range(image.shape[0])])
         if image.shape[-1] < max_channels:
-            padded_images.append(torch.nn.functional.pad(image, (0,1), mode='constant', value=1.0))
+            padded_images.append(torch.nn.functional.pad(image, (0, max_channels - image.shape[-1]), mode='constant', value=1.0))
         else:
             padded_images.append(image)
     # resize all images to be the same size as the first image
@@ -549,6 +569,10 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     batched.source_image_sizes = source_image_sizes
     if source_image_samples is not None:
         batched.source_image_samples = source_image_samples
+    if preserve_source_restore_crop_mode and source_restore_crop_mode is not None:
+        batched.source_restore_crop_mode = source_restore_crop_mode
+    if preserve_preprocess_image_sizes:
+        batched.preprocess_image_sizes = preprocess_image_sizes
     return batched
 
 def batch_masks(masks: list[torch.Tensor]) -> torch.Tensor | None:

@@ -7,12 +7,23 @@ mock_nodes = MagicMock()
 mock_nodes.MAX_RESOLUTION = 16384
 mock_server = MagicMock()
 
+_original_nodes = sys.modules.get("nodes")
+_original_server = sys.modules.get("server")
 sys.modules["nodes"] = mock_nodes
 sys.modules["server"] = mock_server
-
-import comfy_extras.nodes_mask as nodes_mask
-import comfy_extras.nodes_images as nodes_images
-import comfy_extras.nodes_post_processing as nodes_post_processing
+try:
+    import comfy_extras.nodes_mask as nodes_mask
+    import comfy_extras.nodes_images as nodes_images
+    import comfy_extras.nodes_post_processing as nodes_post_processing
+finally:
+    if _original_nodes is None:
+        sys.modules.pop("nodes", None)
+    else:
+        sys.modules["nodes"] = _original_nodes
+    if _original_server is None:
+        sys.modules.pop("server", None)
+    else:
+        sys.modules["server"] = _original_server
 
 ClipVisionToMask = nodes_mask.ClipVisionToMask
 MaskToImage = nodes_mask.MaskToImage
@@ -136,3 +147,67 @@ class TestBatchImagesSourceRestoreMetadata:
         assert len(batched.source_image_samples) == 2
         assert batched.source_image_samples[0].shape == (1, 4, 4, 3)
         assert batched.source_image_samples[1].shape == (1, 6, 5, 3)
+
+    def test_batched_mask_images_preserve_restore_metadata(self):
+        first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        first.source_image_sizes = [(8, 8)]
+        first.source_restore_crop_mode = "none"
+        first.preprocess_image_sizes = [(4, 4)]
+        second = torch.ones((1, 4, 4, 3), dtype=torch.float32)
+        second.source_image_sizes = [(8, 8)]
+        second.source_restore_crop_mode = "none"
+        second.preprocess_image_sizes = [(4, 4)]
+
+        batched = batch_images([first, second])
+
+        assert batched is not None
+        assert batched.source_image_sizes == [(8, 8), (8, 8)]
+        assert batched.source_restore_crop_mode == "none"
+        assert batched.preprocess_image_sizes == [(4, 4), (4, 4)]
+
+    def test_batch_images_pads_to_full_channel_difference(self):
+        first = torch.zeros((1, 4, 4, 1), dtype=torch.float32)
+        second = torch.ones((1, 4, 4, 4), dtype=torch.float32)
+
+        batched = batch_images([first, second])
+
+        assert batched is not None
+        assert batched.shape == (2, 4, 4, 4)
+        assert torch.all(batched[0, :, :, 1:] == 1.0)
+
+    def test_image_from_batch_preserves_source_samples_for_mixed_restore(self):
+        first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        second = torch.ones((1, 6, 5, 3), dtype=torch.float32)
+
+        batched = batch_images([first, second])
+        selected = ImageFromBatch.execute(batched, 1, 1)[0]
+
+        assert selected.shape == (1, 4, 4, 3)
+        assert selected.source_image_sizes == [(6, 5)]
+        assert len(selected.source_image_samples) == 1
+        assert selected.source_image_samples[0].shape == (1, 6, 5, 3)
+
+    def test_rebatched_mixed_mask_images_restore_after_split(self):
+        first_mask = torch.zeros((1, 1, 4, 4), dtype=torch.float32)
+        first_mask.source_image_sizes = [(6, 6)]
+        first_mask.source_restore_crop_mode = "none"
+        first_mask.preprocess_image_sizes = [(4, 4)]
+        second_mask = torch.zeros((1, 1, 4, 4), dtype=torch.float32)
+        second_mask.source_image_sizes = [(2, 3)]
+        second_mask.source_restore_crop_mode = "none"
+        second_mask.preprocess_image_sizes = [(4, 4)]
+
+        first_image = MaskToImage.execute(first_mask)[0]
+        second_image = MaskToImage.execute(second_mask)[0]
+        batched = batch_images([first_image, second_image])
+
+        def fake_upscale(sample, width, height, method, crop):
+            assert sample.shape == (1, 3, 4, 4)
+            assert (width, height, method, crop) == (3, 2, "bilinear", "disabled")
+            return torch.full((sample.shape[0], sample.shape[1], height, width), 0.5, dtype=sample.dtype)
+
+        with patch.object(nodes_images.comfy.utils, "common_upscale", side_effect=fake_upscale) as common_upscale:
+            result = ImageFromBatch.execute(batched, 1, 1)[0]
+
+        assert result.shape == (1, 2, 3, 3)
+        assert common_upscale.call_count == 1

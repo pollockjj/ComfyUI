@@ -147,6 +147,7 @@ class ImageFromBatch(IO.ComfyNode):
         length = min(s_in.shape[0] - batch_index, length)
         s = s_in[batch_index:batch_index + length].clone()
         source_image_sizes = getattr(s_in, "source_image_sizes", None)
+        source_image_samples = getattr(s_in, "source_image_samples", None)
         crop_mode = getattr(s_in, "source_restore_crop_mode", None)
         preprocess_image_sizes = getattr(s_in, "preprocess_image_sizes", None)
         if source_image_sizes is not None:
@@ -158,6 +159,8 @@ class ImageFromBatch(IO.ComfyNode):
                     if s.shape[1] != source_height or s.shape[2] != source_width:
                         s = comfy.utils.common_upscale(s.movedim(-1, 1), source_width, source_height, "bilinear", "disabled").movedim(1, -1)
             s.source_image_sizes = selected_source_sizes
+            if source_image_samples is not None and len(source_image_samples) == s_in.shape[0]:
+                s.source_image_samples = list(source_image_samples[batch_index:batch_index + length])
             if crop_mode is not None:
                 s.source_restore_crop_mode = crop_mode
             if preprocess_image_sizes is not None:
