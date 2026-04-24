@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
 from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
-from comfy.ldm.seedvr.vae import tiled_vae
 
 
 def clear_vae_memory(vae_model):
