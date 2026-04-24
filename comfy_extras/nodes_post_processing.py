@@ -510,11 +510,23 @@ class ResizeImageMaskNode(io.ComfyNode):
 def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     if len(images) == 0:
         return None
+    source_image_sizes: list[tuple[int, int]] = []
+    source_image_samples: list[torch.Tensor] = []
     # first, get the max channels count
     max_channels = max(image.shape[-1] for image in images)
     # then, pad all images to have the same channels count
     padded_images: list[torch.Tensor] = []
     for image in images:
+        image_source_sizes = getattr(image, "source_image_sizes", None)
+        if image_source_sizes is None or len(image_source_sizes) != image.shape[0]:
+            source_image_sizes.extend([tuple(image.shape[1:3])] * image.shape[0])
+        else:
+            source_image_sizes.extend([tuple(size) for size in image_source_sizes])
+        image_source_samples = getattr(image, "source_image_samples", None)
+        if image_source_samples is None or len(image_source_samples) != image.shape[0]:
+            source_image_samples.extend([image[index:index + 1] for index in range(image.shape[0])])
+        else:
+            source_image_samples.extend(image_source_samples)
         if image.shape[-1] < max_channels:
             padded_images.append(torch.nn.functional.pad(image, (0,1), mode='constant', value=1.0))
         else:
@@ -528,7 +540,10 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
         else:
             resized_images.append(image)
     # batch the images in the format [b, h, w, c]
-    return torch.cat(resized_images, dim=0)
+    batched = torch.cat(resized_images, dim=0)
+    batched.source_image_sizes = source_image_sizes
+    batched.source_image_samples = source_image_samples
+    return batched
 
 def batch_masks(masks: list[torch.Tensor]) -> torch.Tensor | None:
     if len(masks) == 0:
