@@ -119,6 +119,14 @@ class ImageCompositeMasked(IO.ComfyNode):
 
 
 class MaskToImage(IO.ComfyNode):
+    @staticmethod
+    def _copy_source_restore_metadata(source, destination):
+        for key in ("source_image_sizes", "source_restore_crop_mode", "preprocess_image_sizes"):
+            value = getattr(source, key, None)
+            if value is not None:
+                setattr(destination, key, value)
+        return destination
+
     @classmethod
     def define_schema(cls):
         return IO.Schema(
@@ -135,6 +143,7 @@ class MaskToImage(IO.ComfyNode):
     @classmethod
     def execute(cls, mask) -> IO.NodeOutput:
         result = mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])).movedim(1, -1).expand(-1, -1, -1, 3)
+        result = cls._copy_source_restore_metadata(mask, result)
         return IO.NodeOutput(result)
 
     mask_to_image = execute  # TODO: remove
@@ -391,6 +400,29 @@ class GrowMask(IO.ComfyNode):
     expand_mask = execute  # TODO: remove
 
 class ClipVisionToMask(IO.ComfyNode):
+    @staticmethod
+    def _output_value(clip_vision_output, key, default=None):
+        if isinstance(clip_vision_output, dict):
+            return clip_vision_output.get(key, default)
+        return getattr(clip_vision_output, key, default)
+
+    @classmethod
+    def _validate_source_restore_inputs(cls, clip_vision_output, mask, source_image_sizes):
+        if cls._output_value(clip_vision_output, "clip_vision_model_type") != "birefnet":
+            raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
+        if not isinstance(mask, torch.Tensor) or mask.ndim != 4 or mask.shape[1] != 1:
+            raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
+        if len(source_image_sizes) != mask.shape[0]:
+            raise ValueError("ClipVisionToMask source_image_sizes length must equal batch size")
+
+    @staticmethod
+    def _copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask):
+        mask.source_image_sizes = [tuple(size) for size in source_image_sizes]
+        mask.source_restore_crop_mode = crop_mode
+        if preprocess_image_sizes is not None:
+            mask.preprocess_image_sizes = [tuple(size) for size in preprocess_image_sizes]
+        return mask
+
     @classmethod
     def define_schema(cls):
         return IO.Schema(
@@ -407,13 +439,24 @@ class ClipVisionToMask(IO.ComfyNode):
             source_image_sizes = None
         else:
             mask = clip_vision_output["last_hidden_state"]
-            source_image_sizes = getattr(clip_vision_output, "source_image_sizes", None)
+            source_image_sizes = cls._output_value(clip_vision_output, "source_image_sizes")
+        if source_image_sizes is not None:
+            cls._validate_source_restore_inputs(clip_vision_output, mask, source_image_sizes)
         mask = mask.sigmoid()
         if mask.ndim == 3:
             mask = mask.unsqueeze(0)
         if mask.shape[1] != 1:
             mask = mask.movedim(-1, 1)
         if source_image_sizes is not None:
+            crop_mode = cls._output_value(clip_vision_output, "source_restore_crop_mode", "center")
+            preprocess_image_sizes = cls._output_value(clip_vision_output, "preprocess_image_sizes")
+            if crop_mode == "center":
+                mask = cls._copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask)
+                return IO.NodeOutput(mask)
+            unique_source_sizes = {tuple(size) for size in source_image_sizes}
+            if len(unique_source_sizes) > 1:
+                mask = cls._copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask)
+                return IO.NodeOutput(mask)
             resized = []
             for index, target_size in enumerate(source_image_sizes):
                 source_height, source_width = target_size
@@ -422,6 +465,7 @@ class ClipVisionToMask(IO.ComfyNode):
                     sample = comfy.utils.common_upscale(sample, source_width, source_height, "bilinear", "disabled")
                 resized.append(sample)
             mask = torch.cat(resized, dim=0)
+            mask = cls._copy_source_restore_metadata(source_image_sizes, crop_mode, preprocess_image_sizes, mask)
         return IO.NodeOutput(mask)
 
     clip_vision_to_mask = execute

@@ -146,6 +146,22 @@ class ImageFromBatch(IO.ComfyNode):
         batch_index = min(s_in.shape[0] - 1, batch_index)
         length = min(s_in.shape[0] - batch_index, length)
         s = s_in[batch_index:batch_index + length].clone()
+        source_image_sizes = getattr(s_in, "source_image_sizes", None)
+        crop_mode = getattr(s_in, "source_restore_crop_mode", None)
+        preprocess_image_sizes = getattr(s_in, "preprocess_image_sizes", None)
+        if source_image_sizes is not None:
+            selected_source_sizes = [tuple(size) for size in source_image_sizes[batch_index:batch_index + length]]
+            if crop_mode == "none":
+                unique_source_sizes = {tuple(size) for size in selected_source_sizes}
+                if len(unique_source_sizes) == 1:
+                    source_height, source_width = selected_source_sizes[0]
+                    if s.shape[1] != source_height or s.shape[2] != source_width:
+                        s = comfy.utils.common_upscale(s.movedim(-1, 1), source_width, source_height, "bilinear", "disabled").movedim(1, -1)
+            s.source_image_sizes = selected_source_sizes
+            if crop_mode is not None:
+                s.source_restore_crop_mode = crop_mode
+            if preprocess_image_sizes is not None:
+                s.preprocess_image_sizes = [tuple(size) for size in preprocess_image_sizes[batch_index:batch_index + length]]
         return IO.NodeOutput(s)
 
     frombatch = execute  # TODO: remove
