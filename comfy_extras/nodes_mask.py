@@ -407,7 +407,7 @@ class ClipVisionToMask(IO.ComfyNode):
             source_image_sizes = None
         else:
             mask = clip_vision_output["last_hidden_state"]
-            source_image_sizes = clip_vision_output.get("source_image_sizes")
+            source_image_sizes = getattr(clip_vision_output, "source_image_sizes", None)
         mask = mask.sigmoid()
         if mask.ndim == 3:
             mask = mask.unsqueeze(0)
