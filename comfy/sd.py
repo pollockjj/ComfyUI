@@ -439,7 +439,8 @@ class CLIP:
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
-        if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
+        is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
+        if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
             if metadata is None or metadata.get("keep_diffusers_format") != "true":
                 sd = diffusers_convert.convert_vae_state_dict(sd)
 
@@ -512,8 +513,11 @@ class VAE:
                 self.latent_channels = 16
             elif "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd: # seedvr2
                 self.first_stage_model = comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper()
-                self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[2] * shape[3] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
-                self.memory_used_encode = lambda shape, dtype: (max(shape[1], 5) * shape[2] * shape[3]) * model_management.dtype_size(dtype)
+                self.latent_channels = 16
+                self.latent_dim = 3
+                self.disable_offload = True
+                self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
+                self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
                 self.working_dtypes = [torch.bfloat16, torch.float32]
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
                 self.downscale_index_formula = (4, 8, 8)
@@ -1081,6 +1085,8 @@ class VAE:
                 else:
                     pixels_in = pixels_in.to(self.device)
                     out = self.first_stage_model.encode(pixels_in)
+                if isinstance(out, tuple):
+                    out = out[0]
                 out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
                 if samples is None:
                     samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())

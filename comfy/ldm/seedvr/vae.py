@@ -2236,8 +2236,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             self.img_dims = orig_dims
         if x.ndim == 4:
             x = x.unsqueeze(2)
-        x = x.to(next(self.parameters()).dtype)
-        x = x.to(next(self.parameters()).device)
+        x = x.to(dtype=next(self.parameters()).dtype)
+        self.device = x.device
         p = super().encode(x)
         z = p.squeeze(2)
         return z, p
@@ -2252,6 +2252,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if latent.ndim == 4:
             latent = latent.unsqueeze(2)
 
+        self.device = latent.device
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:

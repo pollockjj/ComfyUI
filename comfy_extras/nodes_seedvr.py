@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
 from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
-from comfy.ldm.seedvr.vae import tiled_vae
+
 
 def clear_vae_memory(vae_model):
     for module in vae_model.modules():
@@ -166,8 +166,8 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
         images = images.reshape(b, t, c, new_h, new_w)
         images = cut_videos(images)
-
-        images = rearrange(images, "b t c h w -> b c t h w")
+        images_bcthw = rearrange(images, "b t c h w -> b c t h w")
+        images_bthwc = rearrange(images, "b t c h w -> b t h w c")
 
         # in case users a non-compatiable number for tiling
         def make_divisible(val, divisor):
@@ -182,9 +182,19 @@ class SeedVR2InputProcessing(io.ComfyNode):
         args = {"tile_size": (spatial_tile_size, spatial_tile_size), "tile_overlap": (spatial_overlap, spatial_overlap),
                 "temporal_size":temporal_tile_size}
         if enable_tiling:
-            latent = tiled_vae(images, vae_model, encode=True, **args)
+            vae_model.img_dims = [o_h, o_w]
+            vae_model.original_image_video = images_bcthw
+            latent = vae.encode_tiled(
+                images_bthwc,
+                tile_x=spatial_tile_size,
+                tile_y=spatial_tile_size,
+                overlap=spatial_overlap,
+                tile_t=temporal_tile_size,
+            )
         else:
-            latent = vae_model.encode(images, orig_dims = [o_h, o_w])[0]
+            vae_model.img_dims = [o_h, o_w]
+            vae_model.original_image_video = images_bcthw
+            latent = vae.encode(images_bthwc)
 
         clear_vae_memory(vae_model)
         #images = images.to(offload_device)
@@ -193,7 +203,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         vae_model.img_dims = [o_h, o_w]
         args["enable_tiling"] = enable_tiling
         vae_model.tiled_args = args
-        vae_model.original_image_video = images
+        vae_model.original_image_video = images_bcthw
 
         latent = latent.unsqueeze(2) if latent.ndim == 4 else latent
         latent = rearrange(latent, "b c ... -> b ... c")

@@ -490,6 +490,17 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
         return dit_config
 
+    elif "{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix) in state_dict_keys and state_dict["{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix)].shape[1] == 3072: # seedvr2 7b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 3072
+        dit_config["heads"] = 24
+        dit_config["num_layers"] = 36
+        dit_config["norm_eps"] = 1e-5
+        dit_config["qk_rope"] = None
+        dit_config["rope_type"] = None
+        dit_config["mlp_type"] = "normal"
+        return dit_config
     elif "{}blocks.36.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 7b
         dit_config = {}
         dit_config["image_model"] = "seedvr2"
