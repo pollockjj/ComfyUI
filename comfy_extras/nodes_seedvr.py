@@ -2,8 +2,6 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import torch
 import math
-import os
-import time
 from einops import rearrange
 
 import gc
@@ -15,10 +13,6 @@ from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
 from comfy.ldm.seedvr.vae import tiled_vae
 
-
-def issue130_trace(message):
-    if os.environ.get("ISSUE130_SEEDVR2_TRACE") == "1":
-        print(f"ISSUE130_TRACE {time.monotonic():.6f} nodes_seedvr {message}", flush=True)
 
 def clear_vae_memory(vae_model):
     for module in vae_model.modules():
@@ -150,15 +144,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
     @classmethod
     def execute(cls, images, vae, resolution, spatial_tile_size, spatial_overlap, temporal_tile_size, enable_tiling):
 
-        issue130_trace(
-            "SeedVR2InputProcessing.start "
-            f"images_shape={tuple(images.shape)} resolution={resolution} "
-            f"spatial_tile_size={spatial_tile_size} spatial_overlap={spatial_overlap} "
-            f"temporal_tile_size={temporal_tile_size} enable_tiling={enable_tiling}"
-        )
-        start_time = time.monotonic()
         comfy.model_management.load_models_gpu([vae.patcher])
-        issue130_trace("SeedVR2InputProcessing.after_load_models_gpu")
         vae_model = vae.first_stage_model
         scale = 0.9152
         shift = 0
@@ -197,10 +183,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
         args = {"tile_size": (spatial_tile_size, spatial_tile_size), "tile_overlap": (spatial_overlap, spatial_overlap),
                 "temporal_size":temporal_tile_size}
         if enable_tiling:
-            issue130_trace(
-                "SeedVR2InputProcessing.before_tiled_encode "
-                f"images_shape={tuple(images_bthwc.shape)} args={args}"
-            )
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = images_bcthw
             latent = vae.encode_tiled(
@@ -211,20 +193,11 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 tile_t=temporal_tile_size,
             )
         else:
-            issue130_trace(
-                "SeedVR2InputProcessing.before_direct_encode "
-                f"images_shape={tuple(images_bthwc.shape)} orig_dims={[o_h, o_w]}"
-            )
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = images_bcthw
             latent = vae.encode(images_bthwc)
-        issue130_trace(
-            "SeedVR2InputProcessing.after_encode "
-            f"latent_shape={tuple(latent.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
 
         clear_vae_memory(vae_model)
-        issue130_trace("SeedVR2InputProcessing.after_clear_vae_memory")
         #images = images.to(offload_device)
         #vae_model = vae_model.to(offload_device)
 
@@ -238,10 +211,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
         latent = (latent - shift) * scale
 
-        issue130_trace(
-            "SeedVR2InputProcessing.end "
-            f"output_shape={tuple(latent.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return io.NodeOutput({"samples": latent})
 
 class SeedVR2Conditioning(io.ComfyNode):
@@ -263,12 +232,7 @@ class SeedVR2Conditioning(io.ComfyNode):
     @classmethod
     def execute(cls, vae_conditioning, model, latent_noise_scale) -> io.NodeOutput:
 
-        start_time = time.monotonic()
         vae_conditioning = vae_conditioning["samples"]
-        issue130_trace(
-            "SeedVR2Conditioning.start "
-            f"vae_conditioning_shape={tuple(vae_conditioning.shape)} latent_noise_scale={latent_noise_scale}"
-        )
         device = vae_conditioning.device
         model = model.model.diffusion_model
         pos_cond = model.positive_conditioning
@@ -307,10 +271,6 @@ class SeedVR2Conditioning(io.ComfyNode):
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        issue130_trace(
-            "SeedVR2Conditioning.end "
-            f"latent_shape={tuple(noises.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return io.NodeOutput(positive, negative, {"samples": noises})
 
 class SeedVRExtension(ComfyExtension):

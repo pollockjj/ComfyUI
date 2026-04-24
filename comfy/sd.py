@@ -26,14 +26,8 @@ import comfy.weight_adapter
 import yaml
 import math
 import os
-import time
 
 import comfy.utils
-
-
-def issue130_trace(message):
-    if os.environ.get("ISSUE130_SEEDVR2_TRACE") == "1":
-        print(f"ISSUE130_TRACE {time.monotonic():.6f} sd {message}", flush=True)
 
 from . import clip_vision
 from . import gligen
@@ -986,24 +980,16 @@ class VAE:
 
     def decode(self, samples_in, vae_options={}):
         self.throw_exception_if_invalid()
-        trace_start = time.monotonic()
-        issue130_trace(
-            "VAE.decode.start "
-            f"samples_shape={tuple(samples_in.shape)} samples_device={samples_in.device} "
-            f"samples_dtype={samples_in.dtype} vae_dtype={self.vae_dtype}"
-        )
         pixel_samples = None
         do_tile = False
         if self.latent_dim == 2 and samples_in.ndim == 5:
             samples_in = samples_in[:, :, 0]
         try:
             memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-            issue130_trace(f"VAE.decode.memory_required={memory_used}")
             model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
             free_memory = self.patcher.get_free_memory(self.device)
             batch_number = int(free_memory / memory_used)
             batch_number = max(1, batch_number)
-            issue130_trace(f"VAE.decode.batch_number={batch_number} free_memory={free_memory}")
 
             # Pre-allocate output for VAEs that support direct buffer writes
             preallocated = False
@@ -1012,7 +998,6 @@ class VAE:
                 preallocated = True
 
             for x in range(0, samples_in.shape[0], batch_number):
-                issue130_trace(f"VAE.decode.batch_start start={x} stop={x + batch_number}")
                 samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
                 if preallocated:
                     self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
@@ -1023,7 +1008,6 @@ class VAE:
                     pixel_samples[x:x+batch_number].copy_(out)
                     del out
                 self.process_output(pixel_samples[x:x+batch_number])
-                issue130_trace(f"VAE.decode.batch_end start={x} elapsed={time.monotonic() - trace_start:.3f}")
         except Exception as e:
             model_management.raise_non_oom(e)
             logging.warning("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
@@ -1034,7 +1018,6 @@ class VAE:
             do_tile = True
 
         if do_tile:
-            issue130_trace("VAE.decode.tiled_fallback_start")
             comfy.model_management.soft_empty_cache()
             dims = samples_in.ndim - 2
             if dims == 1 or self.extra_1d_channel is not None:
@@ -1045,23 +1028,12 @@ class VAE:
                 tile = 256 // self.spacial_compression_decode()
                 overlap = tile // 4
                 pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
-            issue130_trace(f"VAE.decode.tiled_fallback_end elapsed={time.monotonic() - trace_start:.3f}")
 
         pixel_samples = pixel_samples.to(self.output_device).movedim(1,-1)
-        issue130_trace(
-            "VAE.decode.end "
-            f"pixel_shape={tuple(pixel_samples.shape)} elapsed={time.monotonic() - trace_start:.3f}"
-        )
         return pixel_samples
 
     def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
-        trace_start = time.monotonic()
-        issue130_trace(
-            "VAE.decode_tiled.start "
-            f"samples_shape={tuple(samples.shape)} tile_x={tile_x} tile_y={tile_y} "
-            f"overlap={overlap} tile_t={tile_t} overlap_t={overlap_t}"
-        )
         memory_used = self.memory_used_decode(samples.shape, self.vae_dtype) #TODO: calculate mem required for tile
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
         dims = samples.ndim - 2
@@ -1087,20 +1059,10 @@ class VAE:
                 args["tile_t"] = max(2, tile_t)
 
             output = self.decode_tiled_3d(samples, **args)
-        issue130_trace(
-            "VAE.decode_tiled.end "
-            f"output_shape={tuple(output.shape)} elapsed={time.monotonic() - trace_start:.3f}"
-        )
         return output.movedim(1, -1)
 
     def encode(self, pixel_samples):
         self.throw_exception_if_invalid()
-        trace_start = time.monotonic()
-        issue130_trace(
-            "VAE.encode.start "
-            f"pixel_shape={tuple(pixel_samples.shape)} pixel_device={pixel_samples.device} "
-            f"pixel_dtype={pixel_samples.dtype} latent_dim={self.latent_dim}"
-        )
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         pixel_samples = pixel_samples.movedim(-1, 1)
         do_tile = False
@@ -1111,15 +1073,12 @@ class VAE:
                 pixel_samples = pixel_samples.unsqueeze(2)
         try:
             memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-            issue130_trace(f"VAE.encode.memory_required={memory_used}")
             model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
             free_memory = self.patcher.get_free_memory(self.device)
             batch_number = int(free_memory / max(1, memory_used))
             batch_number = max(1, batch_number)
-            issue130_trace(f"VAE.encode.batch_number={batch_number} free_memory={free_memory}")
             samples = None
             for x in range(0, pixel_samples.shape[0], batch_number):
-                issue130_trace(f"VAE.encode.batch_start start={x} stop={x + batch_number}")
                 pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
                 if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
                     out = self.first_stage_model.encode(pixels_in, device=self.device)
@@ -1132,7 +1091,6 @@ class VAE:
                 if samples is None:
                     samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
                 samples[x:x + batch_number] = out
-                issue130_trace(f"VAE.encode.batch_end start={x} elapsed={time.monotonic() - trace_start:.3f}")
 
         except Exception as e:
             model_management.raise_non_oom(e)
@@ -1144,7 +1102,6 @@ class VAE:
             do_tile = True
 
         if do_tile:
-            issue130_trace("VAE.encode.tiled_fallback_start")
             comfy.model_management.soft_empty_cache()
             if self.latent_dim == 3:
                 tile = 256
@@ -1154,12 +1111,7 @@ class VAE:
                 samples = self.encode_tiled_1d(pixel_samples)
             else:
                 samples = self.encode_tiled_(pixel_samples)
-            issue130_trace(f"VAE.encode.tiled_fallback_end elapsed={time.monotonic() - trace_start:.3f}")
 
-        issue130_trace(
-            "VAE.encode.end "
-            f"samples_shape={tuple(samples.shape)} elapsed={time.monotonic() - trace_start:.3f}"
-        )
         return samples
 
     def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
