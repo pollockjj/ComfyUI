@@ -1,8 +1,6 @@
 from contextlib import nullcontext
 from typing import Literal, Optional, Tuple
 import gc
-import os
-import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,11 +19,6 @@ from comfy.ops import NVIDIA_MEMORY_CONV_BUG_WORKAROUND
 import logging
 import comfy.ops
 ops = comfy.ops.disable_weight_init
-
-
-def issue130_trace(message):
-    if os.environ.get("ISSUE130_SEEDVR2_TRACE") == "1":
-        print(f"ISSUE130_TRACE {time.monotonic():.6f} seedvr_vae {message}", flush=True)
 
 
 @torch.inference_mode()
@@ -2127,41 +2120,23 @@ class VideoAutoencoderKL(nn.Module):
     def _encode(
         self, x, memory_state = MemoryState.DISABLED
     ) -> torch.Tensor:
-        issue130_trace(
-            "VideoAutoencoderKL._encode.start "
-            f"x_shape={tuple(x.shape)} x_device={x.device} target_device={self.device} memory_state={memory_state}"
-        )
-        start_time = time.monotonic()
         _x = x.to(self.device)
         h = self.encoder(_x, memory_state=memory_state)
         if self.quant_conv is not None:
             output = self.quant_conv(h, memory_state=memory_state)
         else:
             output = h
-        issue130_trace(
-            "VideoAutoencoderKL._encode.end "
-            f"output_shape={tuple(output.shape)} output_device={output.device} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return output.to(x.device)
 
     def _decode(
         self, z, memory_state = MemoryState.DISABLED
     ) -> torch.Tensor:
-        issue130_trace(
-            "VideoAutoencoderKL._decode.start "
-            f"z_shape={tuple(z.shape)} z_device={z.device} target_device={self.device} memory_state={memory_state}"
-        )
-        start_time = time.monotonic()
         _z = z.to(self.device)
 
         if self.post_quant_conv is not None:
             _z = self.post_quant_conv(_z, memory_state=memory_state)
 
         output = self.decoder(_z, memory_state=memory_state)
-        issue130_trace(
-            "VideoAutoencoderKL._decode.end "
-            f"output_shape={tuple(output.shape)} output_device={output.device} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return output.to(z.device)
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -2255,42 +2230,19 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return x, z, p
 
     def encode(self, x, orig_dims=None):
-        start_time = time.monotonic()
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.encode.start "
-            f"x_shape={tuple(x.shape)} x_device={x.device} x_dtype={x.dtype} orig_dims={orig_dims}"
-        )
         # we need to keep a reference to the image/video so we later can do a colour fix later
         #self.original_image_video = x
         if orig_dims is not None:
             self.img_dims = orig_dims
         if x.ndim == 4:
             x = x.unsqueeze(2)
-            issue130_trace(f"VideoAutoencoderKLWrapper.encode.after_unsqueeze x_shape={tuple(x.shape)}")
         x = x.to(dtype=next(self.parameters()).dtype)
         self.device = x.device
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.encode.before_super "
-            f"x_shape={tuple(x.shape)} x_device={x.device} x_dtype={x.dtype}"
-        )
         p = super().encode(x)
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.encode.after_super "
-            f"latent_dist_shape={tuple(p.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
         z = p.squeeze(2)
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.encode.end "
-            f"z_shape={tuple(z.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return z, p
 
     def decode(self, z):
-        start_time = time.monotonic()
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.decode.start "
-            f"z_shape={tuple(z.shape)} z_device={z.device} z_dtype={z.dtype}"
-        )
         b, tc, h, w = z.shape
         latent = z.view(b, 16, -1, h, w)
         scale = 0.9152
@@ -2304,21 +2256,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            issue130_trace(
-                "VideoAutoencoderKLWrapper.decode.before_tiled_decode "
-                f"latent_shape={tuple(latent.shape)} tiled_args={self.tiled_args}"
-            )
             x = tiled_vae(latent, self, **self.tiled_args, encode=False).squeeze(2)
         else:
-            issue130_trace(
-                "VideoAutoencoderKLWrapper.decode.before_super_decode "
-                f"latent_shape={tuple(latent.shape)}"
-            )
             x = super().decode_(latent).squeeze(2)
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.decode.after_model_decode "
-            f"x_shape={tuple(x.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
 
         input = rearrange(self.original_image_video, "b c t h w -> (b t) c h w")
         if x.ndim == 4:
@@ -2342,10 +2282,6 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         x = x[..., :o_h, :o_w]
         input = input[..., :o_h, :o_w ]
         x = lab_color_transfer(x, input)
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.decode.after_lab_color_transfer "
-            f"x_shape={tuple(x.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
 
         x = x.unsqueeze(0)
         x = rearrange(x, "b t c h w -> b c t h w")
@@ -2356,10 +2292,6 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         h2 = h - (h % 2)
         x = x[..., :h2, :w2]
 
-        issue130_trace(
-            "VideoAutoencoderKLWrapper.decode.end "
-            f"x_shape={tuple(x.shape)} elapsed={time.monotonic() - start_time:.3f}"
-        )
         return x
 
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
