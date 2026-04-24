@@ -1,3 +1,4 @@
+import importlib
 import sys
 import pytest
 import torch
@@ -7,23 +8,22 @@ mock_nodes = MagicMock()
 mock_nodes.MAX_RESOLUTION = 16384
 mock_server = MagicMock()
 
-_original_nodes = sys.modules.get("nodes")
-_original_server = sys.modules.get("server")
-sys.modules["nodes"] = mock_nodes
-sys.modules["server"] = mock_server
-try:
-    import comfy_extras.nodes_mask as nodes_mask
-    import comfy_extras.nodes_images as nodes_images
-    import comfy_extras.nodes_post_processing as nodes_post_processing
-finally:
-    if _original_nodes is None:
-        sys.modules.pop("nodes", None)
-    else:
-        sys.modules["nodes"] = _original_nodes
-    if _original_server is None:
-        sys.modules.pop("server", None)
-    else:
-        sys.modules["server"] = _original_server
+
+def _import_test_modules():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setitem(sys.modules, "nodes", mock_nodes)
+    monkeypatch.setitem(sys.modules, "server", mock_server)
+    try:
+        return (
+            importlib.import_module("comfy_extras.nodes_mask"),
+            importlib.import_module("comfy_extras.nodes_images"),
+            importlib.import_module("comfy_extras.nodes_post_processing"),
+        )
+    finally:
+        monkeypatch.undo()
+
+
+nodes_mask, nodes_images, nodes_post_processing = _import_test_modules()
 
 ClipVisionToMask = nodes_mask.ClipVisionToMask
 MaskToImage = nodes_mask.MaskToImage
@@ -47,7 +47,7 @@ class TestClipVisionToMaskContract:
             clip_vision_model_type="clip_vision_model",
         )
 
-        with pytest.raises(ValueError, match="ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor"):
+        with pytest.raises(ValueError, match="ClipVisionToMask source restore requires a BiRefNet clip vision output"):
             ClipVisionToMask.execute(clip_vision_output)
 
     def test_source_size_length_mismatch_raises(self):
@@ -211,3 +211,18 @@ class TestBatchImagesSourceRestoreMetadata:
 
         assert result.shape == (1, 2, 3, 3)
         assert common_upscale.call_count == 1
+
+    def test_batch_images_backfills_missing_source_samples_before_late_metadata(self):
+        first = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        first.source_image_sizes = [(4, 4)]
+        second = torch.ones((1, 4, 4, 3), dtype=torch.float32)
+        second.source_image_sizes = [(6, 5)]
+        second.source_image_samples = [torch.ones((1, 6, 5, 3), dtype=torch.float32)]
+
+        batched = batch_images([first, second])
+
+        assert batched is not None
+        assert batched.source_image_sizes == [(4, 4), (6, 5)]
+        assert len(batched.source_image_samples) == 2
+        assert batched.source_image_samples[0].shape == (1, 4, 4, 3)
+        assert batched.source_image_samples[1].shape == (1, 6, 5, 3)

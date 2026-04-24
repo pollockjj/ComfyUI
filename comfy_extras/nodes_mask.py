@@ -409,7 +409,7 @@ class ClipVisionToMask(IO.ComfyNode):
     @classmethod
     def _validate_source_restore_inputs(cls, clip_vision_output, mask, source_image_sizes):
         if cls._output_value(clip_vision_output, "clip_vision_model_type") != "birefnet":
-            raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
+            raise ValueError("ClipVisionToMask source restore requires a BiRefNet clip vision output")
         if not isinstance(mask, torch.Tensor) or mask.ndim != 4 or mask.shape[1] != 1:
             raise ValueError("ClipVisionToMask expects a 4D single-channel BiRefNet mask tensor")
         if len(source_image_sizes) != mask.shape[0]:

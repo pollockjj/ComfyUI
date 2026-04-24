@@ -517,6 +517,7 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
     preserve_source_restore_crop_mode = True
     preserve_source_samples = len({tuple(image.shape[1:3]) for image in images}) > 1
     source_image_samples: list[torch.Tensor] | None = [] if preserve_source_samples else None
+    fallback_source_image_samples: list[torch.Tensor] = []
     # first, get the max channels count
     max_channels = max(image.shape[-1] for image in images)
     # then, pad all images to have the same channels count
@@ -545,13 +546,15 @@ def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
             source_restore_crop_mode = None
         image_source_samples = getattr(image, "source_image_samples", None)
         has_valid_source_samples = image_source_samples is not None and len(image_source_samples) == image.shape[0]
+        image_fallback_source_samples = [image[index:index + 1] for index in range(image.shape[0])]
         if has_valid_source_samples and source_image_samples is None:
-            source_image_samples = []
+            source_image_samples = list(fallback_source_image_samples)
         if source_image_samples is not None:
             if has_valid_source_samples:
                 source_image_samples.extend(image_source_samples)
             else:
-                source_image_samples.extend([image[index:index + 1] for index in range(image.shape[0])])
+                source_image_samples.extend(image_fallback_source_samples)
+        fallback_source_image_samples.extend(image_fallback_source_samples)
         if image.shape[-1] < max_channels:
             padded_images.append(torch.nn.functional.pad(image, (0, max_channels - image.shape[-1]), mode='constant', value=1.0))
         else:
