@@ -5,11 +5,13 @@ swap arguments at runtime; this test fails loudly on any future drift.
 The schema input attribute is `.id` (verified live via Python introspection
 on the upstream class -- there is no `.name`).
 
-`comfy.model_management` is stubbed via `patch.dict(sys.modules, ...)` so
-test collection does not transitively trigger `torch.cuda.is_available()`
-or any other GPU/server-side initialization at module-import time. Live
-introspection confirmed only `comfy.model_management` is pulled in
-transitively by `comfy_extras.nodes_seedvr` (not `nodes`, not `server`).
+`comfy.model_management` is stubbed via `patch.dict(sys.modules, ...)` for
+the import performed inside this test, so importing
+`comfy_extras.nodes_seedvr` here does not call
+`torch.cuda.is_available()` or trigger other GPU/server-side
+initialization through that dependency. Live introspection indicated that
+`comfy_extras.nodes_seedvr` pulls in `comfy.model_management`
+transitively here (not `nodes`, not `server`).
 
 `comfy_extras.nodes_seedvr` is unconditionally evicted from `sys.modules`
 in a `finally` block, and the mocked `model_management` attribute is
@@ -32,7 +34,7 @@ def test_seedvr_node_signature_matches_schema():
             schema_ids = [i.id for i in nodes_seedvr.SeedVR2InputProcessing.define_schema().inputs]
             exec_params = [
                 p
-                for p in inspect.signature(nodes_seedvr.SeedVR2InputProcessing.execute).parameters
+                for p in inspect.signature(nodes_seedvr.SeedVR2InputProcessing.execute).parameters.keys()
                 if p != "cls"
             ]
             assert schema_ids == exec_params, (
