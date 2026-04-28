@@ -13,18 +13,20 @@ initialization through that dependency. Live introspection indicated that
 `comfy_extras.nodes_seedvr` pulls in `comfy.model_management`
 transitively here (not `nodes`, not `server`).
 
-`comfy_extras.nodes_seedvr` is unconditionally evicted from `sys.modules`
-in a `finally` block. The `nodes_seedvr` attribute on the `comfy_extras`
-package object and the `model_management` attribute on the `comfy`
-package object are restored to their pre-test values via a sentinel:
-the original value is captured before the `patch.dict` block, and in
-`finally` the attribute is set back to the original if it had been set,
-or deleted if it had not. This prevents the test from clobbering a
-real `comfy.model_management` (or `comfy_extras.nodes_seedvr`)
-attribute that another test may have legitimately imported earlier in
-the same pytest process, while still preventing the test's mock from
-leaking into later tests that import the real
-`comfy_extras.nodes_seedvr`."""
+The test snapshots three pieces of import state before patching and
+restores all three in `finally` via a sentinel:
+
+1. `sys.modules["comfy_extras.nodes_seedvr"]`
+2. `comfy.model_management` package attribute on the `comfy` package
+3. `comfy_extras.nodes_seedvr` attribute on the `comfy_extras` package
+
+If any of the three was set before the test, it is restored verbatim;
+if it was unset, it is deleted on exit. This prevents the test from
+clobbering a real `comfy.model_management` (or
+`comfy_extras.nodes_seedvr`) module that another test may have
+legitimately imported earlier in the same pytest process, while still
+preventing the test's mock from leaking into later tests that import
+the real `comfy_extras.nodes_seedvr`."""
 
 import importlib
 import inspect
@@ -48,6 +50,7 @@ def test_seedvr_node_signature_matches_schema():
         if comfy_extras_module_pre is not None
         else sentinel
     )
+    prior_comfy_extras_seedvr_module = sys.modules.get("comfy_extras.nodes_seedvr", sentinel)
 
     with patch.dict(sys.modules, {"comfy.model_management": mock_model_management}):
         sys.modules.pop("comfy_extras.nodes_seedvr", None)
@@ -64,7 +67,10 @@ def test_seedvr_node_signature_matches_schema():
                 f"parameter order: schema_ids={schema_ids}, exec_params={exec_params}"
             )
         finally:
-            sys.modules.pop("comfy_extras.nodes_seedvr", None)
+            if prior_comfy_extras_seedvr_module is sentinel:
+                sys.modules.pop("comfy_extras.nodes_seedvr", None)
+            else:
+                sys.modules["comfy_extras.nodes_seedvr"] = prior_comfy_extras_seedvr_module
             comfy_extras_module = sys.modules.get("comfy_extras")
             if comfy_extras_module is not None:
                 if prior_comfy_extras_seedvr_attr is sentinel:
