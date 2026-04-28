@@ -4,7 +4,7 @@ across the wrapper's slicing, scaling, and concatenation logic. Drift between
 the wrapper and the delegate would silently corrupt SeedVR2's RoPE; this test
 fails loudly on any future drift.
 
-Each parametrized case both:
+Each parametrized case does both:
 
 1. Patches ``comfy.ldm.seedvr.model.apply_rope1`` with a ``wraps``-style spy
    and asserts ``spy.call_count >= 1`` so a future change that inlines the
