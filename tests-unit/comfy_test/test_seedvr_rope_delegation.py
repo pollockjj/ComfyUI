@@ -19,13 +19,16 @@ The test uses a local ``torch.Generator`` so global RNG state is not mutated.
 Parametrization covers non-default ``start_index`` and ``scale`` and a case
 where ``freqs.shape[0] > t.shape[seq_dim]`` so the wrapper's
 ``slice_at_dim(freqs, slice(-seq_len, None), dim=0)`` path is exercised.
-Imports are taken at module level; heavy-import stubbing of
-``comfy.model_management`` was attempted but is insufficient on the live
+Imports are taken at module level. Heavy-import stubbing of
+``comfy.model_management`` was attempted but is insufficient on this live
 import chain (``comfy.ldm.seedvr.model`` pulls
 ``comfy.ldm.modules.diffusionmodules.model -> comfy.ops ->
 comfy.memory_management -> comfy.quant_ops -> comfy_kitchen.tensor ->
-torch._dynamo``), so running the test against the real modules is the
-fail-loud-from-real-state approach this repo's tests follow.
+torch._dynamo``), so this test intentionally runs against the real modules
+to fail loudly if that import path or runtime state drifts. Other tests in
+this repo (e.g. ``tests-unit/comfy_extras_test/image_stitch_test.py``) do
+stub via ``patch.dict(sys.modules, ...)`` for narrower targets; the choice
+here is local to this regression and not a repo-wide convention.
 
 Test design rationale and per-decision review trail are recorded on the
 tracking issue: https://github.com/pollockjj/mydevelopment/issues/120
