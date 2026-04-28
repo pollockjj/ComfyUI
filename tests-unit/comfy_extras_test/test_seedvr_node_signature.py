@@ -14,9 +14,13 @@ initialization through that dependency. Live introspection indicated that
 transitively here (not `nodes`, not `server`).
 
 `comfy_extras.nodes_seedvr` is unconditionally evicted from `sys.modules`
-in a `finally` block, and the mocked `model_management` attribute is
-removed from the `comfy` package object if it points at the test's mock,
-so the stub does not leak into later tests that may import the real
+in a `finally` block, and the `nodes_seedvr` attribute is also unconditionally
+removed from the `comfy_extras` package object so a later
+`from comfy_extras import nodes_seedvr` cannot resolve via the stale
+parent-package attribute. The mocked `model_management` attribute is
+also removed from the `comfy` package object if it points at the test's
+mock. Together these clean both halves of the cached-import path so the
+stub does not leak into later tests that may import the real
 `comfy_extras.nodes_seedvr`."""
 
 import importlib
@@ -43,6 +47,9 @@ def test_seedvr_node_signature_matches_schema():
             )
         finally:
             sys.modules.pop("comfy_extras.nodes_seedvr", None)
+            comfy_extras_module = sys.modules.get("comfy_extras")
+            if comfy_extras_module is not None and hasattr(comfy_extras_module, "nodes_seedvr"):
+                delattr(comfy_extras_module, "nodes_seedvr")
             comfy_module = sys.modules.get("comfy")
             if comfy_module is not None and getattr(comfy_module, "model_management", None) is mock_model_management:
                 delattr(comfy_module, "model_management")
