@@ -36,9 +36,21 @@ from unittest.mock import patch
 import pytest
 import torch
 
-import comfy.ldm.seedvr.model as seedvr_model
-from comfy.ldm.flux.math import apply_rope1
-from comfy.ldm.seedvr.model import apply_rotary_emb
+# CPU-only CI fix: ``comfy.ldm.seedvr.model`` transitively imports
+# ``comfy.model_management``, whose import-time ``get_torch_device()`` call
+# probes ``torch.cuda.current_device()`` unless ``comfy.cli_args.args.cpu`` is
+# set. On a CPU-only build that probe can raise during test collection before
+# the ``cuda`` case has had a chance to be skipped. Match the pattern used by
+# ``tests-unit/comfy_quant/test_mixed_precision.py``: flip ``args.cpu`` before
+# importing any ``comfy.ldm.*`` symbol.
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
+import comfy.ldm.seedvr.model as seedvr_model  # noqa: E402
+from comfy.ldm.flux.math import apply_rope1  # noqa: E402
+from comfy.ldm.seedvr.model import apply_rotary_emb  # noqa: E402
 
 
 def _direct_reproduction(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
