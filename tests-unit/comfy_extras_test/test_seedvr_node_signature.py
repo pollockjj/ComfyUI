@@ -14,13 +14,16 @@ initialization through that dependency. Live introspection indicated that
 transitively here (not `nodes`, not `server`).
 
 `comfy_extras.nodes_seedvr` is unconditionally evicted from `sys.modules`
-in a `finally` block, and the `nodes_seedvr` attribute is also unconditionally
-removed from the `comfy_extras` package object so a later
-`from comfy_extras import nodes_seedvr` cannot resolve via the stale
-parent-package attribute. The mocked `model_management` attribute is
-also removed from the `comfy` package object if it points at the test's
-mock. Together these clean both halves of the cached-import path so the
-stub does not leak into later tests that may import the real
+in a `finally` block. The `nodes_seedvr` attribute on the `comfy_extras`
+package object and the `model_management` attribute on the `comfy`
+package object are restored to their pre-test values via a sentinel:
+the original value is captured before the `patch.dict` block, and in
+`finally` the attribute is set back to the original if it had been set,
+or deleted if it had not. This prevents the test from clobbering a
+real `comfy.model_management` (or `comfy_extras.nodes_seedvr`)
+attribute that another test may have legitimately imported earlier in
+the same pytest process, while still preventing the test's mock from
+leaking into later tests that import the real
 `comfy_extras.nodes_seedvr`."""
 
 import importlib
@@ -31,6 +34,21 @@ from unittest.mock import MagicMock, patch
 
 def test_seedvr_node_signature_matches_schema():
     mock_model_management = MagicMock()
+    sentinel = object()
+
+    comfy_module_pre = sys.modules.get("comfy")
+    comfy_extras_module_pre = sys.modules.get("comfy_extras")
+    prior_comfy_mm_attr = (
+        getattr(comfy_module_pre, "model_management", sentinel)
+        if comfy_module_pre is not None
+        else sentinel
+    )
+    prior_comfy_extras_seedvr_attr = (
+        getattr(comfy_extras_module_pre, "nodes_seedvr", sentinel)
+        if comfy_extras_module_pre is not None
+        else sentinel
+    )
+
     with patch.dict(sys.modules, {"comfy.model_management": mock_model_management}):
         sys.modules.pop("comfy_extras.nodes_seedvr", None)
         try:
@@ -48,8 +66,16 @@ def test_seedvr_node_signature_matches_schema():
         finally:
             sys.modules.pop("comfy_extras.nodes_seedvr", None)
             comfy_extras_module = sys.modules.get("comfy_extras")
-            if comfy_extras_module is not None and hasattr(comfy_extras_module, "nodes_seedvr"):
-                delattr(comfy_extras_module, "nodes_seedvr")
+            if comfy_extras_module is not None:
+                if prior_comfy_extras_seedvr_attr is sentinel:
+                    if hasattr(comfy_extras_module, "nodes_seedvr"):
+                        delattr(comfy_extras_module, "nodes_seedvr")
+                else:
+                    setattr(comfy_extras_module, "nodes_seedvr", prior_comfy_extras_seedvr_attr)
             comfy_module = sys.modules.get("comfy")
-            if comfy_module is not None and getattr(comfy_module, "model_management", None) is mock_model_management:
-                delattr(comfy_module, "model_management")
+            if comfy_module is not None:
+                if prior_comfy_mm_attr is sentinel:
+                    if hasattr(comfy_module, "model_management"):
+                        delattr(comfy_module, "model_management")
+                else:
+                    setattr(comfy_module, "model_management", prior_comfy_mm_attr)
