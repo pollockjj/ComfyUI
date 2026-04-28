@@ -216,14 +216,25 @@ def _ffmpeg_ssim(distorted: Path, reference: Path) -> float:
     return float(m.group(1))
 
 
+def _ffmpeg_filter_escape(value: str) -> str:
+    """Escape a path value for use inside an ffmpeg filter argument.
+
+    ffmpeg's filter parser treats ``:`` and ``\\`` as syntax characters, so
+    Windows drive paths like ``C:\\Users\\...`` corrupt filter arguments
+    when interpolated raw. Escape both for safe use inside ``-lavfi``.
+    """
+    return value.replace("\\", "\\\\").replace(":", "\\:")
+
+
 def _ffmpeg_vmaf(distorted: Path, reference: Path) -> float:
     log_dir = tempfile.mkdtemp(prefix="vmaf_", dir=str(distorted.parent))
     log_path = Path(log_dir) / "vmaf.json"
+    log_path_escaped = _ffmpeg_filter_escape(str(log_path))
     cmd = [
         _ffmpeg_bin(), "-hide_banner",
         "-i", str(distorted),
         "-i", str(reference),
-        "-lavfi", f"[0:v][1:v]libvmaf=log_path={log_path}:log_fmt=json",
+        "-lavfi", f"[0:v][1:v]libvmaf=log_path={log_path_escaped}:log_fmt=json",
         "-f", "null", "-",
     ]
     try:
@@ -384,7 +395,12 @@ class SeedVR2BaselineSaveWithArtifacts:
 
         finished_at_epoch = _epoch()
 
-        artifact_path = artifact_dir_p / "probe_result.json"
+        # Per-run filename keyed on manifest_id, implementation, and run_id so
+        # repeated runs against the same artifact_dir don't overwrite earlier
+        # per-run metadata. A `probe_result.json` symlink is also kept for
+        # back-compat with downstream tools that expect the legacy filename.
+        artifact_path = artifact_dir_p / f"{manifest_id}_{implementation}_{run_id}.json"
+        legacy_alias = artifact_dir_p / "probe_result.json"
         artifact = {
             "schema_version": _ARTIFACT_SCHEMA_VERSION,
             "run_id": run_id,
@@ -440,6 +456,16 @@ class SeedVR2BaselineSaveWithArtifacts:
         with artifact_path.open("w", encoding="utf-8") as fh:
             json.dump(artifact, fh, indent=2)
             fh.write("\n")
+        # Maintain a legacy ``probe_result.json`` filename pointing at the
+        # current run's artifact so older tooling that expected the legacy
+        # filename keeps working. Use a copy (not a symlink) for Windows
+        # compatibility.
+        try:
+            shutil.copyfile(artifact_path, legacy_alias)
+        except OSError:
+            # Legacy alias is best-effort; the canonical per-run artifact is
+            # the authoritative output.
+            pass
 
         return (str(artifact_path),)
 
@@ -512,10 +538,17 @@ class SeedVR2BaselineCompareArtifacts:
             )
         custom_impl = custom.get("implementation")
         native_impl = native.get("implementation")
-        if custom_impl == native_impl:
+        if custom_impl != "custom_node":
             raise RuntimeError(
-                f"Comparison implementation collision: both artifacts have "
-                f"implementation={custom_impl!r}; expected one custom_node and one native_pr"
+                f"Comparison custom_artifact_path={custom_p} has implementation="
+                f"{custom_impl!r}; the first input must be a custom_node artifact "
+                f"(probe / native_pr / comparison artifacts are not accepted on this slot)"
+            )
+        if native_impl != "native_pr":
+            raise RuntimeError(
+                f"Comparison native_artifact_path={native_p} has implementation="
+                f"{native_impl!r}; the second input must be a native_pr artifact "
+                f"(probe / custom_node / comparison artifacts are not accepted on this slot)"
             )
 
         manifest_id = custom_id
