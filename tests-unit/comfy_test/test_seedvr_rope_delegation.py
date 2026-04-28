@@ -1,41 +1,63 @@
-"""Regression test: comfy.ldm.seedvr.model.apply_rotary_emb must delegate to
-comfy.ldm.flux.math.apply_rope1 with byte-exact equality across the wrapper's
-slicing, scaling, and concatenation logic. Drift between the wrapper and the
-delegate would silently corrupt SeedVR2's RoPE; this test fails loudly on any
-future drift.
+"""Regression test: ``comfy.ldm.seedvr.model.apply_rotary_emb`` must delegate
+to ``comfy.ldm.flux.math.apply_rope1`` and produce exact-equality output
+across the wrapper's slicing, scaling, and concatenation logic. Drift between
+the wrapper and the delegate would silently corrupt SeedVR2's RoPE; this test
+fails loudly on any future drift.
 
-Imports are taken at module level. Heavy-import stubbing of
-``comfy.model_management`` was attempted but is insufficient on the live import
-chain (``comfy.ldm.seedvr.model`` pulls
-``comfy.ldm.modules.diffusionmodules.model -> comfy.ops ->
-comfy.memory_management -> comfy.quant_ops -> comfy_kitchen.tensor ->
-torch._dynamo``), so every layer would have to be stubbed in lock-step;
-running the test against the real modules instead is the fail-loud-from-real-
-state approach this repo's tests follow.
+Each parametrized case both:
+
+1. Patches ``comfy.ldm.seedvr.model.apply_rope1`` with a ``wraps``-style spy
+   and asserts ``spy.call_count >= 1`` so a future change that inlines the
+   math and stops calling ``apply_rope1`` fails the test (Copilot review on
+   PR #21 comment 3150100205; codex P2).
+2. Compares the wrapper's output against a hand-rolled reproduction using
+   ``torch.testing.assert_close(rtol=0, atol=0)`` -- exact tensor equality,
+   not bit-equality (``+0.0`` vs ``-0.0`` and NaN payloads can still match);
+   the assertion catches any future kernel-precision drift in the
+   ``apply_rope1`` dispatch (Copilot review on PR #21 comments 3149914528 and
+   3150100175).
 
 The test uses a local ``torch.Generator`` so global RNG state is not mutated
-(Copilot review on PR #21, finding #4) and ``torch.testing.assert_close`` with
-``rtol=0, atol=0`` so any future kernel-precision drift is caught (PR #21,
-finding #2; live ``max_abs_delta`` on ``issue_101`` HEAD is 0.0 across every
-case). Parametrization covers non-default ``start_index`` and ``scale`` so the
-wrapper's slicing/concatenation and scale-propagation logic are exercised, not
-just the trivial ``rot_feats == t.shape[-1]`` happy path (PR #21, finding #3).
-The previous version's session-scoped ``params: [...]`` print fixture was
-removed (PR #21, finding #1).
+(Copilot review on PR #21 comment 3149914599). Parametrization covers
+non-default ``start_index`` and ``scale`` and a case where
+``freqs.shape[0] > t.shape[seq_dim]`` so the wrapper's
+``slice_at_dim(freqs, slice(-seq_len, None), dim=0)`` path is exercised
+(Copilot review on PR #21 comments 3149914553, 3150100217, 3150100225).
+
+Imports are taken at module level. Heavy-import stubbing of
+``comfy.model_management`` was attempted but is insufficient on the live
+import chain (``comfy.ldm.seedvr.model`` pulls
+``comfy.ldm.modules.diffusionmodules.model -> comfy.ops ->
+comfy.memory_management -> comfy.quant_ops -> comfy_kitchen.tensor ->
+torch._dynamo``), so every layer would have to be stubbed in lock-step.
+Running the test against the real modules is the fail-loud-from-real-state
+approach this repo's tests follow.
 """
+
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch.testing
 
+import comfy.ldm.seedvr.model as seedvr_model
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.seedvr.model import apply_rotary_emb
 
 
-def _direct_reproduction(freqs, t, start_index=0, scale=1.0):
-    """Byte-for-byte reproduction of comfy/ldm/seedvr/model.py:471-505
-    apply_rotary_emb body, calling apply_rope1 directly on the middle slice.
+def _direct_reproduction(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
+    """Reproduce the body of ``apply_rotary_emb`` for the default case where
+    ``freqs.ndim == 2`` and ``t.ndim == 3`` (implicit ``freqs_seq_dim=0``).
+    Mirrors the wrapper's ``slice_at_dim(freqs, slice(-seq_len, None), dim=0)``
+    step when freqs is longer than ``t`` along ``seq_dim``. Calls the real
+    ``apply_rope1`` via the test module's import (the test patches the
+    ``seedvr_model.apply_rope1`` attribute; this call uses the unpatched
+    ``flux.math`` symbol).
     """
+    if freqs.ndim == 2 and t.ndim == 3:
+        seq_len = t.shape[seq_dim]
+        freqs = freqs[-seq_len:]
+
     rot_feats = freqs.shape[-1]
     end_index = start_index + rot_feats
     t_left = t[..., :start_index]
@@ -65,6 +87,8 @@ _CASES = [
                  id="cpu-float32-non-empty-left-and-right-slices"),
     pytest.param("cpu", torch.float32, (1, 8, 16), (8, 16), 0, 0.5,
                  id="cpu-float32-non-default-scale"),
+    pytest.param("cpu", torch.float32, (1, 8, 16), (12, 16), 0, 1.0,
+                 id="cpu-float32-freqs-longer-than-seq"),
     pytest.param(
         "cuda", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
         id="cuda-float16-base",
@@ -81,19 +105,34 @@ def test_apply_rotary_emb_delegates_to_apply_rope1(
     t = torch.randn(*t_shape, dtype=dtype, device=device, generator=generator)
     freqs = torch.randn(*freqs_shape, dtype=dtype, device=device, generator=generator)
 
-    wrapper_out = apply_rotary_emb(freqs, t, start_index=start_index, scale=scale)
+    # Patch the apply_rope1 symbol as imported into seedvr.model with a wraps
+    # spy: a future change that inlines the math and stops calling the
+    # imported apply_rope1 makes spy.call_count == 0 and fails the test.
+    with patch.object(
+        seedvr_model, "apply_rope1", wraps=seedvr_model.apply_rope1
+    ) as spy:
+        wrapper_out = apply_rotary_emb(
+            freqs, t, start_index=start_index, scale=scale
+        )
+
+    assert spy.call_count >= 1, (
+        "apply_rotary_emb did not call comfy.ldm.seedvr.model.apply_rope1; "
+        "the delegation invariant is broken"
+    )
+
     direct_out = _direct_reproduction(
         freqs, t, start_index=start_index, scale=scale
     )
 
+    msg = (
+        f"apply_rotary_emb output does not match direct apply_rope1 "
+        f"reproduction (device={device}, dtype={dtype}, t_shape={t_shape}, "
+        f"freqs_shape={freqs_shape}, start_index={start_index}, scale={scale})"
+    )
     torch.testing.assert_close(
         wrapper_out,
         direct_out,
         rtol=0,
         atol=0,
-        msg=lambda m: (
-            f"apply_rotary_emb does not byte-match direct apply_rope1 reproduction "
-            f"(device={device}, dtype={dtype}, t_shape={t_shape}, "
-            f"freqs_shape={freqs_shape}, start_index={start_index}, scale={scale}): {m}"
-        ),
+        msg=msg,
     )
