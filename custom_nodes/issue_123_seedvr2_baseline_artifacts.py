@@ -30,9 +30,48 @@ import uuid
 from pathlib import Path
 
 
-_FFMPEG = "/usr/bin/ffmpeg"
-_FFPROBE = "/usr/bin/ffprobe"
 _ARTIFACT_SCHEMA_VERSION = 1
+
+
+def _resolve_tool(name: str, env_var: str, posix_default: str) -> str:
+    """Resolve an external CLI tool path.
+
+    Resolution order:
+      1. ``$<env_var>`` if set and the path exists.
+      2. ``shutil.which(name)`` (PATH lookup; works on Linux, macOS, Windows).
+      3. ``posix_default`` if it exists on disk.
+      4. Raise ``RuntimeError`` (fail loud).
+
+    The Linux POSIX default is kept as a fallback so existing prosoche /
+    `dev_master` runs that rely on `/usr/bin/ffmpeg` keep working when neither
+    the env override nor PATH lookup resolves.
+    """
+    override = os.environ.get(env_var)
+    if override:
+        override_path = Path(override)
+        if override_path.exists():
+            return str(override_path)
+        raise RuntimeError(
+            f"{env_var}={override!r} but path does not exist; clear the env var "
+            f"or point it at a valid {name} binary"
+        )
+    on_path = shutil.which(name)
+    if on_path:
+        return on_path
+    if Path(posix_default).exists():
+        return posix_default
+    raise RuntimeError(
+        f"{name} not found: PATH lookup empty, {env_var} unset, "
+        f"{posix_default} absent. Install {name} or set {env_var}."
+    )
+
+
+def _ffmpeg_bin() -> str:
+    return _resolve_tool("ffmpeg", "ISSUE_123_FFMPEG_BIN", "/usr/bin/ffmpeg")
+
+
+def _ffprobe_bin() -> str:
+    return _resolve_tool("ffprobe", "ISSUE_123_FFPROBE_BIN", "/usr/bin/ffprobe")
 
 
 def _epoch() -> float:
@@ -49,7 +88,7 @@ def _sha256_file(path: Path) -> str:
 
 def _ffprobe_video(path: Path) -> dict:
     cmd = [
-        _FFPROBE,
+        _ffprobe_bin(),
         "-v", "error",
         "-print_format", "json",
         "-show_format",
@@ -114,7 +153,7 @@ def _ffmpeg_upscale_to_match(
     if output_path.exists():
         output_path.unlink()
     cmd = [
-        _FFMPEG,
+        _ffmpeg_bin(),
         "-hide_banner",
         "-y",
         "-i", str(input_path),
@@ -140,7 +179,7 @@ _SSIM_ALL_RE = re.compile(r"All:\s*([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)")
 
 def _ffmpeg_psnr(distorted: Path, reference: Path) -> float:
     cmd = [
-        _FFMPEG, "-hide_banner",
+        _ffmpeg_bin(), "-hide_banner",
         "-i", str(distorted),
         "-i", str(reference),
         "-lavfi", "[0:v][1:v]psnr",
@@ -161,7 +200,7 @@ def _ffmpeg_psnr(distorted: Path, reference: Path) -> float:
 
 def _ffmpeg_ssim(distorted: Path, reference: Path) -> float:
     cmd = [
-        _FFMPEG, "-hide_banner",
+        _ffmpeg_bin(), "-hide_banner",
         "-i", str(distorted),
         "-i", str(reference),
         "-lavfi", "[0:v][1:v]ssim",
@@ -181,7 +220,7 @@ def _ffmpeg_vmaf(distorted: Path, reference: Path) -> float:
     log_dir = tempfile.mkdtemp(prefix="vmaf_", dir=str(distorted.parent))
     log_path = Path(log_dir) / "vmaf.json"
     cmd = [
-        _FFMPEG, "-hide_banner",
+        _ffmpeg_bin(), "-hide_banner",
         "-i", str(distorted),
         "-i", str(reference),
         "-lavfi", f"[0:v][1:v]libvmaf=log_path={log_path}:log_fmt=json",
@@ -208,10 +247,10 @@ def _capture_environment() -> dict:
         "python_version": sys.version.split()[0],
         "host": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", ""),
         "platform": sys.platform,
-        "ffmpeg_path": _FFMPEG,
+        "ffmpeg_path": _ffmpeg_bin(),
     }
     try:
-        ffv = subprocess.run([_FFMPEG, "-version"], capture_output=True, text=True, check=False)
+        ffv = subprocess.run([_ffmpeg_bin(), "-version"], capture_output=True, text=True, check=False)
         first = ffv.stdout.splitlines()[0] if ffv.stdout else ""
         env["ffmpeg_version_line"] = first
     except OSError:
@@ -291,6 +330,26 @@ class SeedVR2BaselineSaveWithArtifacts:
         output_dir_p = Path(output_video_dir).resolve()
         artifact_dir_p.mkdir(parents=True, exist_ok=True)
         output_dir_p.mkdir(parents=True, exist_ok=True)
+
+        # Provenance verification: when the workflow supplies an expected
+        # sha256 for the input or GT, recompute the on-disk hash and fail
+        # loud on mismatch. This prevents a stale or wrong-path workflow
+        # from silently writing artifacts whose recorded provenance does
+        # not match the media the metrics were computed against.
+        if input_sha256:
+            actual_input_sha = _sha256_file(in_path)
+            if actual_input_sha != input_sha256:
+                raise RuntimeError(
+                    f"Input sha256 mismatch for {in_path}: "
+                    f"workflow provided {input_sha256}, file hashes to {actual_input_sha}"
+                )
+        if gt_sha256 and gt_path is not None:
+            actual_gt_sha = _sha256_file(gt_path)
+            if actual_gt_sha != gt_sha256:
+                raise RuntimeError(
+                    f"GT sha256 mismatch for {gt_path}: "
+                    f"workflow provided {gt_sha256}, file hashes to {actual_gt_sha}"
+                )
 
         try:
             node_parameters = json.loads(node_parameters_json) if node_parameters_json else {}
@@ -425,7 +484,41 @@ class SeedVR2BaselineCompareArtifacts:
         custom = json.loads(custom_p.read_text(encoding="utf-8"))
         native = json.loads(native_p.read_text(encoding="utf-8"))
 
-        manifest_id = custom.get("manifest_id") or native.get("manifest_id") or "unknown"
+        # Identity verification: refuse to emit a custom_vs_native_similarity
+        # delta unless the two artifacts agree on what they describe. Without
+        # this, a miswired graph or stale artifact path would produce
+        # meaningless deltas and contaminate downstream baseline aggregation.
+        custom_id = custom.get("manifest_id")
+        native_id = native.get("manifest_id")
+        if not custom_id or not native_id or custom_id != native_id:
+            raise RuntimeError(
+                f"Comparison manifest_id mismatch: "
+                f"custom={custom_id!r} ({custom_p}), "
+                f"native={native_id!r} ({native_p})"
+            )
+        custom_input = (custom.get("input") or {})
+        native_input = (native.get("input") or {})
+        if custom_input.get("manifest_id") != native_input.get("manifest_id"):
+            raise RuntimeError(
+                f"Comparison input.manifest_id mismatch: "
+                f"custom={custom_input.get('manifest_id')!r}, "
+                f"native={native_input.get('manifest_id')!r}"
+            )
+        if custom_input.get("gt_manifest_id") != native_input.get("gt_manifest_id"):
+            raise RuntimeError(
+                f"Comparison input.gt_manifest_id mismatch: "
+                f"custom={custom_input.get('gt_manifest_id')!r}, "
+                f"native={native_input.get('gt_manifest_id')!r}"
+            )
+        custom_impl = custom.get("implementation")
+        native_impl = native.get("implementation")
+        if custom_impl == native_impl:
+            raise RuntimeError(
+                f"Comparison implementation collision: both artifacts have "
+                f"implementation={custom_impl!r}; expected one custom_node and one native_pr"
+            )
+
+        manifest_id = custom_id
         run_id = str(uuid.uuid4())
         out_path = out_dir / f"{manifest_id}_comparison_{run_id}.json"
 
