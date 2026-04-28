@@ -84,14 +84,44 @@ def _direct_reproduction(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
     return torch.cat((t_left, t_middle_out, t_right), dim=-1).type(t.dtype)
 
 
+def _cpu_trig_supported(dtype):
+    """Return whether ``torch.cos`` (and by symmetry ``torch.sin``) is
+    implemented for the given dtype on CPU on the current runtime. Some
+    PyTorch CPU wheels don't implement trig ops for ``float16`` / ``bfloat16``
+    and raise at runtime; the parametrized cases for those dtypes are skipped
+    when that's the case so CI remains stable across PyTorch builds.
+    """
+    try:
+        torch.cos(torch.zeros(1, dtype=dtype))
+    except (RuntimeError, TypeError):
+        return False
+    return True
+
+
+_CPU_FP16_TRIG_OK = _cpu_trig_supported(torch.float16)
+_CPU_BF16_TRIG_OK = _cpu_trig_supported(torch.bfloat16)
+
+
 # (device, dtype, t_shape, freqs_shape, start_index, scale)
 _CASES = [
     pytest.param("cpu", torch.float32, (1, 8, 16), (8, 16), 0, 1.0,
                  id="cpu-float32-base"),
-    pytest.param("cpu", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
-                 id="cpu-float16-base"),
-    pytest.param("cpu", torch.bfloat16, (1, 8, 16), (8, 16), 0, 1.0,
-                 id="cpu-bfloat16-base"),
+    pytest.param(
+        "cpu", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
+        id="cpu-float16-base",
+        marks=pytest.mark.skipif(
+            not _CPU_FP16_TRIG_OK,
+            reason="torch.cos/torch.sin unsupported for float16 tensors on CPU",
+        ),
+    ),
+    pytest.param(
+        "cpu", torch.bfloat16, (1, 8, 16), (8, 16), 0, 1.0,
+        id="cpu-bfloat16-base",
+        marks=pytest.mark.skipif(
+            not _CPU_BF16_TRIG_OK,
+            reason="torch.cos/torch.sin unsupported for bfloat16 tensors on CPU",
+        ),
+    ),
     pytest.param("cpu", torch.float32, (2, 16, 32), (16, 32), 0, 1.0,
                  id="cpu-float32-larger"),
     pytest.param("cpu", torch.float32, (1, 8, 24), (8, 16), 4, 1.0,
