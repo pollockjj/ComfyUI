@@ -8,37 +8,33 @@ Each parametrized case both:
 
 1. Patches ``comfy.ldm.seedvr.model.apply_rope1`` with a ``wraps``-style spy
    and asserts ``spy.call_count >= 1`` so a future change that inlines the
-   math and stops calling ``apply_rope1`` fails the test (Copilot review on
-   PR #21 comment 3150100205; codex P2).
+   math and stops calling ``apply_rope1`` fails the test.
 2. Compares the wrapper's output against a hand-rolled reproduction using
    ``torch.testing.assert_close(rtol=0, atol=0)`` -- exact tensor equality,
    not bit-equality (``+0.0`` vs ``-0.0`` and NaN payloads can still match);
    the assertion catches any future kernel-precision drift in the
-   ``apply_rope1`` dispatch (Copilot review on PR #21 comments 3149914528 and
-   3150100175).
+   ``apply_rope1`` dispatch.
 
-The test uses a local ``torch.Generator`` so global RNG state is not mutated
-(Copilot review on PR #21 comment 3149914599). Parametrization covers
-non-default ``start_index`` and ``scale`` and a case where
-``freqs.shape[0] > t.shape[seq_dim]`` so the wrapper's
-``slice_at_dim(freqs, slice(-seq_len, None), dim=0)`` path is exercised
-(Copilot review on PR #21 comments 3149914553, 3150100217, 3150100225).
-
-Imports are taken at module level. Heavy-import stubbing of
+The test uses a local ``torch.Generator`` so global RNG state is not mutated.
+Parametrization covers non-default ``start_index`` and ``scale`` and a case
+where ``freqs.shape[0] > t.shape[seq_dim]`` so the wrapper's
+``slice_at_dim(freqs, slice(-seq_len, None), dim=0)`` path is exercised.
+Imports are taken at module level; heavy-import stubbing of
 ``comfy.model_management`` was attempted but is insufficient on the live
 import chain (``comfy.ldm.seedvr.model`` pulls
 ``comfy.ldm.modules.diffusionmodules.model -> comfy.ops ->
 comfy.memory_management -> comfy.quant_ops -> comfy_kitchen.tensor ->
-torch._dynamo``), so every layer would have to be stubbed in lock-step.
-Running the test against the real modules is the fail-loud-from-real-state
-approach this repo's tests follow.
+torch._dynamo``), so running the test against the real modules is the
+fail-loud-from-real-state approach this repo's tests follow.
+
+Test design rationale and per-decision review trail are recorded on the
+tracking issue: https://github.com/pollockjj/mydevelopment/issues/120
 """
 
 from unittest.mock import patch
 
 import pytest
 import torch
-import torch.testing
 
 import comfy.ldm.seedvr.model as seedvr_model
 from comfy.ldm.flux.math import apply_rope1
