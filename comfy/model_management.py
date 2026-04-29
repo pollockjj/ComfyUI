@@ -1809,6 +1809,21 @@ def supports_mxfp8_compute(device=None):
 
     return True
 
+def supports_fp64(device=None):
+    if is_device_mps(device):
+        return False
+
+    if is_intel_xpu():
+        return False
+
+    if is_directml_enabled():
+        return False
+
+    if is_ixuca():
+        return False
+
+    return True
+
 def extended_fp16_support():
     # TODO: check why some models work with fp16 on newer torch versions but not on older
     if torch_version_numeric < (2, 7):
@@ -1863,7 +1878,7 @@ def debug_memory_summary():
         return torch.cuda.memory.memory_summary()
     return ""
 
-class InterruptProcessingException(Exception):
+class InterruptProcessingException(BaseException):
     pass
 
 interrupt_processing_mutex = threading.RLock()

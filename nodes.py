@@ -2471,6 +2471,7 @@ async def init_builtin_extra_nodes():
         "nodes_camera_trajectory.py",
         "nodes_edit_model.py",
         "nodes_tcfg.py",
+        "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
         "nodes_chroma_radiance.py",
@@ -2495,7 +2496,9 @@ async def init_builtin_extra_nodes():
         "nodes_number_convert.py",
         "nodes_painter.py",
         "nodes_curve.py",
-        "nodes_rtdetr.py"
+        "nodes_rtdetr.py",
+        "nodes_frame_interpolation.py",
+        "nodes_sam3.py"
     ]
 
     import_failed = []

@@ -12,10 +12,12 @@ from .ldm.cascade.stage_c_coder import StageC_coder
 from .ldm.audio.autoencoder import AudioOobleckVAE
 import comfy.ldm.genmo.vae.model
 import comfy.ldm.lightricks.vae.causal_video_autoencoder
+import comfy.ldm.lightricks.vae.audio_vae
 import comfy.ldm.cosmos.vae
 import comfy.ldm.wan.vae
 import comfy.ldm.wan.vae2_2
 import comfy.ldm.hunyuan3d.vae
+import comfy.ldm.seedvr.vae
 import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.hunyuan_video.vae
 import comfy.ldm.mmaudio.vae.autoencoder
@@ -62,6 +64,7 @@ import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.qwen35
+import comfy.text_encoders.ernie
 
 import comfy.model_patcher
 import comfy.lora
@@ -436,8 +439,10 @@ class CLIP:
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
-        if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
-            sd = diffusers_convert.convert_vae_state_dict(sd)
+        is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
+        if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
+            if metadata is None or metadata.get("keep_diffusers_format") != "true":
+                sd = diffusers_convert.convert_vae_state_dict(sd)
 
         if model_management.is_amd():
             VAE_KL_MEM_RATIO = 2.73
@@ -506,6 +511,20 @@ class VAE:
                 self.first_stage_model = StageC_coder()
                 self.downscale_ratio = 32
                 self.latent_channels = 16
+            elif "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd: # seedvr2
+                self.first_stage_model = comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper()
+                self.latent_channels = 16
+                self.latent_dim = 3
+                self.disable_offload = True
+                self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
+                self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
+                self.working_dtypes = [torch.bfloat16, torch.float32]
+                self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
+                self.downscale_index_formula = (4, 8, 8)
+                self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
+                self.upscale_index_formula = (4, 8, 8)
+                self.process_input = lambda image: image
+                self.crop_input = False
             elif "decoder.conv_in.weight" in sd:
                 if sd['decoder.conv_in.weight'].shape[1] == 64:
                     ddconfig = {"block_out_channels": [128, 256, 512, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 32, "downsample_match_channel": True, "upsample_match_channel": True}
@@ -633,6 +652,7 @@ class VAE:
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 7) / 8)), 32, 32)
                 self.downscale_index_formula = (8, 32, 32)
                 self.working_dtypes = [torch.bfloat16, torch.float32]
+
             elif "decoder.conv_in.conv.weight" in sd and sd['decoder.conv_in.conv.weight'].shape[1] == 32:
                 ddconfig = {"block_out_channels": [128, 256, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 16, "ffactor_temporal": 4, "downsample_match_channel": True, "upsample_match_channel": True}
                 ddconfig['z_channels'] = sd["decoder.conv_in.conv.weight"].shape[1]
@@ -804,6 +824,24 @@ class VAE:
                     self.downscale_index_formula = (4, 8, 8)
                     self.memory_used_encode = lambda shape, dtype: (700 * (max(1, (shape[-3] ** 0.66 * 0.11)) * shape[-2] * shape[-1]) * model_management.dtype_size(dtype))
                     self.memory_used_decode = lambda shape, dtype: (50 * (max(1, (shape[-3] ** 0.65 * 0.26)) * shape[-2] * shape[-1] * 32 * 32) * model_management.dtype_size(dtype))
+            elif "vocoder.resblocks.0.convs1.0.weight" in sd or "vocoder.vocoder.resblocks.0.convs1.0.weight" in sd: # LTX Audio
+                sd = comfy.utils.state_dict_prefix_replace(sd, {"audio_vae.": "autoencoder."})
+                self.first_stage_model = comfy.ldm.lightricks.vae.audio_vae.AudioVAE(metadata=metadata)
+                self.memory_used_encode = lambda shape, dtype: (shape[2] * 330) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: (shape[2] * shape[3] * 87000) * model_management.dtype_size(dtype)
+                self.latent_channels = self.first_stage_model.latent_channels
+                self.audio_sample_rate_output = self.first_stage_model.output_sample_rate
+                self.autoencoder = self.first_stage_model.autoencoder  # TODO: remove hack for ltxv custom nodes
+                self.output_channels = 2
+                self.pad_channel_value = "replicate"
+                self.upscale_ratio = 4096
+                self.downscale_ratio = 4096
+                self.latent_dim = 2
+                self.process_output = lambda audio: audio
+                self.process_input = lambda audio: audio
+                self.working_dtypes = [torch.float32]
+                self.disable_offload = True
+                self.extra_1d_channel = 16
             else:
                 logging.warning("WARNING: No VAE weights detected, VAE not initalized.")
                 self.first_stage_model = None
@@ -1047,6 +1085,8 @@ class VAE:
                 else:
                     pixels_in = pixels_in.to(self.device)
                     out = self.first_stage_model.encode(pixels_in)
+                if isinstance(out, tuple):
+                    out = out[0]
                 out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
                 if samples is None:
                     samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
@@ -1235,6 +1275,7 @@ class TEModel(Enum):
     QWEN35_4B = 25
     QWEN35_9B = 26
     QWEN35_27B = 27
+    MINISTRAL_3_3B = 28
 
 
 def detect_te_model(sd):
@@ -1301,6 +1342,8 @@ def detect_te_model(sd):
                 return TEModel.MISTRAL3_24B
             else:
                 return TEModel.MISTRAL3_24B_PRUNED_FLUX2
+        if weight.shape[0] == 3072:
+            return TEModel.MINISTRAL_3_3B
 
         return TEModel.LLAMA3_8
     return None
@@ -1458,6 +1501,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif te_model == TEModel.QWEN3_06B:
             clip_target.clip = comfy.text_encoders.anima.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.anima.AnimaTokenizer
+        elif te_model == TEModel.MINISTRAL_3_3B:
+            clip_target.clip = comfy.text_encoders.ernie.te(**llama_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.ernie.ErnieTokenizer
+            tokenizer_data["tekken_model"] = clip_data[0].get("tekken_model", None)
         else:
             # clip_l
             if clip_type == CLIPType.SD3:

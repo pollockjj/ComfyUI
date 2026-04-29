@@ -490,6 +490,39 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
         return dit_config
 
+    elif "{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix) in state_dict_keys and state_dict["{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix)].shape[1] == 3072: # seedvr2 7b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 3072
+        dit_config["heads"] = 24
+        dit_config["num_layers"] = 36
+        dit_config["norm_eps"] = 1e-5
+        dit_config["qk_rope"] = None
+        dit_config["rope_type"] = None
+        dit_config["mlp_type"] = "normal"
+        return dit_config
+    elif "{}blocks.36.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 7b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 3072
+        dit_config["heads"] = 24
+        dit_config["num_layers"] = 36
+        dit_config["norm_eps"] = 1e-5
+        dit_config["qk_rope"] = True
+        dit_config["mlp_type"] = "normal"
+        return dit_config
+    elif "{}blocks.31.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 3b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 2560
+        dit_config["heads"] = 20
+        dit_config["num_layers"] = 32
+        dit_config["norm_eps"] = 1.0e-05
+        dit_config["qk_rope"] = None
+        dit_config["mlp_type"] = "swiglu"
+        dit_config["vid_out_norm"] = True
+        return dit_config
+
     if '{}head.modulation'.format(key_prefix) in state_dict_keys:  # Wan 2.1
         dit_config = {}
         dit_config["image_model"] = "wan2.1"
@@ -713,6 +746,19 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["enc_h"] = state_dict['{}encoder.pan_blocks.1.cv4.conv.weight'.format(key_prefix)].shape[0]
         return dit_config
 
+    if '{}layers.0.mlp.linear_fc2.weight'.format(key_prefix) in state_dict_keys: # Ernie Image
+        dit_config = {}
+        dit_config["image_model"] = "ernie"
+        return dit_config
+
+    if 'detector.backbone.vision_backbone.trunk.blocks.0.attn.qkv.weight' in state_dict_keys: # SAM3 / SAM3.1
+        if 'detector.transformer.decoder.query_embed.weight' in state_dict_keys:
+            dit_config = {}
+            dit_config["image_model"] = "SAM3"
+            if 'detector.backbone.vision_backbone.propagation_convs.0.conv_1x1.weight' in state_dict_keys:
+                dit_config["image_model"] = "SAM31"
+            return dit_config
+
     if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
         return None
 
@@ -868,6 +914,10 @@ def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=Fal
     return model_config
 
 def unet_prefix_from_state_dict(state_dict):
+    # SAM3: detector.* and tracker.* at top level, no common prefix
+    if any(k.startswith("detector.") for k in state_dict) and any(k.startswith("tracker.") for k in state_dict):
+        return ""
+
     candidates = ["model.diffusion_model.", #ldm/sgm models
                   "model.model.", #audio models
                   "net.", #cosmos
