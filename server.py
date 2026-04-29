@@ -1099,14 +1099,10 @@ class PromptServer():
                 if result is None:
                     return web.Response(status=404, text="Not found")
 
-                content_type = {
-                    ".js": "application/javascript",
-                    ".css": "text/css",
-                    ".html": "text/html",
-                    ".json": "application/json",
-                }.get(suffix, "application/octet-stream")
-
-                return web.Response(body=result, content_type=content_type)
+                return web.Response(
+                    body=result["content"],
+                    content_type=result["content_type"],
+                )
 
             self.app.router.add_get(
                 "/extensions/{ext_name}/{file_path:.*}",
