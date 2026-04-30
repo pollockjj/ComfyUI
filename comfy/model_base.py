@@ -20,6 +20,7 @@ import comfy.ldm.hunyuan3dv2_1
 import comfy.ldm.hunyuan3dv2_1.hunyuandit
 import torch
 import logging
+import os
 import comfy.ldm.lightricks.av_model
 import comfy.context_windows
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
@@ -127,8 +128,20 @@ def model_sampling(model_config, model_type):
     elif model_type == ModelType.V_PREDICTION_DDPM:
         c = comfy.model_sampling.V_PREDICTION_DDPM
 
+    from comfy.cli_args import args
+    isolation_runtime_enabled = args.use_process_isolation or os.environ.get("PYISOLATE_CHILD") == "1"
+
     class ModelSampling(s, c):
-        pass
+        if isolation_runtime_enabled:
+            def __reduce__(self):
+                """Ensure pickling yields a proxy instead of failing on local class."""
+                try:
+                    from comfy.isolation.model_sampling_proxy import ModelSamplingRegistry, ModelSamplingProxy
+                    registry = ModelSamplingRegistry()
+                    ms_id = registry.register(self)
+                    return (ModelSamplingProxy, (ms_id,))
+                except Exception as exc:
+                    raise RuntimeError("Failed to serialize ModelSampling for isolation.") from exc
 
     return ModelSampling(model_config)
 
