@@ -1,8 +1,21 @@
+import re
 from pathlib import Path
 
 
 def test_seedvr_vae_tiled_args_uses_get_not_pop():
     path = Path(__file__).resolve().parents[2] / "comfy" / "ldm" / "seedvr" / "vae.py"
     src = path.read_text(encoding="utf-8")
-    assert ".tiled_args.pop(" not in src, f"VideoAutoencoderKLWrapper.decode contains tiled_args.pop(...) which mutates self.tiled_args across calls; expected tiled_args.get(...) per the upstream fix in Comfy-Org/ComfyUI#11294 commit 3b418da. Source path: {path}"
-    assert ".tiled_args.get(" in src, f"VideoAutoencoderKLWrapper.decode does not read tiled_args via .get(); expected exactly one self.tiled_args.get(\"enable_tiling\", False) call per Slice 1 baseline. Source path: {path}"
+    assert not re.search(r"(?:self\.)?tiled_args\.pop\s*\(", src), (
+        f"VideoAutoencoderKLWrapper.decode contains tiled_args.pop(...) which mutates tiled_args across calls; "
+        f"expected reads via .get(...) only per the upstream fix in Comfy-Org/ComfyUI#11294 commit 3b418da. "
+        f"Source path: {path}"
+    )
+    enable_tiling_get_calls = re.findall(
+        r"self\.tiled_args\.get\s*\(\s*[\"']enable_tiling[\"']\s*,\s*False\s*\)",
+        src,
+    )
+    assert len(enable_tiling_get_calls) == 1, (
+        f"VideoAutoencoderKLWrapper.decode should contain exactly one "
+        f"self.tiled_args.get('enable_tiling', False) call per Slice 1 baseline; "
+        f"found {len(enable_tiling_get_calls)}. Source path: {path}"
+    )
