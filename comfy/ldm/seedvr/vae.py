@@ -506,7 +506,7 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
             t = x.size(2)
             x = rearrange(x, "b c t h w -> (b t) c h w")
             memory_occupy = x.numel() * x.element_size() / 1024**3
-            if isinstance(norm_layer, ops.GroupNorm) and memory_occupy > float("inf"): # TODO: this may be set dynamically from the vae
+            if isinstance(norm_layer, ops.GroupNorm) and memory_occupy > get_norm_limit():
                 num_chunks = min(4 if x.element_size() == 2 else 2, norm_layer.num_groups)
                 assert norm_layer.num_groups % num_chunks == 0
                 num_groups_per_chunk = norm_layer.num_groups // num_chunks
