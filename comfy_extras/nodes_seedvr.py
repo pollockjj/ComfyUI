@@ -13,6 +13,48 @@ from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
 
 
+_SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
+    "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
+)
+
+_SEEDVR2_ROPE_FREQS_CAST_SENTINEL = "_seedvr2_rope_freqs_float32_cast_done"
+
+
+def _resolve_seedvr2_diffusion_model(model):
+    """Resolve the inner SeedVR2 diffusion-model module from a ComfyUI model
+    patcher object. Fails loud with a ``RuntimeError`` whose message begins
+    with ``_SEEDVR2_INVALID_MODEL_MSG_PREFIX`` when the expected wrapper
+    shape (``model.model.diffusion_model``) is absent.
+    """
+    inner = getattr(model, "model", None)
+    if inner is None:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: input has no 'model' attribute "
+            f"(got type {type(model).__name__})."
+        )
+    diffusion_model = getattr(inner, "diffusion_model", None)
+    if diffusion_model is None:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: 'model.model' has no "
+            f"'diffusion_model' attribute (got type {type(inner).__name__})."
+        )
+    return diffusion_model
+
+
+def _apply_rope_freqs_float32_cast(diffusion_model):
+    """Cast every nested module's ``rope.freqs`` parameter data to ``float32``
+    exactly once per resolved diffusion-model instance. Subsequent calls
+    against the same instance short-circuit via a sentinel attribute, so the
+    full module tree is iterated at most once per instance lifetime.
+    """
+    if getattr(diffusion_model, _SEEDVR2_ROPE_FREQS_CAST_SENTINEL, False):
+        return
+    for module in diffusion_model.modules():
+        if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
+            module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
+    setattr(diffusion_model, _SEEDVR2_ROPE_FREQS_CAST_SENTINEL, True)
+
+
 def clear_vae_memory(vae_model):
     for module in vae_model.modules():
         if hasattr(module, "memory"):
@@ -233,13 +275,11 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         vae_conditioning = vae_conditioning["samples"]
         device = vae_conditioning.device
-        model = model.model.diffusion_model
+        model = _resolve_seedvr2_diffusion_model(model)
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
-        for module in model.modules():
-            if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
-                module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
+        _apply_rope_freqs_float32_cast(model)
 
         noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
