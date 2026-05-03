@@ -80,7 +80,7 @@ def test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path():
         handle = gn.register_forward_hook(_hook)
         try:
             with patch.object(vae_mod.F, "group_norm", side_effect=_group_norm_spy):
-                out_tensor = causal_norm_wrapper(gn, torch.randn(1,8,2,4,4))
+                out_tensor = causal_norm_wrapper(gn, torch.randn(*_TENSOR_SHAPE))
         finally:
             handle.remove()
 
@@ -132,7 +132,7 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path():
         handle = gn.register_forward_hook(_hook)
         try:
             with patch.object(vae_mod.F, "group_norm", side_effect=_group_norm_spy):
-                out_tensor = causal_norm_wrapper(gn, torch.randn(1,8,2,4,4))
+                out_tensor = causal_norm_wrapper(gn, torch.randn(*_TENSOR_SHAPE))
         finally:
             handle.remove()
 
