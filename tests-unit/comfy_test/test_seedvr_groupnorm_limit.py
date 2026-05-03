@@ -8,7 +8,10 @@ through ``set_norm_limit``) had no effect. The CodeRabbit finding on upstream
 PR Comfy-Org/ComfyUI#11294 is at:
 https://github.com/Comfy-Org/ComfyUI/pull/11294#discussion_r2959796343
 
-This module locks in two complementary cases against any future regression:
+This module locks in two complementary cases against any future regression,
+parametrized over both ``ops.GroupNorm`` subclasses (``disable_weight_init`` and
+``manual_cast``) since the production gate ``isinstance(norm_layer, ops.GroupNorm)``
+matches both.
 
 * ``test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path`` — with
   the limit at its default ``inf``, the full GroupNorm forward must run and
@@ -28,12 +31,16 @@ Each case discriminates the two branches with two independent observers:
    Calls with ``num_groups < gn.num_groups`` come from the chunked branch
    (``num_groups_per_chunk = gn.num_groups // num_chunks``).
 
+The spy uses ``*args, **kwargs`` passthrough so future ``F.group_norm`` kwargs
+do not break the test.
+
 CPU-only by construction: the tests use a small float32 tensor and never
 allocate a real model or GPU memory.
 """
 
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from comfy.cli_args import args as cli_args
@@ -53,12 +60,27 @@ _NUM_CHANNELS = 8
 _NUM_GROUPS = 4
 _TENSOR_SHAPE = (1, 8, 2, 4, 4)
 
+# Both ``ops.GroupNorm`` subclasses appear in production paths depending on
+# the active backend. The dispatch gate at ``vae.py:509`` reads
+# ``isinstance(norm_layer, ops.GroupNorm)`` and matches both via MRO.
+_GROUPNORM_SUBCLASSES = [
+    pytest.param(
+        comfy_ops.disable_weight_init.GroupNorm,
+        id="disable_weight_init",
+    ),
+    pytest.param(
+        comfy_ops.manual_cast.GroupNorm,
+        id="manual_cast",
+    ),
+]
 
-def test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path():
+
+@pytest.mark.parametrize("groupnorm_cls", _GROUPNORM_SUBCLASSES)
+def test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path(groupnorm_cls):
     real_group_norm = vae_mod.F.group_norm
     set_norm_limit(None)
     try:
-        gn = comfy_ops.disable_weight_init.GroupNorm(
+        gn = groupnorm_cls(
             num_channels=_NUM_CHANNELS, num_groups=_NUM_GROUPS
         )
         gn.eval()
@@ -70,12 +92,12 @@ def test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path():
 
         spy_calls = []
 
-        def _group_norm_spy(input_tensor, num_groups_arg, weight=None, bias=None, eps=1e-5):
+        def _group_norm_spy(input_tensor, num_groups_arg, *args, **kwargs):
             spy_calls.append({
                 "num_groups": int(num_groups_arg),
                 "input_shape": tuple(int(s) for s in input_tensor.shape),
             })
-            return real_group_norm(input_tensor, num_groups_arg, weight, bias, eps)
+            return real_group_norm(input_tensor, num_groups_arg, *args, **kwargs)
 
         handle = gn.register_forward_hook(_hook)
         try:
@@ -106,11 +128,12 @@ def test_seedvr_groupnorm_default_limit_uses_full_groupnorm_path():
         set_norm_limit(None)
 
 
-def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path():
+@pytest.mark.parametrize("groupnorm_cls", _GROUPNORM_SUBCLASSES)
+def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path(groupnorm_cls):
     real_group_norm = vae_mod.F.group_norm
     set_norm_limit(1e-9)
     try:
-        gn = comfy_ops.disable_weight_init.GroupNorm(
+        gn = groupnorm_cls(
             num_channels=_NUM_CHANNELS, num_groups=_NUM_GROUPS
         )
         gn.eval()
@@ -122,12 +145,12 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path():
 
         spy_calls = []
 
-        def _group_norm_spy(input_tensor, num_groups_arg, weight=None, bias=None, eps=1e-5):
+        def _group_norm_spy(input_tensor, num_groups_arg, *args, **kwargs):
             spy_calls.append({
                 "num_groups": int(num_groups_arg),
                 "input_shape": tuple(int(s) for s in input_tensor.shape),
             })
-            return real_group_norm(input_tensor, num_groups_arg, weight, bias, eps)
+            return real_group_norm(input_tensor, num_groups_arg, *args, **kwargs)
 
         handle = gn.register_forward_hook(_hook)
         try:
@@ -146,11 +169,11 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path():
             f"match input shape {_TENSOR_SHAPE}"
         )
         assert full_calls == 0, (
-            f"low-limit (1e-9 GiB) GroupNorm gate must NOT take the full-forward "
-            f"path (register_forward_hook must not fire); got full_calls={full_calls}"
+            f"low-limit GroupNorm gate must NOT take the full-forward path "
+            f"(register_forward_hook should not fire); got full_calls={full_calls}"
         )
         assert chunked_calls > 0, (
-            f"low-limit (1e-9 GiB) GroupNorm gate must take the chunked path "
+            f"low-limit GroupNorm gate must take the chunked path "
             f"(at least one F.group_norm call with num_groups<{_NUM_GROUPS}); got "
             f"chunked_calls={chunked_calls}"
         )
