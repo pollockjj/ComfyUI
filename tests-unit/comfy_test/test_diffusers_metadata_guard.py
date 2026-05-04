@@ -13,10 +13,18 @@ while the explicit ``"true"`` value bypasses it.
 
 Semantically, the guard sits inline in the constructor and gates the
 ``diffusers_convert.convert_vae_state_dict(sd)`` rewrite for diffusers-
-format VAE state dicts. The first call after the guard is
-``model_management.is_amd()`` — the test cells halt the constructor at
-that point so the regression contract does not depend on any code
-beyond the guarded branch. (Source line numbers are deliberately not
+format VAE state dicts. At the time of writing, the first call after
+the guard is ``model_management.is_amd()`` — the test cells halt the
+constructor at that point. The harness is therefore isolated from
+``__init__`` work that follows ``is_amd``, but it remains coupled to
+the position of ``is_amd`` as the first post-guard call: a refactor
+that inserts raising work between the guard and ``is_amd``, or that
+displaces ``is_amd`` from that slot, can fail this test even when the
+metadata guard itself is still correct. That coupling is intentional
+— such a failure is a loud signal that the harness halt point needs
+re-anchoring, not silent evidence of a guard regression. Maintainers
+who change the constructor in that region should expect to update
+this harness in lockstep. (Source line numbers are deliberately not
 referenced here so unrelated edits to ``comfy/sd.py`` do not silently
 drift the documentation.)
 
@@ -40,13 +48,17 @@ contract:
     to unrelated constructor changes.
   * ``unittest.mock.patch.object(comfy.sd.model_management, "is_amd",
     autospec=True, side_effect=_PostGuardReached(...))`` — patches the
-    first call after the guard; raising a dedicated sentinel exception
-    from this mock halts ``__init__`` immediately past the guard, so the
-    cell never depends on whatever comes after that call site in the
+    currently-first call after the guard; raising a dedicated sentinel
+    exception from this mock halts ``__init__`` at that call site, so
+    the cell does not depend on whatever follows ``is_amd`` in the
     constructor (model-detection chain, ``first_stage_model``
-    instantiation, dtype routing, etc.). Future post-guard refactors can
-    change behaviour freely without forcing this regression to grow
-    false positives or false negatives.
+    instantiation, dtype routing, etc.). The cell IS still coupled to
+    ``is_amd`` as the first post-guard call: refactors that insert
+    raising work between the guard and ``is_amd``, or that rename or
+    remove ``is_amd`` from that slot, will fail this test even when
+    the guard itself remains correct. That coupling is intentional —
+    failures of that shape are loud signals to re-anchor the halt
+    point, not silent passes that drift the regression contract.
   * ``_make_standin()`` — borrows ``comfy.sd.VAE.__init__`` onto a bare
     class, mirroring the precedent set in
     ``tests-unit/comfy_test/seedvr_model_test.py::_make_standin``
