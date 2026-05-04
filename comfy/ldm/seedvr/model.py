@@ -1364,6 +1364,17 @@ class NaDiT(nn.Module):
                 device=device, dtype=dtype
             )
 
+    def _resolve_text_conditioning(self, context):
+        if context is None or getattr(context, "numel", lambda: None)() == 0:
+            context = self.positive_conditioning
+            return flatten([context])
+        neg_cond, pos_cond = context.chunk(2, dim=0)
+        pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
+        return flatten([pos_cond, neg_cond])
+
+    def _swap_pos_neg_halves(self, out):
+        pos, neg = out.chunk(2)
+        return torch.cat([neg, pos])
 
     def forward(
         self,
@@ -1384,13 +1395,7 @@ class NaDiT(nn.Module):
         conditions = conditions.movedim(1, -1)
         cache = Cache(disable=disable_cache)
 
-        try:
-            neg_cond, pos_cond = context.chunk(2, dim=0)
-            pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
-            txt, txt_shape = flatten([pos_cond, neg_cond])
-        except:
-            context = self.positive_conditioning
-            txt, txt_shape = flatten([context])
+        txt, txt_shape = self._resolve_text_conditioning(context)
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)
@@ -1455,9 +1460,4 @@ class NaDiT(nn.Module):
         out =  torch.stack(vid)
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
-        try:
-            pos, neg = out.chunk(2)
-            out = torch.cat([neg, pos])
-            return out
-        except:
-            return out
+        return self._swap_pos_neg_halves(out)
