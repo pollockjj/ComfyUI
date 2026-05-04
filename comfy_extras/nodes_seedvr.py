@@ -228,9 +228,16 @@ class SeedVR2InputProcessing(io.ComfyNode):
         _, _, new_h, new_w = images.shape
 
         images = images.reshape(b, t, c, new_h, new_w)
+        # Per #188: capture UNPADDED tensor before cut_videos for the B==1 trim path.
+        # For B>1, store the PADDED tensor instead — VideoAutoencoderKLWrapper.decode()
+        # passes `input` (derived from original_image_video) to lab_color_transfer, and
+        # the decoded `x` carries B*T_padded frames; matching that with B*T_padded `input`
+        # preserves the pre-#188 pairing semantics until #189 fixes the B>1 axis derivation.
+        images_bcthw_unpadded = rearrange(images, "b t c h w -> b c t h w")
         images = cut_videos(images)
         images_bcthw = rearrange(images, "b t c h w -> b c t h w")
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
+        original_image_video = images_bcthw_unpadded if b == 1 else images_bcthw
 
         # in case users a non-compatiable number for tiling
         def make_divisible(val, divisor):
@@ -246,7 +253,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 "temporal_size":temporal_tile_size}
         if enable_tiling:
             vae_model.img_dims = [o_h, o_w]
-            vae_model.original_image_video = images_bcthw
+            vae_model.original_image_video = original_image_video
             latent = vae.encode_tiled(
                 images_bthwc,
                 tile_x=spatial_tile_size,
@@ -256,7 +263,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
             )
         else:
             vae_model.img_dims = [o_h, o_w]
-            vae_model.original_image_video = images_bcthw
+            vae_model.original_image_video = original_image_video
             latent = vae.encode(images_bthwc)
 
         clear_vae_memory(vae_model)
@@ -266,7 +273,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         vae_model.img_dims = [o_h, o_w]
         args["enable_tiling"] = enable_tiling
         vae_model.tiled_args = args
-        vae_model.original_image_video = images_bcthw
+        vae_model.original_image_video = original_image_video
 
         latent = latent.unsqueeze(2) if latent.ndim == 4 else latent
         latent = rearrange(latent, "b c ... -> b ... c")

@@ -2260,6 +2260,10 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         else:
             x = super().decode_(latent).squeeze(2)
 
+        # Per #188: original_image_video carries the UNPADDED temporal length T_in
+        # (set by SeedVR2InputProcessing.execute BEFORE cut_videos padding). For B == 1
+        # the trim count `t = input.size(0)` therefore equals T_in and trims decode
+        # output to exactly T_in. The B > 1 axis-confusion path is tracked in #189.
         input = rearrange(self.original_image_video, "b c t h w -> (b t) c h w")
         if x.ndim == 4:
             x = x.unsqueeze(0)
