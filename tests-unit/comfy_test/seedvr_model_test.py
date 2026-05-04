@@ -33,7 +33,9 @@ import torch
 if not torch.cuda.is_available():
     args.cpu = True
 
+import ast  # noqa: E402
 import inspect  # noqa: E402
+import textwrap  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -57,7 +59,10 @@ def _make_standin(positive_conditioning):
 def test_no_bare_except_in_forward_path():
     """Source-level pin: neither ``NaDiT.forward`` nor its split helpers
     may carry the bare ``except:`` clauses that swallowed real torch
-    failures on the SeedVR2 conditioning paths.
+    failures on the SeedVR2 conditioning paths. AST-walked rather than
+    substring-matched so that ``except:`` appearing in a docstring or
+    comment does not false-positive, and so that ``except Exception:``
+    (a typed handler, fine to have) does not false-negative.
     """
     sources = [
         inspect.getsource(NaDiT.forward),
@@ -65,10 +70,13 @@ def test_no_bare_except_in_forward_path():
         inspect.getsource(NaDiT._swap_pos_neg_halves),
     ]
     for src in sources:
-        assert "except:" not in src, (
-            "Bare 'except:' must not return on the SeedVR2 forward "
-            f"path:\n{src}"
-        )
+        tree = ast.parse(textwrap.dedent(src))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                assert node.type is not None, (
+                    "Bare 'except:' (ast.ExceptHandler with type=None) "
+                    f"must not appear on the SeedVR2 forward path:\n{src}"
+                )
 
 
 def test_valid_context_splits_pos_neg():
@@ -159,3 +167,22 @@ def test_output_side_misshaped_tensor_raises():
     bad_out = torch.zeros((1, 4, 8, 8))
     with pytest.raises((RuntimeError, ValueError)):
         standin._swap_pos_neg_halves(bad_out)
+
+
+def test_output_side_swaps_pos_neg_halves():
+    """AC complement: ``_swap_pos_neg_halves`` reorders the post-network
+    output so the first half (positive) and second half (negative) trade
+    places. For a 2-batch tensor with distinguishable halves, the
+    returned tensor must be the swap — first half becomes negative,
+    second half becomes positive — matching the original
+    ``torch.cat([neg, pos])`` semantics from the pre-fix forward path.
+    """
+    pos_buffer = torch.zeros((58, 5120))
+    standin = _make_standin(pos_buffer)
+    pos_half = torch.full((1, 4, 8, 8), 1.0)
+    neg_half = torch.full((1, 4, 8, 8), -1.0)
+    out = torch.cat([pos_half, neg_half], dim=0)
+    swapped = standin._swap_pos_neg_halves(out)
+    assert swapped.shape == out.shape
+    assert (swapped[0] == -1.0).all(), "first half of swapped output must be the original negative half"
+    assert (swapped[1] == 1.0).all(), "second half of swapped output must be the original positive half"
