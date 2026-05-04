@@ -1,15 +1,24 @@
 """Regression tests for SeedVR2 conditioning model resolution and RoPE
-frequency-cast caching. Anchored by pollockjj/mydevelopment#183 and the
-CodeRabbit r2962219538 finding on Comfy-Org/ComfyUI#11294.
+frequency cast. Anchored by pollockjj/mydevelopment#183 and the CodeRabbit
+r2962219538 finding on Comfy-Org/ComfyUI#11294.
 
 Pin two behaviors:
+
   1. ``_resolve_seedvr2_diffusion_model`` returns the inner diffusion-model
      for the expected ``model.model.diffusion_model`` shape and fails loud
      with a ``RuntimeError`` whose message begins with
-     ``_SEEDVR2_INVALID_MODEL_MSG_PREFIX`` for any other shape.
-  2. ``_apply_rope_freqs_float32_cast`` iterates the diffusion-model module
-     tree exactly once per resolved instance; subsequent calls against the
-     same instance short-circuit.
+     ``_SEEDVR2_INVALID_MODEL_MSG_PREFIX`` for any other shape, including
+     the four distinct missing-vs-None subcases of the chain.
+  2. ``_apply_rope_freqs_float32_cast`` is idempotent **per-tensor by
+     dtype check**, NOT per-instance by sentinel attribute. Every call
+     walks the diffusion-model module tree and invokes ``.to(float32)``
+     only on tensors whose dtype is not already ``float32``. The cache-by-
+     attribute approach was rejected on PR pollockjj/ComfyUI#32 because
+     the sentinel survives Comfy's dynamic model unload/reload cycle while
+     ``rope.freqs`` itself is restored to the archived dtype, so the next
+     call would short-circuit and leave RoPE running in fp16/bf16 — the
+     exact failure the helper is supposed to prevent. The dtype check is
+     self-correcting against any weight-restore lifecycle event.
 
 Import isolation: ``comfy.model_management`` is stubbed via direct
 ``sys.modules`` assignment so importing ``comfy_extras.nodes_seedvr`` does
@@ -17,8 +26,8 @@ not trigger GPU/server-side initialization. ``patch.dict`` is intentionally
 NOT used here because its snapshot/restore semantics evict transitively
 imported third-party modules (e.g. ``torchvision``) on exit, which causes
 ``torch``'s global op-library Meta-key registrations to double-register on
-re-import. Module-level cached import + scoped restore of the single
-mocked entry avoids that hazard.
+re-import. Module-level cached import + scoped restore of the four mocked
+entries avoids that hazard. See ``_import_nodes_seedvr_isolated``.
 """
 
 import importlib
@@ -149,26 +158,66 @@ def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
 
 
 def test_resolve_seedvr2_diffusion_model_raises_runtime_error_with_specific_prefix():
+    """Pin all four failure modes of the resolver chain to the same error
+    prefix and to message text that distinguishes 'attribute missing'
+    from 'attribute present but None' (Copilot review on PR
+    pollockjj/ComfyUI#32). The four modes:
+
+      mode 1: input has no 'model' attribute
+      mode 2: input.model is None
+      mode 3: 'model.model' has no 'diffusion_model' attribute
+      mode 4: 'model.model.diffusion_model' is None
+    """
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
+        # Mode 1: model has no 'model' attribute at all.
         class _NoModelAttr:
             pass
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr._resolve_seedvr2_diffusion_model(_NoModelAttr())
-        assert str(excinfo.value).startswith(
-            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
-        )
+        msg = str(excinfo.value)
+        assert msg.startswith(nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX)
+        assert "no 'model' attribute" in msg
 
+        # Mode 2: model.model exists but is None (must not be conflated
+        # with "no 'model' attribute").
+        class _ModelIsNone:
+            def __init__(self):
+                self.model = None
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr._resolve_seedvr2_diffusion_model(_ModelIsNone())
+        msg = str(excinfo.value)
+        assert msg.startswith(nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX)
+        assert "input.model is None" in msg
+
+        # Mode 3: model.model exists, has no 'diffusion_model' attribute.
         class _NoDiffusionAttr:
             def __init__(self):
                 self.model = object()
 
-        with pytest.raises(RuntimeError) as excinfo2:
+        with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr._resolve_seedvr2_diffusion_model(_NoDiffusionAttr())
-        assert str(excinfo2.value).startswith(
-            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
-        )
+        msg = str(excinfo.value)
+        assert msg.startswith(nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX)
+        assert "no 'diffusion_model' attribute" in msg
+
+        # Mode 4: model.model.diffusion_model exists but is None (must not
+        # be conflated with "no 'diffusion_model' attribute").
+        class _DiffusionIsNoneInner:
+            def __init__(self):
+                self.diffusion_model = None
+
+        class _DiffusionIsNone:
+            def __init__(self):
+                self.model = _DiffusionIsNoneInner()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr._resolve_seedvr2_diffusion_model(_DiffusionIsNone())
+        msg = str(excinfo.value)
+        assert msg.startswith(nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX)
+        assert "'model.model.diffusion_model' is None" in msg
     finally:
         restore()
 
