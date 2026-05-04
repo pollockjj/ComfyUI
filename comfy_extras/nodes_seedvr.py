@@ -17,8 +17,6 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
 )
 
-_SEEDVR2_ROPE_FREQS_CAST_SENTINEL = "_seedvr2_rope_freqs_float32_cast_done"
-
 
 def _resolve_seedvr2_diffusion_model(model):
     """Resolve the inner SeedVR2 diffusion-model module from a ComfyUI model
@@ -43,16 +41,18 @@ def _resolve_seedvr2_diffusion_model(model):
 
 def _apply_rope_freqs_float32_cast(diffusion_model):
     """Cast every nested module's ``rope.freqs`` parameter data to ``float32``
-    exactly once per resolved diffusion-model instance. Subsequent calls
-    against the same instance short-circuit via a sentinel attribute, so the
-    full module tree is iterated at most once per instance lifetime.
+    when it is not already in float32. Idempotency is per-tensor by dtype
+    check, NOT a per-instance sentinel attribute — a sentinel would survive
+    Comfy's dynamic model unload/reload cycle while ``rope.freqs`` itself
+    is restored from the archived dtype, leaving RoPE running in fp16/bf16
+    on subsequent calls. The dtype check makes the cast self-correcting
+    against weight-restore lifecycle events. Iteration cost is one walk of
+    the diffusion-model module tree per ``execute()`` call (microseconds).
     """
-    if getattr(diffusion_model, _SEEDVR2_ROPE_FREQS_CAST_SENTINEL, False):
-        return
     for module in diffusion_model.modules():
         if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
-            module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
-    setattr(diffusion_model, _SEEDVR2_ROPE_FREQS_CAST_SENTINEL, True)
+            if module.rope.freqs.data.dtype != torch.float32:
+                module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
 
 
 def clear_vae_memory(vae_model):
