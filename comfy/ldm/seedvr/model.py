@@ -1364,6 +1364,25 @@ class NaDiT(nn.Module):
                 device=device, dtype=dtype
             )
 
+    def _resolve_text_conditioning(self, context):
+        if context is None or getattr(context, "numel", lambda: None)() == 0:
+            context = self.positive_conditioning
+            return flatten([context])
+        neg_cond, pos_cond = context.chunk(2, dim=0)
+        pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
+        return flatten([pos_cond, neg_cond])
+
+    def _swap_pos_neg_halves(self, out):
+        # Both calls take dim=0 explicitly. ``Tensor.chunk`` and
+        # ``torch.cat`` default to dim=0, so this is functionally
+        # identical to the implicit form, but the contract here is
+        # specifically "split the BATCH axis into two halves and
+        # swap them" — making the dim load-bearing in source prevents
+        # silent drift if a future refactor reorders the tensor's
+        # axes (e.g. moves batch out of position 0). Copilot review on
+        # PR pollockjj/ComfyUI#33 (2026-05-04 17:38).
+        pos, neg = out.chunk(2, dim=0)
+        return torch.cat([neg, pos], dim=0)
 
     def forward(
         self,
@@ -1384,13 +1403,7 @@ class NaDiT(nn.Module):
         conditions = conditions.movedim(1, -1)
         cache = Cache(disable=disable_cache)
 
-        try:
-            neg_cond, pos_cond = context.chunk(2, dim=0)
-            pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
-            txt, txt_shape = flatten([pos_cond, neg_cond])
-        except:
-            context = self.positive_conditioning
-            txt, txt_shape = flatten([context])
+        txt, txt_shape = self._resolve_text_conditioning(context)
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)
@@ -1455,9 +1468,4 @@ class NaDiT(nn.Module):
         out =  torch.stack(vid)
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
-        try:
-            pos, neg = out.chunk(2)
-            out = torch.cat([neg, pos])
-            return out
-        except:
-            return out
+        return self._swap_pos_neg_halves(out)
