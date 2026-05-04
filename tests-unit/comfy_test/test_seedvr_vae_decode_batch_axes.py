@@ -64,11 +64,8 @@ def _lab_color_passthrough(x, input):
 
 
 def _decode_with_patches(wrapper, z):
-    with patch.object(
-        vae_mod.VideoAutoencoderKL, "decode_", _fingerprint_decode_
-    ), patch.object(
-        vae_mod, "lab_color_transfer", _lab_color_passthrough
-    ):
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _fingerprint_decode_), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_color_passthrough):
         return wrapper.decode(z)
 
 
@@ -77,7 +74,7 @@ def test_decode_b1_t1_shape_and_ordering_correct():
     wrapper = _make_wrapper(B, T_orig)
     z = torch.zeros(B, 16 * T_orig, 2, 2)
     out = _decode_with_patches(wrapper, z)
-    assert tuple(out.shape) == (1, 3, B * T_orig, 16, 16)
+    assert tuple(out.shape) == (1, 3, 1, 16, 16)
     assert out[0, 0, 0, 0, 0].item() == 1.0
 
 
@@ -86,7 +83,7 @@ def test_decode_b1_t5_video_shape_unchanged():
     wrapper = _make_wrapper(B, T_orig)
     z = torch.zeros(B, 16 * T_orig, 2, 2)
     out = _decode_with_patches(wrapper, z)
-    assert tuple(out.shape) == (1, 3, B * T_orig, 16, 16)
+    assert tuple(out.shape) == (1, 3, 5, 16, 16)
 
 
 def test_decode_b2_t1_fixes_batch_time_axes():
@@ -94,7 +91,7 @@ def test_decode_b2_t1_fixes_batch_time_axes():
     wrapper = _make_wrapper(B, T_orig)
     z = torch.zeros(B, 16 * T_orig, 2, 2)
     out = _decode_with_patches(wrapper, z)
-    assert tuple(out.shape) == (1, 3, B * T_orig, 16, 16)
+    assert tuple(out.shape) == (1, 3, 2, 16, 16)
     assert out[0, 0, 0, 0, 0].item() == 1.0
     assert out[0, 0, 1, 0, 0].item() == 2.0
 
@@ -104,7 +101,7 @@ def test_decode_b4_t1_fixes_batch_time_axes():
     wrapper = _make_wrapper(B, T_orig)
     z = torch.zeros(B, 16 * T_orig, 2, 2)
     out = _decode_with_patches(wrapper, z)
-    assert tuple(out.shape) == (1, 3, B * T_orig, 16, 16)
+    assert tuple(out.shape) == (1, 3, 4, 16, 16)
     assert [out[0, 0, b, 0, 0].item() for b in range(4)] == [1.0, 2.0, 3.0, 4.0]
 
 
@@ -113,7 +110,7 @@ def test_decode_b2_t3_multi_frame_batch_unchanged():
     wrapper = _make_wrapper(B, T_orig)
     z = torch.zeros(B, 16 * T_orig, 2, 2)
     out = _decode_with_patches(wrapper, z)
-    assert tuple(out.shape) == (1, 3, B * T_orig, 16, 16)
+    assert tuple(out.shape) == (1, 3, 6, 16, 16)
 
 
 def test_decode_b2_t1_stacked_equals_individual_per_sample_ordering():
@@ -136,18 +133,12 @@ def test_decode_b2_t1_stacked_equals_individual_per_sample_ordering():
 
     z_individual = torch.zeros(1, 16, 2, 2)
 
-    with patch.object(
-        vae_mod.VideoAutoencoderKL, "decode_", _decode_pinned(1.0)
-    ), patch.object(
-        vae_mod, "lab_color_transfer", _lab_color_passthrough
-    ):
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_pinned(1.0)), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_color_passthrough):
         out_individual_0 = wrapper.decode(z_individual)
 
-    with patch.object(
-        vae_mod.VideoAutoencoderKL, "decode_", _decode_pinned(2.0)
-    ), patch.object(
-        vae_mod, "lab_color_transfer", _lab_color_passthrough
-    ):
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_pinned(2.0)), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_color_passthrough):
         out_individual_1 = wrapper.decode(z_individual)
 
     assert torch.equal(out_stacked[0, :, 0, :, :], out_individual_0[0, :, 0, :, :])
