@@ -2256,13 +2256,11 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            x = tiled_vae(latent, self, **self.tiled_args, encode=False).squeeze(2)
+            x = tiled_vae(latent, self, **self.tiled_args, encode=False)
         else:
-            x = super().decode_(latent).squeeze(2)
+            x = super().decode_(latent)
 
         input = rearrange(self.original_image_video, "b c t h w -> (b t) c h w")
-        if x.ndim == 4:
-            x = x.unsqueeze(0)
 
         # in case of padded frames
         t = input.size(0)
@@ -2271,11 +2269,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if t == 1 and x.size(2) == 4:
             x = x[:, :, :t]
 
-        if x.size(1) == 1:
-            exp = "b t c h w -> (b t) c h w"
-        else:
-            exp = "b c t h w -> (b t) c h w"
-        x = rearrange(x, exp)
+        x = rearrange(x, "b c t h w -> (b t) c h w")
 
         input = input.to(x.device)
         o_h, o_w = self.img_dims
