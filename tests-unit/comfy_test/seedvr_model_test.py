@@ -163,7 +163,10 @@ def test_output_side_misshaped_tensor_raises():
     """AC: the post-network output split must raise on an unsplittable
     tensor (no silent return of the un-split tensor in the wrong
     order/shape). Here a batch=1 tensor cannot be ``chunk(2, dim=0)``
-    into two halves; ``pos, neg = out.chunk(2)`` raises on unpacking.
+    into two halves; ``pos, neg = out.chunk(2, dim=0)`` raises on
+    unpacking — matching the production helper's explicit-dim contract
+    (``_swap_pos_neg_halves`` calls ``chunk(2, dim=0)`` and
+    ``torch.cat(..., dim=0)``).
     """
     pos_buffer = torch.zeros((58, 5120))
     standin = _make_standin(pos_buffer)
