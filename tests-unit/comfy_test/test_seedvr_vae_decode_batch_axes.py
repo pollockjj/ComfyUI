@@ -154,6 +154,36 @@ def test_decode_tiled_sf_t1_single_frame_4d_output_normalized():
     assert out[0, 0, 0, 0, 0].item() == 1.0
 
 
+def test_decode_tiled_sf_t1_b2_t1_per_sample_ordering():
+    """Copilot follow-up 3184602213 on PR #34: the tiled-path 4D->5D
+    normalization must preserve distinct batch/time axes for ``B>1``
+    too, not only ``B=1``. Mirrors
+    ``test_decode_b2_t1_fixes_batch_time_axes`` for the
+    ``enable_tiling=True`` path with a wrapper whose
+    ``temporal_downsample_factor == 1`` AND latent T == 1, where
+    ``tiled_vae`` returns 4D and the wrapper must re-add the temporal
+    axis without collapsing batch into channels.
+    """
+    B, T_orig = 2, 1
+    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
+        vae_mod.VideoAutoencoderKLWrapper
+    )
+    nn.Module.__init__(wrapper)
+    wrapper.tiled_args = {"enable_tiling": True}
+    wrapper.original_image_video = torch.zeros(B, 3, T_orig, 16, 16)
+    wrapper.img_dims = (16, 16)
+
+    z = torch.zeros(B, 16 * T_orig, 2, 2)
+
+    with patch.object(vae_mod, "tiled_vae", _tiled_vae_4d_stub), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_color_passthrough):
+        out = wrapper.decode(z)
+
+    assert tuple(out.shape) == (1, 3, 2, 16, 16)
+    assert out[0, 0, 0, 0, 0].item() == 1.0
+    assert out[0, 0, 1, 0, 0].item() == 2.0
+
+
 def test_decode_b2_t1_stacked_equals_individual_per_sample_ordering():
     wrapper = _make_wrapper(2, 1)
     z_stacked = torch.zeros(2, 16, 2, 2)
