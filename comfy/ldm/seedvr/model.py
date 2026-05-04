@@ -1373,8 +1373,16 @@ class NaDiT(nn.Module):
         return flatten([pos_cond, neg_cond])
 
     def _swap_pos_neg_halves(self, out):
-        pos, neg = out.chunk(2)
-        return torch.cat([neg, pos])
+        # Both calls take dim=0 explicitly. ``Tensor.chunk`` and
+        # ``torch.cat`` default to dim=0, so this is functionally
+        # identical to the implicit form, but the contract here is
+        # specifically "split the BATCH axis into two halves and
+        # swap them" — making the dim load-bearing in source prevents
+        # silent drift if a future refactor reorders the tensor's
+        # axes (e.g. moves batch out of position 0). Copilot review on
+        # PR pollockjj/ComfyUI#33 (2026-05-04 17:38).
+        pos, neg = out.chunk(2, dim=0)
+        return torch.cat([neg, pos], dim=0)
 
     def forward(
         self,
