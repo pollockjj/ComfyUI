@@ -1,13 +1,16 @@
 """Regression tests for SeedVR2 conditioning split hardening.
 
 Tracks pollockjj/mydevelopment#109 (parent #101). Two bare ``except:``
-clauses in ``NaDiT.forward`` previously swallowed every failure mode on
-the (1) input-side text-conditioning split and (2) output-side
-positive/negative split, silently substituting wrong fallbacks (zero
-``positive_conditioning`` buffer for the input, un-split tensor for the
-output). Real prompt-shape, dtype, OOM, and downstream tensor failures
-were re-routed to "no prompt supplied" or to a wrong-order output, with
-no diagnostic.
+clauses in ``NaDiT.forward`` previously swallowed every failure mode
+on the (1) input-side text-conditioning split and (2) output-side
+positive/negative split, silently substituting wrong fallbacks: the
+``positive_conditioning`` buffer (registered via ``torch.empty(...)``
+so it holds **uninitialized** memory — NaN, garbage from prior heap
+allocations, or whatever was on the page; never guaranteed-zero) for
+the input, and the un-split tensor for the output. Real prompt-shape,
+dtype, OOM, and downstream tensor failures were re-routed to "no
+prompt supplied" with arbitrary buffer contents standing in for actual
+prompt embeddings, or to a wrong-order output, with no diagnostic.
 
 The fix on the deliverable (Comfy-Org/ComfyUI#11294 follow-up):
 
