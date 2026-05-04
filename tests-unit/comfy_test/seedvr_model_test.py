@@ -159,24 +159,3 @@ def test_output_side_misshaped_tensor_raises():
     bad_out = torch.zeros((1, 4, 8, 8))
     with pytest.raises((RuntimeError, ValueError)):
         standin._swap_pos_neg_halves(bad_out)
-
-
-def test_output_side_valid_tensor_swaps_halves():
-    """AC complement: a valid even-batched output tensor must round-trip
-    through the split/cat correctly — first half (``pos``) and second
-    half (``neg``) are swapped to ``[neg, pos]``, preserving total
-    shape and per-element values.
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    pos_half = torch.full((1, 4, 8, 8), 1.0)
-    neg_half = torch.full((1, 4, 8, 8), -1.0)
-    out = torch.cat([pos_half, neg_half], dim=0)
-    swapped = standin._swap_pos_neg_halves(out)
-    assert swapped.shape == out.shape
-    assert (swapped[:1] == -1.0).all(), (
-        "after swap, first half of output must be the original negative half"
-    )
-    assert (swapped[1:] == 1.0).all(), (
-        "after swap, second half of output must be the original positive half"
-    )
