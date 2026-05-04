@@ -13,6 +13,69 @@ from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
 
 
+_SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
+    "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
+)
+
+# Private sentinel for getattr default — distinguishes "attribute missing"
+# from "attribute present but None", so the failure message is accurate
+# in both cases (Copilot review on PR pollockjj/ComfyUI#32).
+_ATTR_MISSING = object()
+
+
+def _resolve_seedvr2_diffusion_model(model):
+    """Resolve the inner SeedVR2 diffusion-model module from a ComfyUI model
+    patcher object. Fails loud with a ``RuntimeError`` whose message begins
+    with ``_SEEDVR2_INVALID_MODEL_MSG_PREFIX`` when the expected wrapper
+    shape (``model.model.diffusion_model``) is absent.
+
+    Distinguishes four failure modes via the ``_ATTR_MISSING`` sentinel:
+    ``model.model`` missing, ``model.model is None``,
+    ``model.model.diffusion_model`` missing, ``model.model.diffusion_model
+    is None``. Each mode produces an accurate error message rather than
+    conflating "attribute missing" with "attribute is None".
+    """
+    inner = getattr(model, "model", _ATTR_MISSING)
+    if inner is _ATTR_MISSING:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: input has no 'model' attribute "
+            f"(got type {type(model).__name__})."
+        )
+    if inner is None:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: input.model is None "
+            f"(input type {type(model).__name__})."
+        )
+    diffusion_model = getattr(inner, "diffusion_model", _ATTR_MISSING)
+    if diffusion_model is _ATTR_MISSING:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: 'model.model' has no "
+            f"'diffusion_model' attribute (got type {type(inner).__name__})."
+        )
+    if diffusion_model is None:
+        raise RuntimeError(
+            f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: 'model.model.diffusion_model' "
+            f"is None (model.model type {type(inner).__name__})."
+        )
+    return diffusion_model
+
+
+def _apply_rope_freqs_float32_cast(diffusion_model):
+    """Cast every nested module's ``rope.freqs`` parameter data to ``float32``
+    when it is not already in float32. Idempotency is per-tensor by dtype
+    check, NOT a per-instance sentinel attribute — a sentinel would survive
+    Comfy's dynamic model unload/reload cycle while ``rope.freqs`` itself
+    is restored from the archived dtype, leaving RoPE running in fp16/bf16
+    on subsequent calls. The dtype check makes the cast self-correcting
+    against weight-restore lifecycle events. Iteration cost is one walk of
+    the diffusion-model module tree per ``execute()`` call (microseconds).
+    """
+    for module in diffusion_model.modules():
+        if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
+            if module.rope.freqs.data.dtype != torch.float32:
+                module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
+
+
 def clear_vae_memory(vae_model):
     for module in vae_model.modules():
         if hasattr(module, "memory"):
@@ -233,13 +296,11 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         vae_conditioning = vae_conditioning["samples"]
         device = vae_conditioning.device
-        model = model.model.diffusion_model
+        model = _resolve_seedvr2_diffusion_model(model)
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
-        for module in model.modules():
-            if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
-                module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
+        _apply_rope_freqs_float32_cast(model)
 
         noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
