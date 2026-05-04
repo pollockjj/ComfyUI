@@ -2257,6 +2257,12 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
 
         if self.enable_tiling:
             x = tiled_vae(latent, self, **self.tiled_args, encode=False)
+            if x.ndim == 4:
+                # tiled_vae squeezes the temporal axis when
+                # temporal_downsample_factor == 1 AND latent T == 1
+                # (see tiled_vae line 179-180); re-add it so the post-decode
+                # pipeline can keep batch and time distinct on the tiled path.
+                x = x.unsqueeze(2)
         else:
             x = super().decode_(latent)
 
