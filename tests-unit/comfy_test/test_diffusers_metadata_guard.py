@@ -28,7 +28,7 @@ this harness in lockstep. (Source line numbers are deliberately not
 referenced here so unrelated edits to ``comfy/sd.py`` do not silently
 drift the documentation.)
 
-The four test cells below cover the full semantic of the guard. AC1
+The four test cells below cover the full semantics of the guard. AC1
 and AC2 are the binary AC contract from the issue body (key-missing
 vs. key-present-``"true"``); the qa-slice gate evaluates their
 nodeids, metadata literals, and call-count assertions verbatim. AC3
@@ -212,7 +212,7 @@ def test_diffusers_guard_skips_convert_when_metadata_pins_keep_true():
     ``metadata["keep_diffusers_format"] == "true"``. The guard must
     bypass the conversion — ``convert_vae_state_dict`` must not be
     invoked. This is the explicit opt-out path that lets a caller
-    declare an already-Diffusers-formatted VAE should not be rewritten
+    declare that an already-Diffusers-formatted VAE should not be rewritten
     by ``convert_vae_state_dict``. The patched ``is_amd`` raises
     ``_PostGuardReached`` to halt the constructor at the first
     post-guard statement so the cell does not depend on any code past
