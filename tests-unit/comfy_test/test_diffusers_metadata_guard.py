@@ -14,32 +14,44 @@ The two test cells below are the binary AC contract that the qa-slice
 gate evaluates verbatim. Each follows the contract shape exactly:
 
   * ``unittest.mock.patch.object(comfy.sd.diffusers_convert,
-    "convert_vae_state_dict", autospec=True)`` — patches the symbol
-    that ``comfy/sd.py:446`` resolves through (``from . import
-    diffusers_convert``); ``autospec=True`` pins the mock's signature
-    to the production function so a signature drift fails loudly.
+    "convert_vae_state_dict", autospec=True, side_effect=...)`` —
+    patches the symbol that ``comfy/sd.py:446`` resolves through
+    (``from . import diffusers_convert``); ``autospec=True`` pins the
+    mock's signature to the production function so a signature drift
+    fails loudly. The ``side_effect`` is a passthrough lambda that
+    returns its input ``sd`` unchanged, so the production-line
+    ``sd = diffusers_convert.convert_vae_state_dict(sd)`` rebinds
+    ``sd`` to the same real dict the cell constructed — not to the
+    default ``MagicMock`` return value, which would make any
+    post-guard ``in sd`` checks meaningless and make the cell brittle
+    to unrelated constructor changes.
   * ``unittest.mock.patch.object(comfy.sd.model_management, "is_amd",
-    autospec=True)`` — patches the FIRST function called after the
-    guard at ``comfy/sd.py:448`` (``if model_management.is_amd():``).
-    Asserting this mock was called is positive evidence that control
-    flow progressed past the guard without raising; without it, a
-    regression that started raising inside the guard branch (after
-    ``convert_vae_state_dict`` returned, or on the opt-out path that
-    skips it) would be silently swallowed by ``suppress(Exception)``
-    and the cell would still pass on call-count alone.
+    autospec=True, side_effect=_PostGuardReached(...))`` — patches
+    the FIRST function called after the guard at ``comfy/sd.py:448``
+    (``if model_management.is_amd():``). Raising a dedicated sentinel
+    exception from this mock halts ``__init__`` immediately past the
+    guard, so the cell never depends on whatever comes after line 448
+    in the constructor (model-detection chain, ``first_stage_model``
+    instantiation, dtype routing, etc.). Future post-guard refactors
+    can change behaviour freely without forcing this regression to
+    grow false positives or false negatives.
   * ``_make_standin()`` — borrows ``comfy.sd.VAE.__init__`` onto a
     bare class, mirroring the precedent set in
     ``tests-unit/comfy_test/seedvr_model_test.py::_make_standin``
     (#109). The guard sits inline in the constructor at lines 443-446,
     above any subsystem instantiation, so binding ``__init__`` is
     sufficient to drive it.
-  * ``contextlib.suppress(Exception)`` — the post-guard model-detection
-    chain in ``VAE.__init__`` continues past line 448 and raises on a
-    synthetic single-key state dict (``model_detection`` cannot resolve
-    a real architecture). Both the guard's call-count and the
-    post-guard ``is_amd`` reach are captured before that point, so
-    suppressing downstream failures keeps the cell binary while the
-    paired assertions prove control actually crossed the guard.
+  * ``contextlib.suppress(_PostGuardReached)`` — catches ONLY the
+    deliberate halt-point exception raised by the patched ``is_amd``.
+    Any exception of a different class (a ``KeyError`` from a
+    regression of the original metadata-indexing bug, an
+    ``AttributeError`` from an unexpected ``sd`` shape, anything else)
+    propagates uncaught and fails the cell loudly. This replaces an
+    earlier ``suppress(Exception)`` that masked any post-guard failure
+    along with the deliberate halt; per Copilot review feedback on PR
+    pollockjj/ComfyUI#36 (comments r3184935719, r3184935740,
+    r3184935750), narrowing the suppression class restores the
+    regression signal that a broad catch had weakened.
   * Paired assertions per cell — ``mock_convert.call_count`` is the
     branch witness (AC1 expects 1, AC2 expects 0); ``mock_is_amd.called``
     is the post-guard reach witness (both ACs expect ``True``). Both
@@ -66,6 +78,17 @@ import comfy.sd  # noqa: E402
 
 
 _DIFFUSERS_TRIGGER_KEY = "decoder.up_blocks.0.resnets.0.norm1.weight"
+
+
+class _PostGuardReached(Exception):
+    """Sentinel raised by the patched ``model_management.is_amd`` to halt
+    ``VAE.__init__`` at the first statement past the diffusers-format
+    guard (``comfy/sd.py:448``). Catching this dedicated class — and
+    only this class — gives positive proof that control crossed the
+    guard while leaving any other exception (a ``KeyError`` regression
+    of the original indexing bug, or any unrelated raise) free to
+    propagate and fail the cell.
+    """
 
 
 def _make_standin():
@@ -95,11 +118,15 @@ def test_diffusers_guard_invokes_convert_when_metadata_missing_key():
     ``metadata["keep_diffusers_format"]`` form would raise
     ``KeyError`` on this metadata before the call could happen, so a
     ``call_count`` of 1 is positive evidence that the safe ``.get``
-    form is in effect. ``mock_is_amd.called`` is the paired witness
-    that control reached the first post-guard statement at
-    ``comfy/sd.py:448`` — without it, ``suppress(Exception)`` would
-    silently mask any regression that started raising inside the
-    branch after ``convert_vae_state_dict`` returned.
+    form is in effect. The patched converter passes ``sd`` through
+    unchanged so the post-guard line at ``comfy/sd.py:448`` runs
+    against the same real state dict the cell constructed; the patched
+    ``is_amd`` then raises ``_PostGuardReached`` to halt the
+    constructor at exactly that point. ``mock_is_amd.called`` is the
+    paired witness that control reached line 448, and the narrow
+    ``suppress(_PostGuardReached)`` ensures any other regression
+    (e.g., a ``KeyError`` reintroduced into the guard) escapes the
+    cell instead of being silently masked.
     """
     StandIn = _make_standin()
     sd = {_DIFFUSERS_TRIGGER_KEY: torch.zeros(1)}
@@ -109,12 +136,14 @@ def test_diffusers_guard_invokes_convert_when_metadata_missing_key():
         comfy.sd.diffusers_convert,
         "convert_vae_state_dict",
         autospec=True,
+        side_effect=lambda state_dict: state_dict,
     ) as mock_convert, unittest.mock.patch.object(
         comfy.sd.model_management,
         "is_amd",
         autospec=True,
+        side_effect=_PostGuardReached("VAE.__init__ reached comfy/sd.py:448"),
     ) as mock_is_amd:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(_PostGuardReached):
             StandIn(sd=sd, metadata=metadata)
 
     assert mock_convert.call_count == 1
@@ -127,12 +156,14 @@ def test_diffusers_guard_skips_convert_when_metadata_pins_keep_true():
     bypass the conversion — ``convert_vae_state_dict`` must not be
     invoked. This is the explicit opt-out path that lets a caller
     declare an already-Diffusers-formatted VAE should not be rewritten
-    by ``convert_vae_state_dict``. ``mock_is_amd.called`` is the
-    paired witness that control reached the first post-guard statement
-    at ``comfy/sd.py:448``; without it, a regression that raised on
-    the opt-out path itself would be silently swallowed by
-    ``suppress(Exception)`` and the ``call_count == 0`` check would
-    still pass on a guard that never ran.
+    by ``convert_vae_state_dict``. The patched ``is_amd`` raises
+    ``_PostGuardReached`` to halt the constructor at the first
+    post-guard statement so the cell does not depend on any code past
+    line 448; ``mock_is_amd.called`` is the paired witness that
+    control reached that statement on the opt-out path, and the
+    narrow ``suppress(_PostGuardReached)`` ensures any regression that
+    raised before reaching ``is_amd`` (a ``KeyError`` resurrection,
+    for instance) escapes the cell rather than being silently masked.
     """
     StandIn = _make_standin()
     sd = {_DIFFUSERS_TRIGGER_KEY: torch.zeros(1)}
@@ -142,12 +173,14 @@ def test_diffusers_guard_skips_convert_when_metadata_pins_keep_true():
         comfy.sd.diffusers_convert,
         "convert_vae_state_dict",
         autospec=True,
+        side_effect=lambda state_dict: state_dict,
     ) as mock_convert, unittest.mock.patch.object(
         comfy.sd.model_management,
         "is_amd",
         autospec=True,
+        side_effect=_PostGuardReached("VAE.__init__ reached comfy/sd.py:448"),
     ) as mock_is_amd:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(_PostGuardReached):
             StandIn(sd=sd, metadata=metadata)
 
     assert mock_convert.call_count == 0
