@@ -2279,8 +2279,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             )
         if len(img_dims) != 2:
             raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a 2-tuple "
-                f"(H, W); got arity {len(img_dims)} with value {img_dims!r}."
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a length-2 "
+                f"tuple or list (H, W); got arity {len(img_dims)} with value {img_dims!r}."
             )
 
         b, tc, h, w = z.shape
