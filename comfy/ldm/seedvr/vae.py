@@ -2192,19 +2192,15 @@ class VideoAutoencoderKL(nn.Module):
         raise NotImplementedError
 
     def forward(
-        self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
+        self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all"
     ):
         # x: [b c t h w]
-        def _unwrap(value):
-            return value[0] if isinstance(value, tuple) else value
-
         if mode == "encode":
-            return _unwrap(self.encode(x, **kwargs))
+            return self.encode(x)
         elif mode == "decode":
-            return _unwrap(self.decode_(x, **kwargs))
+            return self.decode_(x)
         else:
-            latent = _unwrap(self.encode(x, **kwargs))
-            return _unwrap(self.decode_(latent, **kwargs))
+            return self.decode_(self.encode(x))
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def __init__(
