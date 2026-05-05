@@ -55,7 +55,7 @@ while breaking real callers that omit ``metadata``, pass a
 ``None``-normalized empty dict, or pass a non-``"true"``
 ``keep_diffusers_format`` value.
 
-All four cells share an ``_exercise_guard`` helper so the
+All five cells share an ``_exercise_guard`` helper so the
 patched-constructor harness stays single-sourced; each cell supplies
 its own ``metadata`` literal and asserts on the call counts. The
 helper contract:
