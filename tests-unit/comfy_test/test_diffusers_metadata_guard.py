@@ -28,7 +28,7 @@ this harness in lockstep. (Source line numbers are deliberately not
 referenced here so unrelated edits to ``comfy/sd.py`` do not silently
 drift the documentation.)
 
-The four test cells below cover the full semantics of the guard. AC1
+The five test cells below cover the full semantics of the guard. AC1
 and AC2 are the binary AC contract from the issue body (key-missing
 vs. key-present-``"true"``); the qa-slice gate evaluates their
 nodeids, metadata literals, and call-count assertions verbatim. AC3
@@ -37,11 +37,23 @@ feedback on PR pollockjj/ComfyUI#36 (comment r3185061776, round 8):
 a regression shape like ``if metadata and metadata.get(...) is None:``
 keeps AC1 and AC2 green while breaking the ``metadata is None`` path
 (AC3) and the ``metadata = {"keep_diffusers_format": "false"}`` path
-(AC4) — the two remaining inputs that the guard's ``or`` clause must
-drive into the conversion branch. With all four cells in place the
-guard cannot be silently rewritten to a form that keeps the binary
-contract green while breaking real callers that omit ``metadata`` or
-pass a non-``"true"`` ``keep_diffusers_format`` value.
+(AC4). AC5 is a further completeness cell motivated by Copilot review
+feedback on PR pollockjj/ComfyUI#36 (comment r3185375054, round 26):
+the input ``metadata = {}`` is reachable in production because
+``comfy.utils.convert_old_quants`` (``comfy/utils.py`` line 1359-1360)
+normalizes ``None`` to ``{}`` before ``load_state_dict_guess_config``
+constructs the VAE at ``comfy/sd.py`` line 1739
+(``vae = VAE(sd=vae_sd, metadata=metadata)``). AC1 covers the truthy
+missing-key shape ``{"unrelated_key": "value"}``; AC5 covers the
+distinct falsy missing-key shape ``{}``. A regression like
+``if metadata is None or (metadata and metadata.get(...) != "true"):``
+keeps AC1, AC2, AC3 and AC4 green — the empty dict short-circuits the
+``and`` to ``False`` — but breaks the ``metadata = {}`` path that
+real callers produce. With all five cells in place the guard cannot
+be silently rewritten to a form that keeps the binary contract green
+while breaking real callers that omit ``metadata``, pass a
+``None``-normalized empty dict, or pass a non-``"true"``
+``keep_diffusers_format`` value.
 
 All four cells share an ``_exercise_guard`` helper so the
 patched-constructor harness stays single-sourced; each cell supplies
@@ -91,8 +103,8 @@ helper contract:
     r3184935750), narrowing the suppression class restores the
     regression signal that a broad catch had weakened.
   * Paired assertions per cell — ``mock_convert.call_count`` is the
-    branch witness (AC1, AC3, AC4 expect 1; AC2 expects 0);
-    ``mock_is_amd.called`` is the post-guard reach witness (all four
+    branch witness (AC1, AC3, AC4, AC5 expect 1; AC2 expects 0);
+    ``mock_is_amd.called`` is the post-guard reach witness (all five
     cells expect ``True``). Both must hold for the cell to pass.
 
 The trigger key ``decoder.up_blocks.0.resnets.0.norm1.weight`` is
@@ -152,7 +164,7 @@ def _exercise_guard(metadata):
     branch witness (``mock_convert.call_count``) and post-guard reach
     witness (``mock_is_amd.called``).
 
-    Single-sourcing this harness keeps AC1, AC2, AC3 and AC4
+    Single-sourcing this harness keeps AC1, AC2, AC3, AC4 and AC5
     synchronized. The halt point and mock wiring are tightly coupled to
     ``VAE.__init__``; duplicating them per cell invited drift between
     the ACs (Copilot review feedback on PR pollockjj/ComfyUI#36,
@@ -267,6 +279,34 @@ def test_diffusers_guard_invokes_convert_when_metadata_pins_keep_false():
     ``suppress(_PostGuardReached)`` keeps any other regression loud.
     """
     mock_convert, mock_is_amd = _exercise_guard({"keep_diffusers_format": "false"})
+
+    assert mock_convert.call_count == 1
+    assert mock_is_amd.called
+
+
+def test_diffusers_guard_invokes_convert_when_metadata_is_empty_dict():
+    """AC5: state dict carries the diffusers-format trigger key and
+    ``metadata`` is the empty dict ``{}``. The guard's second disjunct
+    (``metadata.get("keep_diffusers_format") != "true"``) must evaluate
+    to ``True`` because ``{}.get("keep_diffusers_format")`` returns
+    ``None`` and ``None != "true"`` is ``True``, driving the conversion
+    branch and invoking ``convert_vae_state_dict`` exactly once. The
+    empty dict is a real production input: ``comfy.utils.convert_old_quants``
+    (``comfy/utils.py`` line 1359-1360) normalizes ``None`` to ``{}``
+    before ``load_state_dict_guess_config`` constructs the VAE at
+    ``comfy/sd.py`` line 1739 (``vae = VAE(sd=vae_sd, metadata=metadata)``).
+    AC1 covers the truthy missing-key shape ``{"unrelated_key": "value"}``
+    but does not pin the falsy missing-key shape: a regression of the
+    shape ``if metadata is None or (metadata and metadata.get(...) != "true"):``
+    short-circuits the ``and`` on the empty dict and skips the
+    conversion, breaking the ``convert_old_quants``-normalized callers
+    while keeping AC1, AC2, AC3 and AC4 green (Copilot review feedback
+    on PR pollockjj/ComfyUI#36, comment r3185375054). The branch
+    witness is ``mock_convert.call_count == 1``; ``mock_is_amd.called``
+    is the paired post-guard reach witness; the narrow
+    ``suppress(_PostGuardReached)`` keeps any other regression loud.
+    """
+    mock_convert, mock_is_amd = _exercise_guard({})
 
     assert mock_convert.call_count == 1
     assert mock_is_amd.called
