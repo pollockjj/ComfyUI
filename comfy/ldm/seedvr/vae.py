@@ -2255,8 +2255,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be "
                 "a torch.Tensor; got type "
-                f"{type(self.original_image_video).__name__} with value "
-                f"{self.original_image_video!r}."
+                f"{type(self.original_image_video).__name__}."
             )
         if self.original_image_video.ndim != 5:
             raise RuntimeError(
@@ -2276,7 +2275,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a tuple or "
                 "list of length 2 (H, W); got type "
-                f"{type(img_dims).__name__} with value {img_dims!r}."
+                f"{type(img_dims).__name__}."
             )
         if len(img_dims) != 2:
             raise RuntimeError(
@@ -2323,7 +2322,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         x = rearrange(x, "b c t h w -> (b t) c h w")
 
         input = input.to(x.device)
-        o_h, o_w = self.img_dims
+        o_h, o_w = img_dims
         x = x[..., :o_h, :o_w]
         input = input[..., :o_h, :o_w ]
         x = lab_color_transfer(x, input)
