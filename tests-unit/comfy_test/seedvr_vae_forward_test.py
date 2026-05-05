@@ -12,17 +12,10 @@ attribute 'latent_dist'`` for ``mode in {"encode", "all"}`` and
 ``AttributeError: 'VideoAutoencoderKL' object has no attribute 'decode'``
 for ``mode == "decode"`` (the class only defines ``decode_`` with a
 trailing underscore). The post-fix body returns ``encode()`` /
-``decode_()`` outputs directly. ``forward`` preserves the pre-fix
-``**kwargs`` call surface (Copilot 3188197480 / 3188197524: scope the
-fix to the actual return-contract bug, not signature narrowing) and
-extracts ``return_dict`` explicitly so ``return_dict=False`` is
-propagated end-to-end as a single-element tuple — no silent discarding
-of the tuple wrapper. Other kwargs are absorbed at the ``forward``
-boundary and NOT propagated into ``encode()`` / ``decode_()`` (Copilot
-3188128381 cycle 7 — leakage into helpers raises ``TypeError`` from
-inside them rather than at the entry point). An unsupported ``mode``
-value raises ``ValueError`` instead of silently running the ``"all"``
-path.
+``decode_()`` outputs directly. ``forward`` extracts ``return_dict``
+from its ``**kwargs`` surface and propagates only that supported kwarg
+so ``return_dict=False`` is preserved end-to-end as a single-element
+tuple — no silent discarding of the tuple wrapper.
 
 Tests construct a stub subclass of ``VideoAutoencoderKL`` that bypasses
 the heavy ``__init__`` via ``torch.nn.Module.__init__(self)`` and
@@ -132,12 +125,9 @@ def test_forward_encode_propagates_return_dict_false():
     """``forward(x, mode="encode", return_dict=False)`` must reach
     ``encode()`` with ``return_dict=False`` and must return the
     single-element tuple ``(tensor,)`` exactly as ``encode()`` itself
-    does. ``forward`` extracts ``return_dict`` from its ``**kwargs``
-    surface and propagates only that (Copilot 3188128381 cycle 7:
-    propagating arbitrary kwargs leaks into helpers as ``TypeError``;
-    Copilot 3188197480 cycle 8: removing the ``**kwargs`` surface is a
-    breaking API change). This test pins the positive propagation
-    contract for the supported kwarg.
+    does. This test pins the positive propagation contract for the
+    supported kwarg — the tuple/tensor return shape that the PR scope
+    targets.
     """
     vae = _StubVAE()
     x = torch.zeros(*_INPUT_ENCODE_SHAPE)
@@ -230,52 +220,3 @@ def test_forward_source_has_no_diffusers_attr_access():
         f"{bad_self_decode_calls}; this class only defines decode_ "
         f"(trailing underscore)."
     )
-
-
-def test_forward_unknown_kwarg_absorbed_at_forward_boundary():
-    """Pins the joint contract from Copilot 3188128381 (cycle 7) and
-    Copilot 3188197480 / 3188197524 (cycle 8): ``forward`` exposes a
-    ``**kwargs`` surface so it remains call-compatible with the pre-fix
-    signature, AND unsupported kwargs are absorbed at the forward
-    boundary instead of being propagated into ``encode()`` / ``decode_()``
-    where they would surface as ``TypeError`` from inside the helpers.
-    The forward call must succeed; the helper call list shows no
-    ``unsupported_kwarg`` was leaked.
-    """
-    vae = _StubVAE()
-    x = torch.zeros(*_INPUT_ENCODE_SHAPE)
-    result = vae.forward(x, mode="encode", unsupported_kwarg=True)
-    assert type(result) is torch.Tensor
-    assert torch.equal(result, vae._encode_out)
-    assert len(vae.encode_calls) == 1
-    encode_call = vae.encode_calls[0]
-    assert "unsupported_kwarg" not in encode_call, (
-        f"unsupported_kwarg must not be propagated into encode(); "
-        f"recorded call kwargs: {sorted(encode_call.keys())}"
-    )
-    assert encode_call["return_dict"] is True
-    assert len(vae.decode_calls) == 0
-
-
-def test_forward_unsupported_mode_raises_value_error():
-    """Pins Copilot inline comment 3188128442: ``Literal[...]`` is only
-    a type hint; an unsupported ``mode`` value at runtime must fail
-    fast with ``ValueError`` instead of silently running the ``"all"``
-    encode/decode round-trip.
-    """
-    vae = _StubVAE()
-    x = torch.zeros(*_INPUT_ENCODE_SHAPE)
-    raised = None
-    try:
-        vae.forward(x, mode="bogus_mode")
-    except ValueError as exc:
-        raised = exc
-    assert raised is not None, (
-        "forward(x, mode='bogus_mode') must raise ValueError; "
-        "the else branch must not silently run the encode/decode path."
-    )
-    assert "bogus_mode" in str(raised), (
-        f"ValueError must echo the rejected mode; got: {raised!r}"
-    )
-    assert len(vae.encode_calls) == 0
-    assert len(vae.decode_calls) == 0

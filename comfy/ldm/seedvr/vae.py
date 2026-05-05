@@ -2198,32 +2198,25 @@ class VideoAutoencoderKL(nn.Module):
         **kwargs,
     ):
         # x: [b c t h w]
-        # **kwargs preserves the pre-fix call surface (Copilot 3188197480
-        # / 3188197524) so the bug-fix scope stays on the .latent_dist /
-        # .sample / self.decode regression. return_dict is extracted
-        # explicitly and propagated; any other kwarg is absorbed at the
-        # forward boundary and NOT propagated into encode() / decode_()
-        # (Copilot 3188128381 cycle 7 — leakage into helpers raises
-        # TypeError from inside them, which is harder to diagnose than
-        # silent absorption at the entry point).
+        # return_dict is extracted from **kwargs and propagated so the
+        # tensor/tuple return contract of encode() / decode_() reaches
+        # the caller unchanged (return_dict=False -> single-element
+        # tuple). Other kwargs are absorbed at the forward boundary,
+        # matching the pre-fix call surface.
         return_dict = kwargs.pop("return_dict", True)
         if mode == "encode":
             return self.encode(x, return_dict=return_dict)
-        if mode == "decode":
+        elif mode == "decode":
             return self.decode_(x, return_dict=return_dict)
-        if mode == "all":
-            # mode="all": the internal encode must produce a tensor (the
-            # only shape decode_ accepts), so it runs with the default
-            # return_dict=True. return_dict forwards to the terminal
-            # decode_, which controls the final return shape — matching
-            # encode() / decode_()'s native tuple-vs-tensor contract
-            # instead of silently discarding the tuple wrapper.
+        else:
+            # mode="all" (and any other value, matching the pre-fix
+            # else-branch fallthrough). The internal encode must produce
+            # a tensor (the only shape decode_ accepts as input), so it
+            # runs with the default return_dict=True; return_dict
+            # forwards to the terminal decode_ to honor the caller's
+            # requested final return shape.
             latent = self.encode(x)
             return self.decode_(latent, return_dict=return_dict)
-        raise ValueError(
-            f"VideoAutoencoderKL.forward: unsupported mode {mode!r}; "
-            f"expected one of 'encode', 'decode', 'all'."
-        )
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def __init__(
