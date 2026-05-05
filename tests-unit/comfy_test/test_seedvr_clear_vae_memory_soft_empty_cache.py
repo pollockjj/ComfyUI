@@ -34,7 +34,7 @@ import comfy.model_management  # noqa: E402
 import comfy_extras.nodes_seedvr as nodes_seedvr  # noqa: E402
 
 
-def test_clear_vae_memory_dispatches_via_soft_empty_cache():
+def test_clear_vae_memory_uses_soft_empty_cache():
     """``clear_vae_memory(stub)`` must invoke
     ``comfy.model_management.soft_empty_cache`` exactly once and
     ``torch.cuda.empty_cache`` zero times when ``args.cpu`` is True.
