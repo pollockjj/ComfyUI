@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import einops
 from einops import rearrange
+import comfy.model_management
 import torch.nn.functional as F
 from math import ceil, pi
 import torch
