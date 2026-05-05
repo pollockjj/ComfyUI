@@ -11,6 +11,15 @@ adds two presence guards plus shape/arity validation at the top of
 identifying the missing or malformed attribute, and initialises
 ``self.img_dims = None`` in ``__init__`` so the missing-state branch is
 reachable from a default-constructed instance.
+
+PR review round 8 (Copilot comment_id=3188027986) extended the same
+defect class to ``self.tiled_args``: ``decode()`` unconditionally calls
+``self.tiled_args.get("enable_tiling", False)`` but ``__init__`` did
+not initialise the attribute, so a default-constructed wrapper (or any
+instance not populated by ``SeedVR2InputProcessing.execute``) raised
+an opaque ``AttributeError`` after passing the original_image_video /
+img_dims guards. The fix adds ``self.tiled_args = None`` to ``__init__``
+and a presence + type guard in ``decode()`` ahead of the ``.get()`` call.
 """
 
 import inspect
@@ -58,18 +67,41 @@ def _bypass_super_decode(monkeypatch):
     monkeypatch.setattr(vae_mod.VideoAutoencoderKL, "decode_", _stub)
 
 
-def _make_standin(*, original_image_video, img_dims, set_img_dims=True, enable_tiling=False):
+_TILED_ARGS_DEFAULT = object()
+
+
+def _make_standin(
+    *,
+    original_image_video,
+    img_dims,
+    set_img_dims=True,
+    enable_tiling=False,
+    tiled_args=_TILED_ARGS_DEFAULT,
+    set_tiled_args=True,
+):
     """Build a ``VideoAutoencoderKLWrapper`` instance via ``__new__`` so
     the real ``__init__`` (which would allocate the full VAE weight set)
     does not run. ``nn.Module.__init__`` is invoked manually so that
     ``super()`` resolution inside the borrowed ``decode`` body still
     behaves correctly under ``VideoAutoencoderKLWrapper``'s MRO.
+
+    ``tiled_args`` defaults to ``{"enable_tiling": <enable_tiling>}`` for
+    parity with the original signature. Passing an explicit value (any
+    object including ``None``) overrides that default, used by the AC11
+    type-guard cases. Passing ``set_tiled_args=False`` leaves the
+    attribute genuinely unset on the instance, used by the AC10
+    attribute-unset cell to assert the ``getattr`` fallback in
+    ``decode``'s presence guard fires.
     """
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
         vae_mod.VideoAutoencoderKLWrapper
     )
     nn.Module.__init__(wrapper)
-    wrapper.tiled_args = {"enable_tiling": enable_tiling}
+    if set_tiled_args:
+        if tiled_args is _TILED_ARGS_DEFAULT:
+            wrapper.tiled_args = {"enable_tiling": enable_tiling}
+        else:
+            wrapper.tiled_args = tiled_args
     wrapper.original_image_video = original_image_video
     if set_img_dims:
         wrapper.img_dims = img_dims
@@ -288,3 +320,89 @@ def test_valid_state_passes_through_guards_to_tiled_vae():
         f"the existing first body line); got raise_pos={raise_pos}, "
         f"shape_pos={shape_pos}.\n--- decode source ---\n{src}"
     )
+
+
+def test_init_initializes_tiled_args_to_none():
+    """AC9 (Copilot review round 8, comment_id=3188027986): the same
+    missing-state failure mode the AC1/AC2 guards close also applies to
+    ``self.tiled_args``. ``decode()`` unconditionally calls
+    ``self.tiled_args.get("enable_tiling", False)``, but ``__init__``
+    did not initialise the attribute. A default-constructed wrapper
+    therefore raised an opaque ``AttributeError: 'VideoAutoencoderKLWrapper'
+    object has no attribute 'tiled_args'`` after passing the
+    ``original_image_video`` and ``img_dims`` guards. The fix initialises
+    ``self.tiled_args = None`` in ``__init__`` so the missing-state
+    branch (AC10) is reachable from a default-constructed instance.
+    Source introspection is the contract because executing ``__init__``
+    would allocate the real VAE weight set.
+    """
+    src = inspect.getsource(vae_mod.VideoAutoencoderKLWrapper.__init__)
+    assert "self.tiled_args = None" in src, (
+        "AC9: VideoAutoencoderKLWrapper.__init__ must initialise "
+        "`self.tiled_args = None`; missing initialiser leaves the guard's "
+        "missing-state branch unreachable from a default-constructed instance.\n"
+        f"--- __init__ source ---\n{src}"
+    )
+
+
+@pytest.mark.parametrize(
+    "set_tiled_args",
+    [True, False],
+    ids=["explicit-None", "attribute-unset"],
+)
+def test_none_tiled_args_raises_seedvr2_runtime_error(set_tiled_args, _bypass_super_decode):
+    """AC10 (Copilot review round 8, comment_id=3188027986):
+    ``original_image_video`` and ``img_dims`` are valid but ``tiled_args``
+    is either ``None`` or genuinely unset on the instance. ``decode(z)``
+    raises ``RuntimeError`` whose message matches ``SeedVR2.*tiled_args``.
+    On the pre-fix base SHA the unguarded ``self.tiled_args.get(...)``
+    call raises ``AttributeError`` (for the unset branch) or
+    ``AttributeError: 'NoneType' object has no attribute 'get'`` (for
+    the explicit-None branch) — the wrong exception class, so the
+    matcher misses and pytest.raises(RuntimeError) fails.
+    """
+    oiv = torch.zeros(1, 3, 1, 16, 16)
+    wrapper = _make_standin(
+        original_image_video=oiv,
+        img_dims=(16, 16),
+        tiled_args=None,
+        set_tiled_args=set_tiled_args,
+    )
+    if not set_tiled_args:
+        assert not hasattr(wrapper, "tiled_args"), (
+            "Standin must have no `tiled_args` attribute for the unset cell"
+        )
+    z = torch.zeros(1, 16, 2, 2)
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*tiled_args"):
+        wrapper.decode(z)
+
+
+@pytest.mark.parametrize(
+    "non_dict",
+    ["not-a-dict", 42, [1, 2, 3], (1, 2)],
+    ids=["str", "int", "list", "tuple"],
+)
+def test_non_dict_tiled_args_raises_seedvr2_runtime_error(non_dict, _bypass_super_decode):
+    """AC11 (Copilot review round 8, comment_id=3188027986): the
+    ``self.tiled_args.get("enable_tiling", False)`` call assumes
+    ``tiled_args`` is a dict. When a workflow assigns a non-dict
+    sentinel (str / int / list / tuple — exactly the misuse the guard
+    matrix is meant to harden against), the unguarded ``.get()`` access
+    raises ``AttributeError`` (for str / int) or returns ``None`` /
+    raises ``TypeError`` (for list / tuple) before reaching the
+    intended SeedVR2 ``RuntimeError``. The fix inserts an
+    ``isinstance(tiled_args, dict)`` type check ahead of the ``.get()``
+    call so the wrong-type cell still surfaces a SeedVR2-context
+    ``RuntimeError`` whose message identifies ``tiled_args``.
+    """
+    oiv = torch.zeros(1, 3, 1, 16, 16)
+    wrapper = _make_standin(
+        original_image_video=oiv,
+        img_dims=(16, 16),
+        tiled_args=non_dict,
+    )
+    z = torch.zeros(1, 16, 2, 2)
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*tiled_args"):
+        wrapper.decode(z)

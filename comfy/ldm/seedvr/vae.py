@@ -2220,6 +2220,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.freeze_encoder = freeze_encoder
         self.original_image_video = None
         self.img_dims = None
+        self.tiled_args = None
         self.enable_tiling = False
         super().__init__(*args, **kwargs)
         self.set_memory_limit(0.5, 0.5)
@@ -2283,6 +2284,20 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a length-2 "
                 f"tuple or list (H, W); got arity {len(img_dims)} with value {img_dims!r}."
+            )
+        tiled_args = getattr(self, "tiled_args", None)
+        if tiled_args is None:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `tiled_args` is None or unset. "
+                "This attribute must be populated by SeedVR2InputProcessing.execute "
+                "(which assigns `vae_model.tiled_args = {...}` directly) before "
+                "decode() is invoked; calling decode() directly without the SeedVR2 input "
+                "processing node is not supported."
+            )
+        if not isinstance(tiled_args, dict):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `tiled_args` must be a dict; "
+                f"got type {type(tiled_args).__name__}."
             )
 
         b, tc, h, w = z.shape
