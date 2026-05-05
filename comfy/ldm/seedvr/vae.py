@@ -2251,6 +2251,13 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 "decode() is invoked; calling decode() directly without the SeedVR2 input "
                 "processing node is not supported."
             )
+        if not torch.is_tensor(self.original_image_video):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be "
+                "a torch.Tensor; got type "
+                f"{type(self.original_image_video).__name__} with value "
+                f"{self.original_image_video!r}."
+            )
         if self.original_image_video.ndim != 5:
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be a "
@@ -2264,6 +2271,12 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` is None or unset. "
                 "This attribute must be populated by encode(orig_dims=...) before decode() "
                 "is invoked."
+            )
+        if not isinstance(img_dims, (tuple, list)):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a tuple or "
+                "list of length 2 (H, W); got type "
+                f"{type(img_dims).__name__} with value {img_dims!r}."
             )
         if len(img_dims) != 2:
             raise RuntimeError(

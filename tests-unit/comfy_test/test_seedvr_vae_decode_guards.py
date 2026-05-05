@@ -156,6 +156,30 @@ def test_wrong_rank_original_image_video_raises_seedvr2_runtime_error(_bypass_su
 
 
 @pytest.mark.parametrize(
+    "non_tensor",
+    ["not-a-tensor", 42, {"key": "value"}, [1, 2, 3]],
+    ids=["str", "int", "dict", "list"],
+)
+def test_non_tensor_original_image_video_raises_seedvr2_runtime_error(non_tensor, _bypass_super_decode):
+    """AC7 (Copilot review round 1, comment_id=3187775620): the rank
+    guard ``self.original_image_video.ndim != 5`` assumes ``.ndim``
+    exists on the attribute. When a workflow assigns a non-tensor
+    sentinel (str / int / dict / list — exactly the misuse the guard
+    matrix is meant to harden against), the unguarded ``.ndim`` access
+    raises ``AttributeError`` (or ``TypeError`` for sequences with no
+    ``.ndim``) before reaching the intended SeedVR2 ``RuntimeError``.
+    The fix inserts a ``torch.is_tensor`` presence check ahead of the
+    rank guard so the wrong-type cell still surfaces a SeedVR2-context
+    ``RuntimeError`` whose message identifies ``original_image_video``.
+    """
+    wrapper = _make_standin(original_image_video=non_tensor, img_dims=(16, 16))
+    z = torch.zeros(1, 16, 2, 2)
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*original_image_video"):
+        wrapper.decode(z)
+
+
+@pytest.mark.parametrize(
     "img_dims",
     [(16,), (16, 16, 16)],
     ids=["1-tuple", "3-tuple"],
@@ -172,6 +196,31 @@ def test_wrong_arity_img_dims_raises_seedvr2_runtime_error(img_dims, _bypass_sup
     """
     oiv = torch.zeros(1, 3, 1, 16, 16)
     wrapper = _make_standin(original_image_video=oiv, img_dims=img_dims)
+    z = torch.zeros(1, 16, 2, 2)
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*img_dims"):
+        wrapper.decode(z)
+
+
+@pytest.mark.parametrize(
+    "non_sized",
+    [42, 3.14, object()],
+    ids=["int", "float", "bare-object"],
+)
+def test_non_sized_img_dims_raises_seedvr2_runtime_error(non_sized, _bypass_super_decode):
+    """AC8 (Copilot review round 1, comment_id=3187775673): the arity
+    guard ``len(img_dims) != 2`` assumes ``img_dims`` is a sized
+    container. When a workflow assigns a non-sized sentinel
+    (int / float / bare object — exactly the misuse the guard matrix is
+    meant to harden against), the unguarded ``len()`` call raises
+    ``TypeError: object of type 'X' has no len()`` before reaching the
+    intended SeedVR2 ``RuntimeError``. The fix inserts an
+    ``isinstance(img_dims, (tuple, list))`` presence check ahead of the
+    arity guard so the wrong-type cell still surfaces a SeedVR2-context
+    ``RuntimeError`` whose message identifies ``img_dims``.
+    """
+    oiv = torch.zeros(1, 3, 1, 16, 16)
+    wrapper = _make_standin(original_image_video=oiv, img_dims=non_sized)
     z = torch.zeros(1, 16, 2, 2)
 
     with pytest.raises(RuntimeError, match=r"SeedVR2.*img_dims"):
