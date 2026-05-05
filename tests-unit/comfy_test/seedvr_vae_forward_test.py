@@ -12,9 +12,11 @@ attribute 'latent_dist'`` for ``mode in {"encode", "all"}`` and
 ``AttributeError: 'VideoAutoencoderKL' object has no attribute 'decode'``
 for ``mode == "decode"`` (the class only defines ``decode_`` with a
 trailing underscore). The post-fix body returns ``encode()`` /
-``decode_()`` outputs directly. ``forward`` does not accept ``**kwargs``
-and does not propagate ``return_dict``: its contract is "return a
-tensor for the chosen mode."
+``decode_()`` outputs directly. ``forward`` keeps its original
+``**kwargs`` surface and forwards kwargs (the only meaningful one is
+``return_dict``) to the underlying method so ``return_dict=False`` is
+honored end-to-end as a single-element tuple — no silent discarding
+of the tuple wrapper.
 
 Tests construct a stub subclass of ``VideoAutoencoderKL`` that bypasses
 the heavy ``__init__`` via ``torch.nn.Module.__init__(self)`` and
@@ -120,26 +122,69 @@ def test_forward_all_pins_encode_then_decode_composition():
     assert torch.equal(decode_input, vae._encode_out)
 
 
-def test_forward_rejects_return_dict_kwarg():
-    """``forward`` does not propagate ``return_dict``. The signature
-    excludes ``**kwargs`` so passing it must raise ``TypeError``. This
-    pins the resolution of Copilot inline comment 3187882520: forwarding
-    the flag while ``_unwrap`` discards the tuple shape was inconsistent
-    with the only meaning ``return_dict`` has on this class. The fix
-    drops kwargs forwarding entirely; this test guards against any
-    future re-introduction.
+def test_forward_encode_propagates_return_dict_false():
+    """``forward(x, mode="encode", return_dict=False)`` must reach
+    ``encode()`` with ``return_dict=False`` and must return the
+    single-element tuple ``(tensor,)`` exactly as ``encode()`` itself
+    does. Pins Copilot inline comment 3187940844: removing ``**kwargs``
+    from ``forward`` is a breaking API change on top of the underlying
+    ``.latent_dist``/``.sample`` fix, and Copilot inline comment
+    3187940903: the pinned-``TypeError`` test would block any
+    non-breaking fix while also accepting unrelated regressions for the
+    wrong reason. This test asserts the *positive* propagation contract
+    instead of pinning a TypeError.
     """
     vae = _StubVAE()
     x = torch.zeros(*_INPUT_ENCODE_SHAPE)
-    try:
-        vae.forward(x, mode="encode", return_dict=False)
-    except TypeError:
-        pass
-    else:
-        raise AssertionError(
-            "forward(..., return_dict=False) must raise TypeError; "
-            "kwargs forwarding has been re-introduced."
-        )
+    result = vae.forward(x, mode="encode", return_dict=False)
+    assert type(result) is tuple
+    assert len(result) == 1
+    assert type(result[0]) is torch.Tensor
+    assert torch.equal(result[0], vae._encode_out)
+    assert len(vae.encode_calls) == 1
+    assert vae.encode_calls[0]["return_dict"] is False
+    assert len(vae.decode_calls) == 0
+
+
+def test_forward_decode_propagates_return_dict_false():
+    """``forward(z, mode="decode", return_dict=False)`` must reach
+    ``decode_()`` with ``return_dict=False`` and return the
+    single-element tuple ``decode_()`` produces.
+    """
+    vae = _StubVAE()
+    z = torch.zeros(*_INPUT_DECODE_SHAPE)
+    result = vae.forward(z, mode="decode", return_dict=False)
+    assert type(result) is tuple
+    assert len(result) == 1
+    assert type(result[0]) is torch.Tensor
+    assert torch.equal(result[0], vae._decode_out)
+    assert len(vae.encode_calls) == 0
+    assert len(vae.decode_calls) == 1
+    assert vae.decode_calls[0]["return_dict"] is False
+
+
+def test_forward_all_propagates_return_dict_false_to_terminal_decode_only():
+    """For ``mode="all"`` the internal ``encode`` MUST run with the
+    default ``return_dict=True`` so the latent it returns is a tensor
+    (the only shape ``decode_`` accepts as input). The user's
+    ``return_dict=False`` must reach only the terminal ``decode_`` call,
+    which then yields the single-element tuple. This asymmetry is
+    deliberate — it keeps the ``encode→decode_`` composition working
+    while still honoring the user's requested final return shape.
+    """
+    vae = _StubVAE()
+    x = torch.zeros(*_INPUT_ENCODE_SHAPE)
+    result = vae.forward(x, mode="all", return_dict=False)
+    assert type(result) is tuple
+    assert len(result) == 1
+    assert type(result[0]) is torch.Tensor
+    assert torch.equal(result[0], vae._decode_out)
+    assert len(vae.encode_calls) == 1
+    assert vae.encode_calls[0]["return_dict"] is True
+    assert len(vae.decode_calls) == 1
+    assert vae.decode_calls[0]["return_dict"] is False
+    decode_input = vae.decode_calls[0]["z"]
+    assert torch.equal(decode_input, vae._encode_out)
 
 
 def test_forward_source_has_no_diffusers_attr_access():
