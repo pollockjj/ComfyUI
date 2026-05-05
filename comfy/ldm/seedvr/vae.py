@@ -2228,7 +2228,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def forward(self, x: torch.FloatTensor):
         with torch.no_grad() if self.freeze_encoder else nullcontext():
             z, p = self.encode(x)
-        x = self.decode(z).sample
+        x = self.decode(z)
         return x, z, p
 
     def encode(self, x, orig_dims=None):
