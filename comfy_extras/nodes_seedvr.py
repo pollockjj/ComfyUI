@@ -81,7 +81,7 @@ def clear_vae_memory(vae_model):
         if hasattr(module, "memory"):
             module.memory = None
     gc.collect()
-    torch.cuda.empty_cache()
+    comfy.model_management.soft_empty_cache()
 
 def expand_dims(tensor, ndim):
     shape = tensor.shape + (1,) * (ndim - tensor.ndim)
