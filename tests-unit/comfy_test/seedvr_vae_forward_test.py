@@ -83,3 +83,46 @@ def test_forward_source_has_no_diffusers_attr_access():
     assert ".latent_dist" not in src
     assert ".sample" not in src
     assert re.search(r"self\.decode\(", src) is None
+
+
+class _TupleReturningStubVAE(VideoAutoencoderKL):
+    """Stub variant whose ``encode``/``decode_`` return the
+    ``(tensor,)`` one-element tuple shape ``return_dict=False`` produces
+    in the parent class. Exercises the unwrap branch of
+    ``VideoAutoencoderKL.forward``.
+    """
+
+    def __init__(self):
+        nn.Module.__init__(self)
+        self._encode_tensor = torch.zeros(*_LATENT_SHAPE)
+        self._decode_tensor = torch.zeros(*_DECODED_SHAPE)
+
+    def encode(self, x, return_dict=True):
+        return (self._encode_tensor,)
+
+    def decode_(self, z, return_dict=True):
+        return (self._decode_tensor,)
+
+
+def test_forward_encode_unwraps_one_tuple():
+    vae = _TupleReturningStubVAE()
+    x = torch.zeros(*_INPUT_ENCODE_SHAPE)
+    result = vae.forward(x, mode="encode")
+    assert type(result) is torch.Tensor
+    assert result.shape == torch.Size(_LATENT_SHAPE)
+
+
+def test_forward_decode_unwraps_one_tuple():
+    vae = _TupleReturningStubVAE()
+    z = torch.zeros(*_INPUT_DECODE_SHAPE)
+    result = vae.forward(z, mode="decode")
+    assert type(result) is torch.Tensor
+    assert result.shape == torch.Size(_DECODED_SHAPE)
+
+
+def test_forward_all_unwraps_one_tuple_at_each_step():
+    vae = _TupleReturningStubVAE()
+    x = torch.zeros(*_INPUT_ENCODE_SHAPE)
+    result = vae.forward(x, mode="all")
+    assert type(result) is torch.Tensor
+    assert result.shape == torch.Size(_DECODED_SHAPE)
