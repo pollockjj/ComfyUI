@@ -2268,8 +2268,10 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if img_dims is None:
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` is None or unset. "
-                "This attribute must be populated by encode(orig_dims=...) before decode() "
-                "is invoked."
+                "This attribute must be populated by SeedVR2InputProcessing.execute "
+                "(which assigns `vae_model.img_dims = [o_h, o_w]` directly) or by "
+                "encode(orig_dims=...) before decode() is invoked; calling decode() "
+                "directly without the SeedVR2 input processing node is not supported."
             )
         if not isinstance(img_dims, (tuple, list)):
             raise RuntimeError(
