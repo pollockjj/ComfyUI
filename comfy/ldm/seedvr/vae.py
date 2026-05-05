@@ -2199,12 +2199,12 @@ class VideoAutoencoderKL(nn.Module):
             return value[0] if isinstance(value, tuple) else value
 
         if mode == "encode":
-            return _unwrap(self.encode(x))
+            return _unwrap(self.encode(x, **kwargs))
         elif mode == "decode":
-            return _unwrap(self.decode_(x))
+            return _unwrap(self.decode_(x, **kwargs))
         else:
-            latent = _unwrap(self.encode(x))
-            return _unwrap(self.decode_(latent))
+            latent = _unwrap(self.encode(x, **kwargs))
+            return _unwrap(self.decode_(latent, **kwargs))
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def __init__(
