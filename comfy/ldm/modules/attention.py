@@ -720,6 +720,13 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    if not hasattr(torch.nested, "nested_tensor_from_jagged"):
+        raise RuntimeError(
+            "SeedVR2 var_attention_pytorch: torch.nested.nested_tensor_from_jagged "
+            "is required by this attention path; the installed PyTorch build "
+            "does not provide it"
+        )
+
     if not skip_reshape:
         # assumes 2D q, k,v [total_tokens, embed_dim]
         total_tokens, embed_dim = q.shape
