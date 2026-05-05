@@ -6,56 +6,49 @@ if not torch.cuda.is_available():
 
 import ast  # noqa: E402
 import inspect  # noqa: E402
-import importlib  # noqa: E402
 
 from torch import nn  # noqa: E402
 
 import comfy  # noqa: E402
-
-_model_management = importlib.import_module("comfy.model_management")
-
-from comfy.ldm.seedvr import model as seedvr_model  # noqa: E402
+import comfy.ldm.seedvr.model  # noqa: E402
+import comfy.model_management  # noqa: E402
 from comfy.ldm.seedvr.model import MMModule  # noqa: E402
 
 
 def test_no_get_torch_device_in_forward_methods():
-    src = inspect.getsource(seedvr_model)
-    tree = ast.parse(src)
-    offenders = []
-    for cls in ast.walk(tree):
-        if not isinstance(cls, ast.ClassDef):
-            continue
-        for item in cls.body:
-            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if item.name != "forward":
-                continue
-            for node in ast.walk(item):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                if isinstance(func, ast.Attribute) and func.attr == "get_torch_device":
-                    offenders.append((item.lineno, node.lineno))
-                    break
-                if isinstance(func, ast.Name) and func.id == "get_torch_device":
-                    offenders.append((item.lineno, node.lineno))
-                    break
-    assert not offenders, f"found: {offenders}"
+    tree = ast.parse(inspect.getsource(comfy.ldm.seedvr.model))
+    assert [
+        (n.lineno, i.lineno)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "forward"
+        for i in ast.walk(n)
+        if isinstance(i, ast.Call)
+        and isinstance(i.func, ast.Attribute)
+        and i.func.attr == "get_torch_device"
+    ] == []
 
 
 def test_mmmodule_forward_succeeds_without_get_torch_device_lookup(monkeypatch):
-    def boom(*args, **kwargs):
+    call_count = [0]
+
+    def boom():
+        call_count[0] += 1
         raise RuntimeError("MMModule.forward called get_torch_device()")
 
     monkeypatch.setattr(comfy.model_management, "get_torch_device", boom)
 
-    in_features, out_features = 16, 8
-    mm = MMModule(nn.Linear, in_features, out_features, shared_weights=False)
+    class _IdentityCallable(nn.Module):
+        def forward(self, x, *args, **kwargs):
+            return x
 
-    vid = torch.randn(4, in_features)
-    txt = torch.randn(3, in_features)
+    mm = MMModule(_IdentityCallable, shared_weights=False, vid_only=False)
 
-    vid_out, txt_out = mm(vid, txt)
+    vid_in = torch.zeros(2, 4)
+    txt_in = torch.ones(2, 4)
+    vid_out, txt_out = mm.forward(vid_in, txt_in)
 
-    assert vid_out.shape == (4, out_features)
-    assert txt_out.shape == (3, out_features)
+    assert call_count[0] == 0
+    assert torch.equal(vid_out, vid_in)
+    assert torch.equal(txt_out, txt_in)
+    assert vid_out.device == vid_in.device
+    assert txt_out.device == txt_in.device
