@@ -51,12 +51,6 @@ def _inputs():
 
 
 def _assert_guard_source_pin():
-    """``raise RuntimeError(`` must appear in ``var_attention_pytorch``'s
-    source, and its first occurrence must precede the first call site
-    ``nested_tensor_from_jagged(`` so the guard runs before the unguarded
-    torch lookup that motivated it. The call form (with paren) avoids
-    self-referencing the substring inside the guard's own message text.
-    """
     src = inspect.getsource(var_attention_pytorch)
     assert "raise RuntimeError(" in src, (
         "var_attention_pytorch source has no `raise RuntimeError(` substring; "
@@ -64,10 +58,10 @@ def _assert_guard_source_pin():
         f"--- source ---\n{src}"
     )
     raise_idx = src.index("raise RuntimeError(")
-    call_idx = src.index("nested_tensor_from_jagged(")
+    call_idx = src.index("nested_tensor_from_jagged")
     assert raise_idx < call_idx, (
         "`raise RuntimeError(` appears at index "
-        f"{raise_idx} but the first `nested_tensor_from_jagged(` call site is "
+        f"{raise_idx} but the first `nested_tensor_from_jagged` substring is "
         f"at index {call_idx}; the guard must precede the unguarded lookup.\n"
         f"--- source ---\n{src}"
     )
