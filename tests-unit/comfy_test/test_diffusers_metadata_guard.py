@@ -40,9 +40,8 @@ keeps AC1 and AC2 green while breaking the ``metadata is None`` path
 (AC4). AC5 is a further completeness cell motivated by Copilot review
 feedback on PR pollockjj/ComfyUI#36 (comment r3185375054, round 26):
 the input ``metadata = {}`` is reachable in production because
-``comfy.utils.convert_old_quants`` (``comfy/utils.py`` line 1359-1360)
-normalizes ``None`` to ``{}`` before ``load_state_dict_guess_config``
-constructs the VAE at ``comfy/sd.py`` line 1739
+``comfy.utils.convert_old_quants`` normalizes ``None`` to ``{}``
+before ``load_state_dict_guess_config`` constructs the VAE
 (``vae = VAE(sd=vae_sd, metadata=metadata)``). AC1 covers the truthy
 missing-key shape ``{"unrelated_key": "value"}``; AC5 covers the
 distinct falsy missing-key shape ``{}``. A regression like
@@ -292,9 +291,8 @@ def test_diffusers_guard_invokes_convert_when_metadata_is_empty_dict():
     ``None`` and ``None != "true"`` is ``True``, driving the conversion
     branch and invoking ``convert_vae_state_dict`` exactly once. The
     empty dict is a real production input: ``comfy.utils.convert_old_quants``
-    (``comfy/utils.py`` line 1359-1360) normalizes ``None`` to ``{}``
-    before ``load_state_dict_guess_config`` constructs the VAE at
-    ``comfy/sd.py`` line 1739 (``vae = VAE(sd=vae_sd, metadata=metadata)``).
+    normalizes ``None`` to ``{}`` before ``load_state_dict_guess_config``
+    constructs the VAE (``vae = VAE(sd=vae_sd, metadata=metadata)``).
     AC1 covers the truthy missing-key shape ``{"unrelated_key": "value"}``
     but does not pin the falsy missing-key shape: a regression of the
     shape ``if metadata is None or (metadata and metadata.get(...) != "true"):``
