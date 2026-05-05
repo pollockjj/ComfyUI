@@ -239,3 +239,73 @@ def test_valid_state_passes_through_guards_to_tiled_vae():
         f"the existing first body line); got raise_pos={raise_pos}, "
         f"shape_pos={shape_pos}.\n--- decode source ---\n{src}"
     )
+
+
+def test_init_initializes_tiled_args_to_empty_dict():
+    """AC: `VideoAutoencoderKLWrapper.__init__` body contains the literal
+    `self.tiled_args = {}` initialiser so the missing-tiled_args branch
+    is closed for default-constructed instances. Source introspection
+    is the contract because executing __init__ would allocate the real
+    VAE weight set."""
+    src = inspect.getsource(vae_mod.VideoAutoencoderKLWrapper.__init__)
+    assert "self.tiled_args = {}" in src, (
+        "VideoAutoencoderKLWrapper.__init__ must initialise "
+        "`self.tiled_args = {}`; missing initialiser leaves a "
+        "default-constructed wrapper raising AttributeError at "
+        "`self.tiled_args.get(...)` later in decode().\n"
+        f"--- __init__ source ---\n{src}"
+    )
+
+
+def test_non_tensor_original_image_video_raises_seedvr2_runtime_error(_bypass_super_decode):
+    """`original_image_video` set to a non-tensor object (here a list)
+    raises a SeedVR2 RuntimeError naming the type, not a bare
+    AttributeError from `.ndim`."""
+    wrapper = _make_standin(
+        original_image_video=[1, 2, 3],  # non-tensor
+        img_dims=(32, 32),
+    )
+    z = torch.zeros(1, 16, 16, 16)
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*original_image_video.*torch\.Tensor"):
+        wrapper.decode(z)
+
+
+def test_non_sequence_img_dims_raises_seedvr2_runtime_error(_bypass_super_decode):
+    """`img_dims` set to a non-sequence (here an int) raises a SeedVR2
+    RuntimeError naming the type, not a bare TypeError from `len()`."""
+    wrapper = _make_standin(
+        original_image_video=torch.zeros(1, 3, 4, 32, 32),
+        img_dims=16,  # non-sequence
+    )
+    z = torch.zeros(1, 16, 16, 16)
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*img_dims.*tuple or list"):
+        wrapper.decode(z)
+
+
+def test_non_dict_tiled_args_raises_seedvr2_runtime_error(_bypass_super_decode):
+    """`tiled_args` set to a non-dict (here a list) raises a SeedVR2
+    RuntimeError naming the type, not a bare AttributeError at
+    `.get(...)`."""
+    wrapper = _make_standin(
+        original_image_video=torch.zeros(1, 3, 4, 32, 32),
+        img_dims=(32, 32),
+    )
+    wrapper.tiled_args = ["not", "a", "dict"]
+    z = torch.zeros(1, 16, 16, 16)
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*tiled_args.*dict"):
+        wrapper.decode(z)
+
+
+def test_missing_tiled_args_raises_seedvr2_runtime_error(_bypass_super_decode):
+    """Wrapper without `tiled_args` attribute (simulating a code path
+    that bypassed __init__'s initialiser) raises a SeedVR2 RuntimeError,
+    not a bare AttributeError at `.get(...)`. Pins the guard fires when
+    `getattr(self, 'tiled_args', None) is None`."""
+    wrapper = _make_standin(
+        original_image_video=torch.zeros(1, 3, 4, 32, 32),
+        img_dims=(32, 32),
+    )
+    delattr(wrapper, "tiled_args")
+    z = torch.zeros(1, 16, 16, 16)
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*tiled_args"):
+        wrapper.decode(z)
