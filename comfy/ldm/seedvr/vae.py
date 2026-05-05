@@ -2342,7 +2342,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         input = input.to(x.device)
         o_h, o_w = img_dims
         x = x[..., :o_h, :o_w]
-        input = input[..., :o_h, :o_w ]
+        input = input[..., :o_h, :o_w]
         x = lab_color_transfer(x, input)
 
         x = x.unsqueeze(0)
