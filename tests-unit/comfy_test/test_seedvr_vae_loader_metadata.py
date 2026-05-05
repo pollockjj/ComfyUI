@@ -168,3 +168,163 @@ def test_seedvr2_loader_sets_disable_offload(seedvr2_vae):
         "offload during decode (the wrapper retains memory-state references "
         "across slice boundaries — see VideoAutoencoderKL.slicing_decode)."
     )
+
+
+def test_seedvr2_loader_sets_working_dtypes(seedvr2_vae):
+    assert seedvr2_vae.working_dtypes == [torch.bfloat16, torch.float32], (
+        "Expected working_dtypes=[torch.bfloat16, torch.float32] (set at "
+        f"comfy/sd.py:525); got {seedvr2_vae.working_dtypes}. SeedVR2's "
+        "weight cast contract excludes float16 — leaking float16 here would "
+        "drop the working-dtype probe and route the SeedVR2 path through a "
+        "fallback dtype the published checkpoints were not trained for."
+    )
+
+
+def test_seedvr2_loader_sets_downscale_ratio(seedvr2_vae):
+    """Lock the SeedVR2 downscale_ratio shape AND the temporal-axis lambda
+    against published 4× temporal stride (Wang et al., ICLR 2026 §3). A
+    regression that flips the lambda to a non-SeedVR2 form (e.g. SD3's
+    ``a // 8`` or VAE-default identity) would break the tiled 3D path's
+    latent-frame-count derivation in ``comfy/sd.py``'s ``encode_tiled``.
+    """
+    ratio = seedvr2_vae.downscale_ratio
+    assert isinstance(ratio, tuple) and len(ratio) == 3, (
+        "Expected downscale_ratio to be a 3-tuple (set at comfy/sd.py:526); "
+        f"got {type(ratio).__name__} of length "
+        f"{len(ratio) if hasattr(ratio, '__len__') else 'N/A'}."
+    )
+    assert ratio[1] == 8 and ratio[2] == 8, (
+        "Expected downscale_ratio spatial axes (idx 1, 2) to both equal 8 "
+        f"(SeedVR2 spatial 8× downsample); got ({ratio[1]}, {ratio[2]})."
+    )
+    fn = ratio[0]
+    assert callable(fn), (
+        f"Expected downscale_ratio[0] to be callable; got {type(fn).__name__}."
+    )
+    # 4× temporal stride: floor((a + 3) / 4), clamped to >= 0.
+    # Anchor against the standard SeedVR2 latent shapes.
+    cases = {1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 8: 2, 9: 3, 13: 4, 33: 9}
+    for a_in, t_expected in cases.items():
+        actual = fn(a_in)
+        assert actual == t_expected, (
+            f"downscale_ratio temporal lambda: fn({a_in}) returned "
+            f"{actual}; expected {t_expected} per "
+            f"max(0, floor(({a_in} + 3) / 4)) (comfy/sd.py:526)."
+        )
+
+
+def test_seedvr2_loader_sets_upscale_ratio(seedvr2_vae):
+    """Lock the SeedVR2 upscale_ratio shape AND the temporal-axis lambda —
+    inverse of the downscale ratio (``a * 4 - 3``, clamped >= 0). Regression
+    on this lambda would yield wrong output frame counts in
+    ``VideoAutoencoderKLWrapper.decode``'s ``T_out`` reconstruction.
+    """
+    ratio = seedvr2_vae.upscale_ratio
+    assert isinstance(ratio, tuple) and len(ratio) == 3, (
+        "Expected upscale_ratio to be a 3-tuple (set at comfy/sd.py:528); "
+        f"got {type(ratio).__name__} of length "
+        f"{len(ratio) if hasattr(ratio, '__len__') else 'N/A'}."
+    )
+    assert ratio[1] == 8 and ratio[2] == 8, (
+        "Expected upscale_ratio spatial axes (idx 1, 2) to both equal 8 "
+        f"(SeedVR2 spatial 8× upscale); got ({ratio[1]}, {ratio[2]})."
+    )
+    fn = ratio[0]
+    assert callable(fn), (
+        f"Expected upscale_ratio[0] to be callable; got {type(fn).__name__}."
+    )
+    cases = {1: 1, 2: 5, 3: 9, 5: 17, 9: 33}
+    for a_in, t_expected in cases.items():
+        actual = fn(a_in)
+        assert actual == t_expected, (
+            f"upscale_ratio temporal lambda: fn({a_in}) returned "
+            f"{actual}; expected {t_expected} per "
+            f"max(0, {a_in} * 4 - 3) (comfy/sd.py:528)."
+        )
+
+
+def test_seedvr2_loader_sets_memory_used_decode(seedvr2_vae):
+    """Lock the SeedVR2 ``memory_used_decode`` formula:
+    ``shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8) * dtype_size(dtype)``
+    (comfy/sd.py:523). Wrong formula would mis-size decode memory budget
+    and trigger spurious tile-fallbacks or OOM on legitimate inputs.
+    """
+    fn = seedvr2_vae.memory_used_decode
+    assert callable(fn), (
+        f"Expected memory_used_decode to be callable; got {type(fn).__name__}."
+    )
+    # shape = (B, C, T, H, W); only shape[1] (C), shape[-2] (H), shape[-1] (W)
+    # and dtype-size are consumed. dtype_size(bfloat16) == 2 in
+    # comfy.model_management.
+    actual = fn((1, 16, 4, 32, 32), torch.bfloat16)
+    expected = 16 * 32 * 32 * (4 * 8 * 8) * 2
+    assert actual == expected, (
+        f"memory_used_decode((1,16,4,32,32), bfloat16) returned {actual}; "
+        f"expected {expected} per shape[1]*shape[-2]*shape[-1]*(4*8*8)*2 "
+        f"(comfy/sd.py:523)."
+    )
+    # Same shape, fp32 (dtype_size=4) doubles the answer.
+    actual_fp32 = fn((1, 16, 4, 32, 32), torch.float32)
+    expected_fp32 = 16 * 32 * 32 * (4 * 8 * 8) * 4
+    assert actual_fp32 == expected_fp32, (
+        f"memory_used_decode fp32 path returned {actual_fp32}; expected "
+        f"{expected_fp32}."
+    )
+
+
+def test_seedvr2_loader_sets_memory_used_encode(seedvr2_vae):
+    """Lock the SeedVR2 ``memory_used_encode`` formula:
+    ``max(shape[2], 5) * shape[3] * shape[4] * 64 * dtype_size(dtype)``
+    (comfy/sd.py:524). The ``max(shape[2], 5)`` floor matches SeedVR2's
+    minimum 5-frame temporal window after ``cut_videos`` padding (see
+    ``cut_videos`` in ``comfy_extras/nodes_seedvr.py``); regression to a
+    plain ``shape[2]`` would mis-size encode memory budget on short clips.
+    """
+    fn = seedvr2_vae.memory_used_encode
+    assert callable(fn), (
+        f"Expected memory_used_encode to be callable; got {type(fn).__name__}."
+    )
+    # shape (B, C, T, H, W). For T=2 the max-floor must promote to 5.
+    actual_short = fn((1, 3, 2, 32, 32), torch.bfloat16)
+    expected_short = 5 * 32 * 32 * 64 * 2
+    assert actual_short == expected_short, (
+        f"memory_used_encode T=2 path returned {actual_short}; expected "
+        f"{expected_short} per max(2, 5)*32*32*64*2 (comfy/sd.py:524). The "
+        f"max(_, 5) floor matches SeedVR2's cut_videos minimum window."
+    )
+    # T=8 stays at T (max(8, 5) == 8).
+    actual_long = fn((1, 3, 8, 32, 32), torch.bfloat16)
+    expected_long = 8 * 32 * 32 * 64 * 2
+    assert actual_long == expected_long, (
+        f"memory_used_encode T=8 path returned {actual_long}; expected "
+        f"{expected_long} per max(8, 5)*32*32*64*2."
+    )
+
+
+def test_seedvr2_loader_sets_process_input_identity(seedvr2_vae):
+    """SeedVR2's ``process_input`` (comfy/sd.py:530) is the identity lambda;
+    other VAE branches normalise to [-1, 1] or apply diffusers preprocessing.
+    A regression that re-enables the default normaliser would double-shift
+    the SeedVR2 input distribution — inputs are already pre-normalised by
+    ``SeedVR2InputProcessing.execute`` in comfy_extras/nodes_seedvr.py.
+    """
+    fn = seedvr2_vae.process_input
+    assert callable(fn), (
+        f"Expected process_input to be callable; got {type(fn).__name__}."
+    )
+    img = torch.randn(2, 3, 4, 4)
+    out = fn(img)
+    assert out is img, (
+        "process_input(img) returned a NEW object; expected the same tensor "
+        "(identity lambda). A regression here would reintroduce normalisation "
+        "on already-normalised SeedVR2 inputs, double-shifting the distribution."
+    )
+
+
+def test_seedvr2_loader_sets_crop_input_false(seedvr2_vae):
+    assert seedvr2_vae.crop_input is False, (
+        "Expected crop_input=False (set at comfy/sd.py:531); got "
+        f"{seedvr2_vae.crop_input}. SeedVR2 inputs are already aspect-ratio "
+        "managed in SeedVR2InputProcessing.execute (side_resize + div_pad); "
+        "re-enabling crop_input would double-crop and shrink the visible area."
+    )
