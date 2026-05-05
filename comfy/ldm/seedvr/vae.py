@@ -2195,16 +2195,16 @@ class VideoAutoencoderKL(nn.Module):
         self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
     ):
         # x: [b c t h w]
+        def _unwrap(value):
+            return value[0] if isinstance(value, tuple) else value
+
         if mode == "encode":
-            h = self.encode(x)
-            return h.latent_dist
+            return _unwrap(self.encode(x))
         elif mode == "decode":
-            h = self.decode(x)
-            return h.sample
+            return _unwrap(self.decode_(x))
         else:
-            h = self.encode(x)
-            h = self.decode(h.latent_dist.mode())
-            return h.sample
+            latent = _unwrap(self.encode(x))
+            return _unwrap(self.decode_(latent))
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def __init__(
