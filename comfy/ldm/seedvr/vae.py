@@ -2195,9 +2195,18 @@ class VideoAutoencoderKL(nn.Module):
         self,
         x: torch.FloatTensor,
         mode: Literal["encode", "decode", "all"] = "all",
-        return_dict: bool = True,
+        **kwargs,
     ):
         # x: [b c t h w]
+        # **kwargs preserves the pre-fix call surface (Copilot 3188197480
+        # / 3188197524) so the bug-fix scope stays on the .latent_dist /
+        # .sample / self.decode regression. return_dict is extracted
+        # explicitly and propagated; any other kwarg is absorbed at the
+        # forward boundary and NOT propagated into encode() / decode_()
+        # (Copilot 3188128381 cycle 7 — leakage into helpers raises
+        # TypeError from inside them, which is harder to diagnose than
+        # silent absorption at the entry point).
+        return_dict = kwargs.pop("return_dict", True)
         if mode == "encode":
             return self.encode(x, return_dict=return_dict)
         if mode == "decode":
