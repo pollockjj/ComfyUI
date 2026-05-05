@@ -2219,7 +2219,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.temporal_downsample_factor = temporal_downsample_factor
         self.freeze_encoder = freeze_encoder
         self.original_image_video = None
+        self.img_dims = None
         self.enable_tiling = False
+        self.tiled_args = {}
         super().__init__(*args, **kwargs)
         self.set_memory_limit(0.5, 0.5)
 
@@ -2243,6 +2245,57 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return z, p
 
     def decode(self, z):
+        if self.original_image_video is None:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` is None. "
+                "This attribute must be populated by SeedVR2InputProcessing.execute before "
+                "decode() is invoked; calling decode() directly without the SeedVR2 input "
+                "processing node is not supported."
+            )
+        if not torch.is_tensor(self.original_image_video):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be "
+                f"a torch.Tensor; got {type(self.original_image_video).__name__}. "
+                "This attribute is populated by SeedVR2InputProcessing.execute with the "
+                "5-D (B, C, T, H, W) input video tensor; non-tensor values cannot be "
+                "decoded and indicate a wrapper-misuse path."
+            )
+        if self.original_image_video.ndim != 5:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be a "
+                "5-D tensor of shape (B, C, T, H, W); got rank "
+                f"{self.original_image_video.ndim} with shape "
+                f"{tuple(self.original_image_video.shape)}."
+            )
+        img_dims = getattr(self, "img_dims", None)
+        if img_dims is None:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` is None or unset. "
+                "This attribute must be populated by encode(orig_dims=...) before decode() "
+                "is invoked."
+            )
+        if not isinstance(img_dims, (tuple, list)):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a tuple or "
+                f"list of (H, W); got {type(img_dims).__name__} with value {img_dims!r}. "
+                "This attribute is populated by encode(orig_dims=...) with the original "
+                "(H, W) spatial dimensions of the input video; non-sequence values cannot "
+                "be unpacked downstream."
+            )
+        if len(img_dims) != 2:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a 2-tuple "
+                f"(H, W); got arity {len(img_dims)} with value {img_dims!r}."
+            )
+        tiled_args = getattr(self, "tiled_args", None)
+        if not isinstance(tiled_args, dict):
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `tiled_args` must be a dict; "
+                f"got {type(tiled_args).__name__} with value {tiled_args!r}. "
+                "__init__ initialises this to {} as the default (tiling disabled); "
+                "explicit non-dict assignment is a wrapper-misuse path."
+            )
+
         b, tc, h, w = z.shape
         latent = z.view(b, 16, -1, h, w)
         scale = 0.9152
