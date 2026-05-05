@@ -2283,7 +2283,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if len(img_dims) != 2:
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a length-2 "
-                f"tuple or list (H, W); got arity {len(img_dims)} with value {img_dims!r}."
+                f"tuple or list (H, W); got {type(img_dims).__name__} of arity "
+                f"{len(img_dims)}."
             )
         tiled_args = getattr(self, "tiled_args", None)
         if tiled_args is None:
