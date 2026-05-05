@@ -728,7 +728,8 @@ _VAR_ATTENTION_GUARD_MESSAGE = (
 
 
 def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-    if not hasattr(torch.nested, _VAR_ATTENTION_NESTED_API_NAME):
+    _nested = getattr(torch, "nested", None)
+    if _nested is None or not hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME):
         raise RuntimeError(_VAR_ATTENTION_GUARD_MESSAGE)
 
     if not skip_reshape:

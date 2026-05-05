@@ -8,7 +8,11 @@ Contract:
     ``RuntimeError`` whose message contains both ``SeedVR2`` and
     ``nested_tensor_from_jagged`` so the operator can identify the
     failing attention path. A bare ``AttributeError`` from the
-    ``torch.nested`` lookup is non-conformant.
+    ``torch.nested`` lookup is non-conformant. The guard must also
+    cover the case where the ``torch.nested`` namespace itself is
+    absent (e.g. forks/builds that strip the module) — accessing
+    ``torch.nested`` directly would otherwise raise the same opaque
+    ``AttributeError`` the guard is meant to translate.
   * If the API is present, the present-API path must produce the
     canonical SeedVR2-inference output shape ``(total_tokens,
     heads * head_dim)``.
@@ -17,8 +21,8 @@ Contract:
     unchanged: the SeedVR2-context guard fires only on the missing-API
     path, never on torch's per-call shape errors.
 
-Each cell additionally pins the production guard at the source level
-via ``inspect.getsource(var_attention_pytorch)`` so every AC fails
+Each cell additionally pins the production guard at the AST level via
+``inspect.getsource(var_attention_pytorch)`` so every AC fails
 diagnostically on an unguarded base.
 """
 
@@ -28,7 +32,9 @@ import torch
 if not torch.cuda.is_available():
     args.cpu = True
 
+import ast  # noqa: E402
 import inspect  # noqa: E402
+import textwrap  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -51,24 +57,62 @@ def _inputs():
 
 
 def _assert_guard_source_pin():
-    src = inspect.getsource(var_attention_pytorch)
-    assert "raise RuntimeError(" in src, (
-        "var_attention_pytorch source has no `raise RuntimeError(` substring; "
-        "the SeedVR2-named guard is missing.\n"
+    """Walk the AST of ``var_attention_pytorch`` and assert that the
+    first ``raise RuntimeError(...)`` statement appears strictly
+    before any attribute access named ``nested_tensor_from_jagged``.
+
+    Substring-based source pinning (``src.index('raise RuntimeError(')
+    < src.index('nested_tensor_from_jagged')``) is fragile: it false-
+    positives on docstring or comment text containing the literal,
+    and false-negatives on a refactor that splits ``raise
+    RuntimeError(`` across lines or replaces it with a helper
+    raising ``RuntimeError`` from another scope. AST-walking the
+    function body collapses both failure modes onto the only
+    invariant we actually require — the guard statement dominates
+    the attribute access by line number.
+    """
+    src = textwrap.dedent(inspect.getsource(var_attention_pytorch))
+    tree = ast.parse(src)
+    raise_lines = []
+    nested_lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            func = node.exc.func
+            if isinstance(func, ast.Name) and func.id == "RuntimeError":
+                raise_lines.append(node.lineno)
+        if isinstance(node, ast.Attribute) and node.attr == "nested_tensor_from_jagged":
+            nested_lines.append(node.lineno)
+    assert raise_lines, (
+        "var_attention_pytorch has no `raise RuntimeError(...)` AST node; "
+        f"the SeedVR2-named guard is missing.\n--- source ---\n{src}"
+    )
+    assert nested_lines, (
+        "var_attention_pytorch source has no `nested_tensor_from_jagged` "
+        f"attribute access; cannot pin guard ordering.\n"
         f"--- source ---\n{src}"
     )
-    raise_idx = src.index("raise RuntimeError(")
-    call_idx = src.index("nested_tensor_from_jagged")
-    assert raise_idx < call_idx, (
-        "`raise RuntimeError(` appears at index "
-        f"{raise_idx} but the first `nested_tensor_from_jagged` substring is "
-        f"at index {call_idx}; the guard must precede the unguarded lookup.\n"
+    first_raise = min(raise_lines)
+    first_nested = min(nested_lines)
+    assert first_raise < first_nested, (
+        f"`raise RuntimeError(...)` first appears at line {first_raise}, "
+        f"but `torch.nested.nested_tensor_from_jagged` is referenced first "
+        f"at line {first_nested}; the guard must precede the lookup.\n"
         f"--- source ---\n{src}"
     )
 
 
 def test_missing_api_raises_seedvr2_runtime_error(monkeypatch):
-    monkeypatch.delattr(torch.nested, "nested_tensor_from_jagged")
+    monkeypatch.delattr(torch.nested, "nested_tensor_from_jagged", raising=False)
+    q, k, v, heads, cu_q, cu_k, _, _ = _inputs()
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
+        var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
+
+    _assert_guard_source_pin()
+
+
+def test_missing_namespace_raises_seedvr2_runtime_error(monkeypatch):
+    monkeypatch.delattr(torch, "nested", raising=False)
     q, k, v, heads, cu_q, cu_k, _, _ = _inputs()
 
     with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
