@@ -11,18 +11,10 @@ shape/arity validation at the top of ``decode()``, raising ``RuntimeError``
 with a SeedVR2-specific message identifying the missing or malformed
 attribute, and initialises ``self.img_dims = None`` in ``__init__`` so the
 missing-state branch is reachable from a default-constructed instance.
-
-Five AC cells exercise every reachable input shape — missing
-``original_image_video``, missing ``img_dims`` (parameterised over
-explicit-``None`` and attribute-unset), wrong-rank ``original_image_video``,
-wrong-arity ``img_dims`` (parameterised over 1-tuple and 3-tuple), and the
-valid-both halt-at-post-guard sentinel — mirroring the ``__new__`` +
-``nn.Module.__init__`` standin pattern from #189
-(``test_seedvr_vae_decode_batch_axes.py``) and the ``_PostGuardReached``
-halt-point pattern from #119 (``test_diffusers_metadata_guard.py``).
 """
 
-from unittest.mock import patch
+import inspect
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -37,54 +29,83 @@ import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
 
 
 class _PostGuardReached(Exception):
-    """Sentinel raised by the patched ``VideoAutoencoderKL.decode_`` to
-    prove the four guards passed and control reached the first post-guard
-    callable in ``VideoAutoencoderKLWrapper.decode``.
+    """Sentinel raised from the patched module-level ``tiled_vae`` to prove
+    every guard at the top of ``VideoAutoencoderKLWrapper.decode`` passed
+    and control reached the post-guard region without standing up the
+    full decode pipeline.
     """
 
 
-def _make_standin(*, original_image_video, img_dims, set_img_dims=True):
+@pytest.fixture
+def _bypass_super_decode(monkeypatch):
+    """Replace ``VideoAutoencoderKL.decode_`` with a stub returning a 5-D
+    tensor of shape ``(B, 3, 1, 16, 16)`` matching the standin's expected
+    post-decode shape. The standin built by ``_make_standin`` does NOT run
+    the real ``__init__`` (which would allocate the full VAE weight set),
+    so attributes the parent ``decode_`` requires (``use_slicing``,
+    ``slicing_decode`` infra) are absent. On the pre-fix base SHA (where
+    ``decode`` has no guards) control would otherwise die with an
+    ``AttributeError`` on ``use_slicing`` BEFORE reaching the unguarded
+    ``rearrange(self.original_image_video, ...)`` / ``o_h, o_w =
+    self.img_dims`` sites this test class targets. On the post-fix branch
+    the guards fire ahead of ``super().decode_()`` and this stub is never
+    invoked, so the patch is a no-op.
+    """
+    def _stub(self, z, return_dict=True):
+        b = z.shape[0]
+        return torch.zeros(b, 3, 1, 16, 16, device=z.device)
+
+    monkeypatch.setattr(vae_mod.VideoAutoencoderKL, "decode_", _stub)
+
+
+def _make_standin(*, original_image_video, img_dims, set_img_dims=True, enable_tiling=False):
     """Build a ``VideoAutoencoderKLWrapper`` instance via ``__new__`` so
     the real ``__init__`` (which would allocate the full VAE weight set)
     does not run. ``nn.Module.__init__`` is invoked manually so that
     ``super()`` resolution inside the borrowed ``decode`` body still
     behaves correctly under ``VideoAutoencoderKLWrapper``'s MRO.
-
-    ``set_img_dims=False`` skips the attribute assignment entirely so the
-    guard's ``getattr(self, "img_dims", None)`` branch can be exercised
-    against a genuinely unset attribute, not just an explicit ``None``.
     """
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
         vae_mod.VideoAutoencoderKLWrapper
     )
     nn.Module.__init__(wrapper)
-    wrapper.tiled_args = {"enable_tiling": False}
+    wrapper.tiled_args = {"enable_tiling": enable_tiling}
     wrapper.original_image_video = original_image_video
     if set_img_dims:
         wrapper.img_dims = img_dims
     return wrapper
 
 
-def test_ac1_decode_raises_when_original_image_video_is_none():
+def test_init_initializes_img_dims_to_none():
+    """AC6: ``VideoAutoencoderKLWrapper.__init__`` body contains the literal
+    ``self.img_dims = None`` initialiser so the missing-state branch is
+    reachable from a default-constructed instance. Source introspection
+    is the contract because executing ``__init__`` would allocate the
+    real VAE weight set.
+    """
+    src = inspect.getsource(vae_mod.VideoAutoencoderKLWrapper.__init__)
+    assert "self.img_dims = None" in src, (
+        "AC6: VideoAutoencoderKLWrapper.__init__ must initialise "
+        "`self.img_dims = None`; missing initialiser leaves the guard's "
+        "missing-state branch unreachable from a default-constructed instance.\n"
+        f"--- __init__ source ---\n{src}"
+    )
+
+
+def test_none_original_image_video_raises_seedvr2_runtime_error(_bypass_super_decode):
     """AC1: ``original_image_video`` is ``None`` and ``img_dims`` is a valid
     ``(H, W)`` 2-tuple. ``decode(z)`` raises ``RuntimeError`` whose message
-    mentions ``original_image_video`` and ``SeedVR2``. The unguarded
-    ``rearrange(self.original_image_video, ...)`` call further down the
-    body is therefore never reached.
+    matches ``SeedVR2.*original_image_video``. On the pre-fix base SHA the
+    unguarded ``rearrange(self.original_image_video, ...)`` call instead
+    raises an einops error of the form ``Tensor type unknown to einops
+    <class 'NoneType'>`` — the wrong exception class, so the matcher
+    misses and pytest.raises(RuntimeError) fails.
     """
     wrapper = _make_standin(original_image_video=None, img_dims=(16, 16))
     z = torch.zeros(1, 16, 2, 2)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*original_image_video"):
         wrapper.decode(z)
-
-    msg = str(excinfo.value)
-    assert "original_image_video" in msg, (
-        f"AC1 message must name `original_image_video`; got: {msg!r}"
-    )
-    assert "SeedVR2" in msg, (
-        f"AC1 message must mention SeedVR2 to disambiguate from generic torch errors; got: {msg!r}"
-    )
 
 
 @pytest.mark.parametrize(
@@ -92,12 +113,14 @@ def test_ac1_decode_raises_when_original_image_video_is_none():
     [True, False],
     ids=["explicit-None", "attribute-unset"],
 )
-def test_ac2_decode_raises_when_img_dims_missing(set_img_dims):
+def test_none_img_dims_raises_seedvr2_runtime_error(set_img_dims, _bypass_super_decode):
     """AC2: ``original_image_video`` is a valid 5-D tensor and ``img_dims``
     is either ``None`` or genuinely unset on the instance. ``decode(z)``
-    raises ``RuntimeError`` whose message mentions ``img_dims`` and
-    ``SeedVR2``. The ``o_h, o_w = self.img_dims`` unpacking line further
-    down the body is therefore never reached.
+    raises ``RuntimeError`` whose message matches ``SeedVR2.*img_dims``.
+    On the pre-fix base SHA the unguarded ``o_h, o_w = self.img_dims``
+    unpack raises ``TypeError('cannot unpack non-iterable NoneType
+    object')`` — the wrong exception class, so the matcher misses and
+    pytest.raises(RuntimeError) fails.
     """
     oiv = torch.zeros(1, 3, 1, 16, 16)
     wrapper = _make_standin(
@@ -111,38 +134,25 @@ def test_ac2_decode_raises_when_img_dims_missing(set_img_dims):
         )
     z = torch.zeros(1, 16, 2, 2)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*img_dims"):
         wrapper.decode(z)
 
-    msg = str(excinfo.value)
-    assert "img_dims" in msg, (
-        f"AC2 message must name `img_dims`; got: {msg!r}"
-    )
-    assert "SeedVR2" in msg, (
-        f"AC2 message must mention SeedVR2; got: {msg!r}"
-    )
 
-
-def test_ac3_decode_raises_when_original_image_video_wrong_rank():
+def test_wrong_rank_original_image_video_raises_seedvr2_runtime_error(_bypass_super_decode):
     """AC3: ``original_image_video`` is a non-5-D tensor (3-D here) and
     ``img_dims`` is a valid ``(H, W)`` 2-tuple. ``decode(z)`` raises
-    ``RuntimeError`` whose message mentions shape / rank, signalling the
-    rank guard fired before any tensor work.
+    ``RuntimeError`` whose message matches ``SeedVR2.*original_image_video``.
+    On the pre-fix base SHA the unguarded ``rearrange(...)`` instead
+    raises ``einops.EinopsError`` complaining about rank mismatch — the
+    wrong exception class, so the matcher misses and
+    pytest.raises(RuntimeError) fails.
     """
     oiv = torch.zeros(3, 16, 16)
     wrapper = _make_standin(original_image_video=oiv, img_dims=(16, 16))
     z = torch.zeros(1, 16, 2, 2)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*original_image_video"):
         wrapper.decode(z)
-
-    msg = str(excinfo.value)
-    assert "rank" in msg or "5-D" in msg or "shape" in msg, (
-        f"AC3 message must mention rank/shape; got: {msg!r}"
-    )
-    assert "original_image_video" in msg, (
-        f"AC3 message must name the offending attribute; got: {msg!r}"
-    )
 
 
 @pytest.mark.parametrize(
@@ -150,46 +160,82 @@ def test_ac3_decode_raises_when_original_image_video_wrong_rank():
     [(16,), (16, 16, 16)],
     ids=["1-tuple", "3-tuple"],
 )
-def test_ac4_decode_raises_when_img_dims_wrong_arity(img_dims):
+def test_wrong_arity_img_dims_raises_seedvr2_runtime_error(img_dims, _bypass_super_decode):
     """AC4: ``original_image_video`` is a valid 5-D tensor and ``img_dims``
     is a 1-tuple or 3-tuple (wrong arity). ``decode(z)`` raises
-    ``RuntimeError`` whose message mentions ``img_dims`` and arity / dims,
-    signalling the arity guard fired before the unpacking site.
+    ``RuntimeError`` whose message matches ``SeedVR2.*img_dims``. On the
+    pre-fix base SHA the unguarded ``o_h, o_w = self.img_dims`` unpack
+    raises ``ValueError`` (``not enough values to unpack`` for the 1-tuple,
+    ``too many values to unpack`` for the 3-tuple) — the wrong exception
+    class, so the matcher misses and pytest.raises(RuntimeError) fails
+    for both parametrized cells.
     """
     oiv = torch.zeros(1, 3, 1, 16, 16)
     wrapper = _make_standin(original_image_video=oiv, img_dims=img_dims)
     z = torch.zeros(1, 16, 2, 2)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(RuntimeError, match=r"SeedVR2.*img_dims"):
         wrapper.decode(z)
 
-    msg = str(excinfo.value)
-    assert "img_dims" in msg, (
-        f"AC4 message must name `img_dims`; got: {msg!r}"
-    )
-    assert "arity" in msg or "2-tuple" in msg, (
-        f"AC4 message must mention arity / 2-tuple; got: {msg!r}"
-    )
 
-
-def test_ac5_decode_passes_guards_when_both_valid_and_halts_at_post_guard():
+def test_valid_state_passes_through_guards_to_tiled_vae():
     """AC5: ``original_image_video`` is a valid 5-D tensor and ``img_dims``
-    is a valid ``(H, W)`` 2-tuple. The four guards do not raise; control
-    reaches the first post-guard callable. We patch
-    ``VideoAutoencoderKL.decode_`` (the first patchable callable on the
-    non-tiled branch the standin selects via ``tiled_args = {"enable_tiling": False}``)
-    to raise ``_PostGuardReached`` — a sentinel exception that proves the
-    guards passed and control crossed into the post-guard region without
-    standing up the heavy decode pipeline (``super().decode_``,
-    ``tiled_vae``, ``lab_color_transfer``).
+    is a valid ``(H, W)`` 2-tuple. With ``tiled_args = {"enable_tiling":
+    True}`` the post-guard region selects the ``tiled_vae(...)`` branch.
+    The module-level ``comfy.ldm.seedvr.vae.tiled_vae`` is patched with
+    a sentinel side-effect; reaching it proves every guard passed.
+
+    Two assertions are required by the contract:
+
+    * ``mock_tiled.call_count == 1`` — the patched module-level
+      ``tiled_vae`` was reached exactly once via ``_PostGuardReached``,
+      proving valid input flows past the guards into the post-guard
+      region.
+    * ``inspect.getsource(VideoAutoencoderKLWrapper.decode)`` contains
+      ``raise RuntimeError(`` at a position BEFORE ``b, tc, h, w =
+      z.shape`` — proving the guards are placed at the top of
+      ``decode()`` ahead of the existing first body line. On the pre-fix
+      base SHA this assertion FAILS because the unguarded ``decode()``
+      body has no ``raise RuntimeError(`` substring before
+      ``b, tc, h, w = z.shape``.
     """
     oiv = torch.zeros(1, 3, 1, 16, 16)
-    wrapper = _make_standin(original_image_video=oiv, img_dims=(16, 16))
+    wrapper = _make_standin(
+        original_image_video=oiv,
+        img_dims=(16, 16),
+        enable_tiling=True,
+    )
     z = torch.zeros(1, 16, 2, 2)
 
-    def _sentinel_decode_(self, latent, *args, **kwargs):
-        raise _PostGuardReached("guards passed; post-guard region reached")
-
-    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _sentinel_decode_):
+    mock_tiled = MagicMock(
+        side_effect=_PostGuardReached("post-guard region reached: tiled_vae called"),
+    )
+    with patch.object(vae_mod, "tiled_vae", mock_tiled):
         with pytest.raises(_PostGuardReached):
             wrapper.decode(z)
+
+    assert mock_tiled.call_count == 1, (
+        "AC5 (a): patched module-level `comfy.ldm.seedvr.vae.tiled_vae` "
+        f"must be called exactly once; observed call_count={mock_tiled.call_count}."
+    )
+
+    src = inspect.getsource(vae_mod.VideoAutoencoderKLWrapper.decode)
+    raise_pos = src.find("raise RuntimeError(")
+    shape_pos = src.find("b, tc, h, w = z.shape")
+    assert raise_pos != -1, (
+        "AC5 (b): VideoAutoencoderKLWrapper.decode source must contain "
+        "`raise RuntimeError(` (the guard raise statement); not found.\n"
+        f"--- decode source ---\n{src}"
+    )
+    assert shape_pos != -1, (
+        "AC5 (b): VideoAutoencoderKLWrapper.decode source must contain "
+        "`b, tc, h, w = z.shape` (the existing first body line); not found.\n"
+        f"--- decode source ---\n{src}"
+    )
+    assert raise_pos < shape_pos, (
+        "AC5 (b): `raise RuntimeError(` must appear at a position BEFORE "
+        "`b, tc, h, w = z.shape` in VideoAutoencoderKLWrapper.decode source "
+        "(proving the guards are placed at the top of decode() ahead of "
+        f"the existing first body line); got raise_pos={raise_pos}, "
+        f"shape_pos={shape_pos}.\n--- decode source ---\n{src}"
+    )
