@@ -22,7 +22,9 @@ img_dims guards. The fix adds ``self.tiled_args = None`` to ``__init__``
 and a presence + type guard in ``decode()`` ahead of the ``.get()`` call.
 """
 
+import ast
 import inspect
+import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -272,13 +274,21 @@ def test_valid_state_passes_through_guards_to_tiled_vae():
       ``tiled_vae`` was reached exactly once via ``_PostGuardReached``,
       proving valid input flows past the guards into the post-guard
       region.
-    * ``inspect.getsource(VideoAutoencoderKLWrapper.decode)`` contains
-      ``raise RuntimeError(`` at a position BEFORE ``b, tc, h, w =
-      z.shape`` — proving the guards are placed at the top of
-      ``decode()`` ahead of the existing first body line. On the pre-fix
-      base SHA this assertion FAILS because the unguarded ``decode()``
-      body has no ``raise RuntimeError(`` substring before
-      ``b, tc, h, w = z.shape``.
+    * AST-walked source pin (PR review round 43, Copilot
+      ``comment_id=3189256300``): the function-body statement index of
+      the first top-level statement transitively containing a
+      ``raise RuntimeError(...)`` must precede the body-statement index
+      of the ``b, tc, h, w = z.shape`` tuple-unpack assignment, proving
+      the guards are placed at the top of ``decode()`` ahead of the
+      existing first body line. AST-walked rather than substring-matched
+      so that ``raise RuntimeError(`` appearing in a docstring or
+      comment does not false-positive, and so that whitespace /
+      formatting refactors that preserve the structural ordering do
+      not false-negative — pattern-matching the precedent established
+      by ``seedvr_model_test.py::test_no_bare_except_in_forward_path``.
+      On the pre-fix base SHA this assertion FAILS because the unguarded
+      ``decode()`` body contains no ``Raise(Call(Name('RuntimeError')))``
+      node before the ``z.shape`` unpack assignment.
     """
     oiv = torch.zeros(1, 3, 1, 16, 16)
     wrapper = _make_standin(
@@ -301,24 +311,71 @@ def test_valid_state_passes_through_guards_to_tiled_vae():
     )
 
     src = inspect.getsource(vae_mod.VideoAutoencoderKLWrapper.decode)
-    raise_pos = src.find("raise RuntimeError(")
-    shape_pos = src.find("b, tc, h, w = z.shape")
-    assert raise_pos != -1, (
-        "AC5 (b): VideoAutoencoderKLWrapper.decode source must contain "
-        "`raise RuntimeError(` (the guard raise statement); not found.\n"
+    tree = ast.parse(textwrap.dedent(src))
+    func_def = tree.body[0]
+    assert isinstance(func_def, ast.FunctionDef), (
+        "AC5 (b): expected `inspect.getsource(VideoAutoencoderKLWrapper.decode)` "
+        f"to parse to a single ast.FunctionDef; got {type(func_def).__name__}.\n"
         f"--- decode source ---\n{src}"
     )
-    assert shape_pos != -1, (
-        "AC5 (b): VideoAutoencoderKLWrapper.decode source must contain "
-        "`b, tc, h, w = z.shape` (the existing first body line); not found.\n"
-        f"--- decode source ---\n{src}"
+
+    def _is_z_shape_unpack(stmt):
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            return False
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Tuple):
+            return False
+        target_names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if target_names != ["b", "tc", "h", "w"]:
+            return False
+        value = stmt.value
+        return (
+            isinstance(value, ast.Attribute)
+            and value.attr == "shape"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "z"
+        )
+
+    def _contains_raise_runtime_error(stmt):
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Raise):
+                continue
+            exc = node.exc
+            if (
+                isinstance(exc, ast.Call)
+                and isinstance(exc.func, ast.Name)
+                and exc.func.id == "RuntimeError"
+            ):
+                return True
+        return False
+
+    z_shape_idx = None
+    first_raise_idx = None
+    for idx, stmt in enumerate(func_def.body):
+        if z_shape_idx is None and _is_z_shape_unpack(stmt):
+            z_shape_idx = idx
+        if first_raise_idx is None and _contains_raise_runtime_error(stmt):
+            first_raise_idx = idx
+
+    assert z_shape_idx is not None, (
+        "AC5 (b): VideoAutoencoderKLWrapper.decode body must contain a "
+        "`b, tc, h, w = z.shape` tuple-unpack assignment (an ast.Assign with "
+        "Tuple target ('b','tc','h','w') and Attribute value `z.shape`); "
+        f"not found.\n--- decode source ---\n{src}"
     )
-    assert raise_pos < shape_pos, (
-        "AC5 (b): `raise RuntimeError(` must appear at a position BEFORE "
-        "`b, tc, h, w = z.shape` in VideoAutoencoderKLWrapper.decode source "
-        "(proving the guards are placed at the top of decode() ahead of "
-        f"the existing first body line); got raise_pos={raise_pos}, "
-        f"shape_pos={shape_pos}.\n--- decode source ---\n{src}"
+    assert first_raise_idx is not None, (
+        "AC5 (b): VideoAutoencoderKLWrapper.decode body must contain at least one "
+        "`raise RuntimeError(...)` (an ast.Raise whose exc is a Call to a Name "
+        f"'RuntimeError'); not found.\n--- decode source ---\n{src}"
+    )
+    assert first_raise_idx < z_shape_idx, (
+        "AC5 (b): the first body-statement transitively containing a "
+        "`raise RuntimeError(...)` must appear at a position BEFORE the "
+        "`b, tc, h, w = z.shape` tuple-unpack assignment in "
+        "VideoAutoencoderKLWrapper.decode (proving the guards are placed at "
+        "the top of decode() ahead of the existing first body line); got "
+        f"first_raise_idx={first_raise_idx}, z_shape_idx={z_shape_idx}.\n"
+        f"--- decode source ---\n{src}"
     )
 
 
