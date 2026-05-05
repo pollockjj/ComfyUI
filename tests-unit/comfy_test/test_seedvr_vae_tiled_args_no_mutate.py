@@ -11,11 +11,12 @@ def test_seedvr_vae_tiled_args_uses_get_not_pop():
         f"Source path: {path}"
     )
     enable_tiling_get_calls = re.findall(
-        r"self\.tiled_args\.get\s*\(\s*[\"']enable_tiling[\"']\s*,\s*False\s*\)",
+        r"(?:self\.)?tiled_args\.get\s*\(\s*[\"']enable_tiling[\"']\s*,\s*False\s*\)",
         src,
     )
     assert len(enable_tiling_get_calls) == 1, (
         f"VideoAutoencoderKLWrapper.decode should contain exactly one "
-        f"self.tiled_args.get('enable_tiling', False) call per Slice 1 baseline; "
+        f"tiled_args.get('enable_tiling', False) call per Slice 1 baseline "
+        f"(self-attribute or validated-local form); "
         f"found {len(enable_tiling_get_calls)}. Source path: {path}"
     )

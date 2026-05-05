@@ -2310,10 +2310,10 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             latent = latent.unsqueeze(2)
 
         self.device = latent.device
-        self.enable_tiling = self.tiled_args.get("enable_tiling", False)
+        self.enable_tiling = tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            x = tiled_vae(latent, self, **self.tiled_args, encode=False)
+            x = tiled_vae(latent, self, **tiled_args, encode=False)
             if x.ndim == 4:
                 # tiled_vae squeezes the temporal axis when
                 # temporal_downsample_factor == 1 AND latent T == 1
