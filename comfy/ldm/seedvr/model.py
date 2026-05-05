@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import einops
 from einops import rearrange
-import comfy.model_management
 import torch.nn.functional as F
 from math import ceil, pi
 import torch
@@ -621,8 +620,6 @@ class MMModule(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.vid if not self.shared_weights else self.all
-        device = comfy.model_management.get_torch_device()
-        vid = vid.to(device)
         vid = vid_module(vid, *get_args("vid", args), **get_kwargs("vid", kwargs))
         if not self.vid_only:
             txt_module = self.txt if not self.shared_weights else self.all
