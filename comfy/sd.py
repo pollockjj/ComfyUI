@@ -522,7 +522,7 @@ class VAE:
                 self.disable_offload = True
                 self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
                 self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
-                self.working_dtypes = [torch.bfloat16, torch.float32]
+                self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
                 self.downscale_index_formula = (4, 8, 8)
                 self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
@@ -958,6 +958,9 @@ class VAE:
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
     def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
+        latent_channels = getattr(self, "latent_channels", 16)
+        if samples.ndim == 5 and samples.shape[1] != latent_channels and samples.shape[-1] == latent_channels:
+            samples = samples.movedim(-1, 1)
         args = dict(getattr(self.first_stage_model, "tiled_args", {}))
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
         args["enable_tiling"] = True
