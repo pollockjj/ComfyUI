@@ -17,9 +17,8 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
 )
 
-# Private sentinel for getattr default — distinguishes "attribute missing"
-# from "attribute present but None", so the failure message is accurate
-# in both cases (Copilot review on PR pollockjj/ComfyUI#32).
+# Private sentinel for getattr default: distinguishes "attribute missing"
+# from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
 
 
@@ -195,7 +194,8 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
                 io.Int.Input("spatial_tile_size", default = 512, min = 1),
                 io.Int.Input("spatial_overlap", default = 64, min = 1),
-                io.Int.Input("temporal_tile_size", default=5, min=1, max=16384, step=4),
+                io.Int.Input("temporal_tile_size", default=16, min=1, max=16384, step=4),
+                io.Int.Input("temporal_overlap", default=4, min=0, max=16384, step=4),
                 io.Boolean.Input("enable_tiling", default=False),
             ],
             outputs = [
@@ -204,7 +204,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, vae, resolution, spatial_tile_size, spatial_overlap, temporal_tile_size, enable_tiling):
+    def execute(cls, images, vae, resolution, spatial_tile_size, spatial_overlap, temporal_tile_size, temporal_overlap, enable_tiling):
 
         comfy.model_management.load_models_gpu([vae.patcher])
         vae_model = vae.first_stage_model
@@ -228,16 +228,11 @@ class SeedVR2InputProcessing(io.ComfyNode):
         _, _, new_h, new_w = images.shape
 
         images = images.reshape(b, t, c, new_h, new_w)
-        # Per #188: capture UNPADDED tensor before cut_videos for the B==1 trim path.
-        # For B>1, store the PADDED tensor instead — VideoAutoencoderKLWrapper.decode()
-        # passes `input` (derived from original_image_video) to lab_color_transfer, and
-        # the decoded `x` carries B*T_padded frames; matching that with B*T_padded `input`
-        # preserves the pre-#188 pairing semantics until #189 fixes the B>1 axis derivation.
+        # Preserve the unpadded user-visible temporal length for decode trim.
         images_bcthw_unpadded = rearrange(images, "b t c h w -> b c t h w")
         images = cut_videos(images)
-        images_bcthw = rearrange(images, "b t c h w -> b c t h w")
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
-        original_image_video = images_bcthw_unpadded if b == 1 else images_bcthw
+        original_image_video = images_bcthw_unpadded
 
         # in case users a non-compatiable number for tiling
         def make_divisible(val, divisor):
@@ -249,8 +244,12 @@ class SeedVR2InputProcessing(io.ComfyNode):
         if spatial_overlap >= spatial_tile_size:
             spatial_overlap = max(0, spatial_tile_size - 8)
 
-        args = {"tile_size": (spatial_tile_size, spatial_tile_size), "tile_overlap": (spatial_overlap, spatial_overlap),
-                "temporal_size":temporal_tile_size}
+        args = {
+            "tile_size": (spatial_tile_size, spatial_tile_size),
+            "tile_overlap": (spatial_overlap, spatial_overlap),
+            "temporal_size": temporal_tile_size,
+            "temporal_overlap": temporal_overlap,
+        }
         if enable_tiling:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
@@ -260,6 +259,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 tile_y=spatial_tile_size,
                 overlap=spatial_overlap,
                 tile_t=temporal_tile_size,
+                overlap_t=temporal_overlap,
             )
         else:
             vae_model.img_dims = [o_h, o_w]
