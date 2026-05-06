@@ -53,9 +53,12 @@ class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
         nn.Module.__init__(self)
         self.tiled_args = {}
         self.calls = []
+        self.original_image_video = torch.zeros(1, 3, 12, 16, 16)
+        self.spatial_downsample_factor = 8
+        self.temporal_downsample_factor = 4
 
     def decode(self, z):
-        self.calls.append(dict(self.tiled_args))
+        self.calls.append({"tiled_args": dict(self.tiled_args), "shape": tuple(z.shape)})
         return z
 
 
@@ -80,13 +83,62 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
     assert tuple(out.shape) == (1, 3, 2, 2, 16)
     assert vae.first_stage_model.calls == [
         {
-            "enable_tiling": True,
-            "tile_size": (16, 16),
-            "tile_overlap": (8, 8),
-            "temporal_size": 16,
-            "temporal_overlap": 4,
+            "shape": (1, 16, 3, 2, 2),
+            "tiled_args": {
+                "enable_tiling": True,
+                "tile_size": (16, 16),
+                "tile_overlap": (8, 8),
+                "temporal_size": 16,
+                "temporal_overlap": 4,
+            },
         }
     ]
+
+
+def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(monkeypatch):
+    vae = sd_mod.VAE.__new__(sd_mod.VAE)
+    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 64, 64, 64)
+    vae.vae_dtype = torch.float32
+    vae.device = "cpu"
+    vae.output_device = "cpu"
+    vae.disable_offload = True
+    vae.extra_1d_channel = None
+    vae.latent_channels = 16
+    vae.memory_used_decode = lambda shape, dtype: 1
+    vae.process_output = lambda x: x
+    vae.patcher = object()
+
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(sd_mod.VAE, "decode_tiled_3d", lambda *a, **k: (_ for _ in ()).throw(AssertionError("generic decode_tiled_3d called")))
+
+    latent = torch.zeros(1, 16, 8, 8, 16)
+    vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
+
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 16, 8, 8)
+
+
+def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypatch):
+    vae = sd_mod.VAE.__new__(sd_mod.VAE)
+    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.vae_dtype = torch.float32
+    vae.device = "cpu"
+    vae.output_device = "cpu"
+    vae.disable_offload = True
+    vae.extra_1d_channel = None
+    vae.latent_channels = 16
+    vae.memory_used_decode = lambda shape, dtype: 1
+    vae.process_output = lambda x: x
+    vae.patcher = object()
+
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(sd_mod.VAE, "decode_tiled_", lambda *a, **k: (_ for _ in ()).throw(AssertionError("generic decode_tiled_ called")))
+
+    latent = torch.zeros(1, 48, 2, 2)
+    vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
+
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 48, 2, 2)
+    assert vae.first_stage_model.calls[0]["tiled_args"]["temporal_overlap"] == 4
 
 
 class _TemporalChunkRecorder(nn.Module):
