@@ -98,7 +98,7 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
 def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 64, 64, 64)
+    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 61, 64, 64)
     vae.vae_dtype = torch.float32
     vae.device = "cpu"
     vae.output_device = "cpu"
@@ -116,6 +116,29 @@ def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(mon
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
     assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 16, 8, 8)
+
+
+def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_latents(monkeypatch):
+    vae = sd_mod.VAE.__new__(sd_mod.VAE)
+    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 32, 64, 64)
+    vae.vae_dtype = torch.float32
+    vae.device = "cpu"
+    vae.output_device = "cpu"
+    vae.disable_offload = True
+    vae.extra_1d_channel = None
+    vae.latent_channels = 16
+    vae.memory_used_decode = lambda shape, dtype: 1
+    vae.process_output = lambda x: x
+    vae.patcher = object()
+
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    monkeypatch.setattr(sd_mod.VAE, "decode_tiled_3d", lambda *a, **k: (_ for _ in ()).throw(AssertionError("generic decode_tiled_3d called")))
+
+    latent = torch.zeros(1, 9, 8, 8, 16)
+    vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
+
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 9, 8, 8)
 
 
 def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypatch):

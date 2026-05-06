@@ -966,8 +966,15 @@ class VAE:
         source_t = original.shape[2]
         source_h = original.shape[3]
         source_w = original.shape[4]
+        if source_t == 1:
+            padded_t = source_t
+        elif source_t <= temporal_factor:
+            padded_t = temporal_factor + 1
+        else:
+            remainder = (source_t - 1) % temporal_factor
+            padded_t = source_t if remainder == 0 else source_t + (temporal_factor - remainder)
         return (
-            math.ceil(source_t / temporal_factor),
+            math.ceil(padded_t / temporal_factor),
             math.ceil(source_h / spatial_factor),
             math.ceil(source_w / spatial_factor),
         )
