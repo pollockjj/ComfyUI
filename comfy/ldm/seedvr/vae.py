@@ -22,7 +22,16 @@ ops = comfy.ops.disable_weight_init
 
 
 @torch.inference_mode()
-def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), temporal_size=16, encode=True, **kwargs):
+def tiled_vae(
+    x,
+    vae_model,
+    tile_size=(512, 512),
+    tile_overlap=(64, 64),
+    temporal_size=16,
+    temporal_overlap=0,
+    encode=True,
+    **kwargs,
+):
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -48,7 +57,7 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
         ov_h = max(0, tile_overlap[0] // sf_s)
         ov_w = max(0, tile_overlap[1] // sf_s)
 
-        target_d = d * sf_t
+        target_d = max(1, d * sf_t - (sf_t - 1))
         target_h = h * sf_s
         target_w = w * sf_s
 
@@ -63,17 +72,68 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
         chunk_results = []
         t_dim_size = spatial_tile.shape[2]
 
+        def decoded_temporal_len(latent_len):
+            if latent_len <= 0:
+                return 0
+            return max(1, latent_len * sf_t - (sf_t - 1))
+
         if encode:
             input_chunk = temporal_size
+            overlap_chunk = 0
         else:
             input_chunk = max(1, temporal_size // sf_t)
+            overlap_chunk = max(0, temporal_overlap // sf_t)
+            overlap_chunk = min(overlap_chunk, input_chunk - 1)
+
+        if (
+            not encode
+            and temporal_overlap > 0
+            and hasattr(vae_model, "_decode")
+        ):
+            if t_dim_size <= 1:
+                out = vae_model._decode(spatial_tile.contiguous())
+                if isinstance(out, (tuple, list)):
+                    out = out[0]
+                if out.ndim == 4:
+                    out = out.unsqueeze(2)
+                chunk_results.append(out.to(storage_device))
+            else:
+                initial = spatial_tile[:, :, :2, :, :].contiguous()
+                out = vae_model._decode(initial, memory_state=MemoryState.INITIALIZING)
+                if isinstance(out, (tuple, list)):
+                    out = out[0]
+                if out.ndim == 4:
+                    out = out.unsqueeze(2)
+                chunk_results.append(out.to(storage_device))
+
+                active_step = max(1, getattr(vae_model, "slicing_latent_min_size", 1))
+                for i in range(2, t_dim_size, active_step):
+                    t_chunk = spatial_tile[:, :, i : i + active_step, :, :].contiguous()
+                    out = vae_model._decode(t_chunk, memory_state=MemoryState.ACTIVE)
+                    if isinstance(out, (tuple, list)):
+                        out = out[0]
+                    if out.ndim == 4:
+                        out = out.unsqueeze(2)
+                    chunk_results.append(out.to(storage_device))
+            modules_with_memory = [
+                m for m in vae_model.modules()
+                if isinstance(m, InflatedCausalConv3d) and m.memory is not None
+            ]
+            for m in modules_with_memory:
+                m.memory = None
+            return torch.cat(chunk_results, dim=2)
+
         for i in range(0, t_dim_size, input_chunk):
-            t_chunk = spatial_tile[:, :, i : i + input_chunk, :, :]
+            chunk_start = max(0, i - overlap_chunk)
+            chunk_end = min(i + input_chunk, t_dim_size)
+            t_chunk = spatial_tile[:, :, chunk_start:chunk_end, :, :]
             current_valid_len = t_chunk.shape[2]
+            prefix_len = i - chunk_start
 
             pad_amount = 0
-            if current_valid_len < input_chunk:
-                pad_amount = input_chunk - current_valid_len
+            target_input_len = input_chunk + prefix_len
+            if current_valid_len < target_input_len:
+                pad_amount = target_input_len - current_valid_len
 
                 last_frame = t_chunk[:, :, -1:, :, :]
                 padding = last_frame.repeat(1, 1, pad_amount, 1, 1)
@@ -97,8 +157,15 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
                     out = out[:, :, :expected_valid_out, :, :]
 
                 else:
-                    expected_valid_out = current_valid_len * sf_t
+                    expected_valid_out = decoded_temporal_len(current_valid_len)
                     out = out[:, :, :expected_valid_out, :, :]
+
+            if prefix_len > 0:
+                if encode:
+                    prefix_out = (prefix_len + sf_t - 1) // sf_t
+                else:
+                    prefix_out = decoded_temporal_len(prefix_len)
+                out = out[:, :, prefix_out:, :, :]
 
             chunk_results.append(out.to(storage_device))
 
@@ -113,6 +180,7 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
 
     total_tiles = len(range(0, h, stride_h)) * len(range(0, w, stride_w))
     bar = ProgressBar(total_tiles)
+    single_spatial_tile = h <= ti_h and w <= ti_w
 
     for y_idx in range(0, h, stride_h):
         y_end = min(y_idx + ti_h, h)
@@ -124,6 +192,15 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
 
             # Run VAE
             tile_out = run_temporal_chunks(tile_x)
+
+            if single_spatial_tile:
+                result = tile_out[:, :, :target_d, :target_h, :target_w]
+                if result.device != x.device:
+                    result = result.to(x.device).to(x.dtype)
+                if x.shape[2] == 1 and sf_t == 1:
+                    result = result.squeeze(2)
+                bar.update(1)
+                return result
 
             if result is None:
                 b_out, c_out = tile_out.shape[0], tile_out.shape[1]
@@ -2296,14 +2373,21 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 "explicit non-dict assignment is a wrapper-misuse path."
             )
 
-        b, tc, h, w = z.shape
-        latent = z.view(b, 16, -1, h, w)
+        input_was_5d = z.ndim == 5
+        if input_was_5d:
+            b, c, t_latent, h, w = z.shape
+            if c != 16:
+                raise RuntimeError(
+                    "SeedVR2 VideoAutoencoderKLWrapper.decode: 5-D latent input must "
+                    f"have 16 channels; got shape {tuple(z.shape)}."
+                )
+            latent = z
+        else:
+            b, tc, h, w = z.shape
+            latent = z.view(b, 16, -1, h, w)
         scale = 0.9152
         shift = 0
         latent = latent / scale + shift
-
-        if latent.ndim == 4:
-            latent = latent.unsqueeze(2)
 
         self.device = latent.device
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
@@ -2319,29 +2403,28 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         else:
             x = super().decode_(latent)
 
-        # Per #188: original_image_video carries the UNPADDED temporal length T_in
-        # (set by SeedVR2InputProcessing.execute BEFORE cut_videos padding). For B == 1
-        # the trim count `t = input.size(0)` therefore equals T_in and trims decode
-        # output to exactly T_in. The B > 1 axis-confusion path is tracked in #189.
-        input = rearrange(self.original_image_video, "b c t h w -> (b t) c h w")
+        original = self.original_image_video
+        source_b, _, source_t, _, _ = original.shape
+        input = rearrange(original, "b c t h w -> (b t) c h w")
 
-        # in case of padded frames
-        t = input.size(0)
-        if t != 1:
-            x = x[:, :, :t]
-        if t == 1 and x.size(2) == 4:
-            x = x[:, :, :t]
+        if source_t != 1:
+            x = x[:, :, :source_t]
+        if source_t == 1 and x.size(2) == 4:
+            x = x[:, :, :source_t]
 
-        x = rearrange(x, "b c t h w -> (b t) c h w")
+        x_flat = rearrange(x, "b c t h w -> (b t) c h w")
 
-        input = input.to(x.device)
+        input = input.to(x_flat.device)
         o_h, o_w = self.img_dims
-        x = x[..., :o_h, :o_w]
+        x_flat = x_flat[..., :o_h, :o_w]
         input = input[..., :o_h, :o_w ]
-        x = lab_color_transfer(x, input)
+        x_flat = lab_color_transfer(x_flat, input)
 
-        x = x.unsqueeze(0)
-        x = rearrange(x, "b t c h w -> b c t h w")
+        if input_was_5d:
+            x = rearrange(x_flat, "(b t) c h w -> b c t h w", b=source_b, t=source_t)
+        else:
+            x = x_flat.unsqueeze(0)
+            x = rearrange(x, "b t c h w -> b c t h w")
 
         # ensure even dims for save video
         h, w = x.shape[-2:]

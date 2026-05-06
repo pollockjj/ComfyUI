@@ -1,17 +1,7 @@
-"""Regression test for issue #188 — ``SeedVR2InputProcessing.execute`` must
-store the UNPADDED ``original_image_video`` so that
+"""Regression test: ``SeedVR2InputProcessing.execute`` must store the
+UNPADDED ``original_image_video`` so that
 ``VideoAutoencoderKLWrapper.decode`` trims its output to the user-visible
 ``T_in`` rather than the post-``cut_videos`` ``T_padded``.
-
-Pre-fix behavior (``issue_101_pi`` HEAD): ``execute`` writes the PADDED
-``images_bcthw`` (post ``cut_videos``) onto ``vae_model.original_image_video``;
-``decode`` derives ``t = input.size(0) = B * T_padded`` and trims to
-``T_padded`` for ``B == 1``. This silently expands ``T_in`` from
-``{2, 3, 4} -> 5`` and ``{6, 7, 8} -> 9``.
-
-Post-fix behavior (``issue_188`` HEAD): ``execute`` writes the UNPADDED
-``images_bcthw_unpadded`` (pre ``cut_videos``); ``decode`` therefore trims to
-``T_in`` for every ``T_in in {1..8}`` when ``B == 1``.
 
 The test is parametrised over the full ``T_in in {1..8}`` range so that
 ``T_in in {1, 5}`` (unaffected by ``cut_videos`` padding — see the
@@ -21,9 +11,6 @@ no-regression cases, and
 locked in by patching ``lab_color_transfer`` with an identity stub that
 records ``(content, style)`` into a closure-captured ``captured`` dict; the
 test then asserts ``len(captured["args"][1]) == result.shape[2] * B``.
-
-Test design rationale and per-decision review trail are recorded on the
-tracking issue: https://github.com/pollockjj/mydevelopment/issues/188
 """
 
 from types import SimpleNamespace
@@ -156,6 +143,7 @@ def test_decode_returns_tin_frames(t_in):
             spatial_tile_size=h,
             spatial_overlap=8,
             temporal_tile_size=5,
+            temporal_overlap=0,
             enable_tiling=False,
         )
 
@@ -169,8 +157,8 @@ def test_decode_returns_tin_frames(t_in):
     # AC-A / AC-C / AC-D / AC-E load-bearing assertion.
     assert result.shape[2] == t_in, (
         f"decode returned T_out={result.shape[2]} for T_in={t_in}; "
-        f"expected T_out == T_in. Bug locked in by issue #188 — "
-        f"original_image_video must carry UNPADDED T_in, not T_padded="
+        f"expected T_out == T_in. original_image_video must carry "
+        f"UNPADDED T_in, not T_padded="
         f"{_t_padded(t_in)}."
     )
 
