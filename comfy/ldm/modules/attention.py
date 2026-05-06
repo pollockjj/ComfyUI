@@ -719,7 +719,42 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         )
     return out
 
+_VAR_ATTENTION_NESTED_API_NAME = "nested_tensor_from_jagged"
+_VAR_ATTENTION_GUARD_MESSAGE = (
+    "SeedVR2 var_attention_pytorch: torch.nested.nested_tensor_from_jagged "
+    "is required by this attention path; the installed PyTorch build "
+    "does not provide it"
+)
 
+
+def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    _nested = getattr(torch, "nested", None)
+    if _nested is None or not hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME):
+        raise RuntimeError(_VAR_ATTENTION_GUARD_MESSAGE)
+
+    if not skip_reshape:
+        # assumes 2D q, k,v [total_tokens, embed_dim]
+        total_tokens, embed_dim = q.shape
+        head_dim = embed_dim // heads
+        q = q.view(total_tokens, heads, head_dim)
+        k = k.view(k.shape[0], heads, head_dim)
+        v = v.view(v.shape[0], heads, head_dim)
+
+    q = torch.nested.nested_tensor_from_jagged(q, offsets=cu_seqlens_q.long())
+    k = torch.nested.nested_tensor_from_jagged(k, offsets=cu_seqlens_k.long())
+    v = torch.nested.nested_tensor_from_jagged(v, offsets=cu_seqlens_k.long())
+
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+
+    out = out.transpose(1, 2)
+    if not skip_output_reshape:
+        return out.values().reshape(-1, heads * (q.shape[-1]))
+    return out.values()
+
+optimized_var_attention = var_attention_pytorch
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():

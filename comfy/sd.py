@@ -17,6 +17,7 @@ import comfy.ldm.cosmos.vae
 import comfy.ldm.wan.vae
 import comfy.ldm.wan.vae2_2
 import comfy.ldm.hunyuan3d.vae
+import comfy.ldm.seedvr.vae
 import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.cogvideo.vae
 import comfy.ldm.hunyuan_video.vae
@@ -439,8 +440,10 @@ class CLIP:
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
-        if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
-            sd = diffusers_convert.convert_vae_state_dict(sd)
+        is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
+        if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
+            if metadata is None or metadata.get("keep_diffusers_format") != "true":
+                sd = diffusers_convert.convert_vae_state_dict(sd)
 
         if model_management.is_amd():
             VAE_KL_MEM_RATIO = 2.73
@@ -512,6 +515,20 @@ class VAE:
                 self.first_stage_model = StageC_coder()
                 self.downscale_ratio = 32
                 self.latent_channels = 16
+            elif "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd: # seedvr2
+                self.first_stage_model = comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper()
+                self.latent_channels = 16
+                self.latent_dim = 3
+                self.disable_offload = True
+                self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
+                self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
+                self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+                self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
+                self.downscale_index_formula = (4, 8, 8)
+                self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
+                self.upscale_index_formula = (4, 8, 8)
+                self.process_input = lambda image: image
+                self.crop_input = False
             elif "decoder.conv_in.weight" in sd:
                 if sd['decoder.conv_in.weight'].shape[1] == 64:
                     ddconfig = {"block_out_channels": [128, 256, 512, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 32, "downsample_match_channel": True, "upsample_match_channel": True}
@@ -639,6 +656,7 @@ class VAE:
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 7) / 8)), 32, 32)
                 self.downscale_index_formula = (8, 32, 32)
                 self.working_dtypes = [torch.bfloat16, torch.float32]
+
             elif "decoder.conv_in.conv.weight" in sd and sd['decoder.conv_in.conv.weight'].shape[1] == 32:
                 ddconfig = {"block_out_channels": [128, 256, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 16, "ffactor_temporal": 4, "downsample_match_channel": True, "upsample_match_channel": True}
                 ddconfig['z_channels'] = sd["decoder.conv_in.conv.weight"].shape[1]
@@ -939,6 +957,60 @@ class VAE:
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
+    def _seedvr2_expected_latent_shape(self):
+        original = getattr(self.first_stage_model, "original_image_video", None)
+        if not torch.is_tensor(original) or original.ndim != 5:
+            return None
+        temporal_factor = getattr(self.first_stage_model, "temporal_downsample_factor", 4)
+        spatial_factor = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
+        source_t = original.shape[2]
+        source_h = original.shape[3]
+        source_w = original.shape[4]
+        if source_t == 1:
+            padded_t = source_t
+        elif source_t <= temporal_factor:
+            padded_t = temporal_factor + 1
+        else:
+            remainder = (source_t - 1) % temporal_factor
+            padded_t = source_t if remainder == 0 else source_t + (temporal_factor - remainder)
+        return (
+            math.ceil(padded_t / temporal_factor),
+            math.ceil(source_h / spatial_factor),
+            math.ceil(source_w / spatial_factor),
+        )
+
+    def _normalize_seedvr2_decode_samples(self, samples):
+        if samples.ndim != 5:
+            return samples
+        latent_channels = getattr(self, "latent_channels", 16)
+        expected_shape = self._seedvr2_expected_latent_shape()
+        channel_first = samples.shape[1] == latent_channels
+        channel_last = samples.shape[-1] == latent_channels
+        if expected_shape is not None:
+            expected_t, expected_h, expected_w = expected_shape
+            channel_first = channel_first and tuple(samples.shape[2:5]) == (expected_t, expected_h, expected_w)
+            channel_last = channel_last and tuple(samples.shape[1:4]) == (expected_t, expected_h, expected_w)
+        if channel_last and not channel_first:
+            return samples.movedim(-1, 1)
+        return samples
+
+    def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
+        samples = self._normalize_seedvr2_decode_samples(samples)
+        args = dict(getattr(self.first_stage_model, "tiled_args", {}))
+        sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
+        args["enable_tiling"] = True
+        args.setdefault("tile_size", (tile_y * sf_s, tile_x * sf_s))
+        args.setdefault("tile_overlap", (overlap * sf_s, overlap * sf_s))
+        args.setdefault("temporal_size", tile_t)
+        args.setdefault("temporal_overlap", overlap_t)
+        previous_args = getattr(self.first_stage_model, "tiled_args", {})
+        try:
+            self.first_stage_model.tiled_args = args
+            output = self.first_stage_model.decode(samples.to(self.vae_dtype).to(self.device))
+        finally:
+            self.first_stage_model.tiled_args = previous_args
+        return self.process_output(output.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
+
     def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap = 64):
         steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap)
         steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x // 2, tile_y * 2, overlap)
@@ -1024,7 +1096,10 @@ class VAE:
             elif dims == 3:
                 tile = 256 // self.spacial_compression_decode()
                 overlap = tile // 4
-                pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                    pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                else:
+                    pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
 
         pixel_samples = pixel_samples.to(self.output_device).movedim(1,-1)
         return pixel_samples
@@ -1042,7 +1117,20 @@ class VAE:
         if overlap is not None:
             args["overlap"] = overlap
 
-        if dims == 1 or self.extra_1d_channel is not None:
+        if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper) and dims in (2, 3):
+            seedvr2_args = {}
+            if tile_x is not None:
+                seedvr2_args["tile_x"] = tile_x
+            if tile_y is not None:
+                seedvr2_args["tile_y"] = tile_y
+            if overlap is not None:
+                seedvr2_args["overlap"] = overlap
+            if tile_t is not None:
+                seedvr2_args["tile_t"] = tile_t
+            if overlap_t is not None:
+                seedvr2_args["overlap_t"] = overlap_t
+            output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
+        elif dims == 1 or self.extra_1d_channel is not None:
             args.pop("tile_y")
             output = self.decode_tiled_1d(samples, **args)
         elif dims == 2:
@@ -1082,6 +1170,8 @@ class VAE:
                 else:
                     pixels_in = pixels_in.to(self.device)
                     out = self.first_stage_model.encode(pixels_in)
+                if isinstance(out, tuple):
+                    out = out[0]
                 out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
                 if samples is None:
                     samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
