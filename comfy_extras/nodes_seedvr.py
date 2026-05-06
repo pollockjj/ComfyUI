@@ -231,7 +231,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
         # Preserve the unpadded user-visible temporal length for decode trim.
         images_bcthw_unpadded = rearrange(images, "b t c h w -> b c t h w")
         images = cut_videos(images)
-        images_bcthw = rearrange(images, "b t c h w -> b c t h w")
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
         original_image_video = images_bcthw_unpadded
 
