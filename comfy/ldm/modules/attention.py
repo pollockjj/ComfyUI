@@ -901,36 +901,18 @@ def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
     max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
-    if FLASH_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
-        fa3_kwargs = {key: val for key, val in kwargs.items() if key not in ("dropout_p", "window_size")}
-        out = flash_attn3_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens_q.int(),
-            cu_seqlens_k=cu_seqlens_k.int(),
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            seqused_q=None,
-            seqused_k=None,
-            causal=fa3_kwargs.pop("causal", False),
-            **fa3_kwargs,
-        )
-        if isinstance(out, tuple):
-            out = out[0]
-    else:
-        out = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens_q.int(),
-            cu_seqlens_k=cu_seqlens_k.int(),
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            dropout_p=kwargs.get("dropout_p", 0.0),
-            causal=kwargs.get("causal", False),
-            deterministic=torch.are_deterministic_algorithms_enabled(),
-        )
+    out = flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q.int(),
+        cu_seqlens_k=cu_seqlens_k.int(),
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        dropout_p=kwargs.get("dropout_p", 0.0),
+        causal=kwargs.get("causal", False),
+        deterministic=torch.are_deterministic_algorithms_enabled(),
+    )
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)
 
 
@@ -980,10 +962,7 @@ elif model_management.xformers_enabled():
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
-    if FLASH_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
-        logging.info("Using Flash Attention 3 for variable-length attention")
-    else:
-        logging.info("Using Flash Attention 2 for variable-length attention")
+    logging.info("Using Flash Attention 2 for variable-length attention")
     optimized_var_attention = var_attention_flash
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
