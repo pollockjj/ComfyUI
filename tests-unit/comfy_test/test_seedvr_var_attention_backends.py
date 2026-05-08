@@ -18,6 +18,7 @@ _VAR_BACKENDS = (
     "var_attention_sage",
     "var_attention_sage3",
     "var_attention_flash",
+    "var_attention_flash3",
     "var_attention_sub_quad",
     "var_attention_split",
 )
@@ -91,7 +92,7 @@ flash_attn.flash_attn_varlen_func = lambda **kwargs: kwargs["q"]
 sys.modules["flash_attn"] = flash_attn
 
 flash_attn_interface = types.ModuleType("flash_attn_interface")
-flash_attn_interface.flash_attn_varlen_func = lambda **kwargs: kwargs["q"]
+flash_attn_interface.flash_attn_varlen_func = lambda **kwargs: (kwargs["q"], None)
 sys.modules["flash_attn_interface"] = flash_attn_interface
 """
     code = (
@@ -198,6 +199,40 @@ def test_var_attention_flash_uses_cu_seqlens_contract(monkeypatch):
     assert torch.equal(captured["cu_seqlens_k"], cu)
     assert captured["max_seqlen_q"] == 3
     assert captured["max_seqlen_k"] == 3
+
+
+def test_var_attention_flash3_uses_cu_seqlens_contract(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    captured = {}
+
+    def fake_flash_attn3_varlen_func(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(kwargs["q"]), None
+
+    monkeypatch.setattr(attention, "flash_attn3_varlen_func", fake_flash_attn3_varlen_func, raising=False)
+
+    out = attention.var_attention_flash3(
+        q,
+        k,
+        v,
+        heads,
+        cu,
+        cu,
+        skip_reshape=True,
+        skip_output_reshape=True,
+        dropout_p=0.25,
+        window_size=(16, 16),
+    )
+
+    assert tuple(out.shape) == tuple(q.shape)
+    assert torch.equal(captured["cu_seqlens_q"], cu)
+    assert torch.equal(captured["cu_seqlens_k"], cu)
+    assert captured["max_seqlen_q"] == 3
+    assert captured["max_seqlen_k"] == 3
+    assert captured["seqused_q"] is None
+    assert captured["seqused_k"] is None
+    assert "dropout_p" not in captured
+    assert "window_size" not in captured
 
 
 def test_var_attention_sub_quad_uses_cu_seqlens_contract(monkeypatch):

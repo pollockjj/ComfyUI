@@ -917,6 +917,28 @@ def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
 
 
 @torch._dynamo.disable
+def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
+    max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
+    out = flash_attn3_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q.int(),
+        cu_seqlens_k=cu_seqlens_k.int(),
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_q=None,
+        seqused_k=None,
+        softmax_scale=kwargs.get("softmax_scale"),
+        causal=kwargs.get("causal", False),
+        deterministic=torch.are_deterministic_algorithms_enabled(),
+    )[0]
+    return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
+
+@torch._dynamo.disable
 def var_attention_sub_quad(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     return var_attention_pytorch(
         q,
@@ -992,6 +1014,8 @@ if SAGE_ATTENTION3_IS_AVAILABLE:
 if FLASH_ATTENTION_IS_AVAILABLE:
     register_attention_function("flash", attention_flash)
     register_attention_function("var_attention_flash", var_attention_flash)
+if FLASH_ATTENTION3_IS_AVAILABLE:
+    register_attention_function("var_attention_flash3", var_attention_flash3)
 if model_management.xformers_enabled():
     register_attention_function("xformers", attention_xformers)
 register_attention_function("pytorch", attention_pytorch)
