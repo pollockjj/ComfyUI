@@ -134,6 +134,8 @@ class _DiffusionModel(nn.Module):
     def __init__(self, n_blocks=3):
         super().__init__()
         self.blocks = nn.ModuleList([_Block() for _ in range(n_blocks)])
+        self.register_buffer("positive_conditioning", torch.ones((2, 4)))
+        self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
 
 
 class _ModelInner:
@@ -144,6 +146,10 @@ class _ModelInner:
 class _ModelPatcher:
     def __init__(self, diffusion_model):
         self.model = _ModelInner(diffusion_model)
+        self.disable_cfg1_optimization_calls = 0
+
+    def disable_model_cfg1_optimization(self):
+        self.disable_cfg1_optimization_calls += 1
 
 
 def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
@@ -153,6 +159,35 @@ def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
         patcher = _ModelPatcher(diffusion_model)
         resolved = nodes_seedvr._resolve_seedvr2_diffusion_model(patcher)
         assert resolved is diffusion_model
+    finally:
+        restore()
+
+
+def test_seedvr2_conditioning_disables_cfg1_optimization():
+    """SeedVR2's native model consumes paired negative/positive text
+    context. Comfy's CFG=1 fast path drops the negative branch, so the
+    conditioning node must disable that optimization on the model patcher.
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel()
+        patcher = _ModelPatcher(diffusion_model)
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        nodes_seedvr._load_seedvr2_prompt_embeds = lambda device, dtype: (
+            torch.ones((2, 4), device=device, dtype=dtype),
+            torch.zeros((3, 4), device=device, dtype=dtype),
+        )
+
+        positive, negative, latent = nodes_seedvr.SeedVR2Conditioning.execute(
+            vae_conditioning,
+            patcher,
+            0.0,
+        )
+
+        assert patcher.disable_cfg1_optimization_calls == 1
+        assert positive[0][0].shape == (1, 3, 4)
+        assert negative[0][0].shape == (1, 3, 4)
+        assert latent["samples"].shape == (1, 2, 1, 1)
     finally:
         restore()
 
