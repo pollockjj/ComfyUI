@@ -30,6 +30,18 @@ except ImportError as e:
             raise e
         exit(-1)
 
+SAGE_ATTENTION_VARLEN_IS_AVAILABLE = False
+try:
+    from sageattention import sageattn_varlen
+    SAGE_ATTENTION_VARLEN_IS_AVAILABLE = True
+except ImportError as e:
+    if model_management.sage_attention_enabled():
+        if e.name == "sageattention":
+            logging.error(f"\n\nTo use the `--use-sage-attention` feature, the `sageattention` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install sageattention")
+        else:
+            raise e
+        exit(-1)
+
 SAGE_ATTENTION3_IS_AVAILABLE = False
 try:
     from sageattn3 import sageattn3_blackwell
@@ -39,12 +51,19 @@ except ImportError:
 
 FLASH_ATTENTION_IS_AVAILABLE = False
 try:
-    from flash_attn import flash_attn_func
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
     FLASH_ATTENTION_IS_AVAILABLE = True
 except ImportError:
     if model_management.flash_attention_enabled():
         logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
         exit(-1)
+
+FLASH_ATTENTION3_IS_AVAILABLE = False
+try:
+    from flash_attn_interface import flash_attn_varlen_func as flash_attn3_varlen_func
+    FLASH_ATTENTION3_IS_AVAILABLE = True
+except ImportError:
+    pass
 
 REGISTERED_ATTENTION_FUNCTIONS = {}
 def register_attention_function(name: str, func: Callable):
@@ -727,6 +746,36 @@ _VAR_ATTENTION_GUARD_MESSAGE = (
 )
 
 
+def _var_attention_max_seqlen(cu_seqlens):
+    return int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+
+
+def _var_attention_qkv(q, k, v, heads, skip_reshape):
+    if skip_reshape:
+        return q, k, v, q.shape[-1]
+    total_tokens, embed_dim = q.shape
+    head_dim = embed_dim // heads
+    return (
+        q.view(total_tokens, heads, head_dim),
+        k.view(k.shape[0], heads, head_dim),
+        v.view(v.shape[0], heads, head_dim),
+        head_dim,
+    )
+
+
+def _var_attention_output(out, heads, head_dim, skip_output_reshape):
+    if skip_output_reshape:
+        return out
+    return out.reshape(-1, heads * head_dim)
+
+
+def _use_blackwell_attention():
+    if not torch.cuda.is_available():
+        return False
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return (major, minor) >= (12, 0)
+
+
 def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
     _nested = getattr(torch, "nested", None)
     if _nested is None or not hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME):
@@ -754,28 +803,182 @@ def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_resha
         return out.values().reshape(-1, heads * (q.shape[-1]))
     return out.values()
 
+@torch._dynamo.disable
+def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    out_dtype = q.dtype
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+    sm_scale = kwargs.get("softmax_scale")
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(head_dim)
+    out = sageattn_varlen(
+        q,
+        k,
+        v,
+        cu_seqlens_q.int(),
+        cu_seqlens_k.int(),
+        _var_attention_max_seqlen(cu_seqlens_q),
+        _var_attention_max_seqlen(cu_seqlens_k),
+        kwargs.get("causal", False),
+        sm_scale,
+    )
+    if out.dtype != out_dtype:
+        out = out.to(out_dtype)
+    return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
+
+@torch._dynamo.disable
+def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    uniform_q = bool((seq_lens_q == seq_lens_q[0]).all().item())
+    uniform_k = bool((seq_lens_k == seq_lens_k[0]).all().item())
+    if not (uniform_q and uniform_k and seq_lens_q[0] == seq_lens_k[0]):
+        if SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
+            return var_attention_sage(
+                q,
+                k,
+                v,
+                heads,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                skip_reshape=True,
+                skip_output_reshape=skip_output_reshape,
+                **kwargs,
+            )
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=True,
+            skip_output_reshape=skip_output_reshape,
+        )
+    out_dtype = q.dtype
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+    batch_size = len(cu_seqlens_q) - 1
+    seq_len = int(seq_lens_q[0].item())
+    q = q.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+    k = k.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+    v = v.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+    out = sageattn3_blackwell(q, k, v, is_causal=kwargs.get("causal", False))
+    out = out.transpose(1, 2).reshape(-1, heads, head_dim).contiguous()
+    if out.dtype != out_dtype:
+        out = out.to(out_dtype)
+    return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
+
+@torch._dynamo.disable
+def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
+    max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
+    if FLASH_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
+        fa3_kwargs = {key: val for key, val in kwargs.items() if key not in ("dropout_p", "window_size")}
+        out = flash_attn3_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q.int(),
+            cu_seqlens_k=cu_seqlens_k.int(),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            seqused_q=None,
+            seqused_k=None,
+            causal=fa3_kwargs.pop("causal", False),
+            **fa3_kwargs,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+    else:
+        out = flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q.int(),
+            cu_seqlens_k=cu_seqlens_k.int(),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=kwargs.get("dropout_p", 0.0),
+            causal=kwargs.get("causal", False),
+            deterministic=torch.are_deterministic_algorithms_enabled(),
+        )
+    return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
+
+@torch._dynamo.disable
+def var_attention_sub_quad(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    return var_attention_pytorch(
+        q,
+        k,
+        v,
+        heads,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        skip_reshape=skip_reshape,
+        skip_output_reshape=skip_output_reshape,
+    )
+
+
+@torch._dynamo.disable
+def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    return var_attention_pytorch(
+        q,
+        k,
+        v,
+        heads,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        skip_reshape=skip_reshape,
+        skip_output_reshape=skip_output_reshape,
+    )
+
+
 optimized_var_attention = var_attention_pytorch
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
     logging.info("Using sage attention")
     optimized_attention = attention_sage
+    if SAGE_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
+        optimized_var_attention = var_attention_sage3
+    else:
+        optimized_var_attention = var_attention_sage
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
     optimized_attention = attention_xformers
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
+    optimized_var_attention = var_attention_flash
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
     optimized_attention = attention_pytorch
+    optimized_var_attention = var_attention_pytorch
 else:
     if args.use_split_cross_attention:
         logging.info("Using split optimization for attention")
         optimized_attention = attention_split
+        optimized_var_attention = var_attention_split
     else:
         logging.info("Using sub quadratic optimization for attention, if you have memory or speed issues try using: --use-split-cross-attention")
         optimized_attention = attention_sub_quad
+        optimized_var_attention = var_attention_sub_quad
 
 optimized_attention_masked = optimized_attention
 
@@ -783,15 +986,22 @@ optimized_attention_masked = optimized_attention
 # register core-supported attention functions
 if SAGE_ATTENTION_IS_AVAILABLE:
     register_attention_function("sage", attention_sage)
+if SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
+    register_attention_function("var_attention_sage", var_attention_sage)
 if SAGE_ATTENTION3_IS_AVAILABLE:
     register_attention_function("sage3", attention3_sage)
+    register_attention_function("var_attention_sage3", var_attention_sage3)
 if FLASH_ATTENTION_IS_AVAILABLE:
     register_attention_function("flash", attention_flash)
+    register_attention_function("var_attention_flash", var_attention_flash)
 if model_management.xformers_enabled():
     register_attention_function("xformers", attention_xformers)
 register_attention_function("pytorch", attention_pytorch)
+register_attention_function("var_attention_pytorch", var_attention_pytorch)
 register_attention_function("sub_quad", attention_sub_quad)
+register_attention_function("var_attention_sub_quad", var_attention_sub_quad)
 register_attention_function("split", attention_split)
+register_attention_function("var_attention_split", var_attention_split)
 
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
@@ -1228,5 +1438,3 @@ class SpatialVideoTransformer(SpatialTransformer):
             x = self.proj_out(x)
         out = x + x_in
         return out
-
-
