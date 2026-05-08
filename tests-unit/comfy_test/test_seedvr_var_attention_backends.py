@@ -199,15 +199,15 @@ def test_var_attention_sage_uses_cu_seqlens_contract(monkeypatch):
 def test_var_attention_sage_runtime_error_preserves_fallback_dtype(monkeypatch):
     q, k, v, heads, cu = _inputs()
     q = q.float()
-    k = k.float()
-    v = v.float()
+    k = k.half()
+    v = v.half()
     captured = {}
 
     def failing_sageattn_varlen(*args, **kwargs):
         raise RuntimeError("unsupported")
 
     def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-        captured.update(dtype=q.dtype, skip_reshape=skip_reshape)
+        captured.update(dtype=q.dtype, k_dtype=k.dtype, v_dtype=v.dtype, skip_reshape=skip_reshape)
         return torch.zeros_like(q)
 
     monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", True)
@@ -218,6 +218,8 @@ def test_var_attention_sage_runtime_error_preserves_fallback_dtype(monkeypatch):
 
     assert out.dtype == torch.float32
     assert captured["dtype"] == torch.float32
+    assert captured["k_dtype"] == torch.float32
+    assert captured["v_dtype"] == torch.float32
     assert captured["skip_reshape"] is True
 
 
@@ -241,13 +243,16 @@ def test_var_attention_sage3_uses_cu_seqlens_contract(monkeypatch):
 
 def test_var_attention_sage3_runtime_error_falls_back(monkeypatch):
     q, k, v, heads, cu = _inputs()
+    q = q.float()
+    k = k.half()
+    v = v.half()
     captured = {}
 
     def failing_sageattn3_blackwell(*args, **kwargs):
         raise RuntimeError("unsupported")
 
     def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-        captured.update(cu_q=cu_seqlens_q, skip_reshape=skip_reshape)
+        captured.update(cu_q=cu_seqlens_q, dtype=q.dtype, k_dtype=k.dtype, v_dtype=v.dtype, skip_reshape=skip_reshape)
         return torch.zeros_like(q)
 
     monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", False)
@@ -259,6 +264,9 @@ def test_var_attention_sage3_runtime_error_falls_back(monkeypatch):
 
     assert tuple(out.shape) == tuple(q.shape)
     assert torch.equal(captured["cu_q"], cu)
+    assert captured["dtype"] == torch.float32
+    assert captured["k_dtype"] == torch.float32
+    assert captured["v_dtype"] == torch.float32
     assert captured["skip_reshape"] is True
 
 

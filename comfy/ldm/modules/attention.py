@@ -822,11 +822,11 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
             skip_output_reshape=skip_output_reshape,
         )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
-    fallback_q, fallback_k, fallback_v = q, k, v
     out_dtype = q.dtype
     if not (q.dtype == k.dtype == v.dtype):
         k = k.to(q.dtype)
         v = v.to(q.dtype)
+    fallback_q, fallback_k, fallback_v = q, k, v
     if q.dtype not in (torch.float16, torch.bfloat16):
         q = q.to(torch.bfloat16)
         k = k.to(torch.bfloat16)
@@ -892,7 +892,6 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
             skip_output_reshape=skip_output_reshape,
         )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
-    fallback_q, fallback_k, fallback_v = q, k, v
     seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
     uniform_q = bool((seq_lens_q == seq_lens_q[0]).all().item())
@@ -924,6 +923,7 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     if not (q.dtype == k.dtype == v.dtype):
         k = k.to(q.dtype)
         v = v.to(q.dtype)
+    fallback_q, fallback_k, fallback_v = q, k, v
     if q.dtype not in (torch.float16, torch.bfloat16):
         q = q.to(torch.bfloat16)
         k = k.to(torch.bfloat16)
