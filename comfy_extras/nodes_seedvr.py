@@ -301,7 +301,20 @@ class SeedVR2InputProcessing(io.ComfyNode):
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
             images_bcthw = rearrange(images_bthwc, "b t h w c -> b c t h w")
-            latent = tiled_vae(images_bcthw, vae_model, **args, encode=True)
+            # Move input to the VAE's loaded execution device. VideoAutoencoderKLWrapper.encode
+            # adopts x.device as self.device without moving x, so a CPU input against a
+            # GPU-loaded VAE silently falls back to CPU encode. Use vae.patcher.load_device
+            # (the device load_models_gpu loaded the wrapper to) when available; fall back
+            # to the wrapper's parameter device.
+            vae_device = getattr(getattr(vae, "patcher", None), "load_device", None)
+            if vae_device is None:
+                vae_device = next(vae_model.parameters()).device
+            images_bcthw = images_bcthw.to(vae_device)
+            # temporal_overlap is decode-only in tiled_vae (encode hardcodes
+            # overlap_chunk=0 in run_temporal_chunks, and inner slicing is disabled
+            # per outer chunk in the encode branch); strip it from the encode call.
+            encode_args = {k: v for k, v in args.items() if k != "temporal_overlap"}
+            latent = tiled_vae(images_bcthw, vae_model, **encode_args, encode=True)
         else:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
