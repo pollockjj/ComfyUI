@@ -531,11 +531,26 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     chosen divisible by 6) and avoids the cat entirely.
     """
     rot_d = 2 * freqs_cis.shape[-3]
-    if rot_d == t.shape[-1]:
+    head_dim = t.shape[-1]
+    if rot_d == head_dim:
         return apply_rope1(t, freqs_cis)
-    t_rot = apply_rope1(t[..., :rot_d], freqs_cis)
-    t_pass = t[..., rot_d:]
-    return torch.cat((t_rot, t_pass), dim=-1)
+    if rot_d > head_dim or head_dim % 2:
+        raise RuntimeError(
+            f"SeedVR2 RoPE shape mismatch: rot_d={rot_d}, head_dim={head_dim}"
+        )
+    pad_pairs = (head_dim - rot_d) // 2
+    padded_freqs = torch.zeros(
+        *freqs_cis.shape[:-3],
+        freqs_cis.shape[-3] + pad_pairs,
+        2,
+        2,
+        device=freqs_cis.device,
+        dtype=freqs_cis.dtype,
+    )
+    padded_freqs[..., : freqs_cis.shape[-3], :, :] = freqs_cis
+    padded_freqs[..., freqs_cis.shape[-3] :, 0, 0] = 1
+    padded_freqs[..., freqs_cis.shape[-3] :, 1, 1] = 1
+    return apply_rope1(t, padded_freqs)
 
 
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):

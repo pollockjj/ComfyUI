@@ -300,6 +300,26 @@ def test_namm_forward_partial_rope_passthrough_matches_wrapper_oracle():
                                 msg="txt_k partial-rope output diverges from wrapper oracle")
 
 
+def test_partial_rope_helper_has_no_output_tensor_cat():
+    helper_source = inspect.getsource(seedvr_model._apply_rope1_partial)
+    tree = ast.parse(helper_source)
+
+    offending = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id == "cat":
+            offending.append((node.lineno, node.col_offset))
+        if isinstance(callee, ast.Attribute) and callee.attr == "cat":
+            offending.append((node.lineno, node.col_offset))
+
+    assert not offending, (
+        "_apply_rope1_partial must not concatenate q/k output tensors; "
+        f"found cat call(s) at line:col positions {offending}"
+    )
+
+
 # Test 4 — drives AC-4 statically: AST walk over NaMMRotaryEmbedding3d.forward
 # must find zero references to the apply_rotary_emb symbol.
 
@@ -328,6 +348,8 @@ def test_namm_forward_ast_has_no_apply_rotary_emb_calls():
     offending = []
     for node in ast.walk(forward_fn):
         if isinstance(node, ast.Name) and node.id == "apply_rotary_emb":
+            offending.append((node.lineno, node.col_offset))
+        if isinstance(node, ast.Attribute) and node.attr == "apply_rotary_emb":
             offending.append((node.lineno, node.col_offset))
 
     assert not offending, (
