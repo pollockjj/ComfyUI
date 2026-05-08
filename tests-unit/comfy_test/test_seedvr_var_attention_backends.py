@@ -68,12 +68,13 @@ def test_var_attention_registry_contains_always_available_entries():
     assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_split"] is attention.var_attention_split
 
 
-def _run_attention_import(flag, fake_modules=True):
+def _run_attention_import(flag, fake_modules=True, fake_module_code=None):
     argv = ["pytest-subprocess", "--cpu", "--disable-xformers"]
     if flag:
         argv.append(flag)
-    fake_module_code = ""
-    if fake_modules:
+    if fake_module_code is None:
+        fake_module_code = ""
+    if fake_modules and not fake_module_code:
         fake_module_code = """
 import types
 
@@ -124,6 +125,36 @@ def test_var_attention_rebind_flash_launch_flag():
     result = _run_attention_import("--use-flash-attention")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "var_attention_flash"
+
+
+def test_var_attention_rebind_sage_launch_flag_without_varlen_uses_pytorch():
+    result = _run_attention_import(
+        "--use-sage-attention",
+        fake_module_code="""
+import types
+
+sageattention = types.ModuleType("sageattention")
+sageattention.sageattn = lambda *a, **k: a[0]
+sys.modules["sageattention"] = sageattention
+""",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "var_attention_pytorch"
+
+
+def test_var_attention_rebind_flash_launch_flag_without_varlen_uses_pytorch():
+    result = _run_attention_import(
+        "--use-flash-attention",
+        fake_module_code="""
+import types
+
+flash_attn = types.ModuleType("flash_attn")
+flash_attn.flash_attn_func = lambda q, k, v, **kwargs: q
+sys.modules["flash_attn"] = flash_attn
+""",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "var_attention_pytorch"
 
 
 def test_var_attention_rebind_pytorch_launch_flag():
@@ -233,6 +264,19 @@ def test_var_attention_flash3_uses_cu_seqlens_contract(monkeypatch):
     assert captured["seqused_k"] is None
     assert "dropout_p" not in captured
     assert "window_size" not in captured
+
+
+def test_var_attention_flash3_accepts_tensor_return(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+
+    def fake_flash_attn3_varlen_func(**kwargs):
+        return torch.zeros_like(kwargs["q"])
+
+    monkeypatch.setattr(attention, "flash_attn3_varlen_func", fake_flash_attn3_varlen_func, raising=False)
+
+    out = attention.var_attention_flash3(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert tuple(out.shape) == tuple(q.shape)
 
 
 def test_var_attention_sub_quad_uses_cu_seqlens_contract(monkeypatch):

@@ -35,12 +35,8 @@ try:
     from sageattention import sageattn_varlen
     SAGE_ATTENTION_VARLEN_IS_AVAILABLE = True
 except ImportError as e:
-    if model_management.sage_attention_enabled():
-        if e.name == "sageattention":
-            logging.error(f"\n\nTo use the `--use-sage-attention` feature, the `sageattention` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install sageattention")
-        else:
-            raise e
-        exit(-1)
+    if model_management.sage_attention_enabled() and e.name != "sageattention":
+        logging.warning("SageAttention variable-length attention is unavailable, using pytorch var-len attention instead.")
 
 SAGE_ATTENTION3_IS_AVAILABLE = False
 try:
@@ -50,13 +46,21 @@ except ImportError:
     pass
 
 FLASH_ATTENTION_IS_AVAILABLE = False
+FLASH_ATTENTION_VARLEN_IS_AVAILABLE = False
 try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_func
     FLASH_ATTENTION_IS_AVAILABLE = True
 except ImportError:
     if model_management.flash_attention_enabled():
         logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
         exit(-1)
+
+try:
+    from flash_attn import flash_attn_varlen_func
+    FLASH_ATTENTION_VARLEN_IS_AVAILABLE = True
+except ImportError:
+    if model_management.flash_attention_enabled() and FLASH_ATTENTION_IS_AVAILABLE:
+        logging.warning("Flash Attention variable-length attention is unavailable, using pytorch var-len attention instead.")
 
 FLASH_ATTENTION3_IS_AVAILABLE = False
 try:
@@ -805,6 +809,17 @@ def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_resha
 
 @torch._dynamo.disable
 def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if not SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     out_dtype = q.dtype
     if not (q.dtype == k.dtype == v.dtype):
@@ -898,6 +913,17 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
 
 @torch._dynamo.disable
 def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if not FLASH_ATTENTION_VARLEN_IS_AVAILABLE:
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
     max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
@@ -934,7 +960,9 @@ def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip
         softmax_scale=kwargs.get("softmax_scale"),
         causal=kwargs.get("causal", False),
         deterministic=torch.are_deterministic_algorithms_enabled(),
-    )[0]
+    )
+    if isinstance(out, tuple):
+        out = out[0]
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)
 
 
@@ -975,17 +1003,24 @@ if model_management.sage_attention_enabled():
     if SAGE_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
         logging.info("Using SageAttention3 for variable-length attention")
         optimized_var_attention = var_attention_sage3
-    else:
+    elif SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
         logging.info("Using SageAttention for variable-length attention")
         optimized_var_attention = var_attention_sage
+    else:
+        logging.info("Using pytorch attention for variable-length attention")
+        optimized_var_attention = var_attention_pytorch
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
     optimized_attention = attention_xformers
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
-    logging.info("Using Flash Attention 2 for variable-length attention")
-    optimized_var_attention = var_attention_flash
+    if FLASH_ATTENTION_VARLEN_IS_AVAILABLE:
+        logging.info("Using Flash Attention 2 for variable-length attention")
+        optimized_var_attention = var_attention_flash
+    else:
+        logging.info("Using pytorch attention for variable-length attention")
+        optimized_var_attention = var_attention_pytorch
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
     optimized_attention = attention_pytorch
@@ -1013,6 +1048,7 @@ if SAGE_ATTENTION3_IS_AVAILABLE:
     register_attention_function("var_attention_sage3", var_attention_sage3)
 if FLASH_ATTENTION_IS_AVAILABLE:
     register_attention_function("flash", attention_flash)
+if FLASH_ATTENTION_VARLEN_IS_AVAILABLE:
     register_attention_function("var_attention_flash", var_attention_flash)
 if FLASH_ATTENTION3_IS_AVAILABLE:
     register_attention_function("var_attention_flash3", var_attention_flash3)
