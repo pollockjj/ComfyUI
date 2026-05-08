@@ -181,7 +181,7 @@ class _TemporalChunkRecorder(nn.Module):
         return torch.cat(pieces, dim=2)
 
 
-def test_seedvr2_tiled_vae_decode_uses_temporal_overlap_prefix():
+def test_seedvr2_tiled_vae_decode_delegates_full_temporal_axis_to_wrapper():
     recorder = _TemporalChunkRecorder()
     latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6, 1, 1)
 
@@ -195,6 +195,40 @@ def test_seedvr2_tiled_vae_decode_uses_temporal_overlap_prefix():
         encode=False,
     )
 
-    assert recorder.chunks == [[0, 1, 2, 3], [3, 4, 5, 5, 5]]
+    assert recorder.chunks == [[0, 1, 2, 3, 4, 5]]
     assert tuple(out.shape) == (1, 1, 21, 1, 1)
     assert [int(v) for v in out[0, 0, [0, 1, 5, 9, 13, 17], 0, 0].tolist()] == [0, 1, 2, 3, 4, 5]
+
+
+class _SlicingSizeRecorder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(()))
+        self.device = "cpu"
+        self.spatial_downsample_factor = 1
+        self.temporal_downsample_factor = 4
+        self.slicing_sample_min_size = 99
+        self.slicing_latent_min_size = 99
+        self.decode_slicing_sizes = []
+
+    def decode_(self, z):
+        self.decode_slicing_sizes.append(self.slicing_latent_min_size)
+        return z[:, :1, :1]
+
+
+def test_seedvr2_tiled_vae_decode_plumbs_temporal_size_to_wrapper_slicing():
+    recorder = _SlicingSizeRecorder()
+    latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6, 1, 1)
+
+    vae_mod.tiled_vae(
+        latent,
+        recorder,
+        tile_size=(1, 1),
+        tile_overlap=(0, 0),
+        temporal_size=12,
+        temporal_overlap=4,
+        encode=False,
+    )
+
+    assert recorder.decode_slicing_sizes == [3]
+    assert recorder.slicing_latent_min_size == 99

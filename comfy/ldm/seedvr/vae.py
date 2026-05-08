@@ -36,7 +36,8 @@ def tiled_vae(
     gc.collect()
     torch.cuda.empty_cache()
 
-    x = x.to(next(vae_model.parameters()).dtype)
+    vae_param = next(vae_model.parameters())
+    x = x.to(device=vae_param.device, dtype=vae_param.dtype)
     if x.ndim != 5:
         x = x.unsqueeze(2)
 
@@ -68,6 +69,24 @@ def tiled_vae(
     result = None
     count = None
 
+    @contextmanager
+    def wrapper_slicing_sizes():
+        has_sample_size = hasattr(vae_model, "slicing_sample_min_size")
+        has_latent_size = hasattr(vae_model, "slicing_latent_min_size")
+        old_sample_size = getattr(vae_model, "slicing_sample_min_size", None)
+        old_latent_size = getattr(vae_model, "slicing_latent_min_size", None)
+        if has_sample_size:
+            vae_model.slicing_sample_min_size = max(1, int(temporal_size))
+        if has_latent_size:
+            vae_model.slicing_latent_min_size = max(1, int(temporal_size) // sf_t)
+        try:
+            yield
+        finally:
+            if has_sample_size:
+                vae_model.slicing_sample_min_size = old_sample_size
+            if has_latent_size:
+                vae_model.slicing_latent_min_size = old_latent_size
+
     def run_temporal_chunks(spatial_tile):
         # [issue 226] Defer to the wrapper's slicing path
         # (slicing_encode / slicing_decode), which propagates INITIALIZING +
@@ -78,10 +97,11 @@ def tiled_vae(
         # temporal_tile_size boundary. The non-tiled path always used the
         # wrapper's slicing path and was diff-clean against numz; this routes
         # the tiled spatial-tile path through the same temporal handling.
-        if encode:
-            out = vae_model.encode(spatial_tile.contiguous())
-        else:
-            out = vae_model.decode_(spatial_tile.contiguous())
+        with wrapper_slicing_sizes():
+            if encode:
+                out = vae_model.encode(spatial_tile.contiguous())
+            else:
+                out = vae_model.decode_(spatial_tile.contiguous())
         if isinstance(out, (tuple, list)):
             out = out[0]
         if out.ndim == 4:
@@ -2313,15 +2333,12 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             decode_tiled_args = dict(self.tiled_args)
             tile_h, tile_w = decode_tiled_args.get("tile_size", (512, 512))
             ov_h, ov_w = decode_tiled_args.get("tile_overlap", (64, 64))
-            new_tile_h, new_tile_w = min(tile_h, 512), min(tile_w, 512)
-            decode_tiled_args["tile_size"] = (new_tile_h, new_tile_w)
             # Match encode-path overlap < tile_size - 8 invariant
-            # (nodes_seedvr.py SeedVR2InputProcessing.execute) so capping
-            # tile_size cannot leave overlap >= tile_size and collapse
-            # stride to 1.
+            # (nodes_seedvr.py SeedVR2InputProcessing.execute) so decode
+            # cannot collapse stride to 1 when user overlap >= tile_size.
             decode_tiled_args["tile_overlap"] = (
-                min(ov_h, max(0, new_tile_h - 8)),
-                min(ov_w, max(0, new_tile_w - 8)),
+                min(ov_h, max(0, tile_h - 8)),
+                min(ov_w, max(0, tile_w - 8)),
             )
             x = tiled_vae(latent, self, **decode_tiled_args, encode=False)
             if x.ndim == 4:
