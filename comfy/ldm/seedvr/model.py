@@ -503,6 +503,41 @@ def apply_rotary_emb(
     out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
     return out.type(dtype)
 
+def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
+    """Convert lucidrains-interleaved freqs `[..., d]` (`[θ0, θ0, θ1, θ1, ...]`
+    from `RotaryEmbedding.forward`'s `repeat(freqs, '... n -> ... (n r)', r=2)`)
+    into flux-canonical `freqs_cis` of shape `[..., d/2, 2, 2]` with the
+    `cos/-sin/sin/cos` rotation matrix baked in. Output dtype is fp32 to
+    match `comfy/ldm/flux/math.py:rope` precision; `apply_rope1` consumes
+    the matrix layout via `freqs_cis[..., 0]` (column 0) and
+    `freqs_cis[..., 1]` (column 1) of the 2x2 rotation matrix.
+    """
+    angles = freqs_interleaved[..., ::2].float()
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+    out = torch.stack([cos, -sin, sin, cos], dim=-1)
+    return rearrange(out, "... d (i j) -> ... d i j", i=2, j=2)
+
+
+def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
+    components of ``t``'s last dim, passing through the remaining dims
+    untouched. Mirrors the partial-rope contract of the legacy
+    ``apply_rotary_emb`` wrapper at line 470 (``t_left``/``t_middle``/``t_right``
+    split). For SeedVR2-3B this matters because ``rope_dim=128`` integer-
+    divides into 3 axes as ``128 // 3 = 42`` per-axis, total ``42 * 3 = 126``;
+    head_dim is 128, so the trailing 2 dims are unrotated. The fast path
+    triggers when ``rot_d == t.shape[-1]`` (e.g. test rigs where dim is
+    chosen divisible by 6) and avoids the cat entirely.
+    """
+    rot_d = 2 * freqs_cis.shape[-3]
+    if rot_d == t.shape[-1]:
+        return apply_rope1(t, freqs_cis)
+    t_rot = apply_rope1(t[..., :rot_d], freqs_cis)
+    t_pass = t[..., rot_d:]
+    return torch.cat((t_rot, t_pass), dim=-1)
+
+
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
     def __init__(self, dim: int):
         super().__init__(dim, rope_dim=3)
@@ -533,15 +568,15 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             txt_freqs = txt_freqs.to(target_device)
         vid_q = rearrange(vid_q, "L h d -> h L d")
         vid_k = rearrange(vid_k, "L h d -> h L d")
-        vid_q = apply_rotary_emb(vid_freqs, vid_q.float()).to(vid_q.dtype)
-        vid_k = apply_rotary_emb(vid_freqs, vid_k.float()).to(vid_k.dtype)
+        vid_q = _apply_rope1_partial(vid_q, vid_freqs)
+        vid_k = _apply_rope1_partial(vid_k, vid_freqs)
         vid_q = rearrange(vid_q, "h L d -> L h d")
         vid_k = rearrange(vid_k, "h L d -> L h d")
 
         txt_q = rearrange(txt_q, "L h d -> h L d")
         txt_k = rearrange(txt_k, "L h d -> h L d")
-        txt_q = apply_rotary_emb(txt_freqs, txt_q.float()).to(txt_q.dtype)
-        txt_k = apply_rotary_emb(txt_freqs, txt_k.float()).to(txt_k.dtype)
+        txt_q = _apply_rope1_partial(txt_q, txt_freqs)
+        txt_k = _apply_rope1_partial(txt_k, txt_freqs)
         txt_q = rearrange(txt_q, "h L d -> L h d")
         txt_k = rearrange(txt_k, "h L d -> L h d")
         return vid_q, vid_k, txt_q, txt_k
@@ -583,7 +618,17 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             txt_freq = txt_freqs[:l].repeat(1, 3).reshape(-1, vid_freqs.size(-1))
             vid_freq_list.append(vid_freq)
             txt_freq_list.append(txt_freq)
-        return torch.cat(vid_freq_list, dim=0), torch.cat(txt_freq_list, dim=0)
+        vid_freqs_interleaved = torch.cat(vid_freq_list, dim=0)
+        txt_freqs_interleaved = torch.cat(txt_freq_list, dim=0)
+
+        # Convert from lucidrains-interleaved layout `[θ0, θ0, θ1, θ1, ...]`
+        # (produced by `repeat(freqs, '... n -> ... (n r)', r=2)` in the
+        # upstream `RotaryEmbedding.forward`) to flux-canonical `freqs_cis`
+        # in shape `[..., d/2, 2, 2]` with `cos/-sin/sin/cos` baked in.
+        # Mirrors `comfy/ldm/flux/math.py:rope` (line 27) so the trailing
+        # 2x2 is the per-frequency rotation matrix that
+        # `comfy.ldm.flux.math.apply_rope1` expects.
+        return _to_flux_freqs_cis(vid_freqs_interleaved), _to_flux_freqs_cis(txt_freqs_interleaved)
 
 class MMModule(nn.Module):
     def __init__(
