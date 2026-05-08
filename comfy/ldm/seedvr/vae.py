@@ -142,9 +142,35 @@ def tiled_vae(
             t_chunk = t_chunk.contiguous()
 
             if encode:
-                out = vae_model.encode(t_chunk)[0]
+                # Disable inner slicing per outer chunk: tiled_vae's outer
+                # temporal chunking already bounds peak memory, and the
+                # inner slicer's split policy can produce ACTIVE slices
+                # short enough to underflow the second temporal
+                # downsampler for non-(min_size+1)-aligned chunk sizes
+                # (e.g. temporal_tile_size=12 splits 8+3, T=3 ACTIVE
+                # collapses to T=1 after the first downsampler, second
+                # downsampler input T=2 < kernel=3). Forcing
+                # slicing_sample_min_size = t_chunk.shape[2] makes
+                # slicing_encode's `(T-1) > min_size` predicate false for
+                # this chunk, so the encoder runs whole-T per chunk with
+                # no inner runt-slice possible.
+                old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
+                if old_slicing_sample_min_size is not None:
+                    vae_model.slicing_sample_min_size = t_chunk.shape[2]
+                try:
+                    out = vae_model.encode(t_chunk)[0]
+                finally:
+                    if old_slicing_sample_min_size is not None:
+                        vae_model.slicing_sample_min_size = old_slicing_sample_min_size
             else:
-                out = vae_model.decode_(t_chunk)
+                old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
+                if old_slicing_latent_min_size is not None:
+                    vae_model.slicing_latent_min_size = t_chunk.shape[2]
+                try:
+                    out = vae_model.decode_(t_chunk)
+                finally:
+                    if old_slicing_latent_min_size is not None:
+                        vae_model.slicing_latent_min_size = old_slicing_latent_min_size
 
             if isinstance(out, (tuple, list)):
                 out = out[0]
@@ -2393,7 +2419,21 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            x = tiled_vae(latent, self, **self.tiled_args, encode=False)
+            decode_tiled_args = dict(self.tiled_args)
+            tile_h, tile_w = decode_tiled_args.get("tile_size", (512, 512))
+            ov_h, ov_w = decode_tiled_args.get("tile_overlap", (64, 64))
+            new_tile_h, new_tile_w = min(tile_h, 512), min(tile_w, 512)
+            # Clamp overlap with the same `overlap < tile_size - 8`
+            # invariant the encode path enforces (nodes_seedvr.py:244-245).
+            # Without this, capping tile_size alone can leave
+            # overlap >= tile_size, collapsing stride to 1 and producing
+            # O(H_lat * W_lat) overlapping tiles.
+            decode_tiled_args["tile_size"] = (new_tile_h, new_tile_w)
+            decode_tiled_args["tile_overlap"] = (
+                min(ov_h, max(0, new_tile_h - 8)),
+                min(ov_w, max(0, new_tile_w - 8)),
+            )
+            x = tiled_vae(latent, self, **decode_tiled_args, encode=False)
             if x.ndim == 4:
                 # tiled_vae squeezes the temporal axis when
                 # temporal_downsample_factor == 1 AND latent T == 1
