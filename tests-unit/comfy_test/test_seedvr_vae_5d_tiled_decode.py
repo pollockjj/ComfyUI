@@ -181,6 +181,34 @@ class _TemporalChunkRecorder(nn.Module):
         return torch.cat(pieces, dim=2)
 
 
+class _NoDeviceAttrRecorder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(()))
+        self.spatial_downsample_factor = 1
+        self.temporal_downsample_factor = 4
+
+    def decode_(self, z):
+        return z[:, :1, :1]
+
+
+def test_seedvr2_tiled_vae_uses_parameter_device_when_model_device_attr_unset():
+    recorder = _NoDeviceAttrRecorder()
+    latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6, 1, 1)
+
+    out = vae_mod.tiled_vae(
+        latent,
+        recorder,
+        tile_size=(1, 1),
+        tile_overlap=(0, 0),
+        temporal_size=16,
+        temporal_overlap=0,
+        encode=False,
+    )
+
+    assert out.device == recorder.weight.device
+
+
 def test_seedvr2_tiled_vae_decode_delegates_full_temporal_axis_to_wrapper():
     recorder = _TemporalChunkRecorder()
     latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6, 1, 1)

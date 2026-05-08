@@ -65,7 +65,7 @@ def tiled_vae(
     stride_h = max(1, ti_h - ov_h)
     stride_w = max(1, ti_w - ov_w)
 
-    storage_device = vae_model.device
+    storage_device = x.device
     result = None
     count = None
 
