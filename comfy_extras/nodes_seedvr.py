@@ -13,8 +13,6 @@ from torchvision.transforms import functional as TVF
 from torchvision.transforms import Lambda, Normalize
 from torchvision.transforms.functional import InterpolationMode
 
-import folder_paths
-
 
 _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
@@ -23,50 +21,6 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
-
-_SEEDVR2_PROMPT_EMBED_CANDIDATES = {
-    "positive": [
-        ("embeddings", "SEEDVR2/pos_emb.pt"),
-        ("embeddings", "pos_emb.pt"),
-        ("custom_nodes", "ComfyUI-SeedVR2-Canonical/vendor/SeedVR/pos_emb.pt"),
-        ("custom_nodes", "ComfyUI-SeedVR2_VideoUpscaler/pos_emb.pt"),
-    ],
-    "negative": [
-        ("embeddings", "SEEDVR2/neg_emb.pt"),
-        ("embeddings", "neg_emb.pt"),
-        ("custom_nodes", "ComfyUI-SeedVR2-Canonical/vendor/SeedVR/neg_emb.pt"),
-        ("custom_nodes", "ComfyUI-SeedVR2_VideoUpscaler/neg_emb.pt"),
-    ],
-}
-
-
-def _load_seedvr2_prompt_embed(kind, device, dtype):
-    for folder_name, filename in _SEEDVR2_PROMPT_EMBED_CANDIDATES[kind]:
-        path = folder_paths.get_full_path(folder_name, filename)
-        if path is not None:
-            embed = torch.load(path, map_location="cpu", weights_only=True)
-            if not torch.is_tensor(embed) or embed.ndim != 2:
-                raise RuntimeError(
-                    f"SeedVR2Conditioning: {kind} prompt embedding at {path} "
-                    f"must be a rank-2 torch.Tensor; got {type(embed).__name__} "
-                    f"with shape {getattr(embed, 'shape', None)}."
-                )
-            return embed.to(device=device, dtype=dtype)
-    searched = ", ".join(
-        f"{folder_name}:{filename}"
-        for folder_name, filename in _SEEDVR2_PROMPT_EMBED_CANDIDATES[kind]
-    )
-    raise FileNotFoundError(
-        f"SeedVR2Conditioning: missing {kind} prompt embedding. "
-        f"Searched {searched}."
-    )
-
-
-def _load_seedvr2_prompt_embeds(device, dtype):
-    return (
-        _load_seedvr2_prompt_embed("positive", device, dtype),
-        _load_seedvr2_prompt_embed("negative", device, dtype),
-    )
 
 
 def _resolve_seedvr2_diffusion_model(model):
@@ -360,7 +314,8 @@ class SeedVR2Conditioning(io.ComfyNode):
         model_patcher = model
         model = _resolve_seedvr2_diffusion_model(model_patcher)
         model_patcher.disable_model_cfg1_optimization()
-        pos_cond, neg_cond = _load_seedvr2_prompt_embeds(device, model.positive_conditioning.dtype)
+        pos_cond = model.positive_conditioning
+        neg_cond = model.negative_conditioning
 
         _apply_rope_freqs_float32_cast(model)
 
