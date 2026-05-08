@@ -229,6 +229,7 @@ def test_var_attention_sage3_uses_cu_seqlens_contract(monkeypatch):
         captured.update(shape=tuple(q.shape), is_causal=is_causal)
         return torch.zeros_like(q)
 
+    monkeypatch.setattr(attention, "SAGE_ATTENTION3_IS_AVAILABLE", True)
     monkeypatch.setattr(attention, "sageattn3_blackwell", fake_sageattn3_blackwell, raising=False)
 
     out = attention.var_attention_sage3(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
@@ -250,6 +251,7 @@ def test_var_attention_sage3_runtime_error_falls_back(monkeypatch):
         return torch.zeros_like(q)
 
     monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", False)
+    monkeypatch.setattr(attention, "SAGE_ATTENTION3_IS_AVAILABLE", True)
     monkeypatch.setattr(attention, "sageattn3_blackwell", failing_sageattn3_blackwell, raising=False)
     monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
 

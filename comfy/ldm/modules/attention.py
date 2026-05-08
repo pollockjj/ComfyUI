@@ -867,6 +867,29 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
 
 @torch._dynamo.disable
 def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if not SAGE_ATTENTION3_IS_AVAILABLE:
+        if SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
+            return var_attention_sage(
+                q,
+                k,
+                v,
+                heads,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                skip_reshape=skip_reshape,
+                skip_output_reshape=skip_output_reshape,
+                **kwargs,
+            )
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     fallback_q, fallback_k, fallback_v = q, k, v
     seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
