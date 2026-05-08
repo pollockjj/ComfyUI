@@ -11,6 +11,7 @@ from comfy.utils import ProgressBar
 
 from comfy.ldm.seedvr.model import safe_pad_operation
 from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.diffusionmodules.model import vae_attention
 
 import math
 from enum import Enum
@@ -478,6 +479,7 @@ class Attention(nn.Module):
 
         self.norm_added_q = None
         self.norm_added_k = None
+        self.optimized_vae_attention = vae_attention()
 
     def __call__(
         self,
@@ -533,7 +535,13 @@ class Attention(nn.Module):
         if self.norm_k is not None:
             key = self.norm_k(key)
 
-        hidden_states = optimized_attention(query, key, value, heads = self.heads, mask = attention_mask, skip_reshape=True, skip_output_reshape=True)
+        if input_ndim == 4 and encoder_hidden_states is hidden_states and attention_mask is None and self.heads == 1:
+            query = query.transpose(1, 2).reshape(batch_size, -1, height, width)
+            key = key.transpose(1, 2).reshape(batch_size, -1, height, width)
+            value = value.transpose(1, 2).reshape(batch_size, -1, height, width)
+            hidden_states = self.optimized_vae_attention(query, key, value).view(batch_size, self.heads, head_dim, height * width).transpose(2, 3)
+        else:
+            hidden_states = optimized_attention(query, key, value, heads = self.heads, mask = attention_mask, skip_reshape=True, skip_output_reshape=True)
 
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
