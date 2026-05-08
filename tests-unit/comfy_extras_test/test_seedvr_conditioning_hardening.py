@@ -336,3 +336,196 @@ def test_apply_rope_freqs_float32_cast_recovers_after_dtype_reset():
                 )
     finally:
         restore()
+
+
+def test_load_seedvr2_prompt_embed_first_hit_selects_earliest_candidate():
+    """``_load_seedvr2_prompt_embed`` walks ``_SEEDVR2_PROMPT_EMBED_CANDIDATES``
+    in declared order and returns the embedding loaded from the first
+    ``folder_paths.get_full_path`` that resolves a non-None path. The search
+    order is: ``embeddings/SEEDVR2/`` → ``embeddings/`` → canonical pack
+    vendor → numz pack root.
+
+    Pinned by PR #51 review thread ``discussion_r3205802518``: stub-replacing
+    ``_load_seedvr2_prompt_embeds`` in conditioning tests bypasses this
+    ordering guarantee, so a regression in the candidate iteration would
+    silently load from the wrong source.
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        candidates = nodes_seedvr._SEEDVR2_PROMPT_EMBED_CANDIDATES["positive"]
+        target_index = 1
+        target = candidates[target_index]
+        resolved_path = "/fake/path/pos_emb.pt"
+        get_full_path_calls = []
+
+        def fake_get_full_path(folder_name, filename):
+            get_full_path_calls.append((folder_name, filename))
+            if (folder_name, filename) == target:
+                return resolved_path
+            return None
+
+        loaded_payload = torch.zeros((2, 4), dtype=torch.float32)
+        torch_load_calls = []
+
+        def fake_torch_load(path, map_location=None, weights_only=None):
+            torch_load_calls.append((path, map_location, weights_only))
+            return loaded_payload
+
+        prior_get_full_path = nodes_seedvr.folder_paths.get_full_path
+        prior_torch_load = nodes_seedvr.torch.load
+        nodes_seedvr.folder_paths.get_full_path = fake_get_full_path
+        nodes_seedvr.torch.load = fake_torch_load
+        try:
+            result = nodes_seedvr._load_seedvr2_prompt_embed(
+                "positive", torch.device("cpu"), torch.float16,
+            )
+        finally:
+            nodes_seedvr.folder_paths.get_full_path = prior_get_full_path
+            nodes_seedvr.torch.load = prior_torch_load
+
+        # First two candidates probed (target_index=1), no further.
+        assert get_full_path_calls == list(candidates[: target_index + 1]), (
+            f"loader must probe candidates in declared order and stop at the "
+            f"first hit; got {get_full_path_calls!r}"
+        )
+        # torch.load called once, with map_location="cpu" and weights_only=True.
+        assert torch_load_calls == [(resolved_path, "cpu", True)], (
+            f"torch.load must be invoked once with map_location='cpu' and "
+            f"weights_only=True; got {torch_load_calls!r}"
+        )
+        # Returned tensor cast to requested device/dtype.
+        assert result.device == torch.device("cpu")
+        assert result.dtype == torch.float16
+        assert result.shape == (2, 4)
+    finally:
+        restore()
+
+
+def test_load_seedvr2_prompt_embed_raises_runtime_error_on_non_rank2_or_non_tensor():
+    """The loader must reject non-tensor payloads and tensors whose ``ndim != 2``
+    with a ``RuntimeError`` that names the kind, the offending path, the
+    payload type, and its shape (when available)."""
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        prior_get_full_path = nodes_seedvr.folder_paths.get_full_path
+        prior_torch_load = nodes_seedvr.torch.load
+
+        # Case 1: payload is not a torch.Tensor.
+        def fake_get_full_path_first_hit(folder_name, filename):
+            return "/fake/positive.pt"
+
+        def fake_torch_load_returns_dict(path, map_location=None, weights_only=None):
+            return {"not": "a tensor"}
+
+        nodes_seedvr.folder_paths.get_full_path = fake_get_full_path_first_hit
+        nodes_seedvr.torch.load = fake_torch_load_returns_dict
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                nodes_seedvr._load_seedvr2_prompt_embed(
+                    "positive", torch.device("cpu"), torch.float16,
+                )
+            msg = str(excinfo.value)
+            assert "SeedVR2Conditioning" in msg
+            assert "positive" in msg
+            assert "/fake/positive.pt" in msg
+            assert "rank-2 torch.Tensor" in msg
+            assert "dict" in msg
+
+            # Case 2: payload is a torch.Tensor but rank != 2.
+            def fake_torch_load_returns_rank3(path, map_location=None, weights_only=None):
+                return torch.zeros((1, 2, 3), dtype=torch.float32)
+
+            nodes_seedvr.torch.load = fake_torch_load_returns_rank3
+            with pytest.raises(RuntimeError) as excinfo:
+                nodes_seedvr._load_seedvr2_prompt_embed(
+                    "negative", torch.device("cpu"), torch.float16,
+                )
+            msg = str(excinfo.value)
+            assert "SeedVR2Conditioning" in msg
+            assert "negative" in msg
+            assert "rank-2 torch.Tensor" in msg
+            assert "Tensor" in msg
+            assert "torch.Size([1, 2, 3])" in msg
+        finally:
+            nodes_seedvr.folder_paths.get_full_path = prior_get_full_path
+            nodes_seedvr.torch.load = prior_torch_load
+    finally:
+        restore()
+
+
+def test_load_seedvr2_prompt_embed_raises_file_not_found_with_searched_list():
+    """When every candidate resolves to ``None``, the loader must raise
+    ``FileNotFoundError`` whose message names the kind and lists every
+    ``folder_name:filename`` pair that was probed."""
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        prior_get_full_path = nodes_seedvr.folder_paths.get_full_path
+
+        def fake_get_full_path_all_none(folder_name, filename):
+            return None
+
+        nodes_seedvr.folder_paths.get_full_path = fake_get_full_path_all_none
+        try:
+            with pytest.raises(FileNotFoundError) as excinfo:
+                nodes_seedvr._load_seedvr2_prompt_embed(
+                    "positive", torch.device("cpu"), torch.float16,
+                )
+            msg = str(excinfo.value)
+            assert "SeedVR2Conditioning" in msg
+            assert "missing positive prompt embedding" in msg
+            assert "Searched " in msg
+            for folder_name, filename in nodes_seedvr._SEEDVR2_PROMPT_EMBED_CANDIDATES["positive"]:
+                assert f"{folder_name}:{filename}" in msg, (
+                    f"FileNotFoundError message must list every probed candidate; "
+                    f"missing {folder_name}:{filename!r} in {msg!r}"
+                )
+        finally:
+            nodes_seedvr.folder_paths.get_full_path = prior_get_full_path
+    finally:
+        restore()
+
+
+def test_load_seedvr2_prompt_embeds_returns_positive_then_negative_in_order():
+    """``_load_seedvr2_prompt_embeds`` returns ``(positive, negative)``,
+    in that order. A regression that swapped the order would produce
+    inverted conditioning at the DiT and is silent — covering the order
+    explicitly here."""
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        prior_get_full_path = nodes_seedvr.folder_paths.get_full_path
+        prior_torch_load = nodes_seedvr.torch.load
+
+        positive_payload = torch.full((2, 4), 1.0, dtype=torch.float32)
+        negative_payload = torch.full((3, 4), -1.0, dtype=torch.float32)
+
+        def fake_get_full_path(folder_name, filename):
+            if "pos_emb" in filename:
+                return "/fake/positive.pt"
+            if "neg_emb" in filename:
+                return "/fake/negative.pt"
+            return None
+
+        def fake_torch_load(path, map_location=None, weights_only=None):
+            if "positive" in path:
+                return positive_payload
+            return negative_payload
+
+        nodes_seedvr.folder_paths.get_full_path = fake_get_full_path
+        nodes_seedvr.torch.load = fake_torch_load
+        try:
+            pos, neg = nodes_seedvr._load_seedvr2_prompt_embeds(
+                torch.device("cpu"), torch.float16,
+            )
+        finally:
+            nodes_seedvr.folder_paths.get_full_path = prior_get_full_path
+            nodes_seedvr.torch.load = prior_torch_load
+
+        # Positive first, negative second (NOT swapped).
+        assert torch.all(pos == 1.0), "first return must be positive embedding"
+        assert torch.all(neg == -1.0), "second return must be negative embedding"
+        assert pos.shape == (2, 4)
+        assert neg.shape == (3, 4)
+        assert pos.dtype == torch.float16
+        assert neg.dtype == torch.float16
+    finally:
+        restore()
