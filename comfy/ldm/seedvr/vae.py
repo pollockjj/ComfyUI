@@ -142,23 +142,9 @@ def tiled_vae(
             t_chunk = t_chunk.contiguous()
 
             if encode:
-                old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
-                if old_slicing_sample_min_size is not None:
-                    vae_model.slicing_sample_min_size = min(t_chunk.shape[2], max(old_slicing_sample_min_size, sf_t * 2))
-                try:
-                    out = vae_model.encode(t_chunk)[0]
-                finally:
-                    if old_slicing_sample_min_size is not None:
-                        vae_model.slicing_sample_min_size = old_slicing_sample_min_size
+                out = vae_model.encode(t_chunk)[0]
             else:
-                old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
-                if old_slicing_latent_min_size is not None:
-                    vae_model.slicing_latent_min_size = t_chunk.shape[2]
-                try:
-                    out = vae_model.decode_(t_chunk)
-                finally:
-                    if old_slicing_latent_min_size is not None:
-                        vae_model.slicing_latent_min_size = old_slicing_latent_min_size
+                out = vae_model.decode_(t_chunk)
 
             if isinstance(out, (tuple, list)):
                 out = out[0]
@@ -2407,10 +2393,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            decode_tiled_args = dict(self.tiled_args)
-            tile_h, tile_w = decode_tiled_args.get("tile_size", (512, 512))
-            decode_tiled_args["tile_size"] = (min(tile_h, 512), min(tile_w, 512))
-            x = tiled_vae(latent, self, **decode_tiled_args, encode=False)
+            x = tiled_vae(latent, self, **self.tiled_args, encode=False)
             if x.ndim == 4:
                 # tiled_vae squeezes the temporal axis when
                 # temporal_downsample_factor == 1 AND latent T == 1
