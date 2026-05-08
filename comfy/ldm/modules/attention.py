@@ -817,17 +817,30 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
     sm_scale = kwargs.get("softmax_scale")
     if sm_scale is None:
         sm_scale = 1.0 / math.sqrt(head_dim)
-    out = sageattn_varlen(
-        q,
-        k,
-        v,
-        cu_seqlens_q.int(),
-        cu_seqlens_k.int(),
-        _var_attention_max_seqlen(cu_seqlens_q),
-        _var_attention_max_seqlen(cu_seqlens_k),
-        kwargs.get("causal", False),
-        sm_scale,
-    )
+    try:
+        out = sageattn_varlen(
+            q,
+            k,
+            v,
+            cu_seqlens_q.int(),
+            cu_seqlens_k.int(),
+            _var_attention_max_seqlen(cu_seqlens_q),
+            _var_attention_max_seqlen(cu_seqlens_k),
+            kwargs.get("causal", False),
+            sm_scale,
+        )
+    except Exception as e:
+        logging.error("Error running sage var-len attention: %s, using pytorch var-len attention instead.", e)
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=True,
+            skip_output_reshape=skip_output_reshape,
+        )
     if out.dtype != out_dtype:
         out = out.to(out_dtype)
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)
