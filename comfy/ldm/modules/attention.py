@@ -35,7 +35,7 @@ try:
     from sageattention import sageattn_varlen
     SAGE_ATTENTION_VARLEN_IS_AVAILABLE = True
 except ImportError as e:
-    if model_management.sage_attention_enabled() and e.name != "sageattention":
+    if model_management.sage_attention_enabled():
         logging.warning("SageAttention variable-length attention is unavailable, using pytorch var-len attention instead.")
 
 SAGE_ATTENTION3_IS_AVAILABLE = False
@@ -864,6 +864,7 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
 @torch._dynamo.disable
 def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    fallback_q, fallback_k, fallback_v = q, k, v
     seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
     uniform_q = bool((seq_lens_q == seq_lens_q[0]).all().item())
@@ -904,7 +905,32 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     q = q.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
     k = k.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
     v = v.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
-    out = sageattn3_blackwell(q, k, v, is_causal=kwargs.get("causal", False))
+    try:
+        out = sageattn3_blackwell(q, k, v, is_causal=kwargs.get("causal", False))
+    except Exception as e:
+        logging.error("Error running SageAttention3 var-len attention: %s, using fallback var-len attention instead.", e)
+        if SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
+            return var_attention_sage(
+                fallback_q,
+                fallback_k,
+                fallback_v,
+                heads,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                skip_reshape=True,
+                skip_output_reshape=skip_output_reshape,
+                **kwargs,
+            )
+        return var_attention_pytorch(
+            fallback_q,
+            fallback_k,
+            fallback_v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=True,
+            skip_output_reshape=skip_output_reshape,
+        )
     out = out.transpose(1, 2).reshape(-1, heads, head_dim).contiguous()
     if out.dtype != out_dtype:
         out = out.to(out_dtype)
@@ -927,40 +953,77 @@ def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
     max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
-    out = flash_attn_varlen_func(
-        q=q,
-        k=k,
-        v=v,
-        cu_seqlens_q=cu_seqlens_q.int(),
-        cu_seqlens_k=cu_seqlens_k.int(),
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        dropout_p=kwargs.get("dropout_p", 0.0),
-        causal=kwargs.get("causal", False),
-        deterministic=torch.are_deterministic_algorithms_enabled(),
-    )
+    try:
+        out = flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q.int(),
+            cu_seqlens_k=cu_seqlens_k.int(),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=kwargs.get("dropout_p", 0.0),
+            causal=kwargs.get("causal", False),
+            deterministic=torch.are_deterministic_algorithms_enabled(),
+        )
+    except Exception as e:
+        logging.error("Error running Flash Attention var-len attention: %s, using pytorch var-len attention instead.", e)
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=True,
+            skip_output_reshape=skip_output_reshape,
+        )
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)
 
 
 @torch._dynamo.disable
 def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if not FLASH_ATTENTION3_IS_AVAILABLE:
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
     max_seqlen_q = _var_attention_max_seqlen(cu_seqlens_q)
     max_seqlen_k = _var_attention_max_seqlen(cu_seqlens_k)
-    out = flash_attn3_varlen_func(
-        q=q,
-        k=k,
-        v=v,
-        cu_seqlens_q=cu_seqlens_q.int(),
-        cu_seqlens_k=cu_seqlens_k.int(),
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        seqused_q=None,
-        seqused_k=None,
-        softmax_scale=kwargs.get("softmax_scale"),
-        causal=kwargs.get("causal", False),
-        deterministic=torch.are_deterministic_algorithms_enabled(),
-    )
+    try:
+        out = flash_attn3_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q.int(),
+            cu_seqlens_k=cu_seqlens_k.int(),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            seqused_q=None,
+            seqused_k=None,
+            softmax_scale=kwargs.get("softmax_scale"),
+            causal=kwargs.get("causal", False),
+            deterministic=torch.are_deterministic_algorithms_enabled(),
+        )
+    except Exception as e:
+        logging.error("Error running Flash Attention 3 var-len attention: %s, using pytorch var-len attention instead.", e)
+        return var_attention_pytorch(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=True,
+            skip_output_reshape=skip_output_reshape,
+        )
     if isinstance(out, tuple):
         out = out[0]
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)

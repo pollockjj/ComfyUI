@@ -212,6 +212,28 @@ def test_var_attention_sage3_uses_cu_seqlens_contract(monkeypatch):
     assert captured["is_causal"] is False
 
 
+def test_var_attention_sage3_runtime_error_falls_back(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    captured = {}
+
+    def failing_sageattn3_blackwell(*args, **kwargs):
+        raise RuntimeError("unsupported")
+
+    def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+        captured.update(cu_q=cu_seqlens_q, skip_reshape=skip_reshape)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", False)
+    monkeypatch.setattr(attention, "sageattn3_blackwell", failing_sageattn3_blackwell, raising=False)
+    monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
+
+    out = attention.var_attention_sage3(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert tuple(out.shape) == tuple(q.shape)
+    assert torch.equal(captured["cu_q"], cu)
+    assert captured["skip_reshape"] is True
+
+
 def test_var_attention_flash_uses_cu_seqlens_contract(monkeypatch):
     q, k, v, heads, cu = _inputs()
     captured = {}
@@ -232,6 +254,28 @@ def test_var_attention_flash_uses_cu_seqlens_contract(monkeypatch):
     assert captured["max_seqlen_k"] == 3
 
 
+def test_var_attention_flash_runtime_error_falls_back(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    captured = {}
+
+    def failing_flash_attn_varlen_func(**kwargs):
+        raise NotImplementedError("cpu")
+
+    def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+        captured.update(cu_q=cu_seqlens_q, skip_reshape=skip_reshape)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention, "FLASH_ATTENTION_VARLEN_IS_AVAILABLE", True)
+    monkeypatch.setattr(attention, "flash_attn_varlen_func", failing_flash_attn_varlen_func)
+    monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
+
+    out = attention.var_attention_flash(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert tuple(out.shape) == tuple(q.shape)
+    assert torch.equal(captured["cu_q"], cu)
+    assert captured["skip_reshape"] is True
+
+
 def test_var_attention_flash3_uses_cu_seqlens_contract(monkeypatch):
     q, k, v, heads, cu = _inputs()
     captured = {}
@@ -241,6 +285,7 @@ def test_var_attention_flash3_uses_cu_seqlens_contract(monkeypatch):
         return torch.zeros_like(kwargs["q"]), None
 
     monkeypatch.setattr(attention, "flash_attn3_varlen_func", fake_flash_attn3_varlen_func, raising=False)
+    monkeypatch.setattr(attention, "FLASH_ATTENTION3_IS_AVAILABLE", True)
 
     out = attention.var_attention_flash3(
         q,
@@ -273,10 +318,33 @@ def test_var_attention_flash3_accepts_tensor_return(monkeypatch):
         return torch.zeros_like(kwargs["q"])
 
     monkeypatch.setattr(attention, "flash_attn3_varlen_func", fake_flash_attn3_varlen_func, raising=False)
+    monkeypatch.setattr(attention, "FLASH_ATTENTION3_IS_AVAILABLE", True)
 
     out = attention.var_attention_flash3(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
 
     assert tuple(out.shape) == tuple(q.shape)
+
+
+def test_var_attention_flash3_runtime_error_falls_back(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    captured = {}
+
+    def failing_flash_attn3_varlen_func(**kwargs):
+        raise RuntimeError("unsupported")
+
+    def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+        captured.update(cu_q=cu_seqlens_q, skip_reshape=skip_reshape)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention, "FLASH_ATTENTION3_IS_AVAILABLE", True)
+    monkeypatch.setattr(attention, "flash_attn3_varlen_func", failing_flash_attn3_varlen_func, raising=False)
+    monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
+
+    out = attention.var_attention_flash3(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert tuple(out.shape) == tuple(q.shape)
+    assert torch.equal(captured["cu_q"], cu)
+    assert captured["skip_reshape"] is True
 
 
 def test_var_attention_sub_quad_uses_cu_seqlens_contract(monkeypatch):
