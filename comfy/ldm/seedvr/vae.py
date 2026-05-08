@@ -69,125 +69,24 @@ def tiled_vae(
     count = None
 
     def run_temporal_chunks(spatial_tile):
-        chunk_results = []
-        t_dim_size = spatial_tile.shape[2]
-
-        def decoded_temporal_len(latent_len):
-            if latent_len <= 0:
-                return 0
-            return max(1, latent_len * sf_t - (sf_t - 1))
-
+        # [issue 226] Defer to the wrapper's slicing path
+        # (slicing_encode / slicing_decode), which propagates INITIALIZING +
+        # ACTIVE causal state across the full temporal axis correctly. The
+        # previous hand-rolled chunking over `temporal_size` reset the
+        # InflatedCausalConv3d memory cache between outer chunks and produced
+        # periodic per-frame discontinuities in the output at every
+        # temporal_tile_size boundary. The non-tiled path always used the
+        # wrapper's slicing path and was diff-clean against numz; this routes
+        # the tiled spatial-tile path through the same temporal handling.
         if encode:
-            input_chunk = temporal_size
-            overlap_chunk = 0
+            out = vae_model.encode(spatial_tile.contiguous())
         else:
-            input_chunk = max(1, temporal_size // sf_t)
-            overlap_chunk = max(0, temporal_overlap // sf_t)
-            overlap_chunk = min(overlap_chunk, input_chunk - 1)
-
-        if (
-            not encode
-            and temporal_overlap > 0
-            and hasattr(vae_model, "_decode")
-        ):
-            if t_dim_size <= 1:
-                out = vae_model._decode(spatial_tile.contiguous())
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
-                if out.ndim == 4:
-                    out = out.unsqueeze(2)
-                chunk_results.append(out.to(storage_device))
-            else:
-                initial = spatial_tile[:, :, :2, :, :].contiguous()
-                out = vae_model._decode(initial, memory_state=MemoryState.INITIALIZING)
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
-                if out.ndim == 4:
-                    out = out.unsqueeze(2)
-                chunk_results.append(out.to(storage_device))
-
-                active_step = max(1, getattr(vae_model, "slicing_latent_min_size", 1))
-                for i in range(2, t_dim_size, active_step):
-                    t_chunk = spatial_tile[:, :, i : i + active_step, :, :].contiguous()
-                    out = vae_model._decode(t_chunk, memory_state=MemoryState.ACTIVE)
-                    if isinstance(out, (tuple, list)):
-                        out = out[0]
-                    if out.ndim == 4:
-                        out = out.unsqueeze(2)
-                    chunk_results.append(out.to(storage_device))
-            modules_with_memory = [
-                m for m in vae_model.modules()
-                if isinstance(m, InflatedCausalConv3d) and m.memory is not None
-            ]
-            for m in modules_with_memory:
-                m.memory = None
-            return torch.cat(chunk_results, dim=2)
-
-        for i in range(0, t_dim_size, input_chunk):
-            chunk_start = max(0, i - overlap_chunk)
-            chunk_end = min(i + input_chunk, t_dim_size)
-            t_chunk = spatial_tile[:, :, chunk_start:chunk_end, :, :]
-            current_valid_len = t_chunk.shape[2]
-            prefix_len = i - chunk_start
-
-            pad_amount = 0
-            target_input_len = input_chunk + prefix_len
-            if current_valid_len < target_input_len:
-                pad_amount = target_input_len - current_valid_len
-
-                last_frame = t_chunk[:, :, -1:, :, :]
-                padding = last_frame.repeat(1, 1, pad_amount, 1, 1)
-
-                t_chunk = torch.cat([t_chunk, padding], dim=2)
-            t_chunk = t_chunk.contiguous()
-
-            if encode:
-                # Force inner slicing_encode to run whole-T per outer chunk so
-                # non-(min_size+1)-aligned outer chunks (e.g. temporal_tile_size=12
-                # split as 8+3) cannot produce an ACTIVE inner slice that
-                # collapses to T=1 after the first temporal downsampler.
-                old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
-                if old_slicing_sample_min_size is not None:
-                    vae_model.slicing_sample_min_size = t_chunk.shape[2]
-                try:
-                    out = vae_model.encode(t_chunk)[0]
-                finally:
-                    if old_slicing_sample_min_size is not None:
-                        vae_model.slicing_sample_min_size = old_slicing_sample_min_size
-            else:
-                old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
-                if old_slicing_latent_min_size is not None:
-                    vae_model.slicing_latent_min_size = t_chunk.shape[2]
-                try:
-                    out = vae_model.decode_(t_chunk)
-                finally:
-                    if old_slicing_latent_min_size is not None:
-                        vae_model.slicing_latent_min_size = old_slicing_latent_min_size
-
-            if isinstance(out, (tuple, list)):
-                out = out[0]
-            if out.ndim == 4:
-                out = out.unsqueeze(2)
-
-            if pad_amount > 0:
-                if encode:
-                    expected_valid_out = (current_valid_len + sf_t - 1) // sf_t
-                    out = out[:, :, :expected_valid_out, :, :]
-
-                else:
-                    expected_valid_out = decoded_temporal_len(current_valid_len)
-                    out = out[:, :, :expected_valid_out, :, :]
-
-            if prefix_len > 0:
-                if encode:
-                    prefix_out = (prefix_len + sf_t - 1) // sf_t
-                else:
-                    prefix_out = decoded_temporal_len(prefix_len)
-                out = out[:, :, prefix_out:, :, :]
-
-            chunk_results.append(out.to(storage_device))
-
-        return torch.cat(chunk_results, dim=2)
+            out = vae_model.decode_(spatial_tile.contiguous())
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        if out.ndim == 4:
+            out = out.unsqueeze(2)
+        return out.to(storage_device)
 
     ramp_cache = {}
     def get_ramp(steps):
