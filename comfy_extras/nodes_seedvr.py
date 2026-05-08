@@ -6,6 +6,7 @@ from einops import rearrange
 
 import gc
 import comfy.model_management
+from comfy.ldm.seedvr.vae import tiled_vae
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
@@ -253,14 +254,8 @@ class SeedVR2InputProcessing(io.ComfyNode):
         if enable_tiling:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
-            latent = vae.encode_tiled(
-                images_bthwc,
-                tile_x=spatial_tile_size,
-                tile_y=spatial_tile_size,
-                overlap=spatial_overlap,
-                tile_t=temporal_tile_size,
-                overlap_t=temporal_overlap,
-            )
+            images_bcthw = rearrange(images_bthwc, "b t h w c -> b c t h w")
+            latent = tiled_vae(images_bcthw, vae_model, **args, encode=True)
         else:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
@@ -303,7 +298,14 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         vae_conditioning = vae_conditioning["samples"]
         device = vae_conditioning.device
-        model = _resolve_seedvr2_diffusion_model(model)
+        model_patcher = model
+        model = _resolve_seedvr2_diffusion_model(model_patcher)
+        # SeedVR2-3B/7B checkpoints are APT-distilled (arXiv:2506.05301) and
+        # operate one-step at cfg=1.0. Comfy's CFG=1.0 short-circuit
+        # (samplers.py:391) strips the negative pass; the SeedVR2 DiT requires
+        # the [neg, pos] context concat at model.py:context.chunk(2). Disable
+        # the optimization so the negative pass fires.
+        model_patcher.disable_model_cfg1_optimization()
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
