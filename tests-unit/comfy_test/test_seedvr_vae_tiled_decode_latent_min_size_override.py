@@ -1,10 +1,9 @@
 """Regression tests for the decode-side ``slicing_latent_min_size`` override
 in ``tiled_vae``. Mirrors the encode-side override tests
 (``test_seedvr_vae_tiled_encode_runt_slice_override.py``) — the decode branch
-temporarily mutates ``vae_model.slicing_latent_min_size`` to disable inner
-slicing per outer chunk and must restore the prior value via try/finally,
-even when ``decode_`` raises. Anchored by PR #51 review thread
-``discussion_r3205802562``.
+temporarily mutates ``vae_model.slicing_latent_min_size`` to bound inner
+slicing per call and must restore the prior value via try/finally, even
+when ``decode_`` raises.
 """
 
 import re

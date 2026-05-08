@@ -5,9 +5,7 @@ including the ``B>1, T_orig==1`` image-mode batched-decode path.
 The pre-fix code applied ``super().decode_(latent).squeeze(2)`` followed
 by ``if x.ndim == 4: x = x.unsqueeze(0)`` and a ``size(1)==1`` heuristic,
 which mis-routed the batch axis into the channel axis and the channel
-axis into the time axis when ``B>1`` and ``T_dec==1``. The CodeRabbit
-finding on upstream PR Comfy-Org/ComfyUI#11294 is at:
-https://github.com/Comfy-Org/ComfyUI/pull/11294#discussion_r2959796352
+axis into the time axis when ``B>1`` and ``T_dec==1``.
 
 These tests construct a CPU-only wrapper instance via ``__new__`` +
 ``nn.Module.__init__`` (bypassing the real init that would otherwise

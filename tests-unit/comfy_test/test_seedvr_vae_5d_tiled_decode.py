@@ -181,7 +181,14 @@ class _TemporalChunkRecorder(nn.Module):
         return torch.cat(pieces, dim=2)
 
 
-def test_seedvr2_tiled_vae_decode_uses_temporal_overlap_prefix():
+def test_seedvr2_tiled_vae_decode_uses_single_slicing_call_per_spatial_tile():
+    """After the temporal-stitching fix, run_temporal_chunks delegates to
+    the wrapper's slicing path with a single decode_ call per spatial tile
+    (rather than the old hand-rolled outer temporal chunking that reset
+    causal cache between chunks). Validate the new contract: recorder sees
+    one call covering the full temporal axis, output shape and value
+    pattern are equivalent to what the temporal-overlap path produced.
+    """
     recorder = _TemporalChunkRecorder()
     latent = torch.arange(6, dtype=torch.float32).view(1, 1, 6, 1, 1)
 
@@ -195,6 +202,6 @@ def test_seedvr2_tiled_vae_decode_uses_temporal_overlap_prefix():
         encode=False,
     )
 
-    assert recorder.chunks == [[0, 1, 2, 3], [3, 4, 5, 5, 5]]
+    assert recorder.chunks == [[0, 1, 2, 3, 4, 5]]
     assert tuple(out.shape) == (1, 1, 21, 1, 1)
     assert [int(v) for v in out[0, 0, [0, 1, 5, 9, 13, 17], 0, 0].tolist()] == [0, 1, 2, 3, 4, 5]

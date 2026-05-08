@@ -7,7 +7,7 @@ def test_seedvr_vae_tiled_args_uses_get_not_pop():
     src = path.read_text(encoding="utf-8")
     assert not re.search(r"(?:self\.)?tiled_args\.pop\s*\(", src), (
         f"VideoAutoencoderKLWrapper.decode contains tiled_args.pop(...) which mutates tiled_args across calls; "
-        f"expected reads via .get(...) only per the upstream fix in Comfy-Org/ComfyUI#11294 commit 3b418da. "
+        f"expected reads via .get(...) only. "
         f"Source path: {path}"
     )
     enable_tiling_get_calls = re.findall(
