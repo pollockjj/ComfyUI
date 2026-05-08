@@ -34,7 +34,7 @@ SAGE_ATTENTION_VARLEN_IS_AVAILABLE = False
 try:
     from sageattention import sageattn_varlen
     SAGE_ATTENTION_VARLEN_IS_AVAILABLE = True
-except ImportError as e:
+except ImportError:
     if model_management.sage_attention_enabled():
         logging.warning("SageAttention variable-length attention is unavailable, using pytorch var-len attention instead.")
 
@@ -821,6 +821,7 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
             skip_output_reshape=skip_output_reshape,
         )
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+    fallback_q, fallback_k, fallback_v = q, k, v
     out_dtype = q.dtype
     if not (q.dtype == k.dtype == v.dtype):
         k = k.to(q.dtype)
@@ -846,16 +847,19 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
         )
     except Exception as e:
         logging.error("Error running sage var-len attention: %s, using pytorch var-len attention instead.", e)
-        return var_attention_pytorch(
-            q,
-            k,
-            v,
+        out = var_attention_pytorch(
+            fallback_q,
+            fallback_k,
+            fallback_v,
             heads,
             cu_seqlens_q,
             cu_seqlens_k,
             skip_reshape=True,
             skip_output_reshape=skip_output_reshape,
         )
+        if out.dtype != out_dtype:
+            out = out.to(out_dtype)
+        return out
     if out.dtype != out_dtype:
         out = out.to(out_dtype)
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)

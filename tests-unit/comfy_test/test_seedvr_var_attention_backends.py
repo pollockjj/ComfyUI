@@ -195,6 +195,31 @@ def test_var_attention_sage_uses_cu_seqlens_contract(monkeypatch):
     assert captured["is_causal"] is False
 
 
+def test_var_attention_sage_runtime_error_preserves_fallback_dtype(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    q = q.float()
+    k = k.float()
+    v = v.float()
+    captured = {}
+
+    def failing_sageattn_varlen(*args, **kwargs):
+        raise RuntimeError("unsupported")
+
+    def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+        captured.update(dtype=q.dtype, skip_reshape=skip_reshape)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", True)
+    monkeypatch.setattr(attention, "sageattn_varlen", failing_sageattn_varlen)
+    monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
+
+    out = attention.var_attention_sage(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert out.dtype == torch.float32
+    assert captured["dtype"] == torch.float32
+    assert captured["skip_reshape"] is True
+
+
 def test_var_attention_sage3_uses_cu_seqlens_contract(monkeypatch):
     q, k, v, heads, cu = _inputs()
     captured = {}
@@ -242,7 +267,6 @@ def test_var_attention_flash_uses_cu_seqlens_contract(monkeypatch):
         captured.update(kwargs)
         return torch.zeros_like(kwargs["q"])
 
-    monkeypatch.setattr(attention, "FLASH_ATTENTION3_IS_AVAILABLE", False)
     monkeypatch.setattr(attention, "flash_attn_varlen_func", fake_flash_attn_varlen_func)
 
     out = attention.var_attention_flash(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
