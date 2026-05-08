@@ -255,6 +255,52 @@ def test_namm_forward_output_tensor_equal_against_legacy_oracle():
                                 msg="txt_k output diverges from wrapper oracle")
 
 
+# Test 5 — partial-rope coverage. The real SeedVR2-3B model is constructed
+# with rope_dim=128, which integer-divides into 3 axes as 128//3 = 42 per-
+# axis; total rope freq dims = 42*3 = 126. head_dim is 128, so the trailing
+# 2 dims of each q/k must be passed through unrotated (matching the legacy
+# wrapper's `t_right = t[..., end_index:]` behavior). The fp32-CPU oracle
+# test (Test 3) uses dim=192 where rot_d == head_dim and the partial-rope
+# path collapses to a single apply_rope1 call. This test exercises the
+# partial path explicitly with dim=128 and asserts the rewired forward
+# still tensor-equals the wrapper oracle in that regime.
+
+def test_namm_forward_partial_rope_passthrough_matches_wrapper_oracle():
+    rope = NaMMRotaryEmbedding3d(dim=128)
+    g = torch.Generator(device="cpu").manual_seed(_SEED)
+    vid_q = torch.randn(_L_VID, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
+    vid_k = torch.randn(_L_VID, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
+    txt_q = torch.randn(_TXT_L, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
+    txt_k = torch.randn(_TXT_L, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
+    vid_shape = torch.tensor([[_VID_T, _VID_H, _VID_W]], dtype=torch.long)
+    txt_shape = torch.tensor([[_TXT_L]], dtype=torch.long)
+    cache = Cache(disable=True)
+
+    expected_vid_q, expected_vid_k, expected_txt_q, expected_txt_k = _legacy_forward(
+        rope, vid_q.clone(), vid_k.clone(), vid_shape, txt_q.clone(), txt_k.clone(), txt_shape,
+    )
+    actual_vid_q, actual_vid_k, actual_txt_q, actual_txt_k = rope.forward(
+        vid_q.clone(), vid_k.clone(), vid_shape, txt_q.clone(), txt_k.clone(), txt_shape, cache,
+    )
+
+    # Confirm the partial-rope contract: rot_d (= 2 * freqs_cis.shape[-3]) is
+    # 126 (= 42*3), strictly less than head_dim 128. The trailing 2 head-dims
+    # are pass-through.
+    vid_freqs, _ = rope.get_freqs(vid_shape, txt_shape)
+    rot_d = 2 * vid_freqs.shape[-3]
+    assert rot_d == 126, f"expected rot_d=126 for dim=128 model; got {rot_d}"
+    assert rot_d < 128, "partial-rope path must trigger (rot_d < head_dim)"
+
+    torch.testing.assert_close(actual_vid_q, expected_vid_q, rtol=0, atol=0,
+                                msg="vid_q partial-rope output diverges from wrapper oracle")
+    torch.testing.assert_close(actual_vid_k, expected_vid_k, rtol=0, atol=0,
+                                msg="vid_k partial-rope output diverges from wrapper oracle")
+    torch.testing.assert_close(actual_txt_q, expected_txt_q, rtol=0, atol=0,
+                                msg="txt_q partial-rope output diverges from wrapper oracle")
+    torch.testing.assert_close(actual_txt_k, expected_txt_k, rtol=0, atol=0,
+                                msg="txt_k partial-rope output diverges from wrapper oracle")
+
+
 # Test 4 — drives AC-4 statically: AST walk over NaMMRotaryEmbedding3d.forward
 # must find zero references to the apply_rotary_emb symbol.
 
