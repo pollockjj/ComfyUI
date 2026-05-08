@@ -969,8 +969,10 @@ if model_management.sage_attention_enabled():
     logging.info("Using sage attention")
     optimized_attention = attention_sage
     if SAGE_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
+        logging.info("Using SageAttention3 for variable-length attention")
         optimized_var_attention = var_attention_sage3
     else:
+        logging.info("Using SageAttention for variable-length attention")
         optimized_var_attention = var_attention_sage
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
@@ -978,6 +980,10 @@ elif model_management.xformers_enabled():
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
+    if FLASH_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
+        logging.info("Using Flash Attention 3 for variable-length attention")
+    else:
+        logging.info("Using Flash Attention 2 for variable-length attention")
     optimized_var_attention = var_attention_flash
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
