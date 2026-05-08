@@ -9,12 +9,11 @@ _VAE_PATH = Path(__file__).resolve().parents[2] / "comfy" / "ldm" / "seedvr" / "
 
 def test_encode_branch_sets_slicing_sample_min_size_to_chunk_length():
     """tiled_vae's encode branch must disable inner slicing per outer chunk by setting
-    slicing_sample_min_size = t_chunk.shape[2]. The previous clamp
-    `min(t_chunk.shape[2], max(old, sf_t * 2))` only happened to satisfy
-    slicing_encode's `(T-1) > min_size` predicate for temporal_tile_size=16; for
-    schema-allowed values like 12 it produced a runt T=3 ACTIVE slice that
-    underflowed the second temporal downsampler. See PR #51 review threads
-    discussion_r3205644091 / discussion_r3205651100."""
+    slicing_sample_min_size = t_chunk.shape[2]. A bare-minimum clamp
+    `min(t_chunk.shape[2], max(old, sf_t * 2))` only satisfies
+    slicing_encode's `(T-1) > min_size` predicate for temporal_tile_size=16;
+    for schema-allowed values like 12 it produces a runt T=3 ACTIVE slice
+    that underflows the second temporal downsampler."""
     src = _VAE_PATH.read_text(encoding="utf-8")
     encode_block = re.search(
         r"if encode:\s*\n"
@@ -32,7 +31,7 @@ def test_encode_branch_sets_slicing_sample_min_size_to_chunk_length():
     assert rhs == "t_chunk.shape[2]", (
         f"tiled_vae encode branch must set slicing_sample_min_size = t_chunk.shape[2] "
         f"to disable inner slicing per outer chunk; found `{rhs}`. "
-        f"The bare-minimum clamp `min(...)` is insufficient: see PR #51 discussion."
+        f"The bare-minimum clamp `min(...)` is insufficient."
     )
 
 
@@ -82,8 +81,8 @@ def test_runtime_override_disables_slicing_for_chunk_and_restores():
             # Capture the override value AT the point encode runs.
             observed["during_encode"].append(self.slicing_sample_min_size)
             # Slicing predicate `(T-1) > min_size` must be False for the
-            # chunk; equivalently min_size must be >= T-1. Stronger: PR #51
-            # sets min_size = T exactly.
+            # chunk; equivalently min_size must be >= T-1. Stronger: the
+            # contract sets min_size = T exactly.
             assert self.slicing_sample_min_size >= t_chunk.shape[2] - 1, (
                 f"slicing_sample_min_size={self.slicing_sample_min_size} fails "
                 f"`(T-1) > min_size` => False predicate for t_chunk T={t_chunk.shape[2]}"

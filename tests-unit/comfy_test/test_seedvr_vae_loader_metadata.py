@@ -1,26 +1,16 @@
-"""Regression test for issue #191 — ``comfy/sd.py``'s ``VAE.__init__`` loader
-must apply SeedVR2-specific metadata when the SeedVR2 magic key
+"""Regression test for ``comfy/sd.py``'s ``VAE.__init__`` loader — must
+apply SeedVR2-specific metadata when the SeedVR2 magic key
 ``decoder.up_blocks.2.upsamplers.0.upscale_conv.weight`` is present in the
 state dict.
 
-Pre-fix behaviour (before commit ``3cbb5dd89b`` on ``pollockjj/ComfyUI``):
-the SeedVR2 elif branch at ``comfy/sd.py:518`` either did not exist or did
-not set ``self.latent_channels = 16`` / ``self.latent_dim = 3`` /
-``self.disable_offload = True`` /
-``self.downscale_index_formula = (4, 8, 8)`` /
-``self.upscale_index_formula = (4, 8, 8)``, leaving the loader at the
-defaults of ``latent_channels=4`` / ``latent_dim=2`` written at lines
-457-458. Down-stream consumers therefore mis-shape the latent buffer and
-crash with a channel-count mismatch (Comfy-Org/ComfyUI#11294 issuecomment
-``3668638161``).
-
-Post-fix behaviour (``pollockjj/ComfyUI:issue_101`` HEAD): the elif at
-``comfy/sd.py:518-531`` sets ``latent_channels=16``, ``latent_dim=3``,
-``disable_offload=True``, ``downscale_index_formula=(4, 8, 8)``,
-``upscale_index_formula=(4, 8, 8)``, and also installs the SeedVR2
-``memory_used_decode`` / ``memory_used_encode`` lambdas, the
-``downscale_ratio`` / ``upscale_ratio`` tuples, and the no-op
-``process_input`` / ``crop_input=False`` overrides.
+Without the SeedVR2 elif branch the loader leaves ``latent_channels=4`` /
+``latent_dim=2`` defaults, so down-stream consumers mis-shape the latent
+buffer and crash with a channel-count mismatch. The expected behaviour
+sets ``latent_channels=16``, ``latent_dim=3``, ``disable_offload=True``,
+``downscale_index_formula=(4, 8, 8)``, ``upscale_index_formula=(4, 8,
+8)``, plus the SeedVR2 ``memory_used_decode`` / ``memory_used_encode``
+lambdas, the ``downscale_ratio`` / ``upscale_ratio`` tuples, and the
+no-op ``process_input`` / ``crop_input=False`` overrides.
 
 This module exercises the real ``VAE.__init__`` detection-and-load path
 with a stubbed state dict containing only the SeedVR2 magic key, and
@@ -28,9 +18,6 @@ patches ``comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper`` with a tiny
 ``nn.Module`` subclass so the test stays CPU-only and weight-load-free
 while still satisfying ``isinstance(...)`` against the real wrapper class
 (see ``_StubVideoAutoencoderKLWrapper`` below).
-
-Test design rationale and per-decision review trail are recorded on the
-tracking issue: https://github.com/pollockjj/mydevelopment/issues/191
 """
 
 from unittest.mock import patch

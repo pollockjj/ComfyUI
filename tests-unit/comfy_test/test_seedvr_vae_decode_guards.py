@@ -1,16 +1,14 @@
 """Regression tests for SeedVR2 ``VideoAutoencoderKLWrapper.decode`` input guards.
 
-Tracks pollockjj/mydevelopment#194 (parent #101). CodeRabbit thread
-``r2962219551`` on upstream PR Comfy-Org/ComfyUI#11294 flagged that
-``decode()`` accessed ``self.original_image_video`` and ``self.img_dims``
-without validation, raising opaque torch errors deep in ``rearrange()`` /
-attribute unpacking when a workflow wired the wrapper directly without
-``SeedVR2InputProcessing.execute`` populating those attributes. The merged
-fix on ``pollockjj/ComfyUI:issue_194`` adds two presence guards plus
-shape/arity validation at the top of ``decode()``, raising ``RuntimeError``
-with a SeedVR2-specific message identifying the missing or malformed
-attribute, and initialises ``self.img_dims = None`` in ``__init__`` so the
-missing-state branch is reachable from a default-constructed instance.
+``decode()`` accesses ``self.original_image_video`` and ``self.img_dims``
+which are populated by ``SeedVR2InputProcessing.execute``. Without
+validation those accesses raise opaque torch errors deep in
+``rearrange()`` / attribute unpacking when a workflow wires the wrapper
+directly. ``decode()`` carries presence guards plus shape/arity
+validation at the top, raising ``RuntimeError`` with a SeedVR2-specific
+message identifying the missing or malformed attribute, and
+``__init__`` initialises ``self.img_dims = None`` so the missing-state
+branch is reachable from a default-constructed instance.
 """
 
 import inspect

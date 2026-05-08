@@ -1,6 +1,5 @@
 """Regression tests for SeedVR2 conditioning model resolution and RoPE
-frequency cast. Anchored by pollockjj/mydevelopment#183 and the CodeRabbit
-r2962219538 finding on Comfy-Org/ComfyUI#11294.
+frequency cast.
 
 Pin two behaviors:
 

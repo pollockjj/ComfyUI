@@ -4,8 +4,6 @@ direct calls to ``comfy.ldm.flux.math.apply_rope1`` — matching the pattern
 used by the other 7 ComfyUI native-DiT models (flux, hidream, kandinsky5,
 lumina, qwen_image, wan, sam3).
 
-Tracking issue: https://github.com/pollockjj/mydevelopment/issues/224
-
 The wrapper builds a 2x2 ``freqs_mat`` and ends in ``torch.cat((t_left,
 t_middle_out, t_right), dim=-1)``; that cat OOMs on the largest cell of the
 SeedVR2 native_3b non-tiled corpus (VideoLQ_000 1280x960x100 on RTX 5090

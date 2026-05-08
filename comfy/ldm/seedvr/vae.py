@@ -33,6 +33,22 @@ def tiled_vae(
     encode=True,
     **kwargs,
 ):
+    # `temporal_size` and `temporal_overlap` are accepted for caller
+    # compatibility (comfy/sd.py:decode_tiled_seedvr2,
+    # comfy_extras/nodes_seedvr.py:SeedVR2InputProcessing) and still
+    # propagate through `vae_model.tiled_args` for inspection. They no
+    # longer drive outer temporal chunking inside this function: the
+    # encode and decode branches each issue a single call per spatial
+    # tile to vae_model.encode / vae_model.decode_ with
+    # slicing_sample_min_size / slicing_latent_min_size temporarily set
+    # to t_chunk.shape[2], which disables the wrapper's inner slicing
+    # (its `(T-1) > min_size` predicate becomes false). This avoids the
+    # runt-slice underflow at the second temporal downsampler that
+    # arose when inner ACTIVE slices fell below the kernel size, and
+    # keeps causal state coherent across the full temporal axis without
+    # the inter-outer-chunk cache reset that the old loop produced (the
+    # latter caused periodic per-frame discontinuities at every
+    # temporal_tile_size boundary in the output).
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -70,133 +86,48 @@ def tiled_vae(
     count = None
 
     def run_temporal_chunks(spatial_tile):
-        chunk_results = []
-        t_dim_size = spatial_tile.shape[2]
-
-        def decoded_temporal_len(latent_len):
-            if latent_len <= 0:
-                return 0
-            return max(1, latent_len * sf_t - (sf_t - 1))
-
+        # Single-call-per-spatial-tile delegation to the
+        # wrapper's slicing path. Causal state propagates across the full
+        # temporal axis (INITIALIZING + ACTIVE per-slice via slicing_encode /
+        # slicing_decode), eliminating the periodic temporal_tile_size
+        # boundary discontinuities the previous outer chunking caused.
+        t_chunk = spatial_tile.contiguous()
         if encode:
-            input_chunk = temporal_size
-            overlap_chunk = 0
-        else:
-            input_chunk = max(1, temporal_size // sf_t)
-            overlap_chunk = max(0, temporal_overlap // sf_t)
-            overlap_chunk = min(overlap_chunk, input_chunk - 1)
-
-        if (
-            not encode
-            and temporal_overlap > 0
-            and hasattr(vae_model, "_decode")
-        ):
-            if t_dim_size <= 1:
-                out = vae_model._decode(spatial_tile.contiguous())
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
-                if out.ndim == 4:
-                    out = out.unsqueeze(2)
-                chunk_results.append(out.to(storage_device))
-            else:
-                initial = spatial_tile[:, :, :2, :, :].contiguous()
-                out = vae_model._decode(initial, memory_state=MemoryState.INITIALIZING)
-                if isinstance(out, (tuple, list)):
-                    out = out[0]
-                if out.ndim == 4:
-                    out = out.unsqueeze(2)
-                chunk_results.append(out.to(storage_device))
-
-                active_step = max(1, getattr(vae_model, "slicing_latent_min_size", 1))
-                for i in range(2, t_dim_size, active_step):
-                    t_chunk = spatial_tile[:, :, i : i + active_step, :, :].contiguous()
-                    out = vae_model._decode(t_chunk, memory_state=MemoryState.ACTIVE)
-                    if isinstance(out, (tuple, list)):
-                        out = out[0]
-                    if out.ndim == 4:
-                        out = out.unsqueeze(2)
-                    chunk_results.append(out.to(storage_device))
-            modules_with_memory = [
-                m for m in vae_model.modules()
-                if isinstance(m, InflatedCausalConv3d) and m.memory is not None
-            ]
-            for m in modules_with_memory:
-                m.memory = None
-            return torch.cat(chunk_results, dim=2)
-
-        for i in range(0, t_dim_size, input_chunk):
-            chunk_start = max(0, i - overlap_chunk)
-            chunk_end = min(i + input_chunk, t_dim_size)
-            t_chunk = spatial_tile[:, :, chunk_start:chunk_end, :, :]
-            current_valid_len = t_chunk.shape[2]
-            prefix_len = i - chunk_start
-
-            pad_amount = 0
-            target_input_len = input_chunk + prefix_len
-            if current_valid_len < target_input_len:
-                pad_amount = target_input_len - current_valid_len
-
-                last_frame = t_chunk[:, :, -1:, :, :]
-                padding = last_frame.repeat(1, 1, pad_amount, 1, 1)
-
-                t_chunk = torch.cat([t_chunk, padding], dim=2)
-            t_chunk = t_chunk.contiguous()
-
-            if encode:
-                # Disable inner slicing per outer chunk: tiled_vae's outer
-                # temporal chunking already bounds peak memory, and the
-                # inner slicer's split policy can produce ACTIVE slices
-                # short enough to underflow the second temporal
-                # downsampler for non-(min_size+1)-aligned chunk sizes
-                # (e.g. temporal_tile_size=12 splits 8+3, T=3 ACTIVE
-                # collapses to T=1 after the first downsampler, second
-                # downsampler input T=2 < kernel=3). Forcing
-                # slicing_sample_min_size = t_chunk.shape[2] makes
-                # slicing_encode's `(T-1) > min_size` predicate false for
-                # this chunk, so the encoder runs whole-T per chunk with
-                # no inner runt-slice possible.
-                old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
+            # Disable inner slicing for the encode call by
+            # setting slicing_sample_min_size = t_chunk.shape[2]; this
+            # makes slicing_encode's `(T-1) > min_size` predicate false
+            # for this t_chunk so the encoder runs whole-T with no inner
+            # runt-slice possible (e.g. T=12 with default min_size=4 would
+            # otherwise emit a runt ACTIVE T=3 that underflows the second
+            # temporal downsampler -- see
+            # test_seedvr_vae_tiled_encode_runt_slice_override.py).
+            old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
+            if old_slicing_sample_min_size is not None:
+                vae_model.slicing_sample_min_size = t_chunk.shape[2]
+            try:
+                out = vae_model.encode(t_chunk)[0]
+            finally:
                 if old_slicing_sample_min_size is not None:
-                    vae_model.slicing_sample_min_size = t_chunk.shape[2]
-                try:
-                    out = vae_model.encode(t_chunk)[0]
-                finally:
-                    if old_slicing_sample_min_size is not None:
-                        vae_model.slicing_sample_min_size = old_slicing_sample_min_size
-            else:
-                old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
+                    vae_model.slicing_sample_min_size = old_slicing_sample_min_size
+        # Decode branch: disable inner slicing for the decode call by
+        # setting slicing_latent_min_size = t_chunk.shape[2]; this makes
+        # slicing_decode's `(T-1) > min_size` predicate false for this
+        # t_chunk so the decoder runs whole-T with no inner runt-slice
+        # possible. Mirrors the encode-side override.
+        else:
+            old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
+            if old_slicing_latent_min_size is not None:
+                vae_model.slicing_latent_min_size = t_chunk.shape[2]
+            try:
+                out = vae_model.decode_(t_chunk)
+            finally:
                 if old_slicing_latent_min_size is not None:
-                    vae_model.slicing_latent_min_size = t_chunk.shape[2]
-                try:
-                    out = vae_model.decode_(t_chunk)
-                finally:
-                    if old_slicing_latent_min_size is not None:
-                        vae_model.slicing_latent_min_size = old_slicing_latent_min_size
-
-            if isinstance(out, (tuple, list)):
-                out = out[0]
-            if out.ndim == 4:
-                out = out.unsqueeze(2)
-
-            if pad_amount > 0:
-                if encode:
-                    expected_valid_out = (current_valid_len + sf_t - 1) // sf_t
-                    out = out[:, :, :expected_valid_out, :, :]
-
-                else:
-                    expected_valid_out = decoded_temporal_len(current_valid_len)
-                    out = out[:, :, :expected_valid_out, :, :]
-
-            if prefix_len > 0:
-                if encode:
-                    prefix_out = (prefix_len + sf_t - 1) // sf_t
-                else:
-                    prefix_out = decoded_temporal_len(prefix_len)
-                out = out[:, :, prefix_out:, :, :]
-
-            chunk_results.append(out.to(storage_device))
-
-        return torch.cat(chunk_results, dim=2)
+                    vae_model.slicing_latent_min_size = old_slicing_latent_min_size
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        if out.ndim == 4:
+            out = out.unsqueeze(2)
+        return out.to(storage_device)
 
     ramp_cache = {}
     def get_ramp(steps):

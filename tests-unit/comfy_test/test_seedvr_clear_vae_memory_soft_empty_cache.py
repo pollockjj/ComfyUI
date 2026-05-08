@@ -1,13 +1,10 @@
-"""Regression test for issue #193 — ``comfy_extras.nodes_seedvr.clear_vae_memory``
+"""Regression test for ``comfy_extras.nodes_seedvr.clear_vae_memory`` —
 must dispatch its cache clear via ``comfy.model_management.soft_empty_cache``
 rather than calling ``torch.cuda.empty_cache()`` directly. The canonical helper
 at ``comfy/model_management.py:1780`` short-circuits via ``cpu_mode()`` and
 dispatches per-backend (MPS / XPU / NPU / MLU / CUDA), so it is the only
 correct call shape on non-CUDA hosts and on managed-device hosts where
 ``comfy.cli_args.args.cpu`` is True.
-
-Test design rationale and per-decision review trail are recorded on the
-tracking issue: https://github.com/pollockjj/mydevelopment/issues/193
 """
 
 from unittest.mock import patch

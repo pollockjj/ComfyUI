@@ -29,9 +29,6 @@ to fail loudly if that import path or runtime state drifts. Other tests in
 this repo (e.g. ``tests-unit/comfy_extras_test/image_stitch_test.py``) do
 stub via ``patch.dict(sys.modules, ...)`` for narrower targets; the choice
 here is local to this regression and not a repo-wide convention.
-
-Test design rationale and per-decision review trail are recorded on the
-tracking issue: https://github.com/pollockjj/mydevelopment/issues/120
 """
 
 from unittest.mock import patch

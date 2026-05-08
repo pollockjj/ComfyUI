@@ -4,9 +4,7 @@ gate at ``vae.py:509`` must compare ``memory_occupy`` against the configured
 
 The original code path was ``... > float('inf')`` which is unreachable at any
 finite ``memory_occupy`` value, so SeedVR2's ``norm_max_mem`` setting (wired
-through ``set_norm_limit``) had no effect. The CodeRabbit finding on upstream
-PR Comfy-Org/ComfyUI#11294 is at:
-https://github.com/Comfy-Org/ComfyUI/pull/11294#discussion_r2959796343
+through ``set_norm_limit``) had no effect.
 
 This module locks in two complementary cases against any future regression,
 parametrized over both ``ops.GroupNorm`` subclasses (``disable_weight_init`` and
