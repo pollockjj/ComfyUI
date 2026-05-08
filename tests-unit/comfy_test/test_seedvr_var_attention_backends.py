@@ -121,10 +121,10 @@ def test_var_attention_rebind_sage_launch_flag():
     assert result.stdout.strip() == "var_attention_sage"
 
 
-def test_var_attention_rebind_flash_launch_flag():
+def test_var_attention_rebind_flash_launch_flag_uses_pytorch_varlen_in_cpu_mode():
     result = _run_attention_import("--use-flash-attention")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "var_attention_flash"
+    assert result.stdout.strip() == "var_attention_pytorch"
 
 
 def test_var_attention_rebind_sage_launch_flag_without_varlen_uses_pytorch():

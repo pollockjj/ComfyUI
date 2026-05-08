@@ -774,9 +774,10 @@ def _var_attention_output(out, heads, head_dim, skip_output_reshape):
 
 
 def _use_blackwell_attention():
-    if not torch.cuda.is_available():
+    device = model_management.get_torch_device()
+    if device.type != "cuda":
         return False
-    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    major, minor = torch.cuda.get_device_capability(device)
     return (major, minor) >= (12, 0)
 
 
@@ -1105,7 +1106,7 @@ elif model_management.xformers_enabled():
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
-    if FLASH_ATTENTION_VARLEN_IS_AVAILABLE:
+    if FLASH_ATTENTION_VARLEN_IS_AVAILABLE and model_management.get_torch_device().type == "cuda":
         logging.info("Using Flash Attention 2 for variable-length attention")
         optimized_var_attention = var_attention_flash
     else:
