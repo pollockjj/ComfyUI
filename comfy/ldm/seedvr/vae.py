@@ -536,10 +536,10 @@ class Attention(nn.Module):
             key = self.norm_k(key)
 
         if input_ndim == 4 and encoder_hidden_states is hidden_states and attention_mask is None and self.heads == 1:
-            query = query.transpose(1, 2).reshape(batch_size, -1, height, width)
-            key = key.transpose(1, 2).reshape(batch_size, -1, height, width)
-            value = value.transpose(1, 2).reshape(batch_size, -1, height, width)
-            hidden_states = self.optimized_vae_attention(query, key, value).view(batch_size, self.heads, head_dim, height * width).transpose(2, 3)
+            query = query.squeeze(1).transpose(1, 2).reshape(batch_size, head_dim, height, width)
+            key = key.squeeze(1).transpose(1, 2).reshape(batch_size, head_dim, height, width)
+            value = value.squeeze(1).transpose(1, 2).reshape(batch_size, head_dim, height, width)
+            hidden_states = self.optimized_vae_attention(query, key, value).reshape(batch_size, self.heads, head_dim, height * width).transpose(2, 3)
         else:
             hidden_states = optimized_attention(query, key, value, heads = self.heads, mask = attention_mask, skip_reshape=True, skip_output_reshape=True)
 
