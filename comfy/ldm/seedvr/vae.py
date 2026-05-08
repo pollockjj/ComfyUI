@@ -37,7 +37,7 @@ def tiled_vae(
     torch.cuda.empty_cache()
 
     vae_param = next(vae_model.parameters())
-    x = x.to(device=vae_param.device, dtype=vae_param.dtype)
+    x = x.to(dtype=vae_param.dtype)
     if x.ndim != 5:
         x = x.unsqueeze(2)
 
@@ -97,6 +97,7 @@ def tiled_vae(
         # temporal_tile_size boundary. The non-tiled path always used the
         # wrapper's slicing path and was diff-clean against numz; this routes
         # the tiled spatial-tile path through the same temporal handling.
+        spatial_tile = spatial_tile.to(device=vae_param.device, dtype=vae_param.dtype)
         with wrapper_slicing_sizes():
             if encode:
                 out = vae_model.encode(spatial_tile.contiguous())
