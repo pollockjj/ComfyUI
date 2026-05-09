@@ -28,9 +28,14 @@ from unittest.mock import patch
 import pytest
 import torch
 
-import comfy.sample
-import comfy_extras.nodes_seedvr as nodes_seedvr_mod
-from comfy_extras.nodes_seedvr import (
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
+import comfy.sample  # noqa: E402
+import comfy_extras.nodes_seedvr as nodes_seedvr_mod  # noqa: E402
+from comfy_extras.nodes_seedvr import (  # noqa: E402
     SeedVR2ProgressiveSampler,
     _blend_overlap_region,
     _concat_chunks_along_t,
