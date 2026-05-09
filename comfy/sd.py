@@ -1092,7 +1092,20 @@ class VAE:
             if dims == 1 or self.extra_1d_channel is not None:
                 pixel_samples = self.decode_tiled_1d(samples_in)
             elif dims == 2:
-                pixel_samples = self.decode_tiled_(samples_in)
+                # SeedVR2 latents arrive in 4D collapsed form ``(B, 16*T, H, W)``
+                # downstream of ``SeedVR2Conditioning`` (which performs the
+                # ``rearrange(b c t h w -> b (c t) h w)`` collapse). The
+                # generic ``decode_tiled_`` would treat the channel dim as
+                # spatial-only and crash on the collapsed (16, T) layout
+                # under ``tiled_scale``'s mask broadcast; route SeedVR2 4D
+                # latents to ``decode_tiled_seedvr2`` instead, whose wrapper
+                # dispatch handles both 4D and 5D inputs.
+                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                    tile = 256 // self.spacial_compression_decode()
+                    overlap = tile // 4
+                    pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                else:
+                    pixel_samples = self.decode_tiled_(samples_in)
             elif dims == 3:
                 tile = 256 // self.spacial_compression_decode()
                 overlap = tile // 4
