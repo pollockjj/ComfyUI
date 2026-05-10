@@ -167,7 +167,12 @@ class _Block(nn.Module):
 
 
 class _DiffusionModel(nn.Module):
-    def __init__(self, n_blocks=3, zero_conditioning=False):
+    def __init__(
+        self,
+        n_blocks=3,
+        zero_conditioning=False,
+        conditioning_dtype=torch.float32,
+    ):
         super().__init__()
         self.blocks = nn.ModuleList([_Block() for _ in range(n_blocks)])
         if zero_conditioning:
@@ -178,11 +183,23 @@ class _DiffusionModel(nn.Module):
             # keys in the state_dict. The fail-loud guard at
             # ``SeedVR2Conditioning.execute`` distinguishes this from a
             # properly-baked file by ``abs().sum() == 0`` on both buffers.
-            self.register_buffer("positive_conditioning", torch.zeros((2, 4)))
-            self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
+            self.register_buffer(
+                "positive_conditioning",
+                torch.zeros((2, 4), dtype=conditioning_dtype),
+            )
+            self.register_buffer(
+                "negative_conditioning",
+                torch.zeros((3, 4), dtype=conditioning_dtype),
+            )
         else:
-            self.register_buffer("positive_conditioning", torch.ones((2, 4)))
-            self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
+            self.register_buffer(
+                "positive_conditioning",
+                torch.ones((2, 4), dtype=conditioning_dtype),
+            )
+            self.register_buffer(
+                "negative_conditioning",
+                torch.zeros((3, 4), dtype=conditioning_dtype),
+            )
 
 
 class _ModelInner:
@@ -420,6 +437,37 @@ def test_seedvr2_conditioning_fails_loud_on_zero_buffers():
         restore()
 
 
+def test_seedvr2_conditioning_fails_loud_on_fp8_zero_buffers():
+    """The zero-buffer sentinel must reduce fp8 conditioning tensors
+    without hitting PyTorch's unsupported float8 reductions.
+    """
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    if fp8_dtype is None:
+        pytest.skip("torch build does not expose float8_e4m3fn")
+
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel(
+            zero_conditioning=True,
+            conditioning_dtype=fp8_dtype,
+        )
+        patcher = _ModelPatcher(diffusion_model)
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning, patcher, 0.0,
+            )
+
+        message = str(excinfo.value)
+        assert message.startswith(
+            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
+        )
+        assert "zero-valued" in message
+    finally:
+        restore()
+
+
 def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
     """The guard checks BOTH buffers together: a model with zero
     ``negative_conditioning`` but non-zero ``positive_conditioning``
@@ -497,6 +545,6 @@ def test_seedvr2_conditioning_fail_loud_falls_back_when_path_unavailable():
         message = str(excinfo.value)
         assert "Source file:" not in message  # no empty path leak
         assert "Re-bake" in message  # actionable guidance still present
+        assert "bf16 keys" not in message
     finally:
         restore()
-

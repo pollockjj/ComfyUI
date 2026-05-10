@@ -350,7 +350,10 @@ class SeedVR2Conditioning(io.ComfyNode):
         # wasteful) or at the resolver helper (mixes structural shape with
         # semantic content). Both buffers must be checked together — partial
         # bake regressions could populate one but not the other.
-        if pos_cond.abs().sum().item() == 0 and neg_cond.abs().sum().item() == 0:
+        if (
+            pos_cond.float().abs().sum().item() == 0
+            and neg_cond.float().abs().sum().item() == 0
+        ):
             source_path = _describe_seedvr2_model_source(model_patcher)
             file_clause = (
                 f"Source file: {source_path}. " if source_path else ""
@@ -361,8 +364,8 @@ class SeedVR2Conditioning(io.ComfyNode):
                 f"file appears to be a numz-format DiT-only export missing "
                 f"the SeedVR2 conditioning tensors. {file_clause}"
                 f"Re-bake the file with ``positive_conditioning`` (58, 5120) "
-                f"and ``negative_conditioning`` (64, 5120) bf16 keys at top "
-                f"level, or load via CheckpointLoaderSimple from a bundled "
+                f"and ``negative_conditioning`` (64, 5120) keys at top level, "
+                f"or load via CheckpointLoaderSimple from a bundled "
                 f"checkpoint."
             )
 
