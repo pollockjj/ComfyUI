@@ -555,8 +555,9 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         # silently miss-load → all-black output.
         dit_config["mm_layers"] = 36
         dit_config["norm_eps"] = 1e-5
-        dit_config["qk_rope"] = None
-        dit_config["rope_type"] = None
+        dit_config["qk_rope"] = True
+        dit_config["rope_type"] = "rope3d"
+        dit_config["rope_dim"] = 64
         dit_config["mlp_type"] = "normal"
         return dit_config
     elif "{}blocks.36.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 7b

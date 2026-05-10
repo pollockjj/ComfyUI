@@ -438,6 +438,39 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
         return q, k
 
 
+class NaRotaryEmbedding3d(RotaryEmbedding3d):
+    def forward(
+        self,
+        q: torch.FloatTensor,
+        k: torch.FloatTensor,
+        shape: torch.LongTensor,
+        cache: Cache,
+    ) -> Tuple[
+        torch.FloatTensor,
+        torch.FloatTensor,
+    ]:
+        freqs = cache("rope_freqs_3d", lambda: self.get_freqs(shape))
+        freqs = freqs.to(device=q.device)
+        q = rearrange(q, "L h d -> h L d")
+        k = rearrange(k, "L h d -> h L d")
+        q = _apply_rope1_partial(q, freqs)
+        k = _apply_rope1_partial(k, freqs)
+        q = rearrange(q, "h L d -> L h d")
+        k = rearrange(k, "h L d -> L h d")
+        return q, k
+
+    @torch._dynamo.disable
+    def get_freqs(
+        self,
+        shape: torch.LongTensor,
+    ) -> torch.Tensor:
+        freq_list = []
+        for f, h, w in shape.tolist():
+            freqs = self.get_axial_freqs(f, h, w)
+            freq_list.append(freqs.view(-1, freqs.size(-1)))
+        return _to_flux_freqs_cis(torch.cat(freq_list, dim=0))
+
+
 class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
     def __init__(self, dim: int, rope_dim: int):
         super().__init__(dim, rope_dim)
@@ -673,9 +706,10 @@ class MMModule(nn.Module):
         return vid, txt
 
 def get_na_rope(rope_type: Optional[str], dim: int):
-    # 7b doesn't use rope
     if rope_type is None:
         return None
+    if rope_type == "rope3d":
+        return NaRotaryEmbedding3d(dim=dim)
     if rope_type == "mmrope3d":
         return NaMMRotaryEmbedding3d(dim=dim)
 
@@ -1373,7 +1407,7 @@ class NaDiT(nn.Module):
                     window_method=window_method[i],
                     temporal_window_size=temporal_window_size[i],
                     temporal_shifted=temporal_shifted[i],
-                    is_last_layer=(i == num_layers - 1),
+                    is_last_layer=(i == num_layers - 1) and not self._7b_version,
                     rope_type = rope_type,
                     shared_weights=not (
                         (i < mm_layers) if isinstance(mm_layers, int) else mm_layers[i]
