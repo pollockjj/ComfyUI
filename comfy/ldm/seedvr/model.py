@@ -14,6 +14,19 @@ import math
 from comfy.ldm.flux.math import apply_rope1
 import numbers
 
+def _torch_float8_types():
+    return tuple(
+        getattr(torch, name)
+        for name in (
+            "float8_e4m3fn",
+            "float8_e4m3fnuz",
+            "float8_e5m2",
+            "float8_e5m2fnuz",
+            "float8_e8m0fnu",
+        )
+        if hasattr(torch, name)
+    )
+
 class CustomRMSNorm(nn.Module):
 
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
@@ -1161,17 +1174,7 @@ class AdaSingle(nn.Module):
         self.layers = layers
 
         randn_kwargs = {"device": device}
-        fp8_types = tuple(
-            getattr(torch, name)
-            for name in (
-                "float8_e4m3fn",
-                "float8_e4m3fnuz",
-                "float8_e5m2",
-                "float8_e5m2fnuz",
-                "float8_e8m0fnu",
-            )
-            if hasattr(torch, name)
-        )
+        fp8_types = _torch_float8_types()
         if dtype is not None and dtype not in fp8_types:
             randn_kwargs["dtype"] = dtype
 
@@ -1217,8 +1220,8 @@ class AdaSingle(nn.Module):
             getattr(self, f"{layer}_gate", None),
         )
 
-        if hasattr(torch, 'float8_e4m3fn'):
-            fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+        fp8_types = _torch_float8_types()
+        if fp8_types:
             target_dtype = hid.dtype
 
             if shiftB is not None and shiftB.dtype in fp8_types:

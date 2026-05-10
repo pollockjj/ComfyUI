@@ -134,3 +134,19 @@ def test_adasingle_init_uses_default_dtype_for_fp8():
     assert ada.test_shift.dtype is torch.float32
     assert ada.test_scale.dtype is torch.float32
     assert ada.test_gate.dtype is torch.float32
+
+
+def test_adasingle_init_and_forward_share_fp8_dtype_set():
+    expected = {
+        getattr(torch, name)
+        for name in (
+            "float8_e4m3fn",
+            "float8_e4m3fnuz",
+            "float8_e5m2",
+            "float8_e5m2fnuz",
+            "float8_e8m0fnu",
+        )
+        if hasattr(torch, name)
+    }
+
+    assert set(seedvr_model._torch_float8_types()) == expected
