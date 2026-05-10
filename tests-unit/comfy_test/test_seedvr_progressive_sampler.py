@@ -34,7 +34,6 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.sample  # noqa: E402
-import comfy_extras.nodes_seedvr as nodes_seedvr_mod  # noqa: E402
 from comfy_extras.nodes_seedvr import (  # noqa: E402
     SeedVR2ProgressiveSampler,
     _blend_overlap_region,
@@ -317,6 +316,65 @@ def test_t2_per_chunk_cond_slice_matches_chunk_latent_t():
 
     assert cond_shapes[0] == ((1, _COND_C * 6, 8, 8), (1, _COND_C * 6, 8, 8))
     assert cond_shapes[1] == ((1, _COND_C * 5, 8, 8), (1, _COND_C * 5, 8, 8))
+
+
+def test_t2_standard_noise_mask_passed_through_for_sampler_expansion():
+    """Standard ``SetLatentNoiseMask`` masks are ``(B, 1, H, W)`` and
+    must be forwarded unchanged so KSampler can expand them to each
+    chunk's latent shape.
+    """
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    latent["noise_mask"] = torch.ones(1, 1, 8, 8)
+    mask_shapes = []
+
+    def _record_mask(model, noise, steps, cfg, sampler_name, scheduler,
+                     positive, negative, latent_image, denoise=1.0,
+                     noise_mask=None, seed=None):
+        mask_shapes.append(tuple(noise_mask.shape))
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_record_mask), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert mask_shapes == [(1, 1, 8, 8), (1, 1, 8, 8)]
+
+
+def test_t2_collapsed_noise_mask_sliced_per_chunk():
+    """A pre-expanded collapsed ``(B, 16*T, H, W)`` noise mask must be
+    sliced along latent T to match each chunk before sampling.
+    """
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    latent["noise_mask"] = torch.ones_like(latent["samples"])
+    mask_shapes = []
+
+    def _record_mask(model, noise, steps, cfg, sampler_name, scheduler,
+                     positive, negative, latent_image, denoise=1.0,
+                     noise_mask=None, seed=None):
+        mask_shapes.append(tuple(noise_mask.shape))
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_record_mask), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert mask_shapes == [(1, _LAT_C * 6, 8, 8), (1, _LAT_C * 5, 8, 8)]
 
 
 # ---------------------------------------------------------------------------

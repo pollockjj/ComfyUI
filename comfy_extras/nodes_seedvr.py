@@ -415,6 +415,23 @@ def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
     return new_list
 
 
+def _slice_seedvr2_noise_mask_along_t(noise_mask: torch.Tensor,
+                                      samples_4d: torch.Tensor,
+                                      t_start: int,
+                                      t_end: int):
+    """Slice collapsed SeedVR2 masks and preserve standard masks.
+
+    ``SetLatentNoiseMask`` produces ``(B, 1, H, W)`` masks that KSampler
+    expands to the latent shape. Only masks already expanded to the full
+    collapsed ``(B, 16*T, H, W)`` shape need temporal slicing here.
+    """
+    if noise_mask.ndim == samples_4d.ndim and noise_mask.shape[1] == samples_4d.shape[1]:
+        return _slice_collapsed_4d_along_t(
+            noise_mask, t_start, t_end, _SEEDVR2_LATENT_CHANNELS,
+        )
+    return noise_mask
+
+
 def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
     """Concatenate a list of SeedVR2-style collapsed 4D tensors
     ``(B, channels*T_i, H, W)`` along the latent T axis. Each chunk is
@@ -534,7 +551,7 @@ def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
         chunk_5d.append((t_start, t_end, ch.view(B, channels, T, H, W)))
 
     if overlap_latent == 0:
-        # Fast path: pure concat. Asserts that chunks are contiguous.
+        # Fast path: pure concat in the caller-provided chunk order.
         return _concat_chunks_along_t(
             [c.view(c.shape[0], channels * c.shape[2], c.shape[3], c.shape[4])
              for _, _, c in chunk_5d],
@@ -665,9 +682,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                      "adjacent chunks; blended with a "
                                      "Hann window (linear for overlap "
                                      "< 3). 0 = no blend, pure concat. "
-                                     "Must be < frames_per_chunk in "
-                                     "latent units; 1 latent frame "
-                                     "corresponds to ~4 pixel frames."),
+                                     "Must be < chunk_latent derived "
+                                     "from frames_per_chunk; 1 latent "
+                                     "frame corresponds to ~4 pixel "
+                                     "frames."),
             ],
             outputs=[io.Latent.Output()],
         )
@@ -774,14 +792,12 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 negative, chunk_start, chunk_end,
             )
 
-            # Per-chunk noise_mask slice: when present, the mask shares the
-            # latent's collapsed (B, 16*T, H, W) shape and must be sliced in
-            # the same way so the inpaint mask aligns to the chunked latent.
+            # Per-chunk noise_mask handling: standard masks are passed through
+            # for KSampler expansion; pre-expanded collapsed masks are sliced.
             chunk_noise_mask = None
             if noise_mask is not None:
-                chunk_noise_mask = _slice_collapsed_4d_along_t(
-                    noise_mask, chunk_start, chunk_end,
-                    _SEEDVR2_LATENT_CHANNELS,
+                chunk_noise_mask = _slice_seedvr2_noise_mask_along_t(
+                    noise_mask, samples_4d, chunk_start, chunk_end,
                 )
 
             chunk_samples = comfy.sample.sample(
