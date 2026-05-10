@@ -101,3 +101,36 @@ def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
 
     torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
     torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
+
+
+def test_adasingle_init_preserves_supported_dtype():
+    ada = seedvr_model.AdaSingle(
+        dim=4,
+        emb_dim=24,
+        layers=["test"],
+        modes=["in", "out"],
+        device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    assert ada.test_shift.dtype is torch.bfloat16
+    assert ada.test_scale.dtype is torch.bfloat16
+    assert ada.test_gate.dtype is torch.bfloat16
+
+
+def test_adasingle_init_uses_default_dtype_for_fp8():
+    if not hasattr(torch, "float8_e4m3fn"):
+        return
+
+    ada = seedvr_model.AdaSingle(
+        dim=4,
+        emb_dim=24,
+        layers=["test"],
+        modes=["in", "out"],
+        device="cpu",
+        dtype=torch.float8_e4m3fn,
+    )
+
+    assert ada.test_shift.dtype is torch.float32
+    assert ada.test_scale.dtype is torch.float32
+    assert ada.test_gate.dtype is torch.float32

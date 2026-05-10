@@ -1159,19 +1159,32 @@ class AdaSingle(nn.Module):
         self.dim = dim
         self.emb_dim = emb_dim
         self.layers = layers
+
+        randn_kwargs = {"device": device}
+        fp8_types = tuple(
+            getattr(torch, name)
+            for name in (
+                "float8_e4m3fn",
+                "float8_e4m3fnuz",
+                "float8_e5m2",
+                "float8_e5m2fnuz",
+                "float8_e8m0fnu",
+            )
+            if hasattr(torch, name)
+        )
+        if dtype is not None and dtype not in fp8_types:
+            randn_kwargs["dtype"] = dtype
+
         for l in layers:
             if "in" in modes:
-                # Passing ``dtype=`` here would break fp8 weight loads:
-                # CPU has no ``normal_kernel_cpu`` for
-                # ``Float8_e4m3fn``. Keep the requested device, but use
-                # torch.randn's default dtype so construction succeeds
-                # before load_state_dict overwrites these parameters.
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, device=device) / dim**0.5))
+                # Passing fp8 ``dtype=`` here would break CPU weight
+                # loads: CPU has no ``normal_kernel_cpu`` for fp8.
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
                 self.register_parameter(
-                    f"{l}_scale", nn.Parameter(torch.randn(dim, device=device) / dim**0.5 + 1)
+                    f"{l}_scale", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5 + 1)
                 )
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, device=device) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
 
     def forward(
         self,
