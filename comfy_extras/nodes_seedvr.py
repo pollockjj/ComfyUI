@@ -366,10 +366,12 @@ def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
     """Slice a SeedVR2-style collapsed 4D tensor ``(B, channels*T, H, W)``
     along the latent T axis, returning ``(B, channels*(t_end - t_start), H, W)``.
 
-    Reshape -> slice -> ``.contiguous()`` -> re-collapse. The
+    Reshape -> slice -> ``.contiguous()`` -> re-collapse. ``reshape`` is
+    used for the un-collapse so non-contiguous incoming tensors from
+    cropping or slicing nodes are accepted. The
     ``.contiguous()`` is mandatory: T-axis slicing of a 5D tensor produces a
-    non-contiguous view, and the subsequent ``view(...)`` re-collapse only
-    accepts contiguous storage.
+    non-contiguous view, and the subsequent re-collapse requires contiguous
+    storage.
     """
     B, CT, H, W = tensor_4d.shape
     if CT % channels != 0:
@@ -384,8 +386,8 @@ def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
             f"range for T={T}."
         )
     new_T = t_end - t_start
-    sliced = tensor_4d.view(B, channels, T, H, W)[:, :, t_start:t_end, :, :].contiguous()
-    return sliced.view(B, channels * new_T, H, W)
+    sliced = tensor_4d.reshape(B, channels, T, H, W)[:, :, t_start:t_end, :, :].contiguous()
+    return sliced.reshape(B, channels * new_T, H, W)
 
 
 def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
@@ -405,12 +407,14 @@ def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
     new_list = []
     for entry in cond_list:
         text_cond, options = entry[0], entry[1]
+        if "condition" not in options:
+            new_list.append(entry)
+            continue
         new_options = options.copy()
-        if "condition" in new_options:
-            new_options["condition"] = _slice_collapsed_4d_along_t(
-                new_options["condition"], t_start, t_end,
-                _SEEDVR2_CONDITION_CHANNELS,
-            )
+        new_options["condition"] = _slice_collapsed_4d_along_t(
+            new_options["condition"], t_start, t_end,
+            _SEEDVR2_CONDITION_CHANNELS,
+        )
         new_list.append([text_cond, new_options])
     return new_list
 
@@ -448,10 +452,10 @@ def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
                 f"channel dim {CT} not divisible by channels={channels}."
             )
         T = CT // channels
-        fives.append(ch.view(B, channels, T, H, W))
+        fives.append(ch.reshape(B, channels, T, H, W))
     cat = torch.cat(fives, dim=2).contiguous()
     B, C, T_total, H, W = cat.shape
-    return cat.view(B, C * T_total, H, W)
+    return cat.reshape(B, C * T_total, H, W)
 
 
 def _hann_blend_weights_1d(overlap: int, device, dtype) -> torch.Tensor:
@@ -548,12 +552,12 @@ def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
                 f"_concat_chunks_with_overlap_blend: chunk T={T} mismatches "
                 f"declared range [{t_start}:{t_end}]."
             )
-        chunk_5d.append((t_start, t_end, ch.view(B, channels, T, H, W)))
+        chunk_5d.append((t_start, t_end, ch.reshape(B, channels, T, H, W)))
 
     if overlap_latent == 0:
         # Fast path: pure concat in the caller-provided chunk order.
         return _concat_chunks_along_t(
-            [c.view(c.shape[0], channels * c.shape[2], c.shape[3], c.shape[4])
+            [c.reshape(c.shape[0], channels * c.shape[2], c.shape[3], c.shape[4])
              for _, _, c in chunk_5d],
             channels,
         )
@@ -596,7 +600,7 @@ def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
             result[:, :, cs:ce, :, :] = ct_5d
         filled_until = ce
 
-    return result.contiguous().view(B, channels * T_total, H, W)
+    return result.contiguous().reshape(B, channels * T_total, H, W)
 
 
 def _run_standard_sample(model, seed: int, steps: int, cfg: float,

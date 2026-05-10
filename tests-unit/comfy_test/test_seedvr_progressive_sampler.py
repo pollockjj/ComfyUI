@@ -127,6 +127,24 @@ def test_slice_collapsed_preserves_per_frame_values():
         assert torch.equal(out_5d[:, :, i], t5[:, :, src_t])
 
 
+def test_slice_collapsed_4d_along_t_accepts_non_contiguous_input():
+    """Collapsed latents may arrive from slicing/cropping views; temporal
+    slicing must not require contiguous input storage.
+    """
+    B, T, H, W = 1, 5, 4, 4
+    wide = torch.arange(
+        B * _LAT_C * T * H * W * 2, dtype=torch.float32,
+    ).reshape(B, _LAT_C * T, H, W * 2)
+    src = wide[:, :, :, ::2]
+    assert not src.is_contiguous()
+
+    out = _slice_collapsed_4d_along_t(src, 1, 4, _LAT_C)
+    expected = src.reshape(B, _LAT_C, T, H, W)[:, :, 1:4].contiguous()
+    expected = expected.reshape(B, _LAT_C * 3, H, W)
+
+    assert torch.equal(out, expected)
+
+
 def test_concat_chunks_along_t_roundtrip_recovers_source():
     """Slicing a tensor and concatenating the slices must reproduce the
     source byte-identically (within tensor equality).
@@ -140,6 +158,35 @@ def test_concat_chunks_along_t_roundtrip_recovers_source():
     c = _slice_collapsed_4d_along_t(t, 5, 7, _LAT_C)
     cat = _concat_chunks_along_t([a, b, c], _LAT_C)
     assert torch.equal(cat, t)
+
+
+def test_concat_chunks_along_t_accepts_non_contiguous_chunks():
+    """Concatenation must accept non-contiguous chunk tensors returned by
+    sampling or upstream tensor views.
+    """
+    B, H, W = 1, 4, 4
+    wide_a = torch.arange(
+        B * _LAT_C * 2 * H * W * 2, dtype=torch.float32,
+    ).reshape(B, _LAT_C * 2, H, W * 2)
+    wide_b = torch.arange(
+        B * _LAT_C * 3 * H * W * 2, dtype=torch.float32,
+    ).reshape(B, _LAT_C * 3, H, W * 2) + 10000.0
+    chunk_a = wide_a[:, :, :, ::2]
+    chunk_b = wide_b[:, :, :, ::2]
+    assert not chunk_a.is_contiguous()
+    assert not chunk_b.is_contiguous()
+
+    out = _concat_chunks_along_t([chunk_a, chunk_b], _LAT_C)
+    expected = torch.cat(
+        [
+            chunk_a.reshape(B, _LAT_C, 2, H, W),
+            chunk_b.reshape(B, _LAT_C, 3, H, W),
+        ],
+        dim=2,
+    ).reshape(B, _LAT_C * 5, H, W)
+
+    assert tuple(out.shape) == (B, _LAT_C * 5, H, W)
+    assert torch.equal(out, expected)
 
 
 def test_slice_seedvr2_cond_along_t_passes_other_keys_unchanged():
@@ -168,6 +215,7 @@ def test_slice_seedvr2_cond_passes_through_entries_without_condition_key():
     text = torch.zeros(1, 4, 32)
     cond_list = [[text, {"unrelated": 1}]]
     out = _slice_seedvr2_cond_along_t(cond_list, 0, 1)
+    assert out[0] is cond_list[0]
     assert out[0][1] == {"unrelated": 1}
 
 
