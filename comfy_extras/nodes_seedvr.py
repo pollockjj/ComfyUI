@@ -6,6 +6,8 @@ from einops import rearrange
 
 import gc
 import comfy.model_management
+import comfy.sample
+import comfy.samplers
 from comfy.ldm.seedvr.vae import tiled_vae
 
 import torch.nn.functional as F
@@ -350,12 +352,485 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         return io.NodeOutput(positive, negative, {"samples": noises})
 
+# SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
+# stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent
+# (C=16) and the per-frame condition tensor (C=17 = 16 latent + 1 mask), as
+# required by ``NaDiT.forward`` which un-collapses via
+# ``view(B, 16, -1, H, W)`` and ``view(B, 17, -1, H, W)`` respectively.
+_SEEDVR2_LATENT_CHANNELS = 16
+_SEEDVR2_CONDITION_CHANNELS = 17
+
+
+def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
+                                 t_end: int, channels: int) -> torch.Tensor:
+    """Slice a SeedVR2-style collapsed 4D tensor ``(B, channels*T, H, W)``
+    along the latent T axis, returning ``(B, channels*(t_end - t_start), H, W)``.
+
+    Reshape -> slice -> ``.contiguous()`` -> re-collapse. ``reshape`` is
+    used for the un-collapse so non-contiguous incoming tensors from
+    cropping or slicing nodes are accepted. The
+    ``.contiguous()`` is mandatory: T-axis slicing of a 5D tensor produces a
+    non-contiguous view, and the subsequent re-collapse requires contiguous
+    storage.
+    """
+    B, CT, H, W = tensor_4d.shape
+    if CT % channels != 0:
+        raise ValueError(
+            f"_slice_collapsed_4d_along_t: collapsed channel dim {CT} is not "
+            f"divisible by channels={channels}; tensor shape {tuple(tensor_4d.shape)}."
+        )
+    T = CT // channels
+    if not (0 <= t_start < t_end <= T):
+        raise ValueError(
+            f"_slice_collapsed_4d_along_t: slice [{t_start}:{t_end}] out of "
+            f"range for T={T}."
+        )
+    new_T = t_end - t_start
+    sliced = tensor_4d.reshape(B, channels, T, H, W)[:, :, t_start:t_end, :, :].contiguous()
+    return sliced.reshape(B, channels * new_T, H, W)
+
+
+def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
+    """Build a new SeedVR2 conditioning list with the per-frame ``condition``
+    tensor sliced along the latent T axis.
+
+    SeedVR2 conditioning entries have the shape
+    ``[text_cond_tensor, options_dict]`` where ``options_dict["condition"]``
+    is a 4D collapsed ``(B, 17*T, H, W)`` tensor; the text tensor itself has
+    no temporal axis and is passed through unchanged. Other keys in the
+    options dict (controlnets, etc.) are also passed through unchanged. If
+    an entry has no ``"condition"`` key, the entry is forwarded verbatim.
+
+    A new list of ``[text_cond, new_options_dict]`` pairs is returned; the
+    original ``cond_list`` and its options dicts are not mutated.
+    """
+    new_list = []
+    for entry in cond_list:
+        text_cond, options = entry[0], entry[1]
+        if "condition" not in options:
+            new_list.append(entry)
+            continue
+        new_options = options.copy()
+        new_options["condition"] = _slice_collapsed_4d_along_t(
+            new_options["condition"], t_start, t_end,
+            _SEEDVR2_CONDITION_CHANNELS,
+        )
+        new_list.append([text_cond, new_options])
+    return new_list
+
+
+def _slice_seedvr2_noise_mask_along_t(noise_mask: torch.Tensor,
+                                      samples_4d: torch.Tensor,
+                                      t_start: int,
+                                      t_end: int):
+    """Slice collapsed SeedVR2 masks and preserve standard masks.
+
+    ``SetLatentNoiseMask`` produces ``(B, 1, H, W)`` masks that KSampler
+    expands to the latent shape. Only masks already expanded to the full
+    collapsed ``(B, 16*T, H, W)`` shape need temporal slicing here.
+    """
+    if noise_mask.ndim == samples_4d.ndim and noise_mask.shape[1] == samples_4d.shape[1]:
+        return _slice_collapsed_4d_along_t(
+            noise_mask, t_start, t_end, _SEEDVR2_LATENT_CHANNELS,
+        )
+    return noise_mask
+
+
+def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
+    """Concatenate a list of SeedVR2-style collapsed 4D tensors
+    ``(B, channels*T_i, H, W)`` along the latent T axis. Each chunk is
+    un-collapsed to 5D, concatenated on ``dim=2``, then re-collapsed to 4D.
+    """
+    if len(chunks_4d) == 0:
+        raise ValueError("_concat_chunks_along_t: empty chunk list.")
+    fives = []
+    for ch in chunks_4d:
+        B, CT, H, W = ch.shape
+        if CT % channels != 0:
+            raise ValueError(
+                f"_concat_chunks_along_t: chunk shape {tuple(ch.shape)} "
+                f"channel dim {CT} not divisible by channels={channels}."
+            )
+        T = CT // channels
+        fives.append(ch.reshape(B, channels, T, H, W))
+    cat = torch.cat(fives, dim=2).contiguous()
+    B, C, T_total, H, W = cat.shape
+    return cat.reshape(B, C * T_total, H, W)
+
+
+def _hann_blend_weights_1d(overlap: int, device, dtype) -> torch.Tensor:
+    """Build a 1D crossfade weight tensor of length ``overlap`` for the
+    *previous* chunk's contribution; the current chunk's weight is
+    ``1 - w_prev``.
+
+    Mirrors the numz ``blend_overlapping_frames`` shape
+    (AInVFX/numz fork ``src/core/generation_utils.py``,
+    ``blend_overlapping_frames``): a Hann window with a ``[1/3, 2/3]``
+    dead-band when ``overlap >= 3``, and a plain linear ramp when
+    ``overlap < 3`` (the dead-band would collapse the transition for
+    very small overlap counts). The numz reference operates on
+    pixel-space tensors ``[overlap, H, W, C]``; this 1D form is
+    reshaped by the caller to broadcast across the latent's
+    ``(B, C, T_overlap, H, W)`` axes.
+    """
+    if overlap < 1:
+        raise ValueError(
+            f"_hann_blend_weights_1d: overlap must be >= 1; got {overlap}."
+        )
+    if overlap >= 3:
+        t = torch.linspace(0.0, 1.0, steps=overlap, device=device, dtype=dtype)
+        blend_start = 1.0 / 3.0
+        blend_end = 2.0 / 3.0
+        u = ((t - blend_start) / (blend_end - blend_start)).clamp(0.0, 1.0)
+        return 0.5 + 0.5 * torch.cos(torch.pi * u)
+    return torch.linspace(1.0, 0.0, steps=overlap, device=device, dtype=dtype)
+
+
+def _blend_overlap_region(prev_tail_5d: torch.Tensor,
+                          cur_head_5d: torch.Tensor) -> torch.Tensor:
+    """Blend two 5D ``(B, C, T_overlap, H, W)`` tensors of equal shape
+    using a 1D Hann/linear ramp along the T axis. ``prev_tail_5d``
+    receives the descending weight; ``cur_head_5d`` receives
+    ``1 - w_prev``.
+
+    The caller is responsible for ensuring both inputs have identical
+    shape and dtype/device.
+    """
+    if prev_tail_5d.shape != cur_head_5d.shape:
+        raise ValueError(
+            f"_blend_overlap_region: shape mismatch "
+            f"prev {tuple(prev_tail_5d.shape)} vs "
+            f"cur {tuple(cur_head_5d.shape)}."
+        )
+    overlap = int(prev_tail_5d.shape[2])
+    w_prev_1d = _hann_blend_weights_1d(
+        overlap, prev_tail_5d.device, prev_tail_5d.dtype,
+    )
+    # Reshape to (1, 1, overlap, 1, 1) for broadcast across B, C, H, W.
+    w_prev = w_prev_1d.view(1, 1, overlap, 1, 1)
+    w_cur = 1.0 - w_prev
+    return prev_tail_5d * w_prev + cur_head_5d * w_cur
+
+
+def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
+                                      overlap_latent: int) -> torch.Tensor:
+    """Concatenate temporally-overlapping chunks back into a single
+    collapsed 4D tensor, blending overlap regions with a Hann/linear
+    crossfade.
+
+    ``chunk_specs`` is a list of ``(t_start, t_end, chunk_4d)`` tuples
+    in source-latent T coordinates. ``overlap_latent == 0`` is a fast
+    path that delegates to plain concatenation (and produces output
+    bit-identical to ``_concat_chunks_along_t`` of the same chunks).
+
+    The blend at each pair of adjacent chunks acts on the actual
+    overlap region width ``min(prev_end - cur_start, current chunk
+    length)``, which may be smaller than ``overlap_latent`` when the
+    final chunk is a runt shorter than the configured overlap.
+    """
+    if len(chunk_specs) == 0:
+        raise ValueError("_concat_chunks_with_overlap_blend: empty chunk list.")
+    if overlap_latent < 0:
+        raise ValueError(
+            f"_concat_chunks_with_overlap_blend: overlap_latent must be "
+            f">= 0; got {overlap_latent}."
+        )
+
+    # Validate channel divisibility once and capture per-chunk T.
+    chunk_5d = []
+    for t_start, t_end, ch in chunk_specs:
+        B, CT, H, W = ch.shape
+        if CT % channels != 0:
+            raise ValueError(
+                f"_concat_chunks_with_overlap_blend: chunk shape "
+                f"{tuple(ch.shape)} channel dim {CT} not divisible "
+                f"by channels={channels}."
+            )
+        T = CT // channels
+        if t_end - t_start != T:
+            raise ValueError(
+                f"_concat_chunks_with_overlap_blend: chunk T={T} mismatches "
+                f"declared range [{t_start}:{t_end}]."
+            )
+        chunk_5d.append((t_start, t_end, ch.reshape(B, channels, T, H, W)))
+
+    if overlap_latent == 0:
+        # Fast path: pure concat in the caller-provided chunk order.
+        return _concat_chunks_along_t(
+            [c.reshape(c.shape[0], channels * c.shape[2], c.shape[3], c.shape[4])
+             for _, _, c in chunk_5d],
+            channels,
+        )
+
+    T_total = max(t_end for _, t_end, _ in chunk_5d)
+    first_5d = chunk_5d[0][2]
+    B = first_5d.shape[0]
+    H = first_5d.shape[3]
+    W = first_5d.shape[4]
+    result = torch.empty(
+        (B, channels, T_total, H, W),
+        device=first_5d.device, dtype=first_5d.dtype,
+    )
+    filled_until = 0
+    for i, (cs, ce, ct_5d) in enumerate(chunk_5d):
+        chunk_T = int(ct_5d.shape[2])
+        if i == 0:
+            result[:, :, cs:ce, :, :] = ct_5d
+            filled_until = ce
+            continue
+        # Overlap region width is bounded by both the previous fill
+        # frontier and the current chunk's actual length (for runt
+        # final chunks shorter than the configured overlap).
+        overlap_len = min(filled_until - cs, chunk_T)
+        if overlap_len > 0:
+            prev_tail = result[:, :, cs:cs + overlap_len, :, :].contiguous()
+            cur_head = ct_5d[:, :, :overlap_len, :, :].contiguous()
+            blended = _blend_overlap_region(prev_tail, cur_head)
+            result[:, :, cs:cs + overlap_len, :, :] = blended
+            tail_start = cs + overlap_len
+            tail_end = ce
+            if tail_end > tail_start:
+                result[:, :, tail_start:tail_end, :, :] = (
+                    ct_5d[:, :, overlap_len:, :, :]
+                )
+        else:
+            # Disjoint chunks (overlap_latent set but this pair did not
+            # actually overlap, e.g. step_latent equal to chunk_latent
+            # in a degenerate config). Treat as concat.
+            result[:, :, cs:ce, :, :] = ct_5d
+        filled_until = ce
+
+    return result.contiguous().reshape(B, channels * T_total, H, W)
+
+
+def _run_standard_sample(model, seed: int, steps: int, cfg: float,
+                         sampler_name: str, scheduler: str,
+                         positive, negative, latent_image: dict,
+                         denoise: float) -> dict:
+    """Single-shot delegation that mirrors the standard ``common_ksampler``
+    flow (``nodes.py:common_ksampler``): generate noise from seed, run
+    ``comfy.sample.sample``, return a latent dict. Used by the
+    ProgressiveSampler short-circuit when the full sequence fits in one
+    chunk so chunking introduces no overhead for small videos.
+    """
+    samples_in = latent_image["samples"]
+    samples_in = comfy.sample.fix_empty_latent_channels(
+        model, samples_in, latent_image.get("downscale_ratio_spacial", None),
+    )
+    batch_inds = latent_image.get("batch_index", None)
+    noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
+    noise_mask = latent_image.get("noise_mask", None)
+    samples = comfy.sample.sample(
+        model, noise, steps, cfg, sampler_name, scheduler,
+        positive, negative, samples_in,
+        denoise=denoise, noise_mask=noise_mask, seed=seed,
+    )
+    out = latent_image.copy()
+    out.pop("downscale_ratio_spacial", None)
+    out["samples"] = samples
+    return out
+
+
+class SeedVR2ProgressiveSampler(io.ComfyNode):
+    """Sequential temporal chunking sampler for SeedVR2 native.
+
+    Drop-in replacement for ``KSampler`` in SeedVR2 native workflows that
+    OOM on long sequences. The latent enters the sampler in SeedVR2's
+    collapsed form ``(B, 16*T, H, W)`` (collapsed by ``SeedVR2Conditioning``
+    at ``rearrange(b c t h w -> b (c t) h w)``); this node slices that
+    tensor along the temporal axis, runs the configured inner sampler
+    sequentially per chunk against the standard ``comfy.sample.sample``
+    entry point, and concatenates per-chunk outputs back into a single
+    ``(B, 16*T_total, H, W)`` latent.
+
+    Slice 1 scope: chunking with no overlap. ``frames_per_chunk`` is
+    expressed in pixel-frame units to match the SeedVR2 4n+1 constraint
+    enforced upstream by ``cut_videos`` and the VAE's
+    ``temporal_downsample_factor=4``. A pixel chunk size ``F`` maps to
+    ``(F - 1) // 4 + 1`` latent-frame chunks.
+
+    Determinism contract: a single noise tensor is generated once from
+    the user seed and sliced per chunk (rather than re-seeding each
+    chunk), so a workflow that fits in a single chunk produces output
+    identical to a workflow that fits in N chunks at the same seed,
+    modulo the inherent T-axis chunk-boundary independence of the model.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SeedVR2ProgressiveSampler",
+            category="sampling",
+            inputs=[
+                io.Model.Input("model"),
+                io.Int.Input("seed", default=0, min=0,
+                             max=0xffffffffffffffff,
+                             control_after_generate=True),
+                io.Int.Input("steps", default=20, min=1, max=10000),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=100.0,
+                               step=0.1, round=0.01),
+                io.Combo.Input("sampler_name",
+                               options=comfy.samplers.SAMPLER_NAMES),
+                io.Combo.Input("scheduler",
+                               options=comfy.samplers.SCHEDULER_NAMES),
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Latent.Input("latent_image"),
+                io.Float.Input("denoise", default=1.0, min=0.0, max=1.0,
+                               step=0.01),
+                io.Int.Input("frames_per_chunk", default=21, min=1,
+                             max=16384, step=4),
+                io.Int.Input("temporal_overlap", default=0, min=0,
+                             max=16384,
+                             tooltip="Latent-frame overlap between "
+                                     "adjacent chunks; blended with a "
+                                     "Hann window (linear for overlap "
+                                     "< 3). 0 = no blend, pure concat. "
+                                     "Must be < chunk_latent derived "
+                                     "from frames_per_chunk; 1 latent "
+                                     "frame corresponds to ~4 pixel "
+                                     "frames."),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, seed, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise,
+                frames_per_chunk, temporal_overlap) -> io.NodeOutput:
+        # 4n+1 validation in pixel-frame domain. The SeedVR2 native pipeline
+        # requires pixel-frame counts of the form 4n+1 (1, 5, 9, 13, ...),
+        # imposed at ``cut_videos`` upstream and propagated through the VAE's
+        # temporal_downsample_factor=4. Reject violations explicitly before
+        # any model invocation; a silent rounding would mis-align chunk
+        # boundaries with the 4n+1 lattice.
+        if frames_per_chunk < 1 or (frames_per_chunk - 1) % 4 != 0:
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: frames_per_chunk must be a "
+                f"4n+1 pixel-frame count (1, 5, 9, 13, 17, 21, ...); "
+                f"got {frames_per_chunk}."
+            )
+
+        samples_4d = latent_image["samples"]
+        samples_4d = comfy.sample.fix_empty_latent_channels(
+            model, samples_4d,
+            latent_image.get("downscale_ratio_spacial", None),
+        )
+        if samples_4d.ndim != 4:
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: expected 4D collapsed latent "
+                f"(B, 16*T, H, W); got shape {tuple(samples_4d.shape)}."
+            )
+        B, CT, H, W = samples_4d.shape
+        if CT % _SEEDVR2_LATENT_CHANNELS != 0:
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: collapsed channel dim {CT} is "
+                f"not divisible by SeedVR2 latent channels "
+                f"{_SEEDVR2_LATENT_CHANNELS}; latent does not appear to be "
+                f"SeedVR2-shaped."
+            )
+        T_latent = CT // _SEEDVR2_LATENT_CHANNELS
+        T_pixel = 4 * (T_latent - 1) + 1
+
+        # Short-circuit: total fits in one chunk -> standard path with no
+        # chunking overhead. Output of this branch is byte-identical to the
+        # built-in KSampler given the same (model, seed, steps, cfg,
+        # sampler_name, scheduler, positive, negative, latent_image,
+        # denoise) tuple, satisfying AC1.1.
+        if T_pixel <= frames_per_chunk:
+            return io.NodeOutput(_run_standard_sample(
+                model, seed, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise,
+            ))
+
+        # Map pixel chunk -> latent chunk. Each chunk's latent length is
+        # at most ``chunk_latent``; the final chunk may be a runt that
+        # is automatically 4n+1-aligned in the pixel domain by the
+        # T_pixel = 4*(T_latent-1) + 1 mapping (every positive integer
+        # T_latent corresponds to a valid 4n+1 pixel count).
+        chunk_latent = (frames_per_chunk - 1) // 4 + 1
+
+        # ``temporal_overlap`` is exposed in latent-frame units. The
+        # validation here keeps the chunk loop's stride strictly
+        # positive; without it a config like overlap >= chunk would
+        # produce zero or negative stride and an infinite loop.
+        if temporal_overlap < 0 or temporal_overlap >= chunk_latent:
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: temporal_overlap must be in "
+                f"[0, chunk_latent) latent frames where chunk_latent="
+                f"{chunk_latent} (derived from frames_per_chunk="
+                f"{frames_per_chunk}); got {temporal_overlap}."
+            )
+        step_latent = chunk_latent - temporal_overlap
+
+        # Generate full noise once from the user seed, then slice along T
+        # per chunk. Using one global noise tensor (rather than re-seeding
+        # per chunk) preserves seed-determinism across chunk-count
+        # variations: the same (seed, total T_latent) always produces the
+        # same noise samples regardless of how the work is partitioned.
+        batch_inds = latent_image.get("batch_index", None)
+        noise_full = comfy.sample.prepare_noise(samples_4d, seed, batch_inds)
+
+        noise_mask = latent_image.get("noise_mask", None)
+
+        chunk_specs = []
+        for chunk_start in range(0, T_latent, step_latent):
+            chunk_end = min(chunk_start + chunk_latent, T_latent)
+            if chunk_start >= chunk_end:
+                # The final iteration of a stride that lands exactly on
+                # T_latent produces a zero-length chunk; skip it.
+                break
+
+            samples_chunk = _slice_collapsed_4d_along_t(
+                samples_4d, chunk_start, chunk_end,
+                _SEEDVR2_LATENT_CHANNELS,
+            )
+            noise_chunk = _slice_collapsed_4d_along_t(
+                noise_full, chunk_start, chunk_end,
+                _SEEDVR2_LATENT_CHANNELS,
+            )
+            positive_chunk = _slice_seedvr2_cond_along_t(
+                positive, chunk_start, chunk_end,
+            )
+            negative_chunk = _slice_seedvr2_cond_along_t(
+                negative, chunk_start, chunk_end,
+            )
+
+            # Per-chunk noise_mask handling: standard masks are passed through
+            # for KSampler expansion; pre-expanded collapsed masks are sliced.
+            chunk_noise_mask = None
+            if noise_mask is not None:
+                chunk_noise_mask = _slice_seedvr2_noise_mask_along_t(
+                    noise_mask, samples_4d, chunk_start, chunk_end,
+                )
+
+            chunk_samples = comfy.sample.sample(
+                model, noise_chunk, steps, cfg, sampler_name, scheduler,
+                positive_chunk, negative_chunk, samples_chunk,
+                denoise=denoise, noise_mask=chunk_noise_mask, seed=seed,
+            )
+            chunk_specs.append((chunk_start, chunk_end, chunk_samples))
+
+            if chunk_end >= T_latent:
+                break
+
+        final = _concat_chunks_with_overlap_blend(
+            chunk_specs, _SEEDVR2_LATENT_CHANNELS, temporal_overlap,
+        )
+
+        out = latent_image.copy()
+        out.pop("downscale_ratio_spacial", None)
+        out["samples"] = final
+        return io.NodeOutput(out)
+
+
 class SeedVRExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SeedVR2Conditioning,
-            SeedVR2InputProcessing
+            SeedVR2InputProcessing,
+            SeedVR2ProgressiveSampler,
         ]
 
 async def comfy_entrypoint() -> SeedVRExtension:
