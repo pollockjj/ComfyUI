@@ -566,8 +566,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["vid_dim"] = 3072
         dit_config["heads"] = 24
         dit_config["num_layers"] = 36
-        # See the preceding 7B branch's ``mm_layers`` rationale.
-        dit_config["mm_layers"] = 36
+        # This checkpoint layout carries shared ``all.`` MMModule keys.
+        # Preserve the historical split: the initial blocks use separate
+        # vid/txt modules, later blocks use shared modules.
+        dit_config["mm_layers"] = 10
         dit_config["norm_eps"] = 1e-5
         dit_config["qk_rope"] = True
         dit_config["mlp_type"] = "normal"

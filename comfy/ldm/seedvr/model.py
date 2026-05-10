@@ -1161,21 +1161,17 @@ class AdaSingle(nn.Module):
         self.layers = layers
         for l in layers:
             if "in" in modes:
-                # ``torch.randn`` defaults to fp32 on CPU. Passing
-                # ``dtype=`` here would break fp8 weight loads — CPU
-                # has no ``normal_kernel_cpu`` for ``Float8_e4m3fn``
-                # so the model would fail to construct before
-                # ``load_state_dict`` could overwrite these parameters
-                # with the file's quantized values. The init values
-                # are unconditionally overwritten by load, so init
-                # precision is irrelevant beyond picking a kernel
-                # that exists on the target device.
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim) / dim**0.5))
+                # Passing ``dtype=`` here would break fp8 weight loads:
+                # CPU has no ``normal_kernel_cpu`` for
+                # ``Float8_e4m3fn``. Keep the requested device, but use
+                # torch.randn's default dtype so construction succeeds
+                # before load_state_dict overwrites these parameters.
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, device=device) / dim**0.5))
                 self.register_parameter(
-                    f"{l}_scale", nn.Parameter(torch.randn(dim) / dim**0.5 + 1)
+                    f"{l}_scale", nn.Parameter(torch.randn(dim, device=device) / dim**0.5 + 1)
                 )
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, device=device) / dim**0.5))
 
     def forward(
         self,
