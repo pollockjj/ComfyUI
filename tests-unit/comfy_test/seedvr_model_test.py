@@ -1,18 +1,17 @@
 """Regression tests for SeedVR2 conditioning split hardening.
 
-Tracks pollockjj/mydevelopment#109 (parent #101). Two bare ``except:``
-clauses in ``NaDiT.forward`` previously swallowed every failure mode
-on the (1) input-side text-conditioning split and (2) output-side
-positive/negative split, silently substituting wrong fallbacks: the
-``positive_conditioning`` buffer (registered via ``torch.empty(...)``
-so it holds **uninitialized** memory — NaN, garbage from prior heap
-allocations, or whatever was on the page; never guaranteed-zero) for
-the input, and the un-split tensor for the output. Real prompt-shape,
-dtype, OOM, and downstream tensor failures were re-routed to "no
-prompt supplied" with arbitrary buffer contents standing in for actual
-prompt embeddings, or to a wrong-order output, with no diagnostic.
+Two bare ``except:`` clauses in ``NaDiT.forward`` previously swallowed
+every failure mode on (1) the input-side text-conditioning split and
+(2) the output-side positive/negative split, silently substituting
+wrong fallbacks: the ``positive_conditioning`` buffer (which prior to
+explicit zero-init held **uninitialized** memory — NaN, residual heap
+contents, never guaranteed-zero) for the input, and the un-split
+tensor for the output. Real prompt-shape, dtype, OOM, and downstream
+tensor failures were re-routed to "no prompt supplied" with arbitrary
+buffer contents standing in for actual prompt embeddings, or to a
+wrong-order output, with no diagnostic.
 
-The fix on the deliverable (Comfy-Org/ComfyUI#11294 follow-up):
+The fix:
 
   1. Input-side: explicit absence predicate (``context is None`` or
      ``context.numel() == 0``) → fall back to ``positive_conditioning``
@@ -24,10 +23,9 @@ The fix on the deliverable (Comfy-Org/ComfyUI#11294 follow-up):
 
 The two blocks were extracted into named private methods on
 ``NaDiT`` (``_resolve_text_conditioning`` and ``_swap_pos_neg_halves``)
-so the regression evidence can drive the actual production code paths
+so the regression evidence drives the actual production code paths
 without standing up a full transformer. The methods are called from
-``forward`` exactly where the original try/except blocks lived; their
-bodies match the issue body's "Approach" verbatim.
+``forward`` exactly where the original try/except blocks lived.
 """
 
 from comfy.cli_args import args

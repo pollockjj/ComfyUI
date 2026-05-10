@@ -14,6 +14,19 @@ import math
 from comfy.ldm.flux.math import apply_rope1
 import numbers
 
+def _torch_float8_types():
+    return tuple(
+        getattr(torch, name)
+        for name in (
+            "float8_e4m3fn",
+            "float8_e4m3fnuz",
+            "float8_e5m2",
+            "float8_e5m2fnuz",
+            "float8_e8m0fnu",
+        )
+        if hasattr(torch, name)
+    )
+
 class CustomRMSNorm(nn.Module):
 
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
@@ -438,6 +451,39 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
         return q, k
 
 
+class NaRotaryEmbedding3d(RotaryEmbedding3d):
+    def forward(
+        self,
+        q: torch.FloatTensor,
+        k: torch.FloatTensor,
+        shape: torch.LongTensor,
+        cache: Cache,
+    ) -> Tuple[
+        torch.FloatTensor,
+        torch.FloatTensor,
+    ]:
+        freqs = cache("rope_freqs_3d", lambda: self.get_freqs(shape))
+        freqs = freqs.to(device=q.device)
+        q = rearrange(q, "L h d -> h L d")
+        k = rearrange(k, "L h d -> h L d")
+        q = _apply_rope1_partial(q, freqs)
+        k = _apply_rope1_partial(k, freqs)
+        q = rearrange(q, "h L d -> L h d")
+        k = rearrange(k, "h L d -> L h d")
+        return q, k
+
+    @torch._dynamo.disable
+    def get_freqs(
+        self,
+        shape: torch.LongTensor,
+    ) -> torch.Tensor:
+        freq_list = []
+        for f, h, w in shape.tolist():
+            freqs = self.get_axial_freqs(f, h, w)
+            freq_list.append(freqs.view(-1, freqs.size(-1)))
+        return _to_flux_freqs_cis(torch.cat(freq_list, dim=0))
+
+
 class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
     def __init__(self, dim: int, rope_dim: int):
         super().__init__(dim, rope_dim)
@@ -673,9 +719,10 @@ class MMModule(nn.Module):
         return vid, txt
 
 def get_na_rope(rope_type: Optional[str], dim: int):
-    # 7b doesn't use rope
     if rope_type is None:
         return None
+    if rope_type == "rope3d":
+        return NaRotaryEmbedding3d(dim=dim)
     if rope_type == "mmrope3d":
         return NaMMRotaryEmbedding3d(dim=dim)
 
@@ -1125,14 +1172,22 @@ class AdaSingle(nn.Module):
         self.dim = dim
         self.emb_dim = emb_dim
         self.layers = layers
+
+        randn_kwargs = {"device": device}
+        fp8_types = _torch_float8_types()
+        if dtype is not None and dtype not in fp8_types:
+            randn_kwargs["dtype"] = dtype
+
         for l in layers:
             if "in" in modes:
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, device=device, dtype=dtype) / dim**0.5))
+                # Passing fp8 ``dtype=`` here would break CPU weight
+                # loads: CPU has no ``normal_kernel_cpu`` for fp8.
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
                 self.register_parameter(
-                    f"{l}_scale", nn.Parameter(torch.randn(dim) / dim**0.5 + 1)
+                    f"{l}_scale", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5 + 1)
                 )
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, device=device, dtype=dtype) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
 
     def forward(
         self,
@@ -1165,8 +1220,8 @@ class AdaSingle(nn.Module):
             getattr(self, f"{layer}_gate", None),
         )
 
-        if hasattr(torch, 'float8_e4m3fn'):
-            fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+        fp8_types = _torch_float8_types()
+        if fp8_types:
             target_dtype = hid.dtype
 
             if shiftB is not None and shiftB.dtype in fp8_types:
@@ -1364,7 +1419,7 @@ class NaDiT(nn.Module):
                     window_method=window_method[i],
                     temporal_window_size=temporal_window_size[i],
                     temporal_shifted=temporal_shifted[i],
-                    is_last_layer=(i == num_layers - 1),
+                    is_last_layer=(i == num_layers - 1) and not self._7b_version,
                     rope_type = rope_type,
                     shared_weights=not (
                         (i < mm_layers) if isinstance(mm_layers, int) else mm_layers[i]
@@ -1415,14 +1470,10 @@ class NaDiT(nn.Module):
         return flatten([pos_cond, neg_cond])
 
     def _swap_pos_neg_halves(self, out):
-        # Both calls take dim=0 explicitly. ``Tensor.chunk`` and
-        # ``torch.cat`` default to dim=0, so this is functionally
-        # identical to the implicit form, but the contract here is
-        # specifically "split the BATCH axis into two halves and
-        # swap them" — making the dim load-bearing in source prevents
-        # silent drift if a future refactor reorders the tensor's
-        # axes (e.g. moves batch out of position 0). Copilot review on
-        # PR pollockjj/ComfyUI#33 (2026-05-04 17:38).
+        # ``dim=0`` is explicit on both calls. The contract is "split
+        # the batch axis into two halves and swap them"; making the
+        # axis load-bearing in source guards against silent drift if a
+        # future refactor reorders tensor axes.
         pos, neg = out.chunk(2, dim=0)
         return torch.cat([neg, pos], dim=0)
 

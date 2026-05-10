@@ -127,12 +127,11 @@ def _tiled_vae_4d_stub(latent, vae_model, **kwargs):
 
 
 def test_decode_tiled_sf_t1_single_frame_4d_output_normalized():
-    """Codex P2 / Copilot finding on PR #34: ``tiled_vae`` returns 4D
-    when ``temporal_downsample_factor == 1`` AND latent T == 1, so the
-    wrapper must re-add the temporal axis on the tiled branch before
-    the rearrange ``b c t h w -> (b t) c h w``. Pre-fix this case raised
-    an einops ``EinopsError`` because the patch removed the only
-    ``x.ndim == 4`` normalization.
+    """``tiled_vae`` returns 4D when ``temporal_downsample_factor == 1``
+    AND latent T == 1, so the wrapper must re-add the temporal axis on
+    the tiled branch before the rearrange ``b c t h w -> (b t) c h w``.
+    A pre-fix path raised an einops ``EinopsError`` here because the
+    only ``x.ndim == 4`` normalization had been removed.
     """
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
         vae_mod.VideoAutoencoderKLWrapper
@@ -153,9 +152,8 @@ def test_decode_tiled_sf_t1_single_frame_4d_output_normalized():
 
 
 def test_decode_tiled_sf_t1_b2_t1_per_sample_ordering():
-    """Copilot follow-up 3184602213 on PR #34: the tiled-path 4D->5D
-    normalization must preserve distinct batch/time axes for ``B>1``
-    too, not only ``B=1``. Mirrors
+    """The tiled-path 4D->5D normalization must preserve distinct
+    batch/time axes for ``B>1`` too, not only ``B=1``. Mirrors
     ``test_decode_b2_t1_fixes_batch_time_axes`` for the
     ``enable_tiling=True`` path with a wrapper whose
     ``temporal_downsample_factor == 1`` AND latent T == 1, where
