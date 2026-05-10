@@ -1,21 +1,25 @@
-"""Unit tests for ``comfy_extras.nodes_seedvr.SeedVR2ProgressiveSampler``
-(Slice 1 — chunking with no overlap).
+"""Unit tests for ``comfy_extras.nodes_seedvr.SeedVR2ProgressiveSampler``.
 
-Covers acceptance criteria T1-T4:
-- T1: Single-chunk degeneracy (``frames_per_chunk >= T_pixel``) takes the
+Covers:
+
+- Single-chunk degeneracy (``frames_per_chunk >= T_pixel``) takes the
   short-circuit path and calls ``comfy.sample.sample`` exactly once with
   the full unsliced latent.
-- T2: Multi-chunk path slices ``samples_4d`` along the latent T axis,
+- Multi-chunk path slices ``samples_4d`` along the latent T axis,
   invokes the inner sampler once per chunk, and concatenates results
   back into the same total ``(B, 16*T_total, H, W)`` shape with no NaN
   or Inf values.
-- T3: ``frames_per_chunk`` that violates the 4n+1 pixel-frame constraint
+- ``frames_per_chunk`` that violates the 4n+1 pixel-frame constraint
   is rejected with a typed ``ValueError`` before any model invocation.
-- T4: Determinism — given a fixed seed, slicing into N chunks runs each
-  chunk against the same global noise tensor (sliced per chunk), so the
-  same seed always produces the same final latent regardless of chunk
-  count, modulo the inherent T-axis chunk-boundary independence of the
-  model.
+- Determinism: given a fixed seed, slicing into N chunks runs each
+  chunk against the same global noise tensor (sliced per chunk), so
+  the same seed always produces the same final latent regardless of
+  chunk count, modulo the inherent T-axis chunk-boundary independence
+  of the model.
+- Latent-space Hann overlap blend: ``temporal_overlap=0`` produces
+  output byte-identical to the no-overlap path; small-overlap path
+  uses a linear ramp; Hann blend reconstructs source under a
+  passthrough inner sampler.
 
 The tests mock ``comfy.sample.sample``, ``comfy.sample.prepare_noise``,
 and ``comfy.sample.fix_empty_latent_channels`` so the slicing /
@@ -220,12 +224,12 @@ def test_slice_seedvr2_cond_passes_through_entries_without_condition_key():
 
 
 # ---------------------------------------------------------------------------
-# T1 — single-chunk degeneracy
+# Single-chunk degeneracy
 # ---------------------------------------------------------------------------
 
 
 def test_t1_single_chunk_degeneracy_calls_sampler_once_with_full_latent():
-    """AC1.1: When ``frames_per_chunk >= T_pixel``, the short-circuit
+    """When ``frames_per_chunk >= T_pixel``, the short-circuit
     standard path runs and calls ``comfy.sample.sample`` exactly once
     with the full unsliced ``(B, 16*T_total, H, W)`` latent.
     """
@@ -258,12 +262,12 @@ def test_t1_single_chunk_degeneracy_calls_sampler_once_with_full_latent():
 
 
 # ---------------------------------------------------------------------------
-# T2 — multi-chunk path
+# Multi-chunk path
 # ---------------------------------------------------------------------------
 
 
 def test_t2_two_chunk_path_shape_preserved_and_no_nan_inf():
-    """AC1.3 + boundedness: A T_pixel that exceeds frames_per_chunk
+    """A T_pixel that exceeds frames_per_chunk
     triggers chunking; the inner sampler is invoked once per chunk;
     the concatenated output preserves the original
     ``(B, 16*T_total, H, W)`` shape and contains no NaN/Inf values.
@@ -426,13 +430,13 @@ def test_t2_collapsed_noise_mask_sliced_per_chunk():
 
 
 # ---------------------------------------------------------------------------
-# T3 — 4n+1 violation rejection
+# 4n+1 violation rejection
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("bad_chunk", [0, -1, 2, 3, 4, 6, 7, 8, 10, 12])
 def test_t3_invalid_frames_per_chunk_raises_value_error(bad_chunk):
-    """AC1.4: ``frames_per_chunk`` violating 4n+1 (for n >= 0) must raise
+    """``frames_per_chunk`` violating 4n+1 (for n >= 0) must raise
     ``ValueError`` with a message naming the offending value, before any
     model invocation. ``frames_per_chunk < 1`` is also rejected.
     """
@@ -481,12 +485,12 @@ def test_t3_valid_frames_per_chunk_does_not_raise(good_chunk):
 
 
 # ---------------------------------------------------------------------------
-# T4 — determinism
+# Determinism
 # ---------------------------------------------------------------------------
 
 
 def test_t4_determinism_same_seed_same_output():
-    """AC1.4 / determinism: two runs with identical (seed, inputs,
+    """Two runs with identical (seed, inputs,
     frames_per_chunk) must produce byte-identical output, given the
     inner sampler is deterministic (here: passthrough).
     """
@@ -550,7 +554,7 @@ def test_t4_chunk_count_invariance_under_passthrough():
 
 
 # ---------------------------------------------------------------------------
-# Slice 2 helper tests (Hann window + blend region + concat-with-blend)
+# Hann overlap blend helper tests (Hann window + blend region + concat-with-blend)
 # ---------------------------------------------------------------------------
 
 
@@ -619,7 +623,8 @@ def test_blend_region_equal_inputs_returns_input():
 def test_concat_with_overlap_zero_matches_plain_concat():
     """``overlap_latent == 0`` must take the fast path and produce the
     same tensor as ``_concat_chunks_along_t`` of the same chunks.
-    Required by AC2.1 (overlap=0 -> Slice 1 byte-identical).
+    Required so that ``temporal_overlap=0`` is byte-identical to the
+    no-overlap chunked path.
     """
     B, T1, T2, H, W = 1, 3, 4, 4, 4
     a4 = torch.randn(B, _LAT_C * T1, H, W)
@@ -676,13 +681,13 @@ def test_concat_with_overlap_runt_chunk_uses_min_available_overlap():
 
 
 # ---------------------------------------------------------------------------
-# T5 — Slice 2 with overlap=0 byte-identical to Slice 1
+# overlap=0 is byte-identical to the no-overlap chunked path
 # ---------------------------------------------------------------------------
 
 
 def test_t5_overlap_zero_byte_identical_to_slice1_path():
-    """AC2.1: ``temporal_overlap=0`` must produce output byte-identical
-    to the Slice 1 chunked path under a deterministic inner sampler.
+    """``temporal_overlap=0`` must produce output byte-identical
+    to the no-overlap chunked path under a deterministic inner sampler.
     Verifies the overlap=0 fast path is wired correctly through
     ``_concat_chunks_with_overlap_blend``.
     """
@@ -707,12 +712,12 @@ def test_t5_overlap_zero_byte_identical_to_slice1_path():
 
 
 # ---------------------------------------------------------------------------
-# T6 — small overlap (linear ramp path)
+# Small overlap (linear ramp path)
 # ---------------------------------------------------------------------------
 
 
 def test_t6_small_overlap_linear_ramp_no_nan_inf():
-    """AC2.3 + small-overlap behavior: ``temporal_overlap=2`` exercises
+    """``temporal_overlap=2`` exercises
     the linear-ramp fallback (overlap < 3). The output must preserve
     the source's overall T_total shape and contain no NaN/Inf.
     """
@@ -739,12 +744,12 @@ def test_t6_small_overlap_linear_ramp_no_nan_inf():
 
 
 # ---------------------------------------------------------------------------
-# T7 — Hann blend (overlap >= 3): bounded, no boundary discontinuity
+# Hann blend (overlap >= 3): bounded, no boundary discontinuity
 # ---------------------------------------------------------------------------
 
 
 def test_t7_hann_blend_bounded_under_passthrough_inner_sampler():
-    """AC2.3 / boundedness for the Hann path. With a passthrough inner
+    """Boundedness for the Hann path. With a passthrough inner
     sampler the per-chunk outputs equal the per-chunk input slices,
     so the post-blend output equals the source latent at every frame
     (the overlap regions blend two slices of the same source). This

@@ -3,10 +3,6 @@ honor the actual tensor/tuple return contract of ``encode()`` and
 ``decode_()`` and must NOT dereference diffusers-style ``.latent_dist``
 or ``.sample`` attributes on those returns.
 
-Source: CodeRabbit review on Comfy-Org/ComfyUI#11294 thread
-https://github.com/Comfy-Org/ComfyUI/pull/11294#discussion_r2959796348 .
-Tracker: pollockjj/mydevelopment#190.
-
 The pre-fix body raised ``AttributeError: 'Tensor' object has no
 attribute 'latent_dist'`` for ``mode in {"encode", "all"}`` and
 ``AttributeError: 'VideoAutoencoderKL' object has no attribute 'decode'``

@@ -1127,12 +1127,21 @@ class AdaSingle(nn.Module):
         self.layers = layers
         for l in layers:
             if "in" in modes:
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, device=device, dtype=dtype) / dim**0.5))
+                # ``torch.randn`` defaults to fp32 on CPU. Passing
+                # ``dtype=`` here would break fp8 weight loads — CPU
+                # has no ``normal_kernel_cpu`` for ``Float8_e4m3fn``
+                # so the model would fail to construct before
+                # ``load_state_dict`` could overwrite these parameters
+                # with the file's quantized values. The init values
+                # are unconditionally overwritten by load, so init
+                # precision is irrelevant beyond picking a kernel
+                # that exists on the target device.
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim) / dim**0.5))
                 self.register_parameter(
                     f"{l}_scale", nn.Parameter(torch.randn(dim) / dim**0.5 + 1)
                 )
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, device=device, dtype=dtype) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim) / dim**0.5))
 
     def forward(
         self,
@@ -1415,14 +1424,10 @@ class NaDiT(nn.Module):
         return flatten([pos_cond, neg_cond])
 
     def _swap_pos_neg_halves(self, out):
-        # Both calls take dim=0 explicitly. ``Tensor.chunk`` and
-        # ``torch.cat`` default to dim=0, so this is functionally
-        # identical to the implicit form, but the contract here is
-        # specifically "split the BATCH axis into two halves and
-        # swap them" — making the dim load-bearing in source prevents
-        # silent drift if a future refactor reorders the tensor's
-        # axes (e.g. moves batch out of position 0). Copilot review on
-        # PR pollockjj/ComfyUI#33 (2026-05-04 17:38).
+        # ``dim=0`` is explicit on both calls. The contract is "split
+        # the batch axis into two halves and swap them"; making the
+        # axis load-bearing in source guards against silent drift if a
+        # future refactor reorders tensor axes.
         pos, neg = out.chunk(2, dim=0)
         return torch.cat([neg, pos], dim=0)
 

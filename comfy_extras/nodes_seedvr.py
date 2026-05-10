@@ -643,11 +643,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
     entry point, and concatenates per-chunk outputs back into a single
     ``(B, 16*T_total, H, W)`` latent.
 
-    Slice 1 scope: chunking with no overlap. ``frames_per_chunk`` is
-    expressed in pixel-frame units to match the SeedVR2 4n+1 constraint
-    enforced upstream by ``cut_videos`` and the VAE's
-    ``temporal_downsample_factor=4``. A pixel chunk size ``F`` maps to
-    ``(F - 1) // 4 + 1`` latent-frame chunks.
+    ``frames_per_chunk`` is expressed in pixel-frame units to match the
+    SeedVR2 4n+1 constraint enforced upstream by ``cut_videos`` and the
+    VAE's ``temporal_downsample_factor=4``. A pixel chunk size ``F``
+    maps to ``(F - 1) // 4 + 1`` latent-frame chunks.
 
     Determinism contract: a single noise tensor is generated once from
     the user seed and sliced per chunk (rather than re-seeding each
@@ -736,7 +735,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # chunking overhead. Output of this branch is byte-identical to the
         # built-in KSampler given the same (model, seed, steps, cfg,
         # sampler_name, scheduler, positive, negative, latent_image,
-        # denoise) tuple, satisfying AC1.1.
+        # denoise) tuple.
         if T_pixel <= frames_per_chunk:
             return io.NodeOutput(_run_standard_sample(
                 model, seed, steps, cfg, sampler_name, scheduler,

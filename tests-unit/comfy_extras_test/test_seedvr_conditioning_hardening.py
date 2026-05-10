@@ -11,13 +11,14 @@ Pin two behaviors:
   2. ``_apply_rope_freqs_float32_cast`` is idempotent **per-tensor by
      dtype check**, NOT per-instance by sentinel attribute. Every call
      walks the diffusion-model module tree and invokes ``.to(float32)``
-     only on tensors whose dtype is not already ``float32``. The cache-by-
-     attribute approach was rejected on PR pollockjj/ComfyUI#32 because
-     the sentinel survives Comfy's dynamic model unload/reload cycle while
-     ``rope.freqs`` itself is restored to the archived dtype, so the next
-     call would short-circuit and leave RoPE running in fp16/bf16 — the
-     exact failure the helper is supposed to prevent. The dtype check is
-     self-correcting against any weight-restore lifecycle event.
+     only on tensors whose dtype is not already ``float32``. A cache-by-
+     attribute (sentinel) approach is rejected because the sentinel
+     would survive ComfyUI's dynamic model unload/reload cycle while
+     ``rope.freqs`` itself is restored to the archived dtype, so the
+     next call would short-circuit and leave RoPE running in fp16/bf16
+     — the exact failure this helper is supposed to prevent. The dtype
+     check is self-correcting against any weight-restore lifecycle
+     event.
 
 Import isolation: ``comfy.model_management`` is stubbed via direct
 ``sys.modules`` assignment so importing ``comfy_extras.nodes_seedvr`` does
@@ -45,8 +46,8 @@ def _import_nodes_seedvr_isolated():
     """Stub ``comfy.model_management``, import (or reuse a cached import of)
     ``comfy_extras.nodes_seedvr``, and return ``(module, restore)``.
 
-    ``restore()`` snapshots and restores **three** in-process import-state
-    surfaces (Copilot review on PR pollockjj/ComfyUI#32):
+    ``restore()`` snapshots and restores three in-process import-state
+    surfaces:
 
       1. ``sys.modules["comfy.model_management"]`` — the stubbed module.
       2. ``sys.modules["comfy_extras.nodes_seedvr"]`` — the imported test
@@ -56,8 +57,7 @@ def _import_nodes_seedvr_isolated():
          does not re-resolve against the real ``comfy.model_management``.
       3. ``comfy_extras.nodes_seedvr`` package attribute on the
          ``comfy_extras`` package, mirroring the existing
-         ``comfy.model_management`` attribute restore. Mirrors the
-         pattern in ``test_seedvr_node_signature.py``.
+         ``comfy.model_management`` attribute restore.
 
     All three are restored verbatim if previously set; deleted on exit
     if previously unset. No global state leaks into later tests.
@@ -190,8 +190,7 @@ def test_seedvr2_conditioning_disables_cfg1_optimization():
 def test_resolve_seedvr2_diffusion_model_raises_runtime_error_with_specific_prefix():
     """Pin all four failure modes of the resolver chain to the same error
     prefix and to message text that distinguishes 'attribute missing'
-    from 'attribute present but None' (Copilot review on PR
-    pollockjj/ComfyUI#32). The four modes:
+    from 'attribute present but None'. The four modes:
 
       mode 1: input has no 'model' attribute
       mode 2: input.model is None
@@ -296,9 +295,9 @@ def test_apply_rope_freqs_float32_cast_idempotent_on_unchanged_dtype():
 
 def test_apply_rope_freqs_float32_cast_recovers_after_dtype_reset():
     """After a model unload/reload that restores rope.freqs from an
-    archived non-float32 dtype, the next call must re-cast to float32 —
-    the original bool-sentinel implementation would short-circuit here
-    and leave RoPE running in fp16/bf16 (codex P1 finding on PR #32).
+    archived non-float32 dtype, the next call must re-cast to float32.
+    A bool-sentinel cache approach would short-circuit here and leave
+    RoPE running in fp16/bf16.
     """
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
