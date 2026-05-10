@@ -1366,8 +1366,20 @@ class NaDiT(nn.Module):
         elif len(block_type) != num_layers:
             raise ValueError("The ``block_type`` list should equal to ``num_layers``.")
         super().__init__()
-        self.register_buffer("positive_conditioning", torch.empty((58, 5120), device=device, dtype=dtype))
-        self.register_buffer("negative_conditioning", torch.empty((64, 5120), device=device, dtype=dtype))
+        # ``torch.empty`` returns uninitialized memory, not zeros. The
+        # SeedVR2Conditioning fail-loud guard at
+        # ``comfy_extras/nodes_seedvr.py`` distinguishes "buffer was loaded"
+        # from "buffer was never populated by the file" by checking
+        # ``positive_conditioning.abs().sum() == 0``. That sentinel is only
+        # reliable if the post-construction buffer state is deterministically
+        # zero, so explicitly zero-fill here rather than relying on the
+        # allocator's zero-on-alloc behavior (allocator-dependent and not
+        # contractual). When ``load_state_dict`` populates these buffers
+        # from a properly-baked SeedVR2 .safetensors, the in-place copy
+        # overwrites the zeros with the universal SeedVR2 conditioning
+        # tensors (shape (58, 5120) and (64, 5120) bf16).
+        self.register_buffer("positive_conditioning", torch.zeros((58, 5120), device=device, dtype=dtype))
+        self.register_buffer("negative_conditioning", torch.zeros((64, 5120), device=device, dtype=dtype))
         self.vid_in = NaPatchIn(
             in_channels=vid_in_channels,
             patch_size=patch_size,

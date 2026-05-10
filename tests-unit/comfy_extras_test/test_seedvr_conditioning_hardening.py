@@ -77,7 +77,44 @@ def _import_nodes_seedvr_isolated():
             comfy_extras_pkg, "nodes_seedvr", _SENTINEL,
         )
 
-    sys.modules["comfy.model_management"] = MagicMock()
+    # ``comfy_extras.nodes_seedvr`` imports ``comfy.sample`` (added in PR
+    # #59) which pulls in the full samplers/k_diffusion/model_patcher
+    # transitive chain. That chain re-imports ``comfy.model_management``
+    # and calls feature-detection predicates like ``xformers_enabled()``
+    # in module-init code (``comfy/ldm/modules/attention.py:18``); a bare
+    # ``MagicMock()`` returns truthy for those calls and triggers a real
+    # ``import xformers`` that fails in the test environment. Pin the
+    # boolean-returning predicates to ``False`` so the import chain
+    # follows the no-extension path.
+    # Configure stub so every ``..._enabled[_*]()`` predicate returns
+    # False. The transitive import chain through ``comfy.sample`` → ...
+    # invokes several feature-detection predicates at module-init time
+    # (``comfy/ldm/modules/attention.py`` ``xformers_enabled()``,
+    # ``comfy/ldm/modules/diffusionmodules/model.py``
+    # ``xformers_enabled_vae()``, etc.). A bare ``MagicMock()`` returns
+    # truthy auto-attrs, which triggers real ``import xformers`` calls
+    # that fail in the test environment.
+    mock_mm = MagicMock()
+    mock_mm.xformers_enabled.return_value = False
+    mock_mm.xformers_enabled_vae.return_value = False
+    mock_mm.pytorch_attention_enabled.return_value = False
+    mock_mm.pytorch_attention_enabled_vae.return_value = False
+    mock_mm.sage_attention_enabled.return_value = False
+    mock_mm.flash_attention_enabled.return_value = False
+    mock_mm.WINDOWS = False
+    mock_mm.is_intel_xpu.return_value = False
+    sys.modules["comfy.model_management"] = mock_mm
+    # The transitive import chain reaches code paths that do
+    # ``comfy.model_management.<attr>`` (attribute access on the comfy
+    # package, not a fresh import). Setting only ``sys.modules`` is not
+    # enough — also bind the stub as the package attribute. If the
+    # ``comfy`` package isn't imported yet at stub-time (cold first run),
+    # importing it now is safe and idempotent.
+    if comfy_pkg is None:
+        import comfy as _comfy_pkg  # noqa: F401
+        comfy_pkg = sys.modules.get("comfy")
+    if comfy_pkg is not None:
+        setattr(comfy_pkg, "model_management", mock_mm)
     if "comfy_extras.nodes_seedvr" in sys.modules:
         nodes_seedvr = sys.modules["comfy_extras.nodes_seedvr"]
     else:
@@ -130,11 +167,22 @@ class _Block(nn.Module):
 
 
 class _DiffusionModel(nn.Module):
-    def __init__(self, n_blocks=3):
+    def __init__(self, n_blocks=3, zero_conditioning=False):
         super().__init__()
         self.blocks = nn.ModuleList([_Block() for _ in range(n_blocks)])
-        self.register_buffer("positive_conditioning", torch.ones((2, 4)))
-        self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
+        if zero_conditioning:
+            # Simulates a numz-format DiT-only file loaded via UNETLoader:
+            # ``register_buffer`` zero-init at ``comfy/ldm/seedvr/model.py``
+            # leaves the buffers at zero when ``load_state_dict`` cannot
+            # find ``positive_conditioning`` / ``negative_conditioning``
+            # keys in the state_dict. The fail-loud guard at
+            # ``SeedVR2Conditioning.execute`` distinguishes this from a
+            # properly-baked file by ``abs().sum() == 0`` on both buffers.
+            self.register_buffer("positive_conditioning", torch.zeros((2, 4)))
+            self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
+        else:
+            self.register_buffer("positive_conditioning", torch.ones((2, 4)))
+            self.register_buffer("negative_conditioning", torch.zeros((3, 4)))
 
 
 class _ModelInner:
@@ -328,6 +376,127 @@ def test_apply_rope_freqs_float32_cast_recovers_after_dtype_reset():
                     "call MUST re-cast to float32. A bool-sentinel cache "
                     "would have short-circuited here."
                 )
+    finally:
+        restore()
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud guard: zero-valued conditioning buffers
+# ---------------------------------------------------------------------------
+
+
+def test_seedvr2_conditioning_fails_loud_on_zero_buffers():
+    """A SeedVR2 model whose ``positive_conditioning`` AND
+    ``negative_conditioning`` buffers are both zero-valued is an
+    unrecoverable load state — a numz-format DiT-only ``.safetensors``
+    file was loaded via ``UNETLoader`` without the SeedVR2 conditioning
+    keys baked in. ``SeedVR2Conditioning.execute`` must raise
+    ``RuntimeError`` carrying the standard SeedVR2 invalid-model prefix
+    instead of letting the diffusion sampler run on null prompt
+    conditioning (which silently produces wrong output).
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel(zero_conditioning=True)
+        patcher = _ModelPatcher(diffusion_model)
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning, patcher, 0.0,
+            )
+
+        message = str(excinfo.value)
+        assert message.startswith(
+            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
+        ), (
+            "Fail-loud message must use the standard "
+            "_SEEDVR2_INVALID_MODEL_MSG_PREFIX so callers/log scrapers "
+            f"can match it. Got: {message!r}"
+        )
+        assert "positive_conditioning" in message
+        assert "negative_conditioning" in message
+    finally:
+        restore()
+
+
+def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
+    """The guard checks BOTH buffers together: a model with zero
+    ``negative_conditioning`` but non-zero ``positive_conditioning``
+    (the existing baseline mock fixture) must NOT trigger the fail-loud
+    path. This pins the AND-gating semantic and prevents a future
+    regression to OR-gating from rejecting valid bundled checkpoints
+    where one buffer happens to be all-zeros.
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        # Baseline _DiffusionModel has positive=ones, negative=zeros.
+        diffusion_model = _DiffusionModel(zero_conditioning=False)
+        patcher = _ModelPatcher(diffusion_model)
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+
+        # Should not raise.
+        positive, negative, latent = (
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning, patcher, 0.0,
+            )
+        )
+        assert positive[0][0].shape == (1, 3, 4)
+        assert negative[0][0].shape == (1, 3, 4)
+    finally:
+        restore()
+
+
+def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available():
+    """When the model patcher carries ``cached_patcher_init`` with a
+    ``.safetensors`` path (set by ``comfy.sd.load_diffusion_model`` at
+    sd.py:1970), the fail-loud message must surface that path so the
+    user can see exactly which file is missing the conditioning keys.
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel(zero_conditioning=True)
+        patcher = _ModelPatcher(diffusion_model)
+        # Mimic the ``cached_patcher_init`` shape comfy.sd attaches.
+        patcher.cached_patcher_init = (
+            object(),  # function reference
+            ("/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors",),
+        )
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning, patcher, 0.0,
+            )
+
+        assert (
+            "/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors"
+            in str(excinfo.value)
+        )
+    finally:
+        restore()
+
+
+def test_seedvr2_conditioning_fail_loud_falls_back_when_path_unavailable():
+    """When ``cached_patcher_init`` is missing or its tuple does not
+    contain a ``.safetensors`` path, the fail-loud message still
+    delivers the actionable diagnostic without leaking ``None`` or
+    raising during message formatting.
+    """
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel(zero_conditioning=True)
+        patcher = _ModelPatcher(diffusion_model)
+        # No cached_patcher_init set on the patcher.
+        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+
+        with pytest.raises(RuntimeError) as excinfo:
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning, patcher, 0.0,
+            )
+        message = str(excinfo.value)
+        assert "Source file:" not in message  # no empty path leak
+        assert "Re-bake" in message  # actionable guidance still present
     finally:
         restore()
 
