@@ -418,8 +418,6 @@ def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: t
             for x in range(len(to_run)):
                 if can_concat_cond(to_run[x][0], first[0]) and len(to_batch_temp) < remaining_capacity:
                     to_batch_temp += [x]
-            if len(to_batch_temp) == 0:
-                raise RuntimeError(f"MultiGPU scheduler could not schedule any conditions on {current_device}.")
 
             to_batch_temp.reverse()
             to_batch = to_batch_temp[:1]
