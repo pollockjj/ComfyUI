@@ -1267,20 +1267,34 @@ class VAE:
         elif dims == 2:
             samples = self.encode_tiled_(pixel_samples, **args)
         elif dims == 3:
-            if tile_t is not None:
-                tile_t_latent = max(2, self.downscale_ratio[0](tile_t))
+            if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                seedvr2_args = {}
+                if tile_x is not None:
+                    seedvr2_args["tile_x"] = tile_x
+                if tile_y is not None:
+                    seedvr2_args["tile_y"] = tile_y
+                if overlap is not None:
+                    seedvr2_args["overlap"] = overlap
+                if tile_t is not None:
+                    seedvr2_args["tile_t"] = tile_t
+                if overlap_t is not None:
+                    seedvr2_args["overlap_t"] = overlap_t
+                samples = self.encode_tiled_seedvr2(pixel_samples, **seedvr2_args)
             else:
-                tile_t_latent = 9999
-            args["tile_t"] = self.upscale_ratio[0](tile_t_latent)
+                if tile_t is not None:
+                    tile_t_latent = max(2, self.downscale_ratio[0](tile_t))
+                else:
+                    tile_t_latent = 9999
+                args["tile_t"] = self.upscale_ratio[0](tile_t_latent)
 
-            if overlap_t is None:
-                args["overlap"] = (1, overlap, overlap)
-            else:
-                args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), overlap, overlap)
-            maximum = pixel_samples.shape[2]
-            maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
+                if overlap_t is None:
+                    args["overlap"] = (1, overlap, overlap)
+                else:
+                    args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), overlap, overlap)
+                maximum = pixel_samples.shape[2]
+                maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
 
-            samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
+                samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
 
         return samples
 
