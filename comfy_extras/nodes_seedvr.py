@@ -295,6 +295,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         else:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video
+            vae_model.tiled_args = {**args, "enable_tiling": False}
             latent = vae.encode(images_bthwc)
 
         clear_vae_memory(vae_model)
