@@ -1425,10 +1425,15 @@ class SeedVR2(supported_models_base.BASE):
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
-    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
     sampling_settings = {
         "shift": 1.0,
     }
+
+    def set_inference_dtype(self, dtype, manual_cast_dtype):
+        if dtype == torch.float16 and manual_cast_dtype is None:
+            manual_cast_dtype = torch.bfloat16
+        super().set_inference_dtype(dtype, manual_cast_dtype)
 
     def get_model(self, state_dict, prefix = "", device=None):
         out = model_base.SeedVR2(self, device=device)
