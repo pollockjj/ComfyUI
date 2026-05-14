@@ -1228,7 +1228,10 @@ class VAE:
             if self.latent_dim == 3:
                 tile = 256
                 overlap = tile // 4
-                samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                    samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                else:
+                    samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
             elif self.latent_dim == 1 or self.extra_1d_channel is not None:
                 samples = self.encode_tiled_1d(pixel_samples)
             else:
