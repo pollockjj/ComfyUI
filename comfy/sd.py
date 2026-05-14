@@ -1057,6 +1057,7 @@ class VAE:
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
         try:
             self.first_stage_model.tiled_args = args
+            self.first_stage_model.device = self.device
             x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
             output = comfy.ldm.seedvr.vae.tiled_vae(
                 x,

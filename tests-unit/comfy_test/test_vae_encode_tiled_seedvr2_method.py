@@ -74,3 +74,18 @@ def test_method_routes_through_tiled_vae_encode_true():
             f"Every tiled_vae delegation from encode_tiled_seedvr2 must "
             f"pass encode=True; got kwargs={call.kwargs!r}."
         )
+
+
+def test_method_sets_wrapper_device_before_tiled_vae():
+    vae = _make_minimal_seedvr2_vae()
+    pixel_samples = torch.zeros((1, 3, 8, 64, 64))
+    assert not hasattr(vae.first_stage_model, "device")
+
+    def _assert_device_initialized(*args, **kwargs):
+        vae_model = args[1]
+        assert vae_model.device == vae.device
+        return torch.zeros((1, 16, 2, 8, 8))
+
+    with patch.object(seedvr_vae_mod, "tiled_vae",
+                      MagicMock(side_effect=_assert_device_initialized)):
+        vae.encode_tiled_seedvr2(pixel_samples)
