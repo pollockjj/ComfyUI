@@ -69,7 +69,7 @@ def _make_non_seedvr2_vae():
 
 def test_explicit_encode_tiled_seedvr2_3d_routes_to_seedvr2_tiler():
     vae = _make_seedvr2_vae()
-    pixel_samples = torch.zeros((1, 3, 64, 64))
+    pixel_samples = torch.zeros((1, 64, 64, 3))
 
     seedvr2_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))
     generic_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))
@@ -98,7 +98,7 @@ def test_explicit_encode_tiled_dispatcher_breakdown():
     seedvr2_vae = _make_seedvr2_vae()
     non_seedvr2_vae = _make_non_seedvr2_vae()
 
-    pixel_samples = torch.zeros((1, 3, 64, 64))
+    pixel_samples = torch.zeros((1, 64, 64, 3))
 
     with patch.object(sd_mod.model_management, "load_models_gpu",
                       lambda *a, **k: None), \
