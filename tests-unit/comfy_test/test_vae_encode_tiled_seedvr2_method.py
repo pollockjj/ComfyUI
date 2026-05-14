@@ -119,3 +119,20 @@ def test_method_honors_explicit_tile_parameters_over_stale_wrapper_args():
     assert tiled_vae_mock.call_args.kwargs["temporal_size"] == 11
     assert tiled_vae_mock.call_args.kwargs["temporal_overlap"] == 4
     assert vae.first_stage_model.tiled_args["preserved"] == "value"
+
+
+def test_method_clamps_overlap_below_tile_size():
+    vae = _make_minimal_seedvr2_vae()
+    pixel_samples = torch.zeros((1, 3, 8, 64, 64))
+
+    tiled_vae_mock = MagicMock(return_value=torch.zeros((1, 16, 2, 8, 8)))
+
+    with patch.object(seedvr_vae_mod, "tiled_vae", tiled_vae_mock):
+        vae.encode_tiled_seedvr2(
+            pixel_samples,
+            tile_x=64,
+            tile_y=48,
+            overlap=96,
+        )
+
+    assert tiled_vae_mock.call_args.kwargs["tile_overlap"] == (40, 56)
