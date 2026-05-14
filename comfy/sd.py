@@ -1803,7 +1803,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
     else:
         manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
+    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
 
     if model_config.clip_vision_prefix is not None:
         if output_clipvision:
@@ -1942,7 +1942,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
     else:
         manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
+    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
 
     if custom_operations is not None:
         model_config.custom_operations = custom_operations

@@ -53,13 +53,7 @@ class CustomRMSNorm(nn.Module):
         normalized = input / rms
 
         if self.elementwise_affine:
-            if hasattr(torch, 'float8_e4m3fn'):
-                fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
-                if self.weight.dtype in fp8_types:
-                    weight = self.weight.to(input.dtype)
-                    return normalized * weight
-
-            return normalized * self.weight
+            return normalized * self.weight.to(input.dtype)
         return normalized
 
 class Cache:
@@ -578,8 +572,8 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     """
     rot_d = 2 * freqs_cis.shape[-3]
     if rot_d == t.shape[-1]:
-        return apply_rope1(t, freqs_cis)
-    t_rot = apply_rope1(t[..., :rot_d], freqs_cis)
+        return apply_rope1(t, freqs_cis).to(t.dtype)
+    t_rot = apply_rope1(t[..., :rot_d], freqs_cis).to(t.dtype)
     t_pass = t[..., rot_d:]
     return torch.cat((t_rot, t_pass), dim=-1)
 
