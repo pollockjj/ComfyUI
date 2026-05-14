@@ -1047,6 +1047,30 @@ class VAE:
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
+    def encode_tiled_seedvr2(self, pixel_samples, tile_x=512, tile_y=512, overlap=64, tile_t=9999, overlap_t=0):
+        args = dict(getattr(self.first_stage_model, "tiled_args", {}))
+        args["enable_tiling"] = True
+        args.setdefault("tile_size", (tile_y, tile_x))
+        args.setdefault("tile_overlap", (overlap, overlap))
+        args.setdefault("temporal_size", tile_t)
+        args.setdefault("temporal_overlap", overlap_t)
+        previous_args = getattr(self.first_stage_model, "tiled_args", {})
+        try:
+            self.first_stage_model.tiled_args = args
+            x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
+            output = comfy.ldm.seedvr.vae.tiled_vae(
+                x,
+                self.first_stage_model,
+                tile_size=args["tile_size"],
+                tile_overlap=args["tile_overlap"],
+                temporal_size=args["temporal_size"],
+                temporal_overlap=args["temporal_overlap"],
+                encode=True,
+            )
+        finally:
+            self.first_stage_model.tiled_args = previous_args
+        return output.to(device=self.output_device, dtype=self.vae_output_dtype())
+
     def decode(self, samples_in, vae_options={}):
         self.throw_exception_if_invalid()
         pixel_samples = None
