@@ -1050,10 +1050,10 @@ class VAE:
     def encode_tiled_seedvr2(self, pixel_samples, tile_x=512, tile_y=512, overlap=64, tile_t=9999, overlap_t=0):
         args = dict(getattr(self.first_stage_model, "tiled_args", {}))
         args["enable_tiling"] = True
-        args.setdefault("tile_size", (tile_y, tile_x))
-        args.setdefault("tile_overlap", (overlap, overlap))
-        args.setdefault("temporal_size", tile_t)
-        args.setdefault("temporal_overlap", overlap_t)
+        args["tile_size"] = (tile_y, tile_x)
+        args["tile_overlap"] = (overlap, overlap)
+        args["temporal_size"] = tile_t
+        args["temporal_overlap"] = overlap_t
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
         try:
             self.first_stage_model.tiled_args = args
