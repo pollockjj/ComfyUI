@@ -121,6 +121,27 @@ def test_method_honors_explicit_tile_parameters_over_stale_wrapper_args():
     assert vae.first_stage_model.tiled_args["preserved"] == "value"
 
 
+def test_method_preserves_stored_tile_parameters_when_call_omits_them():
+    vae = _make_minimal_seedvr2_vae()
+    pixel_samples = torch.zeros((1, 3, 8, 64, 64))
+    vae.first_stage_model.tiled_args = {
+        "tile_size": (128, 160),
+        "tile_overlap": (16, 24),
+        "temporal_size": 9,
+        "temporal_overlap": 1,
+    }
+
+    tiled_vae_mock = MagicMock(return_value=torch.zeros((1, 16, 2, 8, 8)))
+
+    with patch.object(seedvr_vae_mod, "tiled_vae", tiled_vae_mock):
+        vae.encode_tiled_seedvr2(pixel_samples)
+
+    assert tiled_vae_mock.call_args.kwargs["tile_size"] == (128, 160)
+    assert tiled_vae_mock.call_args.kwargs["tile_overlap"] == (16, 24)
+    assert tiled_vae_mock.call_args.kwargs["temporal_size"] == 9
+    assert tiled_vae_mock.call_args.kwargs["temporal_overlap"] == 1
+
+
 def test_method_clamps_overlap_below_tile_size():
     vae = _make_minimal_seedvr2_vae()
     pixel_samples = torch.zeros((1, 3, 8, 64, 64))

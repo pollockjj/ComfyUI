@@ -101,6 +101,34 @@ def test_seedvr2_3d_routes_to_encode_tiled_seedvr2_on_oom():
     )
 
 
+def test_seedvr2_oom_fallback_preserves_existing_wrapper_tile_args():
+    vae = _make_seedvr2_vae()
+    vae.first_stage_model.tiled_args = {
+        "tile_size": (128, 128),
+        "tile_overlap": (32, 32),
+        "temporal_size": 12,
+        "temporal_overlap": 4,
+    }
+    pixel_samples = torch.zeros((1, 8, 64, 64, 3))
+
+    seedvr2_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))
+
+    with patch.object(sd_mod.model_management, "raise_non_oom",
+                      lambda e: None), \
+         patch.object(sd_mod.model_management, "load_models_gpu",
+                      lambda *a, **k: None), \
+         patch.object(sd_mod.model_management, "soft_empty_cache",
+                      lambda: None), \
+         patch.object(seedvr_vae_mod.VideoAutoencoderKLWrapper, "encode",
+                      side_effect=_force_regular_encode_oom), \
+         patch.object(sd_mod.VAE, "encode_tiled_seedvr2", seedvr2_call,
+                      create=True):
+        vae.encode(pixel_samples)
+
+    assert seedvr2_call.call_count == 1
+    assert seedvr2_call.call_args.kwargs == {}
+
+
 def test_oom_fallback_dispatcher_breakdown():
     seedvr2_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))
     generic_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))

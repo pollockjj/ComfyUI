@@ -1047,11 +1047,26 @@ class VAE:
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
-    def encode_tiled_seedvr2(self, pixel_samples, tile_x=512, tile_y=512, overlap=64, tile_t=9999, overlap_t=0):
+    def encode_tiled_seedvr2(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         args = dict(getattr(self.first_stage_model, "tiled_args", {}))
+        stored_tile_size = args.get("tile_size", (512, 512))
+        stored_tile_overlap = args.get("tile_overlap", (64, 64))
         args["enable_tiling"] = True
-        overlap_y = min(overlap, max(0, tile_y - 8))
-        overlap_x = min(overlap, max(0, tile_x - 8))
+        if tile_y is None:
+            tile_y = stored_tile_size[0]
+        if tile_x is None:
+            tile_x = stored_tile_size[1]
+        if overlap is None:
+            overlap_y, overlap_x = stored_tile_overlap
+        else:
+            overlap_y = overlap
+            overlap_x = overlap
+        if tile_t is None:
+            tile_t = args.get("temporal_size", 9999)
+        if overlap_t is None:
+            overlap_t = args.get("temporal_overlap", 0)
+        overlap_y = min(overlap_y, max(0, tile_y - 8))
+        overlap_x = min(overlap_x, max(0, tile_x - 8))
         args["tile_size"] = (tile_y, tile_x)
         args["tile_overlap"] = (overlap_y, overlap_x)
         args["temporal_size"] = tile_t
@@ -1232,7 +1247,11 @@ class VAE:
                 tile = 256
                 overlap = tile // 4
                 if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                    samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                    tiled_args = getattr(self.first_stage_model, "tiled_args", {})
+                    if isinstance(tiled_args, dict) and "tile_size" in tiled_args:
+                        samples = self.encode_tiled_seedvr2(pixel_samples)
+                    else:
+                        samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
                 else:
                     samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
             elif self.latent_dim == 1 or self.extra_1d_channel is not None:
@@ -1274,14 +1293,24 @@ class VAE:
                 seedvr2_args = {}
                 if tile_x is not None:
                     seedvr2_args["tile_x"] = tile_x
+                else:
+                    seedvr2_args["tile_x"] = 512
                 if tile_y is not None:
                     seedvr2_args["tile_y"] = tile_y
+                else:
+                    seedvr2_args["tile_y"] = 512
                 if overlap is not None:
                     seedvr2_args["overlap"] = overlap
+                else:
+                    seedvr2_args["overlap"] = 64
                 if tile_t is not None:
                     seedvr2_args["tile_t"] = tile_t
+                else:
+                    seedvr2_args["tile_t"] = 9999
                 if overlap_t is not None:
                     seedvr2_args["overlap_t"] = overlap_t
+                else:
+                    seedvr2_args["overlap_t"] = 0
                 samples = self.encode_tiled_seedvr2(pixel_samples, **seedvr2_args)
             else:
                 if tile_t is not None:
