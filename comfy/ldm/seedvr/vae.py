@@ -33,9 +33,6 @@ def tiled_vae(
     encode=True,
     **kwargs,
 ):
-    # Temporal work stays inside the wrapper slicer for each spatial tile so
-    # INITIALIZING/ACTIVE causal state propagates across the full tile.
-
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -64,6 +61,8 @@ def tiled_vae(
     if encode:
         ti_h, ti_w = tile_size
         ov_h, ov_w = tile_overlap
+        blend_ov_h = max(0, ov_h // sf_s)
+        blend_ov_w = max(0, ov_w // sf_s)
         target_d = (d + sf_t - 1) // sf_t
         target_h = (h + sf_s - 1) // sf_s
         target_w = (w + sf_s - 1) // sf_s
@@ -72,6 +71,7 @@ def tiled_vae(
         ti_w = max(1, tile_size[1] // sf_s)
         ov_h = max(0, tile_overlap[0] // sf_s)
         ov_w = max(0, tile_overlap[1] // sf_s)
+        blend_ov_h, blend_ov_w = tile_overlap
 
         target_d = max(1, d * sf_t - (sf_t - 1))
         target_h = h * sf_s
@@ -85,11 +85,6 @@ def tiled_vae(
     count = None
 
     def run_temporal_chunks(spatial_tile):
-        # Single-call-per-spatial-tile delegation to the
-        # wrapper's slicing path. Causal state propagates across the full
-        # temporal axis (INITIALIZING + ACTIVE per-slice via slicing_encode /
-        # slicing_decode), eliminating the periodic temporal_tile_size
-        # boundary discontinuities the previous outer chunking caused.
         t_chunk = spatial_tile.contiguous()
         if encode:
             out = vae_model.encode(t_chunk)[0]
@@ -108,75 +103,81 @@ def tiled_vae(
             ramp_cache[steps] = 0.5 - 0.5 * torch.cos(t * torch.pi)
         return ramp_cache[steps]
 
-    total_tiles = len(range(0, h, stride_h)) * len(range(0, w, stride_w))
+    tile_ranges = []
+    for y_idx in range(0, h, stride_h):
+        y_end = min(y_idx + ti_h, h)
+        if y_idx > 0 and (y_end - y_idx) <= ov_h:
+            continue
+        for x_idx in range(0, w, stride_w):
+            x_end = min(x_idx + ti_w, w)
+            if x_idx > 0 and (x_end - x_idx) <= ov_w:
+                continue
+            tile_ranges.append((y_idx, y_end, x_idx, x_end))
+
+    total_tiles = len(tile_ranges)
     bar = ProgressBar(total_tiles)
     single_spatial_tile = h <= ti_h and w <= ti_w
 
-    for y_idx in range(0, h, stride_h):
-        y_end = min(y_idx + ti_h, h)
+    for y_idx, y_end, x_idx, x_end in tile_ranges:
+        tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
 
-        for x_idx in range(0, w, stride_w):
-            x_end = min(x_idx + ti_w, w)
+        # Run VAE
+        tile_out = run_temporal_chunks(tile_x)
 
-            tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
-
-            # Run VAE
-            tile_out = run_temporal_chunks(tile_x)
-
-            if single_spatial_tile:
-                result = tile_out[:, :, :target_d, :target_h, :target_w]
-                if result.device != x.device:
-                    result = result.to(x.device).to(x.dtype)
-                if x.shape[2] == 1 and sf_t == 1:
-                    result = result.squeeze(2)
-                bar.update(1)
-                return result
-
-            if result is None:
-                b_out, c_out = tile_out.shape[0], tile_out.shape[1]
-                result = torch.zeros((b_out, c_out, target_d, target_h, target_w), device=storage_device, dtype=torch.float32)
-                count = torch.zeros((1, 1, 1, target_h, target_w), device=storage_device, dtype=torch.float32)
-
-            if encode:
-                ys, ye = y_idx // sf_s, (y_idx // sf_s) + tile_out.shape[3]
-                xs, xe = x_idx // sf_s, (x_idx // sf_s) + tile_out.shape[4]
-                cur_ov_h = max(0, min(ov_h // sf_s, tile_out.shape[3] // 2))
-                cur_ov_w = max(0, min(ov_w // sf_s, tile_out.shape[4] // 2))
-            else:
-                ys, ye = y_idx * sf_s, (y_idx * sf_s) + tile_out.shape[3]
-                xs, xe = x_idx * sf_s, (x_idx * sf_s) + tile_out.shape[4]
-                cur_ov_h = max(0, min(ov_h, tile_out.shape[3] // 2))
-                cur_ov_w = max(0, min(ov_w, tile_out.shape[4] // 2))
-
-            w_h = torch.ones((tile_out.shape[3],), device=storage_device)
-            w_w = torch.ones((tile_out.shape[4],), device=storage_device)
-
-            if cur_ov_h > 0:
-                r = get_ramp(cur_ov_h)
-                if y_idx > 0:
-                    w_h[:cur_ov_h] = r
-                if y_end < h:
-                    w_h[-cur_ov_h:] = 1.0 - r
-
-            if cur_ov_w > 0:
-                r = get_ramp(cur_ov_w)
-                if x_idx > 0:
-                    w_w[:cur_ov_w] = r
-                if x_end < w:
-                    w_w[-cur_ov_w:] = 1.0 - r
-
-            final_weight = w_h.view(1,1,1,-1,1) * w_w.view(1,1,1,1,-1)
-
-            valid_d = min(tile_out.shape[2], result.shape[2])
-            tile_out = tile_out[:, :, :valid_d, :, :]
-
-            tile_out.mul_(final_weight)
-
-            result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
-            count[:, :, :, ys:ye, xs:xe] += final_weight
-
-            del tile_out, final_weight, tile_x, w_h, w_w
+        if single_spatial_tile:
+            result = tile_out[:, :, :target_d, :target_h, :target_w]
+            if result.device != x.device:
+                result = result.to(x.device).to(x.dtype)
+            if x.shape[2] == 1 and sf_t == 1:
+                result = result.squeeze(2)
             bar.update(1)
+            return result
+
+        if result is None:
+            b_out, c_out = tile_out.shape[0], tile_out.shape[1]
+            result = torch.zeros((b_out, c_out, target_d, target_h, target_w), device=storage_device, dtype=torch.float32)
+            count = torch.zeros((1, 1, 1, target_h, target_w), device=storage_device, dtype=torch.float32)
+
+        if encode:
+            ys, ye = y_idx // sf_s, (y_idx // sf_s) + tile_out.shape[3]
+            xs, xe = x_idx // sf_s, (x_idx // sf_s) + tile_out.shape[4]
+            cur_ov_h = max(0, min(blend_ov_h, tile_out.shape[3] // 2))
+            cur_ov_w = max(0, min(blend_ov_w, tile_out.shape[4] // 2))
+        else:
+            ys, ye = y_idx * sf_s, (y_idx * sf_s) + tile_out.shape[3]
+            xs, xe = x_idx * sf_s, (x_idx * sf_s) + tile_out.shape[4]
+            cur_ov_h = max(0, min(blend_ov_h, tile_out.shape[3] // 2))
+            cur_ov_w = max(0, min(blend_ov_w, tile_out.shape[4] // 2))
+
+        w_h = torch.ones((tile_out.shape[3],), device=storage_device)
+        w_w = torch.ones((tile_out.shape[4],), device=storage_device)
+
+        if cur_ov_h > 0:
+            r = get_ramp(cur_ov_h)
+            if y_idx > 0:
+                w_h[:cur_ov_h] = r
+            if y_end < h:
+                w_h[-cur_ov_h:] = 1.0 - r
+
+        if cur_ov_w > 0:
+            r = get_ramp(cur_ov_w)
+            if x_idx > 0:
+                w_w[:cur_ov_w] = r
+            if x_end < w:
+                w_w[-cur_ov_w:] = 1.0 - r
+
+        final_weight = w_h.view(1,1,1,-1,1) * w_w.view(1,1,1,1,-1)
+
+        valid_d = min(tile_out.shape[2], result.shape[2])
+        tile_out = tile_out[:, :, :valid_d, :, :]
+
+        tile_out.mul_(final_weight)
+
+        result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
+        count[:, :, :, ys:ye, xs:xe] += final_weight
+
+        del tile_out, final_weight, tile_x, w_h, w_w
+        bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
 
