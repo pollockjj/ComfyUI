@@ -205,6 +205,51 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
     return cloned
 
 
+def create_vae_multigpu_deepclones(vae, max_gpus: int):
+    """Return a shallow copy of ``vae`` with a ``multigpu_clones`` dict of CPU-resident VAE
+    deepclones, one per extra CUDA device up to ``max_gpus``.
+    """
+    vae.throw_exception_if_invalid()
+    vae_device = torch.device(vae.device)
+    cloned = copy.copy(vae)
+    if hasattr(cloned, 'multigpu_clones'):
+        del cloned.multigpu_clones
+    if vae_device.type == "cpu":
+        logging.info("CPU VAE selected, skipping initializing MultiGPU VAE clones.")
+        return cloned
+
+    full_extra_devices = comfy.model_management.get_all_torch_devices()
+
+    def is_vae_device(device):
+        return device.type == vae_device.type and device.index == vae_device.index
+
+    limit_extra_devices = [d for d in full_extra_devices if not is_vae_device(d)][:max_gpus - 1]
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU VAE clones.")
+        return cloned
+
+    existing = getattr(vae, 'multigpu_clones', None)
+    limit_extra_device_set = set(limit_extra_devices)
+    clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if d in limit_extra_device_set} if existing else {}
+    clone_source = copy.copy(vae)
+    if hasattr(clone_source, 'multigpu_clones'):
+        del clone_source.multigpu_clones
+
+    for device in limit_extra_devices:
+        if device in clones:
+            continue
+        clone_vae = copy.deepcopy(clone_source)
+        clone_vae.first_stage_model.eval()
+        for p in clone_vae.first_stage_model.parameters():
+            p.requires_grad_(False)
+        clone_vae.first_stage_model.to("cpu")
+        clones[device] = clone_vae
+        logging.info(f"Created CPU VAE deepclone for {device}")
+
+    cloned.multigpu_clones = clones
+    return cloned
+
+
 LoadBalance = namedtuple('LoadBalance', ['work_per_device', 'idle_time'])
 def load_balance_devices(model_options: dict[str], total_work: int, return_idle_time=False, work_normalized: int=None):
     'Optimize work assigned to different devices, accounting for their relative speeds and splittable work.'
