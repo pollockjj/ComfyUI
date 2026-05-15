@@ -86,6 +86,7 @@ class ImageUpscaleWithModel(io.ComfyNode):
         multigpu_clones = getattr(upscale_model, 'multigpu_clones', None)
         if multigpu_clones:
             for dev, desc in multigpu_clones.items():
+                model_management.free_memory(memory_required, dev)
                 desc.to(dev)
 
         oom = True

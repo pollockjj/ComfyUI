@@ -205,9 +205,9 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
         clone_desc.model.eval()
         for p in clone_desc.model.parameters():
             p.requires_grad_(False)
-        clone_desc.to(device)
+        clone_desc.to("cpu")
         clones[device] = clone_desc
-        logging.info(f"Created upscale_model descriptor deepclone for {device}")
+        logging.info(f"Created CPU upscale_model descriptor deepclone for {device}")
 
     cloned.multigpu_clones = clones
     return cloned
