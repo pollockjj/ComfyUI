@@ -33,10 +33,8 @@ def tiled_vae(
     encode=True,
     **kwargs,
 ):
-    # Temporal work stays inside the wrapper slicer for each spatial tile.
-    # Encode runs whole-T per spatial tile to avoid downsampler runt slices;
-    # decode uses the requested temporal tile size as the wrapper slice width
-    # so INITIALIZING/ACTIVE causal state propagates across the tile.
+    # Temporal work stays inside the wrapper slicer for each spatial tile so
+    # INITIALIZING/ACTIVE causal state propagates across the full tile.
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -94,31 +92,9 @@ def tiled_vae(
         # boundary discontinuities the previous outer chunking caused.
         t_chunk = spatial_tile.contiguous()
         if encode:
-            # Disable inner slicing for the encode call by
-            # setting slicing_sample_min_size = t_chunk.shape[2]; this
-            # makes slicing_encode's `(T-1) > min_size` predicate false
-            # for this t_chunk so the encoder runs whole-T with no inner
-            # runt-slice possible (e.g. T=12 with default min_size=4 would
-            # otherwise emit a runt ACTIVE T=3 that underflows the second
-            # temporal downsampler -- see
-            # test_seedvr_vae_tiled_encode_runt_slice_override.py).
-            old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
-            if old_slicing_sample_min_size is not None:
-                vae_model.slicing_sample_min_size = t_chunk.shape[2]
-            try:
-                out = vae_model.encode(t_chunk)[0]
-            finally:
-                if old_slicing_sample_min_size is not None:
-                    vae_model.slicing_sample_min_size = old_slicing_sample_min_size
+            out = vae_model.encode(t_chunk)[0]
         else:
-            old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
-            if old_slicing_latent_min_size is not None:
-                vae_model.slicing_latent_min_size = max(1, temporal_size // sf_t)
-            try:
-                out = vae_model.decode_(t_chunk)
-            finally:
-                if old_slicing_latent_min_size is not None:
-                    vae_model.slicing_latent_min_size = old_slicing_latent_min_size
+            out = vae_model.decode_(t_chunk)
         if isinstance(out, (tuple, list)):
             out = out[0]
         if out.ndim == 4:
@@ -2180,7 +2156,15 @@ class VideoAutoencoderKL(nn.Module):
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         sp_size =1
         if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size * sp_size:
-            x_slices = x[:, :, 1:].split(split_size=self.slicing_sample_min_size * sp_size, dim=2)
+            split_size = max(
+                self.slicing_sample_min_size * sp_size,
+                getattr(self, "temporal_downsample_factor", 1),
+            )
+            x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))
+            min_active_len = getattr(self, "temporal_downsample_factor", 1)
+            if len(x_slices) > 1 and x_slices[-1].shape[2] < min_active_len:
+                x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
+                x_slices.pop()
             encoded_slices = [
                 self._encode(
                     torch.cat((x[:, :, :1], x_slices[0]), dim=2),
