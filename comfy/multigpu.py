@@ -209,6 +209,7 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     """Return a shallow copy of ``vae`` with a ``multigpu_clones`` dict of CPU-resident VAE
     deepclones, one per extra CUDA device up to ``max_gpus``.
     """
+    vae.throw_exception_if_invalid()
     vae_device = torch.device(vae.device)
     cloned = copy.copy(vae)
     if hasattr(cloned, 'multigpu_clones'):
