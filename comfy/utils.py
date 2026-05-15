@@ -35,7 +35,6 @@ from einops import rearrange
 from comfy.cli_args import args
 import json
 import time
-import threading
 import warnings
 
 MMAP_TORCH_FILES = args.mmap_torch_files
