@@ -913,7 +913,6 @@ class VAE:
 
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
 
-        # MultiGPU dispatch: 3-aspect average becomes 3 calls through the multigpu primitive.
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         if multigpu_clones:
             for dev, c in multigpu_clones.items():
@@ -969,8 +968,6 @@ class VAE:
     def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
 
-        # MultiGPU dispatch: if MultiGPU_WorkUnits attached per-device deepclones, route tiles
-        # through tiled_scale_multidim_multigpu instead of the single-device tiled_scale_multidim.
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         if multigpu_clones:
             for dev, c in multigpu_clones.items():

@@ -214,17 +214,9 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
 
 
 def create_vae_multigpu_deepclones(vae, max_gpus: int):
-    '''Attach per-device deepclones of a VAE (comfy.sd.VAE wrapper) for tile-parallel decode dispatch.
-
-    Returns a shallow copy of the vae with a `multigpu_clones: dict[torch.device, VAE]` attribute.
-    Each clone is a `copy.deepcopy` of the full VAE wrapper (including its `first_stage_model`,
-    `patcher`, and metadata). The clone's `first_stage_model` is moved to CPU at attachment time
-    (mirrors the upscale_model lane's CPU-resident-until-execute pattern); the consumer moves it
-    to the target device at execute time and back to CPU in `finally`.
-
-    Downstream consumers (VAE.decode_tiled_*) check `getattr(self, 'multigpu_clones', None)` and
-    dispatch tiles across the devices when present.
-    '''
+    """Return a shallow copy of ``vae`` with a ``multigpu_clones`` dict of CPU-resident VAE
+    deepclones, one per extra CUDA device up to ``max_gpus``.
+    """
     full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
     limit_extra_devices = full_extra_devices[:max_gpus - 1]
     if len(limit_extra_devices) == 0:
