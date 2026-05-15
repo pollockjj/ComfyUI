@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import queue
 import threading
 import torch
@@ -173,6 +174,35 @@ def create_multigpu_deepclones(model: ModelPatcher, max_gpus: int, gpu_options: 
     # if len(skip_devices) > 0 or "multigpu_skip_devices" in model.model_options:
     #     model.model_options["multigpu_skip_devices"] = skip_devices
     return model
+
+
+def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
+    """Return a shallow copy of ``upscale_model`` with a ``multigpu_clones`` dict of CPU-resident
+    descriptor deepclones, one per extra CUDA device up to ``max_gpus``.
+    """
+    full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
+    limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
+        return upscale_model
+
+    cloned = copy.copy(upscale_model)
+    existing = getattr(upscale_model, 'multigpu_clones', None)
+    clones: dict[torch.device, object] = dict(existing) if existing else {}
+
+    for device in limit_extra_devices:
+        if device in clones:
+            continue
+        clone_desc = copy.deepcopy(upscale_model)
+        clone_desc.model.eval()
+        for p in clone_desc.model.parameters():
+            p.requires_grad_(False)
+        clone_desc.to("cpu")
+        clones[device] = clone_desc
+        logging.info(f"Created CPU upscale_model descriptor deepclone for {device}")
+
+    cloned.multigpu_clones = clones
+    return cloned
 
 
 LoadBalance = namedtuple('LoadBalance', ['work_per_device', 'idle_time'])
