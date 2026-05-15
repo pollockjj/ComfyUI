@@ -177,23 +177,15 @@ def create_multigpu_deepclones(model: ModelPatcher, max_gpus: int, gpu_options: 
 
 
 def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
-    '''Attach per-device deepclones of an UPSCALE_MODEL (spandrel ImageModelDescriptor) for tile-parallel dispatch.
-
-    Returns a shallow copy of the upscale_model with a `multigpu_clones: dict[torch.device, descriptor]`
-    attribute. Each clone is a `copy.deepcopy` of the descriptor (preserves the spandrel `__call__`
-    path on clones so primary and clones produce numerically equivalent output) moved to one extra
-    CUDA device.
-
-    Downstream consumers (e.g. ImageUpscaleWithModel) check `getattr(upscale_model, 'multigpu_clones', None)`
-    and dispatch tiles across the devices when present.
-    '''
+    """Return a shallow copy of ``upscale_model`` with a ``multigpu_clones`` dict of CPU-resident
+    descriptor deepclones, one per extra CUDA device up to ``max_gpus``.
+    """
     full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
     limit_extra_devices = full_extra_devices[:max_gpus - 1]
     if len(limit_extra_devices) == 0:
         logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
         return upscale_model
 
-    # Shallow copy so we don't mutate the loader's cached descriptor.
     cloned = copy.copy(upscale_model)
     existing = getattr(upscale_model, 'multigpu_clones', None)
     clones: dict[torch.device, object] = dict(existing) if existing else {}

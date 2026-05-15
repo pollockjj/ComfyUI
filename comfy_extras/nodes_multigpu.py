@@ -13,13 +13,11 @@ import comfy.multigpu
 
 class MultiGPUCFGSplitNode(io.ComfyNode):
     """
-    Prepares MODEL (CFG cond/uncond split) and/or UPSCALE_MODEL (tile-parallel) for multi-GPU
-    work-unit dispatch. Any non-empty input gets per-device deepclones attached; downstream
-    nodes detect the attached state on the object they receive and dispatch automatically.
+    Attaches per-device deepclones to any connected MODEL and/or UPSCALE_MODEL so downstream
+    nodes that recognize the attached state dispatch their work across multiple GPUs.
 
-    Should be placed after nodes that modify the model object itself, such as compile or attention-switch nodes.
-
-    Other than those exceptions, this node can be placed in any order.
+    Place after nodes that modify the model object itself (compile, attention-switch, etc.).
+    Otherwise position is not order-sensitive.
     """
 
     @classmethod

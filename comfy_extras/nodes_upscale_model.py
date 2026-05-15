@@ -81,8 +81,6 @@ class ImageUpscaleWithModel(io.ComfyNode):
 
         output_device = comfy.model_management.intermediate_device()
 
-        # MultiGPU dispatch: if MultiGPU_WorkUnits attached per-device deepclones, route tiles
-        # through tiled_scale_multidim_multigpu instead of the single-device tiled_scale.
         multigpu_clones = getattr(upscale_model, 'multigpu_clones', None)
         if multigpu_clones:
             for dev, desc in multigpu_clones.items():
