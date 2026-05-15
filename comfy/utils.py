@@ -1240,6 +1240,7 @@ def tiled_scale_multidim_multigpu(samples, functions, tile=(64, 64), overlap=8, 
         return [round(get_scale(i, a[i])) for i in range(len(a))]
 
     output = torch.empty([samples.shape[0], out_channels] + mult_list_upscale(samples.shape[2:]), device=output_device)
+    merge_device = torch.device("cpu")
 
     pbar_lock = threading.Lock() if pbar is not None else None
     primary_device = devices[0]
@@ -1268,8 +1269,8 @@ def tiled_scale_multidim_multigpu(samples, functions, tile=(64, 64), overlap=8, 
 
         out_shape = [s.shape[0], out_channels] + mult_list_upscale(s.shape[2:])
         div_shape = [s.shape[0], 1] + mult_list_upscale(s.shape[2:])
-        bufs = {d: torch.zeros(out_shape, device=output_device) for d in devices}
-        divs = {d: torch.zeros(div_shape, device=output_device) for d in devices}
+        bufs = {d: torch.zeros(out_shape, device=merge_device) for d in devices}
+        divs = {d: torch.zeros(div_shape, device=merge_device) for d in devices}
 
         worker_errors: list[BaseException] = []
         worker_lock = threading.Lock()
@@ -1294,8 +1295,8 @@ def tiled_scale_multidim_multigpu(samples, functions, tile=(64, 64), overlap=8, 
                             upscaled.append(round(get_pos(d, pos)))
 
                         s_in_dev = s_in.to(device, non_blocking=True)
-                        ps = fn(s_in_dev).to(output_device)
-                        mask = torch.ones([1, 1] + list(ps.shape[2:]), device=output_device)
+                        ps = fn(s_in_dev).to(merge_device)
+                        mask = torch.ones([1, 1] + list(ps.shape[2:]), device=merge_device)
 
                         for d in range(2, dims + 2):
                             feather = round(get_scale(d - 2, overlap[d - 2]))
