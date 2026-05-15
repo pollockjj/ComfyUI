@@ -915,13 +915,13 @@ class VAE:
 
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         if multigpu_clones:
-            for dev, c in multigpu_clones.items():
-                model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
-                c.first_stage_model.to(dev)
             functions = {self.device: decode_fn}
-            for dev, c in multigpu_clones.items():
-                functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
             try:
+                for dev, c in multigpu_clones.items():
+                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
+                    c.first_stage_model.to(dev)
+                for dev, c in multigpu_clones.items():
+                    functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
                 output = self.process_output(
                     (comfy.utils.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_y * 2, tile_x // 2), overlap=overlap, upscale_amount=self.upscale_ratio, output_device=self.output_device, pbar=pbar) +
                      comfy.utils.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_y // 2, tile_x * 2), overlap=overlap, upscale_amount=self.upscale_ratio, output_device=self.output_device, pbar=pbar) +
@@ -941,23 +941,25 @@ class VAE:
 
     def decode_tiled_1d(self, samples, tile_x=256, overlap=32):
         if samples.ndim == 3:
+            memory_shape = samples.shape
             decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
             clone_decode_fn_factory = lambda c, dev: (lambda a: c.first_stage_model.decode(a.to(c.vae_dtype).to(dev)).to(dtype=c.vae_output_dtype()))
         else:
             og_shape = samples.shape
+            memory_shape = og_shape
             samples = samples.reshape((og_shape[0], og_shape[1] * og_shape[2], -1))
             decode_fn = lambda a: self.first_stage_model.decode(a.reshape((-1, og_shape[1], og_shape[2], a.shape[-1])).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
             clone_decode_fn_factory = lambda c, dev: (lambda a: c.first_stage_model.decode(a.reshape((-1, og_shape[1], og_shape[2], a.shape[-1])).to(c.vae_dtype).to(dev)).to(dtype=c.vae_output_dtype()))
 
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         if multigpu_clones:
-            for dev, c in multigpu_clones.items():
-                model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
-                c.first_stage_model.to(dev)
             functions = {self.device: decode_fn}
-            for dev, c in multigpu_clones.items():
-                functions[dev] = clone_decode_fn_factory(c, dev)
             try:
+                for dev, c in multigpu_clones.items():
+                    model_management.free_memory(c.memory_used_decode(memory_shape, c.vae_dtype), dev)
+                    c.first_stage_model.to(dev)
+                for dev, c in multigpu_clones.items():
+                    functions[dev] = clone_decode_fn_factory(c, dev)
                 return self.process_output(comfy.utils.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
             finally:
                 for c in multigpu_clones.values():
@@ -970,13 +972,13 @@ class VAE:
 
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         if multigpu_clones:
-            for dev, c in multigpu_clones.items():
-                model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
-                c.first_stage_model.to(dev)
             functions = {self.device: decode_fn}
-            for dev, c in multigpu_clones.items():
-                functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
             try:
+                for dev, c in multigpu_clones.items():
+                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
+                    c.first_stage_model.to(dev)
+                for dev, c in multigpu_clones.items():
+                    functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
                 return self.process_output(comfy.utils.tiled_scale_multidim_multigpu(samples, functions, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
             finally:
                 for c in multigpu_clones.values():

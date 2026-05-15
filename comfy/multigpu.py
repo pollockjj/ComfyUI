@@ -209,20 +209,28 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     """Return a shallow copy of ``vae`` with a ``multigpu_clones`` dict of CPU-resident VAE
     deepclones, one per extra CUDA device up to ``max_gpus``.
     """
-    full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
-    limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    vae_device = torch.device(vae.device)
+    full_extra_devices = comfy.model_management.get_all_torch_devices()
+
+    def is_vae_device(device):
+        return device.type == vae_device.type and device.index == vae_device.index
+
+    limit_extra_devices = [d for d in full_extra_devices if not is_vae_device(d)][:max_gpus - 1]
     if len(limit_extra_devices) == 0:
         logging.info("No extra torch devices need initialization, skipping initializing MultiGPU VAE clones.")
         return vae
 
     cloned = copy.copy(vae)
     existing = getattr(vae, 'multigpu_clones', None)
-    clones: dict[torch.device, object] = dict(existing) if existing else {}
+    clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if not is_vae_device(d)} if existing else {}
+    clone_source = copy.copy(vae)
+    if hasattr(clone_source, 'multigpu_clones'):
+        del clone_source.multigpu_clones
 
     for device in limit_extra_devices:
         if device in clones:
             continue
-        clone_vae = copy.deepcopy(vae)
+        clone_vae = copy.deepcopy(clone_source)
         clone_vae.first_stage_model.eval()
         for p in clone_vae.first_stage_model.parameters():
             p.requires_grad_(False)
