@@ -58,6 +58,19 @@ def tiled_vae(
         x = x.unsqueeze(2)
 
     b, c, d, h, w = x.shape
+    logging.warning(
+        "!!! SEEDVR2 VAE TILING ACTIVE !!! phase=%s input_shape=%s "
+        "tile_size=%s tile_overlap=%s temporal_size=%s temporal_overlap=%s "
+        "dtype=%s device=%s",
+        "encode" if encode else "decode",
+        tuple(x.shape),
+        tile_size,
+        tile_overlap,
+        temporal_size,
+        temporal_overlap,
+        x.dtype,
+        x.device,
+    )
 
     sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
     sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
