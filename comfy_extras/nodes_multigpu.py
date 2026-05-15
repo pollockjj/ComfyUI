@@ -13,7 +13,9 @@ import comfy.multigpu
 
 class MultiGPUCFGSplitNode(io.ComfyNode):
     """
-    Prepares model to have sampling accelerated via splitting work units.
+    Prepares MODEL (CFG cond/uncond split) and/or UPSCALE_MODEL (tile-parallel) for multi-GPU
+    work-unit dispatch. Any non-empty input gets per-device deepclones attached; downstream
+    nodes detect the attached state on the object they receive and dispatch automatically.
 
     Should be placed after nodes that modify the model object itself, such as compile or attention-switch nodes.
 
@@ -24,22 +26,27 @@ class MultiGPUCFGSplitNode(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="MultiGPU_WorkUnits",
-            display_name="MultiGPU CFG Split",
+            display_name="MultiGPU Work Units",
             category="advanced/multigpu",
             description=cleandoc(cls.__doc__),
             inputs=[
-                io.Model.Input("model"),
+                io.Model.Input("model", optional=True),
+                io.UpscaleModel.Input("upscale_model", optional=True),
                 io.Int.Input("max_gpus", default=2, min=1, step=1),
             ],
             outputs=[
                 io.Model.Output(),
+                io.UpscaleModel.Output(),
             ],
         )
 
     @classmethod
-    def execute(cls, model: ModelPatcher, max_gpus: int) -> io.NodeOutput:
-        model = comfy.multigpu.create_multigpu_deepclones(model, max_gpus, reuse_loaded=True)
-        return io.NodeOutput(model)
+    def execute(cls, max_gpus: int, model: ModelPatcher = None, upscale_model=None) -> io.NodeOutput:
+        if model is not None:
+            model = comfy.multigpu.create_multigpu_deepclones(model, max_gpus, reuse_loaded=True)
+        if upscale_model is not None:
+            upscale_model = comfy.multigpu.create_upscale_model_multigpu_deepclones(upscale_model, max_gpus)
+        return io.NodeOutput(model, upscale_model)
 
 
 class MultiGPUOptionsNode(io.ComfyNode):
