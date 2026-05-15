@@ -1244,15 +1244,11 @@ def tiled_scale_multidim_multigpu(samples, functions, tile=(64, 64), overlap=8, 
     pbar_lock = threading.Lock() if pbar is not None else None
     primary_device = devices[0]
 
-    # Stage samples on CPU once: workers pull per-tile to their own device in parallel.
-    # Avoids cross-device GPU->GPU copies (which serialize via PCIe on workstations
-    # without NVLink) when input arrives on the primary device.
     samples_staged = samples if samples.device.type == "cpu" else samples.to("cpu", non_blocking=False)
 
     for b in range(samples_staged.shape[0]):
         s = samples_staged[b:b+1]
 
-        # Whole input fits in one tile -> no tiling, no parallelism available.
         if all(s.shape[d+2] <= tile[d] for d in range(dims)):
             with torch.inference_mode():
                 output[b:b+1] = functions[primary_device](s.to(primary_device, non_blocking=True)).to(output_device)
@@ -1263,7 +1259,6 @@ def tiled_scale_multidim_multigpu(samples, functions, tile=(64, 64), overlap=8, 
         positions = [range(0, s.shape[d+2] - overlap[d], tile[d] - overlap[d]) if s.shape[d+2] > tile[d] else [0] for d in range(dims)]
         all_positions = list(itertools.product(*positions))
 
-        # Round-robin split: device i gets positions i, i+N, i+2N, ...
         split = {devices[i]: all_positions[i::len(devices)] for i in range(len(devices))}
 
         out_shape = [s.shape[0], out_channels] + mult_list_upscale(s.shape[2:])
