@@ -210,6 +210,13 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     deepclones, one per extra CUDA device up to ``max_gpus``.
     """
     vae_device = torch.device(vae.device)
+    cloned = copy.copy(vae)
+    if hasattr(cloned, 'multigpu_clones'):
+        del cloned.multigpu_clones
+    if vae_device.type == "cpu":
+        logging.info("CPU VAE selected, skipping initializing MultiGPU VAE clones.")
+        return cloned
+
     full_extra_devices = comfy.model_management.get_all_torch_devices()
 
     def is_vae_device(device):
@@ -218,11 +225,11 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     limit_extra_devices = [d for d in full_extra_devices if not is_vae_device(d)][:max_gpus - 1]
     if len(limit_extra_devices) == 0:
         logging.info("No extra torch devices need initialization, skipping initializing MultiGPU VAE clones.")
-        return vae
+        return cloned
 
-    cloned = copy.copy(vae)
     existing = getattr(vae, 'multigpu_clones', None)
-    clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if not is_vae_device(d)} if existing else {}
+    limit_extra_device_set = set(limit_extra_devices)
+    clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if d in limit_extra_device_set} if existing else {}
     clone_source = copy.copy(vae)
     if hasattr(clone_source, 'multigpu_clones'):
         del clone_source.multigpu_clones
