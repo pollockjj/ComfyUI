@@ -13,9 +13,10 @@ import comfy.multigpu
 
 class MultiGPUCFGSplitNode(io.ComfyNode):
     """
-    Prepares MODEL (CFG cond/uncond split) and/or UPSCALE_MODEL (tile-parallel) for multi-GPU
-    work-unit dispatch. Any non-empty input gets per-device deepclones attached; downstream
-    nodes detect the attached state on the object they receive and dispatch automatically.
+    Prepares MODEL (CFG cond/uncond split), UPSCALE_MODEL (tile-parallel), and/or VAE
+    (tiled-decode parallel) for multi-GPU work-unit dispatch. Any non-empty input gets
+    per-device deepclones attached; downstream nodes detect the attached state on the
+    object they receive and dispatch automatically.
 
     Should be placed after nodes that modify the model object itself, such as compile or attention-switch nodes.
 
@@ -32,21 +33,25 @@ class MultiGPUCFGSplitNode(io.ComfyNode):
             inputs=[
                 io.Model.Input("model", optional=True),
                 io.UpscaleModel.Input("upscale_model", optional=True),
+                io.Vae.Input("vae", optional=True),
                 io.Int.Input("max_gpus", default=2, min=1, step=1),
             ],
             outputs=[
                 io.Model.Output(),
                 io.UpscaleModel.Output(),
+                io.Vae.Output(),
             ],
         )
 
     @classmethod
-    def execute(cls, max_gpus: int, model: ModelPatcher = None, upscale_model=None) -> io.NodeOutput:
+    def execute(cls, max_gpus: int, model: ModelPatcher = None, upscale_model=None, vae=None) -> io.NodeOutput:
         if model is not None:
             model = comfy.multigpu.create_multigpu_deepclones(model, max_gpus, reuse_loaded=True)
         if upscale_model is not None:
             upscale_model = comfy.multigpu.create_upscale_model_multigpu_deepclones(upscale_model, max_gpus)
-        return io.NodeOutput(model, upscale_model)
+        if vae is not None:
+            vae = comfy.multigpu.create_vae_multigpu_deepclones(vae, max_gpus)
+        return io.NodeOutput(model, upscale_model, vae)
 
 
 class MultiGPUOptionsNode(io.ComfyNode):

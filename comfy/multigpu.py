@@ -213,6 +213,43 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
     return cloned
 
 
+def create_vae_multigpu_deepclones(vae, max_gpus: int):
+    '''Attach per-device deepclones of a VAE (comfy.sd.VAE wrapper) for tile-parallel decode dispatch.
+
+    Returns a shallow copy of the vae with a `multigpu_clones: dict[torch.device, VAE]` attribute.
+    Each clone is a `copy.deepcopy` of the full VAE wrapper (including its `first_stage_model`,
+    `patcher`, and metadata). The clone's `first_stage_model` is moved to CPU at attachment time
+    (mirrors the upscale_model lane's CPU-resident-until-execute pattern); the consumer moves it
+    to the target device at execute time and back to CPU in `finally`.
+
+    Downstream consumers (VAE.decode_tiled_*) check `getattr(self, 'multigpu_clones', None)` and
+    dispatch tiles across the devices when present.
+    '''
+    full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
+    limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU VAE clones.")
+        return vae
+
+    cloned = copy.copy(vae)
+    existing = getattr(vae, 'multigpu_clones', None)
+    clones: dict[torch.device, object] = dict(existing) if existing else {}
+
+    for device in limit_extra_devices:
+        if device in clones:
+            continue
+        clone_vae = copy.deepcopy(vae)
+        clone_vae.first_stage_model.eval()
+        for p in clone_vae.first_stage_model.parameters():
+            p.requires_grad_(False)
+        clone_vae.first_stage_model.to("cpu")
+        clones[device] = clone_vae
+        logging.info(f"Created CPU VAE deepclone for {device}")
+
+    cloned.multigpu_clones = clones
+    return cloned
+
+
 LoadBalance = namedtuple('LoadBalance', ['work_per_device', 'idle_time'])
 def load_balance_devices(model_options: dict[str], total_work: int, return_idle_time=False, work_normalized: int=None):
     'Optimize work assigned to different devices, accounting for their relative speeds and splittable work.'
