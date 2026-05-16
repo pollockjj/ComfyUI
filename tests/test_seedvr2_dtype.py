@@ -1,7 +1,10 @@
+import json
+
 import torch
 
 import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
+import comfy.ldm.modules.attention as attention_module
 
 
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
@@ -55,3 +58,41 @@ def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch)
         (t[..., :4].float() + 1.0).to(torch.float16),
     )
     torch.testing.assert_close(out[..., 4:], t[..., 4:])
+
+
+def test_var_attention_boundary_telemetry_emits_contract_fields(monkeypatch, tmp_path):
+    telemetry_path = tmp_path / "telemetry.jsonl"
+    monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_PATH", str(telemetry_path))
+    monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_WORKFLOW", "workflow.json")
+    monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_FLOW_ID", "native")
+    monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX", "7")
+
+    def fake_attention(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs):
+        return q + k + v
+
+    wrapped = attention_module._instrument_var_attention(fake_attention)
+    q = torch.ones(2, 1, 2)
+    k = torch.full((2, 1, 2), 2.0)
+    v = torch.full((2, 1, 2), 3.0)
+    cu_seqlens = torch.tensor([0, 2])
+
+    out = wrapped(
+        q,
+        k,
+        v,
+        1,
+        cu_seqlens,
+        cu_seqlens,
+        skip_reshape=True,
+        skip_output_reshape=True,
+    )
+
+    torch.testing.assert_close(out, torch.full((2, 1, 2), 6.0))
+    rows = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["entry", "exit"]
+    assert rows[-1]["status"] == "pass"
+    assert set(attention_module._VAR_ATTENTION_TELEMETRY_FIELDS).issubset(rows[-1])
+    assert rows[-1]["workflow"] == "workflow.json"
+    assert rows[-1]["flow_id"] == "native"
+    assert rows[-1]["block_index"] == "7"
+    assert rows[-1]["attention_backend"] == "fake_attention"

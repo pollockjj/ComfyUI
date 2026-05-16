@@ -1,5 +1,9 @@
 import math
 import sys
+import os
+import json
+import re
+from datetime import datetime, timezone
 
 import torch
 import torch.nn.functional as F
@@ -1085,6 +1089,113 @@ def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     )
 
 
+_VAR_ATTENTION_TELEMETRY_FIELDS = (
+    "timestamp",
+    "workflow",
+    "flow_id",
+    "attention_backend",
+    "event",
+    "block_index",
+    "cuda_free_gib",
+    "cuda_allocated_gib",
+    "cuda_reserved_gib",
+    "requested_allocation_gib",
+    "device_limit_gib",
+    "status",
+)
+_VAR_ATTENTION_TELEMETRY_CALL_INDEX = 0
+
+
+def _bytes_to_gib(value):
+    if value is None:
+        return None
+    return round(value / (1024 ** 3), 6)
+
+
+def _parse_requested_allocation_gib(exc):
+    match = re.search(r"(?:Tried to allocate|Requested)\s*:?\s*([0-9.]+)\s*(GiB|MiB)", str(exc))
+    if match is None:
+        return None
+    value = float(match.group(1))
+    if match.group(2) == "MiB":
+        value /= 1024
+    return round(value, 6)
+
+
+def _var_attention_cuda_memory_row(q):
+    if not isinstance(q, torch.Tensor) or q.device.type != "cuda":
+        return {
+            "cuda_free_gib": None,
+            "cuda_allocated_gib": None,
+            "cuda_reserved_gib": None,
+            "device_limit_gib": None,
+        }
+    free_bytes, total_bytes = torch.cuda.mem_get_info(q.device)
+    return {
+        "cuda_free_gib": _bytes_to_gib(free_bytes),
+        "cuda_allocated_gib": _bytes_to_gib(torch.cuda.memory_allocated(q.device)),
+        "cuda_reserved_gib": _bytes_to_gib(torch.cuda.memory_reserved(q.device)),
+        "device_limit_gib": _bytes_to_gib(total_bytes),
+    }
+
+
+def _write_var_attention_telemetry(row):
+    path = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_PATH")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _emit_var_attention_telemetry(q, attention_backend, event, block_index, status, requested_allocation_gib=None):
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "workflow": os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_WORKFLOW", ""),
+        "flow_id": os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_FLOW_ID", ""),
+        "attention_backend": attention_backend,
+        "event": event,
+        "block_index": block_index,
+        "requested_allocation_gib": requested_allocation_gib,
+        "status": status,
+    }
+    row.update(_var_attention_cuda_memory_row(q))
+    _write_var_attention_telemetry(row)
+
+
+def _instrument_var_attention(fn):
+    @functools.wraps(fn)
+    def wrapped(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs):
+        global _VAR_ATTENTION_TELEMETRY_CALL_INDEX
+        path = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_PATH")
+        if not path:
+            return fn(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs)
+        block_index = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX")
+        if block_index is None:
+            block_index = _VAR_ATTENTION_TELEMETRY_CALL_INDEX
+        _VAR_ATTENTION_TELEMETRY_CALL_INDEX += 1
+        backend = getattr(fn, "__name__", type(fn).__name__)
+        _emit_var_attention_telemetry(q, backend, "entry", block_index, "running")
+        try:
+            out = fn(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs)
+        except torch.cuda.OutOfMemoryError as exc:
+            _emit_var_attention_telemetry(
+                q,
+                backend,
+                "exception",
+                block_index,
+                "oom",
+                requested_allocation_gib=_parse_requested_allocation_gib(exc),
+            )
+            raise
+        except Exception:
+            _emit_var_attention_telemetry(q, backend, "exception", block_index, "exception")
+            raise
+        _emit_var_attention_telemetry(q, backend, "exit", block_index, "pass")
+        return out
+
+    return wrapped
+
+
 optimized_var_attention = var_attention_pytorch
 optimized_attention = attention_basic
 
@@ -1126,6 +1237,7 @@ else:
         optimized_attention = attention_sub_quad
         optimized_var_attention = var_attention_sub_quad
 
+optimized_var_attention = _instrument_var_attention(optimized_var_attention)
 optimized_attention_masked = optimized_attention
 
 
