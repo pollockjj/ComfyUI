@@ -56,22 +56,30 @@ def tiled_vae(
         x = x.unsqueeze(2)
 
     b, c, d, h, w = x.shape
+
+    sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
+    sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
+    if encode:
+        slicing_attr = "slicing_sample_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap)
+    else:
+        slicing_attr = "slicing_latent_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
     logging.warning(
         "!!! SEEDVR2 VAE TILING ACTIVE !!! phase=%s input_shape=%s "
         "tile_size=%s tile_overlap=%s temporal_size=%s temporal_overlap=%s "
-        "dtype=%s device=%s",
+        "slicing_attr=%s effective_slicing_min_size=%s dtype=%s device=%s",
         "encode" if encode else "decode",
         tuple(x.shape),
         tile_size,
         tile_overlap,
         temporal_size,
         temporal_overlap,
+        slicing_attr,
+        slicing_min_size,
         x.dtype,
         x.device,
     )
-
-    sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
-    sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
 
     if encode:
         ti_h, ti_w = tile_size
@@ -98,13 +106,6 @@ def tiled_vae(
     storage_device = vae_model.device
     result = None
     count = None
-    if encode:
-        slicing_attr = "slicing_sample_min_size"
-        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap)
-    else:
-        slicing_attr = "slicing_latent_min_size"
-        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
-
     def run_temporal_chunks(spatial_tile):
         t_chunk = spatial_tile.contiguous()
         old_slicing_min_size = getattr(vae_model, slicing_attr, None)
