@@ -643,7 +643,7 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             max_width = max(max_width, w)
             max_txt_len = max(max_txt_len, l)
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             vid_freqs = self.get_axial_freqs(
                 min(max_temporal + 16, 1024),  # Cap at 1024, add small buffer
                 min(max_height + 4, 128),      # Cap at 128, add small buffer
