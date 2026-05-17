@@ -61,7 +61,7 @@ def tiled_vae(
     if x.ndim != 5:
         x = x.unsqueeze(2)
 
-    b, c, d, h, w = x.shape
+    _, _, d, h, w = x.shape
 
     sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
     sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
