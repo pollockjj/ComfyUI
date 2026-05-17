@@ -1,5 +1,6 @@
 import json
 import asyncio
+import inspect
 
 import torch
 
@@ -9,7 +10,6 @@ import comfy.ldm.seedvr.model as seedvr_model
 import comfy.ldm.modules.attention as attention_module
 import execution as execution_module
 import nodes
-from comfy_execution.graph import DynamicPrompt, ExecutionList
 
 
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
@@ -67,6 +67,7 @@ def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch)
 
 def test_var_attention_boundary_telemetry_emits_contract_fields(monkeypatch, tmp_path):
     telemetry_path = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(attention_module, "_VAR_ATTENTION_TELEMETRY_CALL_INDEX", 0)
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_PATH", str(telemetry_path))
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_WORKFLOW", "workflow.json")
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_FLOW_ID", "native")
@@ -100,11 +101,13 @@ def test_var_attention_boundary_telemetry_emits_contract_fields(monkeypatch, tmp
     assert rows[-1]["workflow"] == "workflow.json"
     assert rows[-1]["flow_id"] == "native"
     assert rows[-1]["block_index"] == "7"
+    assert rows[-1]["call_index"] == 0
     assert rows[-1]["attention_backend"] == "fake_attention"
 
 
 def test_var_attention_boundary_telemetry_records_oom(monkeypatch, tmp_path):
     telemetry_path = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(attention_module, "_VAR_ATTENTION_TELEMETRY_CALL_INDEX", 0)
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_PATH", str(telemetry_path))
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX", "2")
 
@@ -127,35 +130,37 @@ def test_var_attention_boundary_telemetry_records_oom(monkeypatch, tmp_path):
     assert rows[-1]["status"] == "oom"
     assert rows[-1]["requested_allocation_gib"] == 1.24
     assert rows[-1]["block_index"] == "2"
+    assert rows[-1]["call_index"] == 0
 
 
-def test_var_attention_argument_telemetry_records_materialization_oom(monkeypatch, tmp_path):
+def test_var_attention_boundary_telemetry_does_not_synthesize_block_index(monkeypatch, tmp_path):
     telemetry_path = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(attention_module, "_VAR_ATTENTION_TELEMETRY_CALL_INDEX", 0)
     monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_PATH", str(telemetry_path))
-    monkeypatch.setenv("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX", "3")
 
-    def fake_concat(vid, txt):
-        raise torch.cuda.OutOfMemoryError("Requested: 512.00 MiB")
+    def fake_attention(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs):
+        return q
 
-    wrapped = attention_module.instrument_var_attention_argument(fake_concat, "concat_win")
-    vid = torch.ones(2, 1, 2)
-    txt = torch.ones(1, 1, 2)
-
-    try:
-        wrapped(vid, txt)
-    except torch.cuda.OutOfMemoryError:
-        pass
-    else:
-        raise AssertionError("expected OutOfMemoryError")
+    wrapped = attention_module._instrument_var_attention(fake_attention)
+    q = torch.ones(2, 1, 2)
+    cu_seqlens = torch.tensor([0, 2])
+    wrapped(q, q, q, 1, cu_seqlens, cu_seqlens)
 
     rows = [json.loads(line) for line in telemetry_path.read_text().splitlines()]
-    assert [row["event"] for row in rows] == ["argument_entry", "argument_exception"]
-    assert rows[-1]["status"] == "oom"
-    assert rows[-1]["requested_allocation_gib"] == 0.5
-    assert rows[-1]["attention_backend"] == "argument:concat_win"
+    assert rows[-1]["block_index"] is None
+    assert isinstance(rows[-1]["call_index"], int)
 
 
-def test_stop_after_dit_exception_returns_execution_success(monkeypatch):
+def test_seedvr2_attention_caller_shape_is_unwrapped():
+    source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
+    assert "instrument_var_attention_argument" not in source
+    assert "concat_win = instrument" not in source
+    assert "q=concat_win(vid_q, txt_q)" in source
+    assert "k=concat_win(vid_k, txt_k)" in source
+    assert "v=concat_win(vid_v, txt_v)" in source
+
+
+def test_stop_after_dit_exception_terminates_prompt_before_downstream(monkeypatch):
     class StopAfterDiTNode:
         RETURN_TYPES = ("IMAGE",)
         FUNCTION = "run"
@@ -168,44 +173,42 @@ def test_stop_after_dit_exception_returns_execution_success(monkeypatch):
         def run(self):
             raise comfy.model_management.StopAfterDiTProcessingException()
 
+    class DownstreamOutputNode:
+        RETURN_TYPES = ()
+        FUNCTION = "run"
+        OUTPUT_NODE = True
+        CATEGORY = "test"
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {"image": ("IMAGE",)}}
+
+        def run(self, image):
+            raise AssertionError("downstream node executed")
+
     class Server:
         client_id = None
+        messages = []
 
         def send_sync(self, event, data, client_id):
-            raise AssertionError(event)
+            self.messages.append((event, data, client_id))
 
-    async def run_node():
+    async def run_prompt():
         monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "StopAfterDiTNode", StopAfterDiTNode)
-        prompt = {"1": {"class_type": "StopAfterDiTNode", "inputs": {}}}
-        dynprompt = DynamicPrompt(prompt)
-        caches = execution_module.CacheSet()
-        is_changed_cache = execution_module.IsChangedCache(
-            "prompt-stop-after-dit",
-            dynprompt,
-            caches.outputs,
-        )
-        for cache in caches.all:
-            await cache.set_prompt(dynprompt, prompt.keys(), is_changed_cache)
-        execution_list = ExecutionList(dynprompt, caches.outputs)
-        execution_list.add_node("1")
-        executed = set()
-        result, error, ex = await execution_module.execute(
-            Server(),
-            dynprompt,
-            caches,
-            "1",
-            {},
-            executed,
-            "prompt-stop-after-dit",
-            execution_list,
-            {},
-            {},
-            {},
-        )
-        return result, error, ex, executed
+        monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "DownstreamOutputNode", DownstreamOutputNode)
+        prompt = {
+            "1": {"class_type": "StopAfterDiTNode", "inputs": {}},
+            "2": {"class_type": "DownstreamOutputNode", "inputs": {"image": ["1", 0]}},
+        }
+        executor = execution_module.PromptExecutor(Server(), cache_args={"ram": 0})
+        await executor.execute_async(prompt, "prompt-stop-after-dit", {}, ["2"])
+        return executor
 
-    result, error, ex, executed = asyncio.run(run_node())
-    assert result is execution_module.ExecutionResult.SUCCESS
-    assert error is None
-    assert ex is None
-    assert executed == {"1"}
+    executor = asyncio.run(run_prompt())
+    assert executor.success is True
+    assert [message[0] for message in executor.status_messages] == [
+        "execution_start",
+        "execution_cached",
+        "execution_success",
+    ]
+    assert executor.history_result == {"outputs": {}, "meta": {}}

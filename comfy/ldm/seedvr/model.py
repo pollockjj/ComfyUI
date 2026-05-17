@@ -8,7 +8,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention, instrument_var_attention_argument
+from comfy.ldm.modules.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
@@ -859,7 +859,6 @@ class NaSwinAttention(NaMMAttention):
         concat_win, unconcat_win = cache_win(
             "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
-        concat_win = instrument_var_attention_argument(concat_win, "concat_win")
 
         # window rope
         if not self.version_7b:
@@ -1521,37 +1520,47 @@ class NaDiT(nn.Module):
 
         emb = self.emb_in(timestep, device=vid.device, dtype=vid.dtype)
 
-        for i, block in enumerate(self.blocks):
-            if ("block", i) in blocks_replace:
-                def block_wrap(args):
-                    out = {}
-                    out["vid"], out["txt"], out["vid_shape"], out["txt_shape"] = block(
-                            vid=args["vid"],
-                            txt=args["txt"],
-                            vid_shape=args["vid_shape"],
-                            txt_shape=args["txt_shape"],
-                            emb=args["emb"],
-                            cache=args["cache"],
-                        )
-                    return out
-                out = blocks_replace[("block", i)]({
-                        "vid":vid,
-                        "txt":txt,
-                        "vid_shape":vid_shape,
-                        "txt_shape":txt_shape,
-                        "emb":emb,
-                        "cache":cache,
-                    }, {"original_block": block_wrap})
-                vid, txt, vid_shape, txt_shape = out["vid"], out["txt"], out["vid_shape"], out["txt_shape"]
+        telemetry_enabled = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_PATH")
+        previous_block_index = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX")
+        try:
+            for i, block in enumerate(self.blocks):
+                if telemetry_enabled:
+                    os.environ["COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX"] = str(i)
+                if ("block", i) in blocks_replace:
+                    def block_wrap(args):
+                        out = {}
+                        out["vid"], out["txt"], out["vid_shape"], out["txt_shape"] = block(
+                                vid=args["vid"],
+                                txt=args["txt"],
+                                vid_shape=args["vid_shape"],
+                                txt_shape=args["txt_shape"],
+                                emb=args["emb"],
+                                cache=args["cache"],
+                            )
+                        return out
+                    out = blocks_replace[("block", i)]({
+                            "vid":vid,
+                            "txt":txt,
+                            "vid_shape":vid_shape,
+                            "txt_shape":txt_shape,
+                            "emb":emb,
+                            "cache":cache,
+                        }, {"original_block": block_wrap})
+                    vid, txt, vid_shape, txt_shape = out["vid"], out["txt"], out["vid_shape"], out["txt_shape"]
+                else:
+                    vid, txt, vid_shape, txt_shape = block(
+                        vid=vid,
+                        txt=txt,
+                        vid_shape=vid_shape,
+                        txt_shape=txt_shape,
+                        emb=emb,
+                        cache=cache,
+                    )
+        finally:
+            if previous_block_index is None:
+                os.environ.pop("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX", None)
             else:
-                vid, txt, vid_shape, txt_shape = block(
-                    vid=vid,
-                    txt=txt,
-                    vid_shape=vid_shape,
-                    txt_shape=txt_shape,
-                    emb=emb,
-                    cache=cache,
-                )
+                os.environ["COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX"] = previous_block_index
 
         if self.vid_out_norm:
             vid = self.vid_out_norm(vid)

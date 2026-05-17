@@ -47,6 +47,7 @@ class ExecutionResult(Enum):
     SUCCESS = 0
     FAILURE = 1
     PENDING = 2
+    STOPPED = 3
 
 class DuplicateNodeError(Exception):
     pass
@@ -604,7 +605,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
         logging.info("Processing stopped after DiT")
         get_progress_state().finish_progress(unique_id)
         executed.add(unique_id)
-        return (ExecutionResult.SUCCESS, None, None)
+        return (ExecutionResult.STOPPED, None, None)
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
 
@@ -779,6 +780,9 @@ class PromptExecutor:
                         break
                     elif result == ExecutionResult.PENDING:
                         execution_list.unstage_node_execution()
+                    elif result == ExecutionResult.STOPPED:
+                        self.add_message("execution_success", { "prompt_id": prompt_id }, broadcast=False)
+                        break
                     else: # result == ExecutionResult.SUCCESS:
                         execution_list.complete_node_execution()
 
