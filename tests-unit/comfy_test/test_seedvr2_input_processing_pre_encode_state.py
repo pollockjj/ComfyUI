@@ -25,7 +25,7 @@ import comfy_extras.nodes_seedvr as nodes_seedvr  # noqa: E402
 _MISSING = object()
 
 
-def _make_capture_fixture():
+def _make_capture_fixture(temporal_tile_size=16, temporal_overlap=4):
     """Build the SeedVR2InputProcessing.execute call surface with a vae.encode
     stub whose side_effect captures vae_model state at invocation time.
 
@@ -62,8 +62,8 @@ def _make_capture_fixture():
                 resolution=120,
                 spatial_tile_size=512,
                 spatial_overlap=64,
-                temporal_tile_size=16,
-                temporal_overlap=4,
+                temporal_tile_size=temporal_tile_size,
+                temporal_overlap=temporal_overlap,
                 enable_tiling=False,
             )
 
@@ -107,3 +107,16 @@ def test_pre_encode_tiled_args_contains_enable_tiling_false():
         f"be False (the enable_tiling=False branch); got "
         f"{tiled_args.get('enable_tiling')!r}."
     )
+
+
+def test_pre_encode_tiled_args_preserve_zero_temporal_bkm():
+    """A configured 0/0 temporal BKM must reach the wrapper state unchanged."""
+    call_execute, captured = _make_capture_fixture(
+        temporal_tile_size=0,
+        temporal_overlap=0,
+    )
+    call_execute()
+
+    tiled_args = captured.get("tiled_args", _MISSING)
+    assert tiled_args["temporal_size"] == 0
+    assert tiled_args["temporal_overlap"] == 0

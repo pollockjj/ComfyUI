@@ -22,6 +22,27 @@ import comfy.ops
 ops = comfy.ops.disable_weight_init
 
 
+def _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, temporal_scale=1):
+    if temporal_size is None:
+        return None
+
+    temporal_size = int(temporal_size)
+    if temporal_size <= 0:
+        return 0
+
+    temporal_overlap = max(0, int(temporal_overlap or 0))
+    temporal_overlap = min(temporal_overlap, temporal_size - 1)
+    temporal_step = temporal_size - temporal_overlap
+    temporal_scale = max(1, int(temporal_scale))
+    return max(1, math.ceil(temporal_step / temporal_scale))
+
+
+def _seedvr2_clamped_spatial_overlap(overlap, tile_size):
+    overlap = max(0, int(overlap))
+    tile_size = max(1, int(tile_size))
+    return min(overlap, tile_size - 1)
+
+
 @torch.inference_mode()
 def tiled_vae(
     x,
@@ -33,23 +54,6 @@ def tiled_vae(
     encode=True,
     **kwargs,
 ):
-    # `temporal_size` and `temporal_overlap` are accepted for caller
-    # compatibility (comfy/sd.py:decode_tiled_seedvr2,
-    # comfy_extras/nodes_seedvr.py:SeedVR2InputProcessing) and still
-    # propagate through `vae_model.tiled_args` for inspection. They no
-    # longer drive outer temporal chunking inside this function: the
-    # encode and decode branches each issue a single call per spatial
-    # tile to vae_model.encode / vae_model.decode_ with
-    # slicing_sample_min_size / slicing_latent_min_size temporarily set
-    # to t_chunk.shape[2], which disables the wrapper's inner slicing
-    # (its `(T-1) > min_size` predicate becomes false). This avoids the
-    # runt-slice underflow at the second temporal downsampler that
-    # arose when inner ACTIVE slices fell below the kernel size, and
-    # keeps causal state coherent across the full temporal axis without
-    # the inter-outer-chunk cache reset that the old loop produced (the
-    # latter caused periodic per-frame discontinuities at every
-    # temporal_tile_size boundary in the output).
-
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -57,35 +61,48 @@ def tiled_vae(
     if x.ndim != 5:
         x = x.unsqueeze(2)
 
-    b, c, d, h, w = x.shape
+    _, _, d, h, w = x.shape
+
+    sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
+    sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
+    if encode:
+        slicing_attr = "slicing_sample_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap)
+    else:
+        slicing_attr = "slicing_latent_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
     logging.warning(
         "!!! SEEDVR2 VAE TILING ACTIVE !!! phase=%s input_shape=%s "
         "tile_size=%s tile_overlap=%s temporal_size=%s temporal_overlap=%s "
-        "dtype=%s device=%s",
+        "slicing_attr=%s effective_slicing_min_size=%s dtype=%s device=%s",
         "encode" if encode else "decode",
         tuple(x.shape),
         tile_size,
         tile_overlap,
         temporal_size,
         temporal_overlap,
+        slicing_attr,
+        slicing_min_size,
         x.dtype,
         x.device,
     )
 
-    sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
-    sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
-
     if encode:
         ti_h, ti_w = tile_size
-        ov_h, ov_w = tile_overlap
+        ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0], ti_h)
+        ov_w = _seedvr2_clamped_spatial_overlap(tile_overlap[1], ti_w)
+        blend_ov_h = max(0, ov_h // sf_s)
+        blend_ov_w = max(0, ov_w // sf_s)
         target_d = (d + sf_t - 1) // sf_t
         target_h = (h + sf_s - 1) // sf_s
         target_w = (w + sf_s - 1) // sf_s
     else:
         ti_h = max(1, tile_size[0] // sf_s)
         ti_w = max(1, tile_size[1] // sf_s)
-        ov_h = max(0, tile_overlap[0] // sf_s)
-        ov_w = max(0, tile_overlap[1] // sf_s)
+        ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0] // sf_s, ti_h)
+        ov_w = _seedvr2_clamped_spatial_overlap(tile_overlap[1] // sf_s, ti_w)
+        blend_ov_h = ov_h * sf_s
+        blend_ov_w = ov_w * sf_s
 
         target_d = max(1, d * sf_t - (sf_t - 1))
         target_h = h * sf_s
@@ -97,45 +114,26 @@ def tiled_vae(
     storage_device = vae_model.device
     result = None
     count = None
-
     def run_temporal_chunks(spatial_tile):
-        # Single-call-per-spatial-tile delegation to the
-        # wrapper's slicing path. Causal state propagates across the full
-        # temporal axis (INITIALIZING + ACTIVE per-slice via slicing_encode /
-        # slicing_decode), eliminating the periodic temporal_tile_size
-        # boundary discontinuities the previous outer chunking caused.
         t_chunk = spatial_tile.contiguous()
+        old_slicing_min_size = getattr(vae_model, slicing_attr, None)
+        if old_slicing_min_size is not None and slicing_min_size is not None:
+            if slicing_min_size <= 0:
+                setattr(vae_model, slicing_attr, t_chunk.shape[2])
+            else:
+                setattr(vae_model, slicing_attr, slicing_min_size)
         if encode:
-            # Disable inner slicing for the encode call by
-            # setting slicing_sample_min_size = t_chunk.shape[2]; this
-            # makes slicing_encode's `(T-1) > min_size` predicate false
-            # for this t_chunk so the encoder runs whole-T with no inner
-            # runt-slice possible (e.g. T=12 with default min_size=4 would
-            # otherwise emit a runt ACTIVE T=3 that underflows the second
-            # temporal downsampler -- see
-            # test_seedvr_vae_tiled_encode_runt_slice_override.py).
-            old_slicing_sample_min_size = getattr(vae_model, "slicing_sample_min_size", None)
-            if old_slicing_sample_min_size is not None:
-                vae_model.slicing_sample_min_size = t_chunk.shape[2]
             try:
                 out = vae_model.encode(t_chunk)[0]
             finally:
-                if old_slicing_sample_min_size is not None:
-                    vae_model.slicing_sample_min_size = old_slicing_sample_min_size
-        # Decode branch: disable inner slicing for the decode call by
-        # setting slicing_latent_min_size = t_chunk.shape[2]; this makes
-        # slicing_decode's `(T-1) > min_size` predicate false for this
-        # t_chunk so the decoder runs whole-T with no inner runt-slice
-        # possible. Mirrors the encode-side override.
+                if old_slicing_min_size is not None and slicing_min_size is not None:
+                    setattr(vae_model, slicing_attr, old_slicing_min_size)
         else:
-            old_slicing_latent_min_size = getattr(vae_model, "slicing_latent_min_size", None)
-            if old_slicing_latent_min_size is not None:
-                vae_model.slicing_latent_min_size = t_chunk.shape[2]
             try:
                 out = vae_model.decode_(t_chunk)
             finally:
-                if old_slicing_latent_min_size is not None:
-                    vae_model.slicing_latent_min_size = old_slicing_latent_min_size
+                if old_slicing_min_size is not None and slicing_min_size is not None:
+                    setattr(vae_model, slicing_attr, old_slicing_min_size)
         if isinstance(out, (tuple, list)):
             out = out[0]
         if out.ndim == 4:
@@ -149,75 +147,81 @@ def tiled_vae(
             ramp_cache[steps] = 0.5 - 0.5 * torch.cos(t * torch.pi)
         return ramp_cache[steps]
 
-    total_tiles = len(range(0, h, stride_h)) * len(range(0, w, stride_w))
+    tile_ranges = []
+    for y_idx in range(0, h, stride_h):
+        y_end = min(y_idx + ti_h, h)
+        if y_idx > 0 and (y_end - y_idx) <= ov_h:
+            continue
+        for x_idx in range(0, w, stride_w):
+            x_end = min(x_idx + ti_w, w)
+            if x_idx > 0 and (x_end - x_idx) <= ov_w:
+                continue
+            tile_ranges.append((y_idx, y_end, x_idx, x_end))
+
+    total_tiles = len(tile_ranges)
     bar = ProgressBar(total_tiles)
     single_spatial_tile = h <= ti_h and w <= ti_w
 
-    for y_idx in range(0, h, stride_h):
-        y_end = min(y_idx + ti_h, h)
+    for y_idx, y_end, x_idx, x_end in tile_ranges:
+        tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
 
-        for x_idx in range(0, w, stride_w):
-            x_end = min(x_idx + ti_w, w)
+        # Run VAE
+        tile_out = run_temporal_chunks(tile_x)
 
-            tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
-
-            # Run VAE
-            tile_out = run_temporal_chunks(tile_x)
-
-            if single_spatial_tile:
-                result = tile_out[:, :, :target_d, :target_h, :target_w]
-                if result.device != x.device:
-                    result = result.to(x.device).to(x.dtype)
-                if x.shape[2] == 1 and sf_t == 1:
-                    result = result.squeeze(2)
-                bar.update(1)
-                return result
-
-            if result is None:
-                b_out, c_out = tile_out.shape[0], tile_out.shape[1]
-                result = torch.zeros((b_out, c_out, target_d, target_h, target_w), device=storage_device, dtype=torch.float32)
-                count = torch.zeros((1, 1, 1, target_h, target_w), device=storage_device, dtype=torch.float32)
-
-            if encode:
-                ys, ye = y_idx // sf_s, (y_idx // sf_s) + tile_out.shape[3]
-                xs, xe = x_idx // sf_s, (x_idx // sf_s) + tile_out.shape[4]
-                cur_ov_h = max(0, min(ov_h // sf_s, tile_out.shape[3] // 2))
-                cur_ov_w = max(0, min(ov_w // sf_s, tile_out.shape[4] // 2))
-            else:
-                ys, ye = y_idx * sf_s, (y_idx * sf_s) + tile_out.shape[3]
-                xs, xe = x_idx * sf_s, (x_idx * sf_s) + tile_out.shape[4]
-                cur_ov_h = max(0, min(ov_h, tile_out.shape[3] // 2))
-                cur_ov_w = max(0, min(ov_w, tile_out.shape[4] // 2))
-
-            w_h = torch.ones((tile_out.shape[3],), device=storage_device)
-            w_w = torch.ones((tile_out.shape[4],), device=storage_device)
-
-            if cur_ov_h > 0:
-                r = get_ramp(cur_ov_h)
-                if y_idx > 0:
-                    w_h[:cur_ov_h] = r
-                if y_end < h:
-                    w_h[-cur_ov_h:] = 1.0 - r
-
-            if cur_ov_w > 0:
-                r = get_ramp(cur_ov_w)
-                if x_idx > 0:
-                    w_w[:cur_ov_w] = r
-                if x_end < w:
-                    w_w[-cur_ov_w:] = 1.0 - r
-
-            final_weight = w_h.view(1,1,1,-1,1) * w_w.view(1,1,1,1,-1)
-
-            valid_d = min(tile_out.shape[2], result.shape[2])
-            tile_out = tile_out[:, :, :valid_d, :, :]
-
-            tile_out.mul_(final_weight)
-
-            result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
-            count[:, :, :, ys:ye, xs:xe] += final_weight
-
-            del tile_out, final_weight, tile_x, w_h, w_w
+        if single_spatial_tile:
+            result = tile_out[:, :, :target_d, :target_h, :target_w]
+            if result.device != x.device:
+                result = result.to(x.device).to(x.dtype)
+            if x.shape[2] == 1 and sf_t == 1:
+                result = result.squeeze(2)
             bar.update(1)
+            return result
+
+        if result is None:
+            b_out, c_out = tile_out.shape[0], tile_out.shape[1]
+            result = torch.zeros((b_out, c_out, target_d, target_h, target_w), device=storage_device, dtype=torch.float32)
+            count = torch.zeros((1, 1, 1, target_h, target_w), device=storage_device, dtype=torch.float32)
+
+        if encode:
+            ys, ye = y_idx // sf_s, (y_idx // sf_s) + tile_out.shape[3]
+            xs, xe = x_idx // sf_s, (x_idx // sf_s) + tile_out.shape[4]
+            cur_ov_h = max(0, min(blend_ov_h, tile_out.shape[3] // 2))
+            cur_ov_w = max(0, min(blend_ov_w, tile_out.shape[4] // 2))
+        else:
+            ys, ye = y_idx * sf_s, (y_idx * sf_s) + tile_out.shape[3]
+            xs, xe = x_idx * sf_s, (x_idx * sf_s) + tile_out.shape[4]
+            cur_ov_h = max(0, min(blend_ov_h, tile_out.shape[3] // 2))
+            cur_ov_w = max(0, min(blend_ov_w, tile_out.shape[4] // 2))
+
+        w_h = torch.ones((tile_out.shape[3],), device=storage_device)
+        w_w = torch.ones((tile_out.shape[4],), device=storage_device)
+
+        if cur_ov_h > 0:
+            r = get_ramp(cur_ov_h)
+            if y_idx > 0:
+                w_h[:cur_ov_h] = r
+            if y_end < h:
+                w_h[-cur_ov_h:] = 1.0 - r
+
+        if cur_ov_w > 0:
+            r = get_ramp(cur_ov_w)
+            if x_idx > 0:
+                w_w[:cur_ov_w] = r
+            if x_end < w:
+                w_w[-cur_ov_w:] = 1.0 - r
+
+        final_weight = w_h.view(1,1,1,-1,1) * w_w.view(1,1,1,1,-1)
+
+        valid_d = min(tile_out.shape[2], result.shape[2])
+        tile_out = tile_out[:, :, :valid_d, :, :]
+
+        tile_out.mul_(final_weight)
+
+        result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
+        count[:, :, :, ys:ye, xs:xe] += final_weight
+
+        del tile_out, final_weight, tile_x, w_h, w_w
+        bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
 
@@ -2197,7 +2201,15 @@ class VideoAutoencoderKL(nn.Module):
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         sp_size =1
         if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size * sp_size:
-            x_slices = x[:, :, 1:].split(split_size=self.slicing_sample_min_size * sp_size, dim=2)
+            split_size = max(
+                self.slicing_sample_min_size * sp_size,
+                getattr(self, "temporal_downsample_factor", 1),
+            )
+            x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))
+            min_active_len = getattr(self, "temporal_downsample_factor", 1)
+            if len(x_slices) > 1 and x_slices[-1].shape[2] < min_active_len:
+                x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
+                x_slices.pop()
             encoded_slices = [
                 self._encode(
                     torch.cat((x[:, :, :1], x_slices[0]), dim=2),
