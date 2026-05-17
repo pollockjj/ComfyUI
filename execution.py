@@ -600,6 +600,11 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
         execution_list.cache_update(unique_id, cache_entry)
         await caches.outputs.set(unique_id, cache_entry)
 
+    except comfy.model_management.StopAfterDiTProcessingException:
+        logging.info("Processing stopped after DiT")
+        get_progress_state().finish_progress(unique_id)
+        executed.add(unique_id)
+        return (ExecutionResult.SUCCESS, None, None)
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
 

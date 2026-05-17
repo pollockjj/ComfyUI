@@ -1805,6 +1805,9 @@ def debug_memory_summary():
 class InterruptProcessingException(BaseException):
     pass
 
+class StopAfterDiTProcessingException(BaseException):
+    pass
+
 interrupt_processing_mutex = threading.RLock()
 
 interrupt_processing = False

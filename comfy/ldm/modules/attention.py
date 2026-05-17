@@ -1162,6 +1162,36 @@ def _emit_var_attention_telemetry(q, attention_backend, event, block_index, stat
     _write_var_attention_telemetry(row)
 
 
+def instrument_var_attention_argument(fn, argument_name):
+    @functools.wraps(fn)
+    def wrapped(vid, txt):
+        path = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_PATH")
+        if not path:
+            return fn(vid, txt)
+        block_index = os.environ.get("COMFY_VAR_ATTENTION_TELEMETRY_BLOCK_INDEX")
+        backend = f"argument:{argument_name}"
+        _emit_var_attention_telemetry(vid, backend, "argument_entry", block_index, "running")
+        try:
+            out = fn(vid, txt)
+        except torch.cuda.OutOfMemoryError as exc:
+            _emit_var_attention_telemetry(
+                vid,
+                backend,
+                "argument_exception",
+                block_index,
+                "oom",
+                requested_allocation_gib=_parse_requested_allocation_gib(exc),
+            )
+            raise
+        except Exception:
+            _emit_var_attention_telemetry(vid, backend, "argument_exception", block_index, "exception")
+            raise
+        _emit_var_attention_telemetry(out, backend, "argument_exit", block_index, "pass")
+        return out
+
+    return wrapped
+
+
 def _instrument_var_attention(fn):
     @functools.wraps(fn)
     def wrapped(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, **kwargs):

@@ -8,7 +8,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention
+from comfy.ldm.modules.attention import optimized_var_attention, instrument_var_attention_argument
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
@@ -859,6 +859,7 @@ class NaSwinAttention(NaMMAttention):
         concat_win, unconcat_win = cache_win(
             "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
+        concat_win = instrument_var_attention_argument(concat_win, "concat_win")
 
         # window rope
         if not self.version_7b:
@@ -1570,5 +1571,5 @@ class NaDiT(nn.Module):
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
         if os.environ.get("COMFY_SEEDVR2_STOP_AFTER_DIT") == "1":
-            raise comfy.model_management.InterruptProcessingException()
+            raise comfy.model_management.StopAfterDiTProcessingException()
         return self._swap_pos_neg_halves(out)
