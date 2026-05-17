@@ -218,3 +218,17 @@ def test_boundary_reference_latent_no_periodic_temporal_tile_discontinuity():
         (1, 16, 1, 8, 8),
     ]
     assert torch.isclose(spatial[0, 0, 0, 0, 36], expected)
+
+
+def test_decode_tiled_vae_clamps_overlap_sized_tiles_to_preserve_coverage():
+    spatial_vae = _LocalSpatialDecodeVAE()
+    spatial = tiled_vae(
+        torch.zeros(1, 16, 1, 8, 12),
+        spatial_vae,
+        tile_size=(64, 64),
+        tile_overlap=(0, 128),
+        encode=False,
+    )
+
+    assert len(spatial_vae.tile_shapes) > 1
+    assert torch.count_nonzero(spatial[0, 0, 0, 0, 64:]) > 0

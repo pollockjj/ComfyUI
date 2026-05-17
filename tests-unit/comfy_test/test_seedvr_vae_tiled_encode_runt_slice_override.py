@@ -1,5 +1,10 @@
 import torch
 
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
 
 def test_slicing_encode_merges_runt_active_tail():
     from comfy.ldm.seedvr.vae import MemoryState, VideoAutoencoderKL, tiled_vae

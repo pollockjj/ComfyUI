@@ -37,6 +37,12 @@ def _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, temporal
     return max(1, math.ceil(temporal_step / temporal_scale))
 
 
+def _seedvr2_clamped_spatial_overlap(overlap, tile_size):
+    overlap = max(0, int(overlap))
+    tile_size = max(1, int(tile_size))
+    return min(overlap, tile_size - 1)
+
+
 @torch.inference_mode()
 def tiled_vae(
     x,
@@ -83,7 +89,8 @@ def tiled_vae(
 
     if encode:
         ti_h, ti_w = tile_size
-        ov_h, ov_w = tile_overlap
+        ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0], ti_h)
+        ov_w = _seedvr2_clamped_spatial_overlap(tile_overlap[1], ti_w)
         blend_ov_h = max(0, ov_h // sf_s)
         blend_ov_w = max(0, ov_w // sf_s)
         target_d = (d + sf_t - 1) // sf_t
@@ -92,9 +99,10 @@ def tiled_vae(
     else:
         ti_h = max(1, tile_size[0] // sf_s)
         ti_w = max(1, tile_size[1] // sf_s)
-        ov_h = max(0, tile_overlap[0] // sf_s)
-        ov_w = max(0, tile_overlap[1] // sf_s)
-        blend_ov_h, blend_ov_w = tile_overlap
+        ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0] // sf_s, ti_h)
+        ov_w = _seedvr2_clamped_spatial_overlap(tile_overlap[1] // sf_s, ti_w)
+        blend_ov_h = ov_h * sf_s
+        blend_ov_w = ov_w * sf_s
 
         target_d = max(1, d * sf_t - (sf_t - 1))
         target_h = h * sf_s

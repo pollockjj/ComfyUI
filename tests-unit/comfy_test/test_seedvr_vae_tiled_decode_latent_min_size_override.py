@@ -1,5 +1,10 @@
 import torch
 
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
 
 def test_runtime_decode_zero_temporal_size_disables_slicing_for_call():
     from comfy.ldm.seedvr.vae import MemoryState, VideoAutoencoderKL, tiled_vae
