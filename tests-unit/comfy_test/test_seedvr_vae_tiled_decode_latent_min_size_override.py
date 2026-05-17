@@ -1,24 +1,7 @@
-import re
-from pathlib import Path
-
 import torch
 
 
-_VAE_PATH = Path(__file__).resolve().parents[2] / "comfy" / "ldm" / "seedvr" / "vae.py"
-
-
-def test_decode_branch_delegates_to_wrapper_slicing_decode():
-    src = _VAE_PATH.read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"if encode:\s*\n"
-        r"\s*out = vae_model\.encode\(t_chunk\)\[0\]\s*\n"
-        r"\s*else:\s*\n"
-        r"\s*out = vae_model\.decode_\(t_chunk\)",
-    )
-    assert pattern.search(src) is not None
-
-
-def test_runtime_decode_uses_existing_slicing_latent_min_size():
+def test_runtime_decode_zero_temporal_size_disables_slicing_for_call():
     from comfy.ldm.seedvr.vae import MemoryState, VideoAutoencoderKL, tiled_vae
 
     class StubVAEModel(torch.nn.Module):
@@ -50,12 +33,13 @@ def test_runtime_decode_uses_existing_slicing_latent_min_size():
         vae,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=16,
+        temporal_size=0,
+        temporal_overlap=0,
         encode=False,
     )
 
-    assert vae.decode_min_sizes == [2]
-    assert vae.memory_states == [MemoryState.INITIALIZING, MemoryState.ACTIVE]
+    assert vae.decode_min_sizes == [5]
+    assert vae.memory_states == [MemoryState.DISABLED]
     assert vae.slicing_latent_min_size == 2
 
 
@@ -84,7 +68,8 @@ def test_runtime_decode_preserves_min_size_when_decode_raises():
             vae,
             tile_size=(64, 64),
             tile_overlap=(0, 0),
-            temporal_size=16,
+            temporal_size=0,
+            temporal_overlap=0,
             encode=False,
         )
     except RuntimeError as exc:

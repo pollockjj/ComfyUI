@@ -218,7 +218,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
                 io.Int.Input("spatial_tile_size", default = 512, min = 1),
                 io.Int.Input("spatial_overlap", default = 64, min = 1),
-                io.Int.Input("temporal_tile_size", default=16, min=1, max=16384, step=4),
+                io.Int.Input("temporal_tile_size", default=16, min=0, max=16384, step=4),
                 io.Int.Input("temporal_overlap", default=4, min=0, max=16384, step=4),
                 io.Boolean.Input("enable_tiling", default=False),
             ],
@@ -287,11 +287,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
             if vae_device is None:
                 vae_device = next(vae_model.parameters()).device
             images_bcthw = images_bcthw.to(vae_device)
-            # temporal_overlap is decode-only in tiled_vae (encode hardcodes
-            # overlap_chunk=0 in run_temporal_chunks, and inner slicing is disabled
-            # per outer chunk in the encode branch); strip it from the encode call.
-            encode_args = {k: v for k, v in args.items() if k != "temporal_overlap"}
-            latent = tiled_vae(images_bcthw, vae_model, **encode_args, encode=True)
+            latent = tiled_vae(images_bcthw, vae_model, **args, encode=True)
         else:
             vae_model.img_dims = [o_h, o_w]
             vae_model.original_image_video = original_image_video

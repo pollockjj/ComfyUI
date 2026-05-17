@@ -1,21 +1,4 @@
-import re
-from pathlib import Path
-
 import torch
-
-
-_VAE_PATH = Path(__file__).resolve().parents[2] / "comfy" / "ldm" / "seedvr" / "vae.py"
-
-
-def test_encode_branch_delegates_to_wrapper_slicing_encode():
-    src = _VAE_PATH.read_text(encoding="utf-8")
-    pattern = re.compile(
-        r"if encode:\s*\n"
-        r"\s*out = vae_model\.encode\(t_chunk\)\[0\]\s*\n"
-        r"\s*else:\s*\n"
-        r"\s*out = vae_model\.decode_\(t_chunk\)",
-    )
-    assert pattern.search(src) is not None
 
 
 def test_slicing_encode_merges_runt_active_tail():
@@ -54,7 +37,7 @@ def test_slicing_encode_merges_runt_active_tail():
         vae,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=12,
+        temporal_size=None,
         encode=True,
     )
 
@@ -63,7 +46,7 @@ def test_slicing_encode_merges_runt_active_tail():
     assert min(vae.encode_t[1:]) >= vae.temporal_downsample_factor
 
 
-def test_slicing_encode_preserves_min_size_when_encode_raises():
+def test_zero_temporal_size_preserves_min_size_when_encode_raises():
     from comfy.ldm.seedvr.vae import tiled_vae
 
     class RaisingVAEModel(torch.nn.Module):
@@ -88,7 +71,8 @@ def test_slicing_encode_preserves_min_size_when_encode_raises():
             vae,
             tile_size=(64, 64),
             tile_overlap=(0, 0),
-            temporal_size=12,
+            temporal_size=0,
+            temporal_overlap=0,
             encode=True,
         )
     except RuntimeError as exc:

@@ -22,6 +22,21 @@ import comfy.ops
 ops = comfy.ops.disable_weight_init
 
 
+def _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, temporal_scale=1):
+    if temporal_size is None:
+        return None
+
+    temporal_size = int(temporal_size)
+    if temporal_size <= 0:
+        return 0
+
+    temporal_overlap = max(0, int(temporal_overlap or 0))
+    temporal_overlap = min(temporal_overlap, temporal_size - 1)
+    temporal_step = temporal_size - temporal_overlap
+    temporal_scale = max(1, int(temporal_scale))
+    return max(1, math.ceil(temporal_step / temporal_scale))
+
+
 @torch.inference_mode()
 def tiled_vae(
     x,
@@ -83,13 +98,33 @@ def tiled_vae(
     storage_device = vae_model.device
     result = None
     count = None
+    if encode:
+        slicing_attr = "slicing_sample_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap)
+    else:
+        slicing_attr = "slicing_latent_min_size"
+        slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
 
     def run_temporal_chunks(spatial_tile):
         t_chunk = spatial_tile.contiguous()
+        old_slicing_min_size = getattr(vae_model, slicing_attr, None)
+        if old_slicing_min_size is not None and slicing_min_size is not None:
+            if slicing_min_size <= 0:
+                setattr(vae_model, slicing_attr, t_chunk.shape[2])
+            else:
+                setattr(vae_model, slicing_attr, slicing_min_size)
         if encode:
-            out = vae_model.encode(t_chunk)[0]
+            try:
+                out = vae_model.encode(t_chunk)[0]
+            finally:
+                if old_slicing_min_size is not None and slicing_min_size is not None:
+                    setattr(vae_model, slicing_attr, old_slicing_min_size)
         else:
-            out = vae_model.decode_(t_chunk)
+            try:
+                out = vae_model.decode_(t_chunk)
+            finally:
+                if old_slicing_min_size is not None and slicing_min_size is not None:
+                    setattr(vae_model, slicing_attr, old_slicing_min_size)
         if isinstance(out, (tuple, list)):
             out = out[0]
         if out.ndim == 4:

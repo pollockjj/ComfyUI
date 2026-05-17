@@ -51,8 +51,10 @@ class _EncodeVAE(nn.Module):
         self._dummy = nn.Parameter(torch.zeros(1, dtype=torch.float32))
         self.memory_states = []
         self.encoded_t = []
+        self.encode_min_sizes = []
 
     def encode(self, t_chunk):
+        self.encode_min_sizes.append(self.slicing_sample_min_size)
         h = vae_mod.VideoAutoencoderKL.slicing_encode(self, t_chunk)
         return (h, h)
 
@@ -91,7 +93,7 @@ class _LocalSpatialDecodeVAE(nn.Module):
         ).clone()
 
 
-def test_decode_tiled_vae_honors_temporal_args_and_uses_slicing_memory_states():
+def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
     vae = _SlicingDecodeVAE(slicing_latent_min_size=2)
     z = torch.arange(1 * 16 * 5 * 8 * 8, dtype=torch.float32).reshape(1, 16, 5, 8, 8)
 
@@ -100,7 +102,7 @@ def test_decode_tiled_vae_honors_temporal_args_and_uses_slicing_memory_states():
         vae,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=8,
+        temporal_size=12,
         temporal_overlap=4,
         encode=False,
     )
@@ -138,7 +140,7 @@ def test_decode_tiled_vae_honors_temporal_args_and_uses_slicing_memory_states():
     assert captured["temporal_overlap"] == 7
 
 
-def test_encode_tiled_vae_honors_temporal_args_and_avoids_runt_active_underflow():
+def test_encode_tiled_vae_zero_temporal_size_disables_wrapper_slicing():
     vae = _EncodeVAE(slicing_sample_min_size=4)
     x = torch.zeros((1, 3, 12, 64, 64), dtype=torch.float32)
 
@@ -147,12 +149,34 @@ def test_encode_tiled_vae_honors_temporal_args_and_avoids_runt_active_underflow(
         vae,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=12,
+        temporal_size=0,
+        temporal_overlap=0,
         encode=True,
     )
 
+    assert vae.encode_min_sizes == [12]
+    assert vae.memory_states == [MemoryState.DISABLED]
+    assert vae.encoded_t == [12]
+    assert vae.slicing_sample_min_size == 4
+
+
+def test_encode_tiled_vae_maps_temporal_args_to_sample_slicing_min_size():
+    vae = _EncodeVAE(slicing_sample_min_size=4)
+    x = torch.zeros((1, 3, 14, 64, 64), dtype=torch.float32)
+
+    tiled_vae(
+        x,
+        vae,
+        tile_size=(64, 64),
+        tile_overlap=(0, 0),
+        temporal_size=8,
+        temporal_overlap=2,
+        encode=True,
+    )
+
+    assert vae.encode_min_sizes == [6]
     assert vae.memory_states == [MemoryState.INITIALIZING, MemoryState.ACTIVE]
-    assert vae.encoded_t == [5, 7]
+    assert vae.encoded_t == [7, 7]
     assert vae.slicing_sample_min_size == 4
 
 
@@ -168,16 +192,14 @@ def test_boundary_reference_latent_no_periodic_temporal_tile_discontinuity():
         tiled_vae_model,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=12,
-        temporal_overlap=4,
+        temporal_size=0,
+        temporal_overlap=0,
         encode=False,
     )
 
     assert torch.equal(actual, expected)
-    assert tiled_vae_model.memory_states == [
-        MemoryState.INITIALIZING,
-        MemoryState.ACTIVE,
-    ]
+    assert tiled_vae_model.decode_min_sizes == [7]
+    assert tiled_vae_model.memory_states == [MemoryState.DISABLED]
     assert tiled_vae_model.slicing_latent_min_size == 3
 
     spatial_vae = _LocalSpatialDecodeVAE()
