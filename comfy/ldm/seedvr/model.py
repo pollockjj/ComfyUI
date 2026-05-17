@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import einops
 from einops import rearrange
+import os
 import torch.nn.functional as F
 from math import ceil, pi
 import torch
@@ -11,6 +12,7 @@ from comfy.ldm.modules.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
+import comfy.model_management
 from comfy.ldm.flux.math import apply_rope1
 import numbers
 
@@ -1567,4 +1569,6 @@ class NaDiT(nn.Module):
         out =  torch.stack(vid)
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
+        if os.environ.get("COMFY_SEEDVR2_STOP_AFTER_DIT") == "1":
+            raise comfy.model_management.InterruptProcessingException()
         return self._swap_pos_neg_halves(out)
