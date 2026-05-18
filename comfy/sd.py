@@ -1095,66 +1095,67 @@ class VAE:
         do_tile = False
         if self.latent_dim == 2 and samples_in.ndim == 5:
             samples_in = samples_in[:, :, 0]
-        try:
-            memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-            model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
-            free_memory = self.patcher.get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
-            batch_number = max(1, batch_number)
+        with model_management.cuda_device_context(self.device):
+            try:
+                memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
+                model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
+                free_memory = self.patcher.get_free_memory(self.device)
+                batch_number = int(free_memory / memory_used)
+                batch_number = max(1, batch_number)
 
-            # Pre-allocate output for VAEs that support direct buffer writes
-            preallocated = False
-            if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
-                pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
-                preallocated = True
+                # Pre-allocate output for VAEs that support direct buffer writes
+                preallocated = False
+                if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
+                    pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
+                    preallocated = True
 
-            for x in range(0, samples_in.shape[0], batch_number):
-                samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
-                if preallocated:
-                    self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
-                else:
-                    out = self.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
-                    if pixel_samples is None:
-                        pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
-                    pixel_samples[x:x+batch_number].copy_(out)
-                    del out
-                self.process_output(pixel_samples[x:x+batch_number])
-        except Exception as e:
-            model_management.raise_non_oom(e)
-            logging.warning("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
-            #NOTE: We don't know what tensors were allocated to stack variables at the time of the
-            #exception and the exception itself refs them all until we get out of this except block.
-            #So we just set a flag for tiler fallback so that tensor gc can happen once the
-            #exception is fully off the books.
-            do_tile = True
+                for x in range(0, samples_in.shape[0], batch_number):
+                    samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
+                    if preallocated:
+                        self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
+                    else:
+                        out = self.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
+                        if pixel_samples is None:
+                            pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                        pixel_samples[x:x+batch_number].copy_(out)
+                        del out
+                    self.process_output(pixel_samples[x:x+batch_number])
+            except Exception as e:
+                model_management.raise_non_oom(e)
+                logging.warning("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
+                #NOTE: We don't know what tensors were allocated to stack variables at the time of the
+                #exception and the exception itself refs them all until we get out of this except block.
+                #So we just set a flag for tiler fallback so that tensor gc can happen once the
+                #exception is fully off the books.
+                do_tile = True
 
-        if do_tile:
-            comfy.model_management.soft_empty_cache()
-            dims = samples_in.ndim - 2
-            if dims == 1 or self.extra_1d_channel is not None:
-                pixel_samples = self.decode_tiled_1d(samples_in)
-            elif dims == 2:
-                # SeedVR2 latents arrive in 4D collapsed form ``(B, 16*T, H, W)``
-                # downstream of ``SeedVR2Conditioning`` (which performs the
-                # ``rearrange(b c t h w -> b (c t) h w)`` collapse). The
-                # generic ``decode_tiled_`` would treat the channel dim as
-                # spatial-only and crash on the collapsed (16, T) layout
-                # under ``tiled_scale``'s mask broadcast; route SeedVR2 4D
-                # latents to ``decode_tiled_seedvr2`` instead, whose wrapper
-                # dispatch handles both 4D and 5D inputs.
-                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+            if do_tile:
+                comfy.model_management.soft_empty_cache()
+                dims = samples_in.ndim - 2
+                if dims == 1 or self.extra_1d_channel is not None:
+                    pixel_samples = self.decode_tiled_1d(samples_in)
+                elif dims == 2:
+                    # SeedVR2 latents arrive in 4D collapsed form ``(B, 16*T, H, W)``
+                    # downstream of ``SeedVR2Conditioning`` (which performs the
+                    # ``rearrange(b c t h w -> b (c t) h w)`` collapse). The
+                    # generic ``decode_tiled_`` would treat the channel dim as
+                    # spatial-only and crash on the collapsed (16, T) layout
+                    # under ``tiled_scale``'s mask broadcast; route SeedVR2 4D
+                    # latents to ``decode_tiled_seedvr2`` instead, whose wrapper
+                    # dispatch handles both 4D and 5D inputs.
+                    if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                        tile = 256 // self.spacial_compression_decode()
+                        overlap = tile // 4
+                        pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                    else:
+                        pixel_samples = self.decode_tiled_(samples_in)
+                elif dims == 3:
                     tile = 256 // self.spacial_compression_decode()
                     overlap = tile // 4
-                    pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
-                else:
-                    pixel_samples = self.decode_tiled_(samples_in)
-            elif dims == 3:
-                tile = 256 // self.spacial_compression_decode()
-                overlap = tile // 4
-                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                    pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
-                else:
-                    pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                    if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                        pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                    else:
+                        pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
 
         pixel_samples = pixel_samples.to(self.output_device).movedim(1,-1)
         return pixel_samples
@@ -1172,33 +1173,34 @@ class VAE:
         if overlap is not None:
             args["overlap"] = overlap
 
-        if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper) and dims in (2, 3):
-            seedvr2_args = {}
-            if tile_x is not None:
-                seedvr2_args["tile_x"] = tile_x
-            if tile_y is not None:
-                seedvr2_args["tile_y"] = tile_y
-            if overlap is not None:
-                seedvr2_args["overlap"] = overlap
-            if tile_t is not None:
-                seedvr2_args["tile_t"] = tile_t
-            if overlap_t is not None:
-                seedvr2_args["overlap_t"] = overlap_t
-            output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
-        elif dims == 1 or self.extra_1d_channel is not None:
-            args.pop("tile_y")
-            output = self.decode_tiled_1d(samples, **args)
-        elif dims == 2:
-            output = self.decode_tiled_(samples, **args)
-        elif dims == 3:
-            if overlap_t is None:
-                args["overlap"] = (1, overlap, overlap)
-            else:
-                args["overlap"] = (max(1, overlap_t), overlap, overlap)
-            if tile_t is not None:
-                args["tile_t"] = max(2, tile_t)
+        with model_management.cuda_device_context(self.device):
+            if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper) and dims in (2, 3):
+                seedvr2_args = {}
+                if tile_x is not None:
+                    seedvr2_args["tile_x"] = tile_x
+                if tile_y is not None:
+                    seedvr2_args["tile_y"] = tile_y
+                if overlap is not None:
+                    seedvr2_args["overlap"] = overlap
+                if tile_t is not None:
+                    seedvr2_args["tile_t"] = tile_t
+                if overlap_t is not None:
+                    seedvr2_args["overlap_t"] = overlap_t
+                output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
+            elif dims == 1 or self.extra_1d_channel is not None:
+                args.pop("tile_y")
+                output = self.decode_tiled_1d(samples, **args)
+            elif dims == 2:
+                output = self.decode_tiled_(samples, **args)
+            elif dims == 3:
+                if overlap_t is None:
+                    args["overlap"] = (1, overlap, overlap)
+                else:
+                    args["overlap"] = (max(1, overlap_t), overlap, overlap)
+                if tile_t is not None:
+                    args["tile_t"] = max(2, tile_t)
 
-            output = self.decode_tiled_3d(samples, **args)
+                output = self.decode_tiled_3d(samples, **args)
         return output.movedim(1, -1)
 
     def encode(self, pixel_samples):
@@ -1211,53 +1213,54 @@ class VAE:
                 pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
             else:
                 pixel_samples = pixel_samples.unsqueeze(2)
-        try:
-            memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-            model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
-            free_memory = self.patcher.get_free_memory(self.device)
-            batch_number = int(free_memory / max(1, memory_used))
-            batch_number = max(1, batch_number)
-            samples = None
-            for x in range(0, pixel_samples.shape[0], batch_number):
-                pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
-                if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
-                    out = self.first_stage_model.encode(pixels_in, device=self.device)
-                else:
-                    pixels_in = pixels_in.to(self.device)
-                    out = self.first_stage_model.encode(pixels_in)
-                if isinstance(out, tuple):
-                    out = out[0]
-                out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
-                if samples is None:
-                    samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
-                samples[x:x + batch_number] = out
-
-        except Exception as e:
-            model_management.raise_non_oom(e)
-            logging.warning("Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding.")
-            #NOTE: We don't know what tensors were allocated to stack variables at the time of the
-            #exception and the exception itself refs them all until we get out of this except block.
-            #So we just set a flag for tiler fallback so that tensor gc can happen once the
-            #exception is fully off the books.
-            do_tile = True
-
-        if do_tile:
-            comfy.model_management.soft_empty_cache()
-            if self.latent_dim == 3:
-                tile = 256
-                overlap = tile // 4
-                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                    tiled_args = getattr(self.first_stage_model, "tiled_args", {})
-                    if isinstance(tiled_args, dict) and "tile_size" in tiled_args:
-                        samples = self.encode_tiled_seedvr2(pixel_samples)
+        with model_management.cuda_device_context(self.device):
+            try:
+                memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
+                model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
+                free_memory = self.patcher.get_free_memory(self.device)
+                batch_number = int(free_memory / max(1, memory_used))
+                batch_number = max(1, batch_number)
+                samples = None
+                for x in range(0, pixel_samples.shape[0], batch_number):
+                    pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
+                    if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
+                        out = self.first_stage_model.encode(pixels_in, device=self.device)
                     else:
-                        samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                        pixels_in = pixels_in.to(self.device)
+                        out = self.first_stage_model.encode(pixels_in)
+                    if isinstance(out, tuple):
+                        out = out[0]
+                    out = out.to(self.output_device).to(dtype=self.vae_output_dtype())
+                    if samples is None:
+                        samples = torch.empty((pixel_samples.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                    samples[x:x + batch_number] = out
+
+            except Exception as e:
+                model_management.raise_non_oom(e)
+                logging.warning("Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding.")
+                #NOTE: We don't know what tensors were allocated to stack variables at the time of the
+                #exception and the exception itself refs them all until we get out of this except block.
+                #So we just set a flag for tiler fallback so that tensor gc can happen once the
+                #exception is fully off the books.
+                do_tile = True
+
+            if do_tile:
+                comfy.model_management.soft_empty_cache()
+                if self.latent_dim == 3:
+                    tile = 256
+                    overlap = tile // 4
+                    if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                        tiled_args = getattr(self.first_stage_model, "tiled_args", {})
+                        if isinstance(tiled_args, dict) and "tile_size" in tiled_args:
+                            samples = self.encode_tiled_seedvr2(pixel_samples)
+                        else:
+                            samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                    else:
+                        samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                elif self.latent_dim == 1 or self.extra_1d_channel is not None:
+                    samples = self.encode_tiled_1d(pixel_samples)
                 else:
-                    samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
-            elif self.latent_dim == 1 or self.extra_1d_channel is not None:
-                samples = self.encode_tiled_1d(pixel_samples)
-            else:
-                samples = self.encode_tiled_(pixel_samples)
+                    samples = self.encode_tiled_(pixel_samples)
 
         return samples
 
@@ -1283,50 +1286,51 @@ class VAE:
         if overlap is not None:
             args["overlap"] = overlap
 
-        if dims == 1:
-            args.pop("tile_y")
-            samples = self.encode_tiled_1d(pixel_samples, **args)
-        elif dims == 2:
-            samples = self.encode_tiled_(pixel_samples, **args)
-        elif dims == 3:
-            if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                seedvr2_args = {}
-                if tile_x is not None:
-                    seedvr2_args["tile_x"] = tile_x
+        with model_management.cuda_device_context(self.device):
+            if dims == 1:
+                args.pop("tile_y")
+                samples = self.encode_tiled_1d(pixel_samples, **args)
+            elif dims == 2:
+                samples = self.encode_tiled_(pixel_samples, **args)
+            elif dims == 3:
+                if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                    seedvr2_args = {}
+                    if tile_x is not None:
+                        seedvr2_args["tile_x"] = tile_x
+                    else:
+                        seedvr2_args["tile_x"] = 512
+                    if tile_y is not None:
+                        seedvr2_args["tile_y"] = tile_y
+                    else:
+                        seedvr2_args["tile_y"] = 512
+                    if overlap is not None:
+                        seedvr2_args["overlap"] = overlap
+                    else:
+                        seedvr2_args["overlap"] = 64
+                    if tile_t is not None:
+                        seedvr2_args["tile_t"] = tile_t
+                    else:
+                        seedvr2_args["tile_t"] = 9999
+                    if overlap_t is not None:
+                        seedvr2_args["overlap_t"] = overlap_t
+                    else:
+                        seedvr2_args["overlap_t"] = 0
+                    samples = self.encode_tiled_seedvr2(pixel_samples, **seedvr2_args)
                 else:
-                    seedvr2_args["tile_x"] = 512
-                if tile_y is not None:
-                    seedvr2_args["tile_y"] = tile_y
-                else:
-                    seedvr2_args["tile_y"] = 512
-                if overlap is not None:
-                    seedvr2_args["overlap"] = overlap
-                else:
-                    seedvr2_args["overlap"] = 64
-                if tile_t is not None:
-                    seedvr2_args["tile_t"] = tile_t
-                else:
-                    seedvr2_args["tile_t"] = 9999
-                if overlap_t is not None:
-                    seedvr2_args["overlap_t"] = overlap_t
-                else:
-                    seedvr2_args["overlap_t"] = 0
-                samples = self.encode_tiled_seedvr2(pixel_samples, **seedvr2_args)
-            else:
-                if tile_t is not None:
-                    tile_t_latent = max(2, self.downscale_ratio[0](tile_t))
-                else:
-                    tile_t_latent = 9999
-                args["tile_t"] = self.upscale_ratio[0](tile_t_latent)
+                    if tile_t is not None:
+                        tile_t_latent = max(2, self.downscale_ratio[0](tile_t))
+                    else:
+                        tile_t_latent = 9999
+                    args["tile_t"] = self.upscale_ratio[0](tile_t_latent)
 
-                if overlap_t is None:
-                    args["overlap"] = (1, overlap, overlap)
-                else:
-                    args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), overlap, overlap)
-                maximum = pixel_samples.shape[2]
-                maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
+                    if overlap_t is None:
+                        args["overlap"] = (1, overlap, overlap)
+                    else:
+                        args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), overlap, overlap)
+                    maximum = pixel_samples.shape[2]
+                    maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
 
-                samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
+                    samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
 
         return samples
 

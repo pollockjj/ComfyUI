@@ -20,7 +20,6 @@ try:
         if cuda_version < (13,):
             ck.registry.disable("cuda")
             logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.")
-
     ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")

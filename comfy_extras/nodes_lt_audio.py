@@ -184,7 +184,7 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "device",
-                    options=["default", "cpu"],
+                    options=comfy.model_management.get_gpu_device_options(),
                     advanced=True,
                 )
             ],
@@ -199,8 +199,12 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
         clip_path2 = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
 
         model_options = {}
-        if device == "cpu":
-            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+        resolved = comfy.model_management.resolve_gpu_device_option(device)
+        if resolved is not None:
+            if resolved.type == "cpu":
+                model_options["load_device"] = model_options["offload_device"] = resolved
+            else:
+                model_options["load_device"] = resolved
 
         clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2], embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type, model_options=model_options)
         return io.NodeOutput(clip)

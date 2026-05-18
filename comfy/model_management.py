@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
+from __future__ import annotations
 
 import psutil
 import logging
@@ -27,10 +28,15 @@ import platform
 import weakref
 import gc
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import comfy.memory_management
 import comfy.utils
 import comfy.quant_ops
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from comfy.model_patcher import ModelPatcher
+
 
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
@@ -205,6 +211,89 @@ def get_torch_device():
             return torch.device("mlu", torch.mlu.current_device())
         else:
             return torch.device(torch.cuda.current_device())
+
+def get_all_torch_devices(exclude_current=False):
+    global cpu_state
+    devices = []
+    if cpu_state == CPUState.GPU:
+        if is_nvidia():
+            for i in range(torch.cuda.device_count()):
+                devices.append(torch.device(i))
+        elif is_intel_xpu():
+            for i in range(torch.xpu.device_count()):
+                devices.append(torch.device(i))
+        elif is_ascend_npu():
+            for i in range(torch.npu.device_count()):
+                devices.append(torch.device(i))
+    else:
+        devices.append(get_torch_device())
+    if exclude_current:
+        devices.remove(get_torch_device())
+    return devices
+
+def get_gpu_device_options():
+    """Return list of device option strings for node widgets.
+
+    Always includes "default" and "cpu". When multiple GPUs are present,
+    adds "gpu:0", "gpu:1", etc. (vendor-agnostic labels).
+    """
+    options = ["default", "cpu"]
+    devices = get_all_torch_devices()
+    if len(devices) > 1:
+        for i in range(len(devices)):
+            options.append(f"gpu:{i}")
+    return options
+
+def resolve_gpu_device_option(option: str):
+    """Resolve a device option string to a torch.device.
+
+    Returns None for "default" (let the caller use its normal default).
+    Returns torch.device("cpu") for "cpu".
+    For "gpu:N", returns the Nth torch device. Falls back to None if
+    the index is out of range (caller should use default).
+    """
+    if option is None or option == "default":
+        return None
+    if option == "cpu":
+        return torch.device("cpu")
+    if option.startswith("gpu:"):
+        try:
+            idx = int(option[4:])
+            devices = get_all_torch_devices()
+            if 0 <= idx < len(devices):
+                return devices[idx]
+            else:
+                logging.warning(f"Device '{option}' not available (only {len(devices)} GPU(s)), using default.")
+                return None
+        except (ValueError, IndexError):
+            logging.warning(f"Invalid device option '{option}', using default.")
+            return None
+    logging.warning(f"Unrecognized device option '{option}', using default.")
+    return None
+
+@contextmanager
+def cuda_device_context(device):
+    """Context manager that sets torch.cuda.current_device to match *device*.
+
+    Used when running operations on a non-default CUDA device so that custom
+    CUDA kernels (e.g. comfy_kitchen fp8 quantization) pick up the correct
+    device index.  The previous device is restored on exit.
+
+    No-op when *device* is not CUDA, has no explicit index, or already matches
+    the current device.
+    """
+    prev = None
+    if device.type == "cuda" and device.index is not None:
+        prev = torch.cuda.current_device()
+        if prev != device.index:
+            torch.cuda.set_device(device)
+        else:
+            prev = None
+    try:
+        yield
+    finally:
+        if prev is not None:
+            torch.cuda.set_device(prev)
 
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
@@ -494,9 +583,13 @@ try:
     logging.info("Device: {}".format(get_torch_device_name(get_torch_device())))
 except:
     logging.warning("Could not pick default device.")
+try:
+    for device in get_all_torch_devices(exclude_current=True):
+        logging.info("Device: {}".format(get_torch_device_name(device)))
+except:
+    pass
 
-
-current_loaded_models = []
+current_loaded_models: list[LoadedModel] = []
 
 def module_size(module):
     module_mem = 0
@@ -529,7 +622,7 @@ def module_mmap_residency(module, free=False):
     return mmap_touched_mem, module_mem
 
 class LoadedModel:
-    def __init__(self, model):
+    def __init__(self, model: ModelPatcher):
         self._set_model(model)
         self.device = model.load_device
         self.real_model = None
@@ -537,7 +630,7 @@ class LoadedModel:
         self.model_finalizer = None
         self._patcher_finalizer = None
 
-    def _set_model(self, model):
+    def _set_model(self, model: ModelPatcher):
         self._model = weakref.ref(model)
         if model.parent is not None:
             self._parent_model = weakref.ref(model.parent)
@@ -548,6 +641,7 @@ class LoadedModel:
         model = self._parent_model()
         if model is not None:
             self._set_model(model)
+            self.device = model.load_device
 
     @property
     def model(self):
@@ -1795,7 +1889,34 @@ def soft_empty_cache(force=False):
         torch.cuda.ipc_collect()
 
 def unload_all_models():
-    free_memory(1e30, get_torch_device())
+    for device in get_all_torch_devices():
+        free_memory(1e30, device)
+
+def unload_model_and_clones(model: ModelPatcher, unload_additional_models=True, all_devices=False):
+    'Unload only model and its clones - primarily for multigpu cloning purposes.'
+    initial_keep_loaded: list[LoadedModel] = current_loaded_models.copy()
+    additional_models = []
+    if unload_additional_models:
+        additional_models = model.get_nested_additional_models()
+    keep_loaded = []
+    for loaded_model in initial_keep_loaded:
+        if loaded_model.model is not None:
+            if model.clone_base_uuid == loaded_model.model.clone_base_uuid:
+                continue
+            # check additional models if they are a match
+            skip = False
+            for add_model in additional_models:
+                if add_model.clone_base_uuid == loaded_model.model.clone_base_uuid:
+                    skip = True
+                    break
+            if skip:
+                continue
+        keep_loaded.append(loaded_model)
+    if not all_devices:
+        free_memory(1e30, get_torch_device(), keep_loaded)
+    else:
+        for device in get_all_torch_devices():
+            free_memory(1e30, device, keep_loaded)
 
 def debug_memory_summary():
     if is_amd() or is_nvidia():
