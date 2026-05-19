@@ -27,6 +27,7 @@ concatenation / cond-handling logic can be exercised in isolation
 without GPU, model weights, or ComfyUI's full sampling stack.
 """
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -38,6 +39,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.sample  # noqa: E402
+import comfy_extras.nodes_seedvr as nodes_seedvr_mod  # noqa: E402
 from comfy_extras.nodes_seedvr import (  # noqa: E402
     SeedVR2ProgressiveSampler,
     _blend_overlap_region,
@@ -103,6 +105,52 @@ def _passthrough_sample_returning_latent(
     equals the original input under per-chunk slice + concat.
     """
     return latent_image.clone()
+
+
+class _FakeSeedVR2Patcher:
+    def __init__(self, name, load_device, extra_clones=None):
+        self.name = name
+        self.load_device = load_device
+        self._extra_clones = list(extra_clones or [])
+        self.is_multigpu_base_clone = True
+        self.removed_keys = []
+        self.cfg1_disabled = False
+
+    def get_additional_models_with_key(self, key):
+        return list(self._extra_clones) if key == "multigpu" else []
+
+    def clone(self):
+        return _FakeSeedVR2Patcher(f"{self.name}-worker", self.load_device)
+
+    def remove_additional_models(self, key):
+        self.removed_keys.append(key)
+
+    def disable_model_cfg1_optimization(self):
+        self.cfg1_disabled = True
+
+
+class _FakeMultiGPUThreadPool:
+    instances = []
+
+    def __init__(self, devices):
+        self.devices = list(devices)
+        self.results = {}
+        self.shutdown_called = False
+        _FakeMultiGPUThreadPool.instances.append(self)
+
+    def submit(self, device, fn, *args):
+        self.results[device] = (fn(*args), None)
+
+    def get_result(self, device):
+        return self.results[device]
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
+class _RaisingMultiGPUThreadPool:
+    def __init__(self, devices):
+        raise RuntimeError("pool construction failed")
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +475,87 @@ def test_t2_collapsed_noise_mask_sliced_per_chunk():
         )
 
     assert mask_shapes == [(1, _LAT_C * 6, 8, 8), (1, _LAT_C * 5, 8, 8)]
+
+
+def test_t2_worksplit_dispatches_chunks_and_restores_flags(monkeypatch):
+    """With one extra multigpu clone, the progressive sampler must submit
+    chunk work to both devices, reassemble the worker results in chunk order,
+    and restore the participating patchers' multigpu-base flags.
+    """
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    primary_device = "cpu:0"
+    clone_device = "cpu:1"
+    clone = _FakeSeedVR2Patcher("clone", clone_device)
+    model = _FakeSeedVR2Patcher("primary", primary_device, [clone])
+    calls = []
+    _FakeMultiGPUThreadPool.instances = []
+
+    class _FakeMultiGPUModule:
+        MultiGPUThreadPool = _FakeMultiGPUThreadPool
+
+    def _record(model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise=1.0,
+                noise_mask=None, seed=None):
+        calls.append((model.name, tuple(latent_image.shape)))
+        return latent_image.clone()
+
+    monkeypatch.setattr(nodes_seedvr_mod.importlib, "import_module",
+                        lambda name: _FakeMultiGPUModule)
+    monkeypatch.setattr(nodes_seedvr_mod.comfy.model_management,
+                        "cuda_device_context", lambda device: nullcontext())
+
+    with patch.object(comfy.sample, "sample", side_effect=_record), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        out = SeedVR2ProgressiveSampler.execute(
+            model=model, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert calls == [
+        ("primary-worker", (1, _LAT_C * 6, 8, 8)),
+        ("clone-worker", (1, _LAT_C * 5, 8, 8)),
+    ]
+    assert tuple(out.result[0]["samples"].shape) == tuple(latent["samples"].shape)
+    assert torch.equal(out.result[0]["samples"], latent["samples"])
+    assert model.is_multigpu_base_clone is True
+    assert clone.is_multigpu_base_clone is True
+    assert _FakeMultiGPUThreadPool.instances[0].devices == [primary_device, clone_device]
+    assert _FakeMultiGPUThreadPool.instances[0].shutdown_called is True
+
+
+def test_t2_worksplit_restores_flags_when_pool_construction_fails(monkeypatch):
+    """Flag restoration must cover failures before worker submission,
+    including ``MultiGPUThreadPool`` construction errors.
+    """
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    clone = _FakeSeedVR2Patcher("clone", "cpu:1")
+    model = _FakeSeedVR2Patcher("primary", "cpu:0", [clone])
+
+    class _FakeMultiGPUModule:
+        MultiGPUThreadPool = _RaisingMultiGPUThreadPool
+
+    monkeypatch.setattr(nodes_seedvr_mod.importlib, "import_module",
+                        lambda name: _FakeMultiGPUModule)
+
+    with patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        with pytest.raises(RuntimeError, match="pool construction failed"):
+            SeedVR2ProgressiveSampler.execute(
+                model=model, seed=0, steps=2, cfg=1.0,
+                sampler_name="euler", scheduler="simple",
+                positive=pos, negative=neg, latent_image=latent,
+                denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+            )
+
+    assert model.is_multigpu_base_clone is True
+    assert clone.is_multigpu_base_clone is True
 
 
 # ---------------------------------------------------------------------------
