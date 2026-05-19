@@ -87,8 +87,8 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.vae_dtype = torch.float32
-    vae.device = "cpu"
-    vae.output_device = "cpu"
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
     vae.disable_offload = True
     vae.extra_1d_channel = None
     vae.memory_used_decode = lambda shape, dtype: 1
@@ -121,8 +121,8 @@ def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(mon
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.first_stage_model.original_image_video = torch.zeros(1, 3, 61, 64, 64)
     vae.vae_dtype = torch.float32
-    vae.device = "cpu"
-    vae.output_device = "cpu"
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
     vae.disable_offload = True
     vae.extra_1d_channel = None
     vae.latent_channels = 16
@@ -144,8 +144,8 @@ def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_laten
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.first_stage_model.original_image_video = torch.zeros(1, 3, 32, 64, 64)
     vae.vae_dtype = torch.float32
-    vae.device = "cpu"
-    vae.output_device = "cpu"
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
     vae.disable_offload = True
     vae.extra_1d_channel = None
     vae.latent_channels = 16
@@ -166,8 +166,8 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.vae_dtype = torch.float32
-    vae.device = "cpu"
-    vae.output_device = "cpu"
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
     vae.disable_offload = True
     vae.extra_1d_channel = None
     vae.latent_channels = 16
