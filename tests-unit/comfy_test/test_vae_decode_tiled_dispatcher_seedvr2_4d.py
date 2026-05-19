@@ -163,3 +163,42 @@ def test_4d_non_seedvr2_latent_still_routes_to_generic_decode_tiled():
         f"decode_tiled_seedvr2 must NOT be called for non-SeedVR2 latents; "
         f"got {seedvr2_call.call_count} calls."
     )
+
+
+def test_decode_tiled_seedvr2_explicit_args_override_stale_encode_tiling():
+    vae = _make_minimal_seedvr2_vae()
+    vae.first_stage_model.spatial_downsample_factor = 8
+    vae.first_stage_model.tiled_args = {
+        "tile_size": (512, 512),
+        "tile_overlap": (0, 0),
+        "temporal_size": 48,
+        "temporal_overlap": 12,
+        "enable_tiling": True,
+    }
+
+    captured_args = {}
+
+    def capture_decode(samples):
+        captured_args.update(vae.first_stage_model.tiled_args)
+        return torch.zeros(1, 3, 1, 64, 64)
+
+    vae.first_stage_model.decode = capture_decode
+    samples_4d = torch.zeros(1, 16, 8, 8)
+
+    with patch.object(sd_mod.model_management, "load_models_gpu",
+                      lambda *a, **k: None), \
+         patch.object(sd_mod.model_management, "free_memory",
+                      lambda *a, **k: None):
+        vae.decode_tiled(
+            samples_4d,
+            tile_x=32,
+            tile_y=32,
+            overlap=4,
+            tile_t=16,
+            overlap_t=4,
+        )
+
+    assert captured_args["tile_size"] == (256, 256)
+    assert captured_args["tile_overlap"] == (32, 32)
+    assert captured_args["temporal_size"] == 16
+    assert captured_args["temporal_overlap"] == 4

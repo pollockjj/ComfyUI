@@ -1056,15 +1056,23 @@ class VAE:
             return samples.movedim(-1, 1)
         return samples
 
-    def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
+    def decode_tiled_seedvr2(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         samples = self._normalize_seedvr2_decode_samples(samples)
         args = dict(getattr(self.first_stage_model, "tiled_args", {}))
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
+        stored_tile_size = args.get("tile_size", (32 * sf_s, 32 * sf_s))
+        stored_tile_overlap = args.get("tile_overlap", (8 * sf_s, 8 * sf_s))
         args["enable_tiling"] = True
-        args.setdefault("tile_size", (tile_y * sf_s, tile_x * sf_s))
-        args.setdefault("tile_overlap", (overlap * sf_s, overlap * sf_s))
-        args.setdefault("temporal_size", tile_t)
-        args.setdefault("temporal_overlap", overlap_t)
+        args["tile_size"] = (
+            stored_tile_size[0] if tile_y is None else tile_y * sf_s,
+            stored_tile_size[1] if tile_x is None else tile_x * sf_s,
+        )
+        if overlap is None:
+            args["tile_overlap"] = stored_tile_overlap
+        else:
+            args["tile_overlap"] = (overlap * sf_s, overlap * sf_s)
+        args["temporal_size"] = args.get("temporal_size", 16) if tile_t is None else tile_t
+        args["temporal_overlap"] = args.get("temporal_overlap", 4) if overlap_t is None else overlap_t
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         clone_previous_args = {}
