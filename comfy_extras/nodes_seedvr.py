@@ -5,6 +5,7 @@ import math
 from einops import rearrange
 
 import gc
+import importlib
 import logging
 import time
 import comfy.model_management
@@ -902,7 +903,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 )
                 chunk_specs.append((chunk_start, chunk_end, chunk_samples))
         else:
-            import comfy.multigpu
+            multigpu = importlib.import_module("comfy.multigpu")
 
             # Worksplit path — round-robin chunks across
             # ``[primary_device, *clone_devices]`` and run sample()
@@ -1000,7 +1001,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for c in extra_clones:
                 c.is_multigpu_base_clone = False
 
-            pool = comfy.multigpu.MultiGPUThreadPool(devices)
+            pool = multigpu.MultiGPUThreadPool(devices)
             dispatch_t0 = time.perf_counter()
             try:
                 submitted_devices = []
