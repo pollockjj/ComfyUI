@@ -884,7 +884,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # populated later, inside ``KSampler.outer_sample``, so we MUST
         # read from the registry here rather than from
         # ``model_options``.
-        extra_clones = model.get_additional_models_with_key("multigpu")
+        extra_clones = (
+            model.get_additional_models_with_key("multigpu")
+            if model is not None else []
+        )
 
         if not extra_clones:
             # Sequential path — byte-identical to the pre-worksplit
