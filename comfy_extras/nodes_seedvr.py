@@ -955,13 +955,16 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for i, (cs, ce) in enumerate(chunk_ranges):
                 per_device_ranges[devices[i % len(devices)]].append((i, cs, ce))
 
-            def _worker_run_chunks(device, patcher, ranges):
-                # Per-worker patcher: shallow clone (no weight copy),
-                # strip the multigpu additional-models registry, and
-                # force ``is_multigpu_base_clone=False`` so the
-                # worker's ``outer_sample`` does not enter the
-                # multigpu CFG-split path inside the sampler.
-                worker_patcher = patcher.clone()
+            def _worker_run_chunks(device, patcher, ranges, clone_patcher=True):
+                # Per-worker patcher: extra-device workers use a shallow
+                # clone (no weight copy). The primary device runs on the
+                # primary patcher in the main execution thread so chunk 0
+                # follows the same patcher/thread path as the sequential
+                # baseline while the extra devices run concurrently.
+                worker_patcher = patcher.clone() if clone_patcher else patcher
+                saved_multigpu_models = None
+                if not clone_patcher:
+                    saved_multigpu_models = list(worker_patcher.get_additional_models_with_key("multigpu"))
                 worker_patcher.remove_additional_models("multigpu")
                 worker_patcher.is_multigpu_base_clone = False
                 # Propagate SeedVR2's CFG=1.0 contract: SeedVR2's
@@ -979,20 +982,24 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 # 2-batch and the others fail at
                 # ``context.chunk(2, dim=0)`` inside the DiT.
                 worker_patcher.disable_model_cfg1_optimization()
-                results = []
-                with comfy.model_management.cuda_device_context(device):
-                    for (idx, cs, ce) in ranges:
-                        t0 = time.perf_counter()
-                        chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
-                        t1 = time.perf_counter()
-                        logging.info(
-                            f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=worksplit "
-                            f"chunk_idx={idx} chunk_start={cs} "
-                            f"chunk_end={ce} device={device} "
-                            f"duration_ms={(t1 - t0) * 1000.0:.2f}"
-                        )
-                        results.append((idx, cs, ce, chunk_samples))
-                return results
+                try:
+                    results = []
+                    with comfy.model_management.cuda_device_context(device):
+                        for (idx, cs, ce) in ranges:
+                            t0 = time.perf_counter()
+                            chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
+                            t1 = time.perf_counter()
+                            logging.info(
+                                f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=worksplit "
+                                f"chunk_idx={idx} chunk_start={cs} "
+                                f"chunk_end={ce} device={device} "
+                                f"duration_ms={(t1 - t0) * 1000.0:.2f}"
+                            )
+                            results.append((idx, cs, ce, chunk_samples))
+                    return results
+                finally:
+                    if saved_multigpu_models is not None:
+                        worker_patcher.set_additional_models("multigpu", saved_multigpu_models)
 
             # Flip the flag on every participating patcher BEFORE
             # dispatch so ``prepare_model_patcher_multigpu_clones``
@@ -1007,23 +1014,40 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for c in extra_clones:
                 c.is_multigpu_base_clone = False
 
-            pool = multigpu.MultiGPUThreadPool(devices)
+            primary_device = model.load_device
+            worker_devices = [dev for dev in devices if dev != primary_device]
+            pool = multigpu.MultiGPUThreadPool(worker_devices)
             dispatch_t0 = time.perf_counter()
             try:
                 submitted_devices = []
-                for dev in devices:
+                for dev in worker_devices:
                     if per_device_ranges[dev]:
                         pool.submit(dev, _worker_run_chunks, dev,
                                     patcher_for_device[dev],
                                     per_device_ranges[dev])
                         submitted_devices.append(dev)
 
+                primary_result = None
+                primary_error = None
+                if per_device_ranges[primary_device]:
+                    try:
+                        primary_result = _worker_run_chunks(
+                            primary_device,
+                            patcher_for_device[primary_device],
+                            per_device_ranges[primary_device],
+                            clone_patcher=False,
+                        )
+                    except Exception as err:
+                        primary_error = err
+
                 # Drain every submitted device. Surfacing the first
                 # worker exception (if any) as a chained RuntimeError
                 # tells the caller which device failed and preserves
                 # the original traceback via ``raise ... from``.
                 per_device_results = {}
-                first_error = None
+                first_error = (primary_device, primary_error) if primary_error is not None else None
+                if primary_result is not None:
+                    per_device_results[primary_device] = primary_result
                 for dev in submitted_devices:
                     result, error = pool.get_result(dev)
                     if error is not None and first_error is None:
