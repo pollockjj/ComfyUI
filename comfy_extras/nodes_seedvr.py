@@ -898,10 +898,11 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 t0 = time.perf_counter()
                 chunk_samples = _sample_one_chunk(model, chunk_start, chunk_end)
                 t1 = time.perf_counter()
+                device_label = getattr(model, "load_device", None)
                 logging.info(
                     f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=standard "
                     f"chunk_idx={idx} chunk_start={chunk_start} "
-                    f"chunk_end={chunk_end} device={model.load_device} "
+                    f"chunk_end={chunk_end} device={device_label} "
                     f"duration_ms={(t1 - t0) * 1000.0:.2f}"
                 )
                 chunk_specs.append((chunk_start, chunk_end, chunk_samples))
