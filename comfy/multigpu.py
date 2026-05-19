@@ -238,9 +238,10 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     #   1. detaches the source from the loaded-models registry and from the dynamic-VRAM
     #      allocator's per-model tracking via unload_model_and_clones(self)
     #   2. invokes the patcher's cached_patcher_init factory (registered by VAELoader and
-    #      pointing at comfy.sd.load_vae_patcher) to re-load weights fresh from disk onto
-    #      the target device, ensuring the clone has no inherited source-device state
-    #   3. sets the clone's load_device to the target device
+    #      pointing at comfy.sd.load_vae_patcher) to build a fresh VAE patcher with no
+    #      inherited source-device state
+    #   3. sets the clone's load_device so later model loading places weights on the target
+    #      device
     # A bare copy.deepcopy(vae) would carry source-device storage tracking forward and
     # cause cuda:N worker threads to access weights through stale source-device storage.
     for device in limit_extra_devices:
@@ -248,6 +249,8 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
             continue
         cloned_patcher = vae.patcher.deepclone_multigpu(new_load_device=device)
         clone_vae = copy.copy(vae)
+        if hasattr(clone_vae, 'multigpu_clones'):
+            del clone_vae.multigpu_clones
         clone_vae.first_stage_model = cloned_patcher.model
         clone_vae.patcher = cloned_patcher
         clone_vae.first_stage_model.eval()

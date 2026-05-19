@@ -1975,12 +1975,12 @@ def load_vae_patcher(vae_path, metadata=None, device=None):
 
     Used as the ``cached_patcher_init`` factory on ``VAE.patcher`` so that
     :meth:`comfy.model_patcher.ModelPatcher.deepclone_multigpu` can produce a
-    multi-GPU clone of the VAE by re-loading weights fresh onto the target
-    device (mirrors the UNET / CLIP / checkpoint loader pattern). Without this,
-    bare ``copy.deepcopy`` of the VAE wrapper carries source-device storage
-    tracking from the dynamic-VRAM allocator forward to the clone, which
-    causes per-device worker threads in tiled encode/decode dispatch to access
-    weights through the source-device buffer."""
+    fresh VAE patcher with no inherited source-device state. Device placement
+    is handled later through the cloned patcher's load_device path. Without
+    this, bare ``copy.deepcopy`` of the VAE wrapper carries source-device
+    storage tracking from the dynamic-VRAM allocator forward to the clone,
+    which causes per-device worker threads in tiled encode/decode dispatch to
+    access weights through the source-device buffer."""
     if metadata is None:
         sd, metadata = comfy.utils.load_torch_file(vae_path, return_metadata=True)
     else:
