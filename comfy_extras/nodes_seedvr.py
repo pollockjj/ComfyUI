@@ -6,8 +6,6 @@ from einops import rearrange
 
 import gc
 import importlib
-import logging
-import time
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
@@ -895,16 +893,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             # temporal order.
             chunk_specs = []
             for idx, (chunk_start, chunk_end) in enumerate(chunk_ranges):
-                t0 = time.perf_counter()
                 chunk_samples = _sample_one_chunk(model, chunk_start, chunk_end)
-                t1 = time.perf_counter()
-                device_label = getattr(model, "load_device", None)
-                logging.info(
-                    f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=standard "
-                    f"chunk_idx={idx} chunk_start={chunk_start} "
-                    f"chunk_end={chunk_end} device={device_label} "
-                    f"duration_ms={(t1 - t0) * 1000.0:.2f}"
-                )
                 chunk_specs.append((chunk_start, chunk_end, chunk_samples))
         else:
             multigpu = importlib.import_module("comfy.multigpu")
@@ -980,15 +969,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 results = []
                 with comfy.model_management.cuda_device_context(device):
                     for (idx, cs, ce) in ranges:
-                        t0 = time.perf_counter()
                         chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
-                        t1 = time.perf_counter()
-                        logging.info(
-                            f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=worksplit "
-                            f"chunk_idx={idx} chunk_start={cs} "
-                            f"chunk_end={ce} device={device} "
-                            f"duration_ms={(t1 - t0) * 1000.0:.2f}"
-                        )
                         results.append((idx, cs, ce, chunk_samples))
                 return results
 
@@ -1005,9 +986,9 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for c in extra_clones:
                 c.is_multigpu_base_clone = False
 
-            pool = multigpu.MultiGPUThreadPool(devices)
-            dispatch_t0 = time.perf_counter()
+            pool = None
             try:
+                pool = multigpu.MultiGPUThreadPool(devices)
                 submitted_devices = []
                 for dev in devices:
                     if per_device_ranges[dev]:
@@ -1028,11 +1009,11 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                         first_error = (dev, error)
                     per_device_results[dev] = result
             finally:
-                pool.shutdown()
+                if pool is not None:
+                    pool.shutdown()
                 model.is_multigpu_base_clone = saved_flag_model
                 for c, f in zip(extra_clones, saved_flag_extras):
                     c.is_multigpu_base_clone = f
-            dispatch_t1 = time.perf_counter()
 
             if first_error is not None:
                 err_dev, err = first_error
@@ -1049,13 +1030,6 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for dev in submitted_devices:
                 indexed.extend(per_device_results[dev])
             indexed.sort(key=lambda x: x[0])
-
-            logging.info(
-                f"INSTRUMENT_SEEDVR2_DISPATCH_TIME path=worksplit "
-                f"n_chunks={len(chunk_ranges)} "
-                f"n_devices={len(submitted_devices)} "
-                f"parallel_wall_ms={(dispatch_t1 - dispatch_t0) * 1000.0:.2f}"
-            )
 
             chunk_specs = [(cs, ce, chunk_samples)
                            for (_, cs, ce, chunk_samples) in indexed]

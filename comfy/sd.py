@@ -1095,12 +1095,14 @@ class VAE:
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         clone_previous_args = {}
+        clone_previous_devices = {}
         clone_models = {}
         try:
             if multigpu_clones:
                 for dev, c in multigpu_clones.items():
                     model_management.free_memory(c.memory_used_encode(pixel_samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
+                    clone_previous_devices[dev] = getattr(c.first_stage_model, "device", torch.device("cpu"))
                     c.first_stage_model.device = dev
                     clone_previous_args[dev] = getattr(c.first_stage_model, "tiled_args", {})
                     c.first_stage_model.tiled_args = args
@@ -1127,6 +1129,7 @@ class VAE:
                     if dev in clone_previous_args:
                         c.first_stage_model.tiled_args = clone_previous_args[dev]
                     c.first_stage_model.to("cpu")
+                    c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 
     def decode(self, samples_in, vae_options={}):
