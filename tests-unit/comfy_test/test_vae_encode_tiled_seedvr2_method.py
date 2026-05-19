@@ -42,6 +42,27 @@ def _make_minimal_seedvr2_vae():
     return vae
 
 
+class _CloneFirstStage(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.tiled_args = {"stale": "clone"}
+        self.device = torch.device("cpu")
+        self.to_calls = []
+
+    def to(self, device):
+        self.to_calls.append(device)
+        return self
+
+
+class _CloneVAE:
+    def __init__(self):
+        self.first_stage_model = _CloneFirstStage()
+        self.vae_dtype = torch.float32
+
+    def memory_used_encode(self, shape, dtype):
+        return 1
+
+
 def test_method_exists_with_seedvr2_signature():
     assert hasattr(sd_mod.VAE, "encode_tiled_seedvr2"), (
         "VAE.encode_tiled_seedvr2 must be defined on the VAE class."
@@ -157,3 +178,23 @@ def test_method_clamps_overlap_below_tile_size():
         )
 
     assert tiled_vae_mock.call_args.kwargs["tile_overlap"] == (40, 56)
+
+
+def test_method_passes_multigpu_clone_models_to_seedvr2_tiler(monkeypatch):
+    vae = _make_minimal_seedvr2_vae()
+    clone_device = torch.device("cpu", 1)
+    clone = _CloneVAE()
+    vae.multigpu_clones = {clone_device: clone}
+    pixel_samples = torch.zeros((1, 3, 8, 64, 64))
+
+    monkeypatch.setattr(sd_mod.model_management, "free_memory", lambda *a, **k: None)
+    tiled_vae_mock = MagicMock(return_value=torch.zeros((1, 16, 2, 8, 8)))
+
+    with patch.object(seedvr_vae_mod, "tiled_vae", tiled_vae_mock):
+        vae.encode_tiled_seedvr2(pixel_samples)
+
+    assert tiled_vae_mock.call_args.kwargs["multigpu_vae_models"] == {
+        clone_device: clone.first_stage_model
+    }
+    assert clone.first_stage_model.tiled_args == {"stale": "clone"}
+    assert clone.first_stage_model.to_calls == [clone_device, "cpu"]

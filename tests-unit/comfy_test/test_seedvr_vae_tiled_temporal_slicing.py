@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 import torch
 import torch.nn as nn
 
@@ -91,6 +93,27 @@ class _LocalSpatialDecodeVAE(nn.Module):
             h * self.spatial_downsample_factor,
             width,
         ).clone()
+
+
+class _WorksplitDecodeVAE(nn.Module):
+    def __init__(self, name, device):
+        super().__init__()
+        self.name = name
+        self.device = torch.device(device)
+        self.slicing_latent_min_size = 99
+        self.spatial_downsample_factor = 1
+        self.temporal_downsample_factor = 1
+        self._dummy = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        self.calls = []
+
+    def decode_(self, z):
+        self.calls.append({
+            "device": self.device,
+            "shape": tuple(z.shape),
+            "temporal_values": [int(v) for v in z[0, 0, :, 0, 0].tolist()],
+        })
+        offset = 100.0 if self.name == "clone" else 10.0
+        return z[:, :1] + offset
 
 
 def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
@@ -218,6 +241,50 @@ def test_boundary_reference_latent_no_periodic_temporal_tile_discontinuity():
         (1, 16, 1, 8, 8),
     ]
     assert torch.isclose(spatial[0, 0, 0, 0, 36], expected)
+
+
+def test_seedvr2_tiled_vae_worksplit_dispatches_spatial_tiles_without_temporal_split():
+    primary = _WorksplitDecodeVAE("primary", torch.device("cpu", 0))
+    clone = _WorksplitDecodeVAE("clone", torch.device("cpu", 1))
+    latent = torch.arange(1 * 1 * 3 * 2 * 4, dtype=torch.float32).reshape(1, 1, 3, 2, 4)
+
+    out = tiled_vae(
+        latent,
+        primary,
+        tile_size=(2, 2),
+        tile_overlap=(0, 0),
+        temporal_size=16,
+        temporal_overlap=4,
+        encode=False,
+        multigpu_vae_models={torch.device("cpu", 1): clone},
+    )
+
+    assert [call["shape"] for call in primary.calls] == [(1, 1, 3, 2, 2)]
+    assert [call["shape"] for call in clone.calls] == [(1, 1, 3, 2, 2)]
+    assert primary.calls[0]["temporal_values"] == [0, 8, 16]
+    assert clone.calls[0]["temporal_values"] == [2, 10, 18]
+    assert torch.equal(out[:, :, :, :, :2], latent[:, :, :, :, :2] + 10.0)
+    assert torch.equal(out[:, :, :, :, 2:], latent[:, :, :, :, 2:] + 100.0)
+
+
+def test_seedvr2_tiled_vae_worksplit_worker_error_names_device():
+    primary = _WorksplitDecodeVAE("primary", torch.device("cpu", 0))
+    clone = _WorksplitDecodeVAE("clone", torch.device("cpu", 1))
+
+    def _raise(_z):
+        raise RuntimeError("clone failure")
+
+    clone.decode_ = _raise
+
+    with pytest.raises(RuntimeError, match=r"SeedVR2 VAE tiled worksplit failed on cpu:1"):
+        tiled_vae(
+            torch.zeros(1, 1, 1, 2, 4),
+            primary,
+            tile_size=(2, 2),
+            tile_overlap=(0, 0),
+            encode=False,
+            multigpu_vae_models={torch.device("cpu", 1): clone},
+        )
 
 
 def test_decode_tiled_vae_clamps_overlap_sized_tiles_to_preserve_coverage():
