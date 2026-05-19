@@ -8,7 +8,6 @@ import gc
 import logging
 import time
 import comfy.model_management
-import comfy.multigpu
 import comfy.sample
 import comfy.samplers
 from comfy.ldm.seedvr.vae import tiled_vae
@@ -903,6 +902,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 )
                 chunk_specs.append((chunk_start, chunk_end, chunk_samples))
         else:
+            import comfy.multigpu
+
             # Worksplit path — round-robin chunks across
             # ``[primary_device, *clone_devices]`` and run sample()
             # calls in parallel through ``MultiGPUThreadPool``.
