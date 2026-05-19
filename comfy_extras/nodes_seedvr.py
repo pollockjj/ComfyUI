@@ -1072,7 +1072,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             # chunks in order regardless of which device produced
             # them.
             indexed = []
-            for dev in submitted_devices:
+            result_devices = ([primary_device] if primary_result is not None else []) + submitted_devices
+            for dev in result_devices:
                 indexed.extend(per_device_results[dev])
             indexed.sort(key=lambda x: x[0])
 
