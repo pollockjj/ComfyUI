@@ -1,0 +1,57 @@
+import torch
+
+import comfy.supported_models
+import comfy.ldm.seedvr.model as seedvr_model
+
+
+def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
+    bf16_device = object()
+    fp16_device = object()
+
+    monkeypatch.setattr(
+        comfy.supported_models.comfy.model_management,
+        "should_use_bf16",
+        lambda device=None: device is bf16_device,
+    )
+
+    bf16_config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    bf16_config.set_inference_dtype(torch.float16, None, device=bf16_device)
+    assert bf16_config.manual_cast_dtype is torch.bfloat16
+
+    fp16_config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    fp16_config.set_inference_dtype(torch.float16, None, device=fp16_device)
+    assert fp16_config.manual_cast_dtype is None
+
+
+def test_apply_rope1_partial_preserves_full_rotation_input_dtype(monkeypatch):
+    def fake_apply_rope1(t, freqs_cis):
+        return t.float() + 1.0
+
+    monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
+
+    t = torch.arange(8, dtype=torch.float16).reshape(1, 2, 4)
+    freqs_cis = torch.zeros(1, 2, 2, 2)
+
+    out = seedvr_model._apply_rope1_partial(t, freqs_cis)
+
+    assert out.dtype is torch.float16
+    torch.testing.assert_close(out, (t.float() + 1.0).to(torch.float16))
+
+
+def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch):
+    def fake_apply_rope1(t, freqs_cis):
+        return t.float() + 1.0
+
+    monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
+
+    t = torch.arange(12, dtype=torch.float16).reshape(1, 2, 6)
+    freqs_cis = torch.zeros(1, 2, 2, 2)
+
+    out = seedvr_model._apply_rope1_partial(t, freqs_cis)
+
+    assert out.dtype is torch.float16
+    torch.testing.assert_close(
+        out[..., :4],
+        (t[..., :4].float() + 1.0).to(torch.float16),
+    )
+    torch.testing.assert_close(out[..., 4:], t[..., 4:])

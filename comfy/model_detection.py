@@ -490,6 +490,102 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
         return dit_config
 
+    if '{}blocks.0.norm1.linear.weight'.format(key_prefix) in state_dict_keys:  # CogVideoX
+        dit_config = {}
+        dit_config["image_model"] = "cogvideox"
+
+        # Extract config from weight shapes
+        norm1_weight = state_dict['{}blocks.0.norm1.linear.weight'.format(key_prefix)]
+        time_embed_dim = norm1_weight.shape[1]
+        dim = norm1_weight.shape[0] // 6
+
+        dit_config["num_attention_heads"] = dim // 64
+        dit_config["attention_head_dim"] = 64
+        dit_config["time_embed_dim"] = time_embed_dim
+        dit_config["num_layers"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
+
+        # Detect in_channels from patch_embed
+        patch_proj_key = '{}patch_embed.proj.weight'.format(key_prefix)
+        if patch_proj_key in state_dict_keys:
+            w = state_dict[patch_proj_key]
+            if w.ndim == 4:
+                # Conv2d: [out, in, kh, kw] — CogVideoX 1.0
+                dit_config["in_channels"] = w.shape[1]
+                dit_config["patch_size"] = w.shape[2]
+            elif w.ndim == 2:
+                # Linear: [out, in_channels * patch_size * patch_size * patch_size_t] — CogVideoX 1.5
+                dit_config["patch_size"] = 2
+                dit_config["patch_size_t"] = 2
+                dit_config["in_channels"] = w.shape[1] // (2 * 2 * 2)  # 256 // 8 = 32
+
+        text_proj_key = '{}patch_embed.text_proj.weight'.format(key_prefix)
+        if text_proj_key in state_dict_keys:
+            dit_config["text_embed_dim"] = state_dict[text_proj_key].shape[1]
+
+        # Detect OFS embedding
+        ofs_key = '{}ofs_embedding_linear_1.weight'.format(key_prefix)
+        if ofs_key in state_dict_keys:
+            dit_config["ofs_embed_dim"] = state_dict[ofs_key].shape[1]
+
+        # Detect positional embedding type
+        pos_key = '{}patch_embed.pos_embedding'.format(key_prefix)
+        if pos_key in state_dict_keys:
+            dit_config["use_learned_positional_embeddings"] = True
+            dit_config["use_rotary_positional_embeddings"] = False
+        else:
+            dit_config["use_learned_positional_embeddings"] = False
+            dit_config["use_rotary_positional_embeddings"] = True
+
+        return dit_config
+
+    if "{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix) in state_dict_keys and state_dict["{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix)].shape[1] == 3072: # seedvr2 7b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 3072
+        dit_config["heads"] = 24
+        dit_config["num_layers"] = 36
+        # 7B uses non-shared MMModule layout (separate ``vid.`` / ``txt.``
+        # submodules) at EVERY block — verified by inspecting the 7B
+        # state_dict at ``blocks.31.ada.txt.attn_gate`` (txt. prefix means
+        # ``MMModule.shared_weights=False``). Native NaDiT computes
+        # per-block ``shared_weights = not (i < mm_layers)``, so to keep
+        # every block non-shared we set ``mm_layers = num_layers``.
+        # Without this, blocks at index >= mm_layers (default 10) try to
+        # load ``blocks.N.*.all.*`` keys that don't exist in the file,
+        # silently miss-load → all-black output.
+        dit_config["mm_layers"] = 36
+        dit_config["norm_eps"] = 1e-5
+        dit_config["qk_rope"] = True
+        dit_config["rope_type"] = "rope3d"
+        dit_config["rope_dim"] = 64
+        dit_config["mlp_type"] = "normal"
+        return dit_config
+    elif "{}blocks.36.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 7b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 3072
+        dit_config["heads"] = 24
+        dit_config["num_layers"] = 36
+        # This checkpoint layout carries shared ``all.`` MMModule keys.
+        # Preserve the historical split: the initial blocks use separate
+        # vid/txt modules, later blocks use shared modules.
+        dit_config["mm_layers"] = 10
+        dit_config["norm_eps"] = 1e-5
+        dit_config["qk_rope"] = True
+        dit_config["mlp_type"] = "normal"
+        return dit_config
+    elif "{}blocks.31.mlp.all.proj_in_gate.weight".format(key_prefix) in state_dict_keys: # seedvr2 3b
+        dit_config = {}
+        dit_config["image_model"] = "seedvr2"
+        dit_config["vid_dim"] = 2560
+        dit_config["heads"] = 20
+        dit_config["num_layers"] = 32
+        dit_config["norm_eps"] = 1.0e-05
+        dit_config["qk_rope"] = None
+        dit_config["mlp_type"] = "swiglu"
+        dit_config["vid_out_norm"] = True
+        return dit_config
+
     if '{}head.modulation'.format(key_prefix) in state_dict_keys:  # Wan 2.1
         dit_config = {}
         dit_config["image_model"] = "wan2.1"
