@@ -1885,11 +1885,23 @@ def _seedvr2_block_release_model_options_enabled(model_options):
         or model_options.get("transformer_options", {}).get("seedvr2_block_release", False)
     )
 
+def _seedvr2_model_config_enabled(model_config):
+    return getattr(model_config, "unet_config", {}).get("image_model") == "seedvr2"
+
+def _seedvr2_block_release_options_from_model_config(model_config, model_options):
+    if not _seedvr2_model_config_enabled(model_config):
+        return model_options
+    model_options = dict(model_options)
+    transformer_options = dict(model_options.get("transformer_options", {}))
+    transformer_options["seedvr2_block_release"] = True
+    model_options["transformer_options"] = transformer_options
+    return model_options
+
 def _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic):
     if disable_dynamic:
         return comfy.model_patcher.ModelPatcher
     if (
-        getattr(model_config, "unet_config", {}).get("image_model") == "seedvr2"
+        _seedvr2_model_config_enabled(model_config)
         and _seedvr2_block_release_model_options_enabled(model_options)
     ):
         return comfy.model_patcher.ModelPatcher
@@ -1897,7 +1909,7 @@ def _select_model_patcher_for_diffusion_model(model_config, model_options, disab
 
 def _apply_seedvr2_block_release_runtime_options(model_patcher, model_config, model_options):
     if (
-        getattr(model_config, "unet_config", {}).get("image_model") == "seedvr2"
+        _seedvr2_model_config_enabled(model_config)
         and _seedvr2_block_release_model_options_enabled(model_options)
     ):
         model_patcher.model_options.setdefault("transformer_options", {})["seedvr2_block_release"] = True
@@ -1933,6 +1945,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
     if custom_operations is not None:
         model_config.custom_operations = custom_operations
 
+    model_options = _seedvr2_block_release_options_from_model_config(model_config, model_options)
     unet_dtype = model_options.get("dtype", model_options.get("weight_dtype", None))
 
     if unet_dtype is None:
@@ -2087,6 +2100,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     if custom_operations is not None:
         model_config.custom_operations = custom_operations
 
+    model_options = _seedvr2_block_release_options_from_model_config(model_config, model_options)
     if model_options.get("fp8_optimizations", False):
         model_config.optimizations["fp8"] = True
 

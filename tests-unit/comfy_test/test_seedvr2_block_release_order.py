@@ -1,8 +1,9 @@
 from comfy.cli_args import args
 
-args.cpu = True
-
 import torch  # noqa: E402
+
+if not torch.cuda.is_available():
+    args.cpu = True
 
 import comfy.ldm.seedvr.model as seedvr_model  # noqa: E402
 from comfy.ldm.seedvr.model import NaDiT  # noqa: E402

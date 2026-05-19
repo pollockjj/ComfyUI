@@ -949,9 +949,6 @@ class UNETLoader:
             model_options["fp8_optimizations"] = True
         elif weight_dtype == "fp8_e5m2":
             model_options["dtype"] = torch.float8_e5m2
-        if unet_name.startswith("seedvr2_"):
-            model_options.setdefault("transformer_options", {})["seedvr2_block_release"] = True
-
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
         return (model,)

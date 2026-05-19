@@ -1,6 +1,9 @@
 from comfy.cli_args import args
 
-args.cpu = True
+import torch  # noqa: E402
+
+if not torch.cuda.is_available():
+    args.cpu = True
 
 import comfy.sd as sd  # noqa: E402
 
@@ -50,6 +53,20 @@ def test_seedvr2_block_release_loader_uses_static_model_patcher(monkeypatch):
         {"seedvr2_block_release": True},
         False,
     ) is _DynamicPatcher
+
+
+def test_seedvr2_block_release_options_follow_detected_model_config():
+    model_options = {"transformer_options": {"existing": True}}
+
+    selected_options = sd._seedvr2_block_release_options_from_model_config(
+        _SeedVR2Config(),
+        model_options,
+    )
+
+    assert selected_options is not model_options
+    assert selected_options["transformer_options"]["existing"] is True
+    assert selected_options["transformer_options"]["seedvr2_block_release"] is True
+    assert "seedvr2_block_release" not in model_options["transformer_options"]
 
 
 def test_seedvr2_block_release_loader_sets_runtime_transformer_option():

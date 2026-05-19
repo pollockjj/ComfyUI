@@ -1567,8 +1567,7 @@ class NaDiT(nn.Module):
         return torch.cat([neg, pos], dim=0)
 
     def _seedvr2_synchronize_after_block(self, device):
-        if getattr(device, "type", None) == "cuda" and torch.cuda.is_available():
-            torch.cuda.synchronize(device)
+        comfy.model_management.synchronize()
 
     def _seedvr2_call_block(
         self,
