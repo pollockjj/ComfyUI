@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import einops
 from einops import rearrange
@@ -1551,6 +1552,8 @@ class NaDiT(nn.Module):
             if block_release:
                 load_device = vid.device
                 block.to(load_device)
+                residency_mb = comfy.model_management.module_size(block) / (1024 * 1024)
+                logging.info("SeedVR2 DiT block %s residency allocated %.2f MB", i, residency_mb)
                 try:
                     vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
                         block,
