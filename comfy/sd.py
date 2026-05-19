@@ -1895,6 +1895,13 @@ def _select_model_patcher_for_diffusion_model(model_config, model_options, disab
         return comfy.model_patcher.ModelPatcher
     return comfy.model_patcher.CoreModelPatcher
 
+def _apply_seedvr2_block_release_runtime_options(model_patcher, model_config, model_options):
+    if (
+        getattr(model_config, "unet_config", {}).get("image_model") == "seedvr2"
+        and _seedvr2_block_release_model_options_enabled(model_options)
+    ):
+        model_patcher.model_options.setdefault("transformer_options", {})["seedvr2_block_release"] = True
+
 def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True, model_options={}, te_model_options={}, metadata=None, disable_dynamic=False):
     clip = None
     clipvision = None
@@ -1946,6 +1953,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         model = model_config.get_model(sd, diffusion_model_prefix, device=inital_load_device)
         ModelPatcher = _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic)
         model_patcher = ModelPatcher(model, load_device=load_device, offload_device=model_management.unet_offload_device())
+        _apply_seedvr2_block_release_runtime_options(model_patcher, model_config, model_options)
         model.load_model_weights(sd, diffusion_model_prefix, assign=model_patcher.is_dynamic())
 
     if output_vae:
@@ -2085,6 +2093,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     model = model_config.get_model(new_sd, "")
     ModelPatcher = _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic)
     model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    _apply_seedvr2_block_release_runtime_options(model_patcher, model_config, model_options)
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
     model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic())

@@ -12,21 +12,21 @@ class _RecordingBlock:
     def __init__(self, block_index, events):
         self.block_index = block_index
         self.events = events
-        self.loaded = False
+        self.device = "cuda"
 
     def to(self, device):
-        if self.loaded:
-            self.events.append(f"offload block {self.block_index}")
-            self.loaded = False
+        target = str(device)
+        if target == "meta":
+            event = "offload" if self.device == "cpu" else "preoffload"
+            self.events.append(f"{event} block {self.block_index}")
         else:
             self.events.append(f"enter block {self.block_index}")
-            self.loaded = True
+        self.device = "cpu" if target != "meta" else "meta"
         return self
 
     def __call__(self, *, vid, txt, vid_shape, txt_shape, emb, cache):
         self.events.append(f"run block {self.block_index}")
         return vid, txt, vid_shape, txt_shape
-
 
 class _SeedVR2StandIn:
     _seedvr2_call_block = NaDiT._seedvr2_call_block
@@ -62,23 +62,35 @@ def _run_block_loop(model, transformer_options):
 def test_seedvr2_block_release_moves_one_block_at_a_time(monkeypatch):
     events = []
     model = _make_standin(events)
+    monkeypatch.setattr(seedvr_model.comfy.model_management, "unet_offload_device", lambda: torch.device("meta"))
     monkeypatch.setattr(seedvr_model.comfy.model_management, "soft_empty_cache", lambda: events.append("soft_empty_cache"))
 
     _run_block_loop(model, {})
 
-    assert events[:6] == [
+    assert events[:9] == [
+        "preoffload block 0",
+        "preoffload block 1",
+        "synchronize",
+        "soft_empty_cache",
         "enter block 0",
         "run block 0",
         "synchronize",
         "offload block 0",
         "soft_empty_cache",
+    ]
+    assert events[9:14] == [
         "enter block 1",
+        "run block 1",
+        "synchronize",
+        "offload block 1",
+        "soft_empty_cache",
     ]
 
 
 def test_seedvr2_block_release_preserves_replacement_block_path(monkeypatch):
     events = []
     model = _make_standin(events)
+    monkeypatch.setattr(seedvr_model.comfy.model_management, "unet_offload_device", lambda: torch.device("meta"))
     monkeypatch.setattr(seedvr_model.comfy.model_management, "soft_empty_cache", lambda: events.append("soft_empty_cache"))
     seen_original_keys = []
 

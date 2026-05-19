@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import logging
 from typing import Optional, Tuple, Union, List, Dict, Any, Callable
 import einops
 from einops import rearrange
@@ -1548,12 +1547,17 @@ class NaDiT(nn.Module):
         block_release=False,
     ):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
+        offload_device = comfy.model_management.unet_offload_device()
+        if block_release:
+            for block in self.blocks:
+                block.to(offload_device)
+            self._seedvr2_synchronize_after_block(vid.device)
+            comfy.model_management.soft_empty_cache()
+
         for i, block in enumerate(self.blocks):
             if block_release:
                 load_device = vid.device
                 block.to(load_device)
-                residency_mb = comfy.model_management.module_size(block) / (1024 * 1024)
-                logging.info("SeedVR2 DiT block %s residency allocated %.2f MB", i, residency_mb)
                 try:
                     vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
                         block,
@@ -1569,7 +1573,7 @@ class NaDiT(nn.Module):
                     )
                 finally:
                     self._seedvr2_synchronize_after_block(load_device)
-                    block.to(comfy.model_management.unet_offload_device())
+                    block.to(offload_device)
                     comfy.model_management.soft_empty_cache()
             else:
                 vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
