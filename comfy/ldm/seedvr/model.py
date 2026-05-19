@@ -5,6 +5,7 @@ from einops import rearrange
 import torch.nn.functional as F
 from math import ceil, pi
 import torch
+import comfy.model_management
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
 from comfy.ldm.modules.attention import optimized_var_attention
@@ -1484,6 +1485,104 @@ class NaDiT(nn.Module):
         pos, neg = out.chunk(2, dim=0)
         return torch.cat([neg, pos], dim=0)
 
+    def _seedvr2_synchronize_after_block(self, device):
+        if getattr(device, "type", None) == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _seedvr2_call_block(
+        self,
+        block,
+        block_index,
+        blocks_replace,
+        vid,
+        txt,
+        vid_shape,
+        txt_shape,
+        emb,
+        cache,
+        transformer_options,
+    ):
+        if ("block", block_index) in blocks_replace:
+            def block_wrap(args):
+                out = {}
+                out["vid"], out["txt"], out["vid_shape"], out["txt_shape"] = block(
+                    vid=args["vid"],
+                    txt=args["txt"],
+                    vid_shape=args["vid_shape"],
+                    txt_shape=args["txt_shape"],
+                    emb=args["emb"],
+                    cache=args["cache"],
+                )
+                return out
+
+            out = blocks_replace[("block", block_index)]({
+                "vid": vid,
+                "txt": txt,
+                "vid_shape": vid_shape,
+                "txt_shape": txt_shape,
+                "emb": emb,
+                "cache": cache,
+                "transformer_options": transformer_options,
+            }, {"original_block": block_wrap})
+            return out["vid"], out["txt"], out["vid_shape"], out["txt_shape"]
+
+        return block(
+            vid=vid,
+            txt=txt,
+            vid_shape=vid_shape,
+            txt_shape=txt_shape,
+            emb=emb,
+            cache=cache,
+        )
+
+    def _seedvr2_run_blocks(
+        self,
+        vid,
+        txt,
+        vid_shape,
+        txt_shape,
+        emb,
+        cache,
+        transformer_options,
+        block_release=False,
+    ):
+        blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
+        for i, block in enumerate(self.blocks):
+            if block_release:
+                load_device = vid.device
+                block.to(load_device)
+                try:
+                    vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
+                        block,
+                        i,
+                        blocks_replace,
+                        vid,
+                        txt,
+                        vid_shape,
+                        txt_shape,
+                        emb,
+                        cache,
+                        transformer_options,
+                    )
+                finally:
+                    self._seedvr2_synchronize_after_block(load_device)
+                    block.to(comfy.model_management.unet_offload_device())
+                    comfy.model_management.soft_empty_cache()
+            else:
+                vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
+                    block,
+                    i,
+                    blocks_replace,
+                    vid,
+                    txt,
+                    vid_shape,
+                    txt_shape,
+                    emb,
+                    cache,
+                    transformer_options,
+                )
+        return vid, txt, vid_shape, txt_shape
+
     def forward(
         self,
         x,
@@ -1493,8 +1592,6 @@ class NaDiT(nn.Module):
         **kwargs
     ):
         transformer_options = kwargs.get("transformer_options", {})
-        patches_replace = transformer_options.get("patches_replace", {})
-        blocks_replace = patches_replace.get("dit", {})
         conditions = kwargs.get("condition")
         b, tc, h, w = x.shape
         x = x.view(b, 16, -1, h, w)
@@ -1519,37 +1616,16 @@ class NaDiT(nn.Module):
 
         emb = self.emb_in(timestep, device=vid.device, dtype=vid.dtype)
 
-        for i, block in enumerate(self.blocks):
-            if ("block", i) in blocks_replace:
-                def block_wrap(args):
-                    out = {}
-                    out["vid"], out["txt"], out["vid_shape"], out["txt_shape"] = block(
-                            vid=args["vid"],
-                            txt=args["txt"],
-                            vid_shape=args["vid_shape"],
-                            txt_shape=args["txt_shape"],
-                            emb=args["emb"],
-                            cache=args["cache"],
-                        )
-                    return out
-                out = blocks_replace[("block", i)]({
-                        "vid":vid,
-                        "txt":txt,
-                        "vid_shape":vid_shape,
-                        "txt_shape":txt_shape,
-                        "emb":emb,
-                        "cache":cache,
-                    }, {"original_block": block_wrap})
-                vid, txt, vid_shape, txt_shape = out["vid"], out["txt"], out["vid_shape"], out["txt_shape"]
-            else:
-                vid, txt, vid_shape, txt_shape = block(
-                    vid=vid,
-                    txt=txt,
-                    vid_shape=vid_shape,
-                    txt_shape=txt_shape,
-                    emb=emb,
-                    cache=cache,
-                )
+        vid, txt, vid_shape, txt_shape = self._seedvr2_run_blocks(
+            vid,
+            txt,
+            vid_shape,
+            txt_shape,
+            emb,
+            cache,
+            transformer_options,
+            block_release=transformer_options.get("seedvr2_block_release", False),
+        )
 
         if self.vid_out_norm:
             vid = self.vid_out_norm(vid)

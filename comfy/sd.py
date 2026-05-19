@@ -1879,6 +1879,22 @@ def load_checkpoint_guess_config_clip_only(ckpt_path, embedding_directory=None, 
             disable_dynamic=disable_dynamic)
     return clip.patcher
 
+def _seedvr2_block_release_model_options_enabled(model_options):
+    return bool(
+        model_options.get("seedvr2_block_release", False)
+        or model_options.get("transformer_options", {}).get("seedvr2_block_release", False)
+    )
+
+def _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic):
+    if disable_dynamic:
+        return comfy.model_patcher.ModelPatcher
+    if (
+        getattr(model_config, "unet_config", {}).get("image_model") == "seedvr2"
+        and _seedvr2_block_release_model_options_enabled(model_options)
+    ):
+        return comfy.model_patcher.ModelPatcher
+    return comfy.model_patcher.CoreModelPatcher
+
 def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True, model_options={}, te_model_options={}, metadata=None, disable_dynamic=False):
     clip = None
     clipvision = None
@@ -1928,7 +1944,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
     if output_model:
         inital_load_device = model_management.unet_inital_load_device(parameters, unet_dtype)
         model = model_config.get_model(sd, diffusion_model_prefix, device=inital_load_device)
-        ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
+        ModelPatcher = _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic)
         model_patcher = ModelPatcher(model, load_device=load_device, offload_device=model_management.unet_offload_device())
         model.load_model_weights(sd, diffusion_model_prefix, assign=model_patcher.is_dynamic())
 
@@ -2067,7 +2083,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
         model_config.optimizations["fp8"] = True
 
     model = model_config.get_model(new_sd, "")
-    ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
+    ModelPatcher = _select_model_patcher_for_diffusion_model(model_config, model_options, disable_dynamic)
     model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
