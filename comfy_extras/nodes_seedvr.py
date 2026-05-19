@@ -1031,7 +1031,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 indexed.extend(per_device_results[dev])
             indexed.sort(key=lambda x: x[0])
 
+            chunk_device = indexed[0][3].device
             chunk_specs = [(cs, ce, chunk_samples)
+                           if chunk_samples.device == chunk_device
+                           else (cs, ce, chunk_samples.to(chunk_device))
                            for (_, cs, ce, chunk_samples) in indexed]
 
         final = _concat_chunks_with_overlap_blend(
