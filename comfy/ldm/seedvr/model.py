@@ -4,7 +4,6 @@ import einops
 from einops import rearrange
 import torch.nn.functional as F
 from math import ceil, pi
-import logging
 import torch
 import comfy.model_management
 from itertools import chain
@@ -157,14 +156,6 @@ def repeat_concat_idx(
         lambda vid, txt: torch.cat([vid, txt])[tgt_idx],
         lambda all: unconcat_coalesce(all),
     )
-
-def module_residency_mb(module: nn.Module) -> float:
-    total = 0
-    if hasattr(module, "parameters"):
-        total += sum(p.numel() * p.element_size() for p in module.parameters())
-    if hasattr(module, "buffers"):
-        total += sum(b.numel() * b.element_size() for b in module.buffers())
-    return total / (1024 ** 2)
 
 @dataclass
 class MMArg:
@@ -1628,7 +1619,6 @@ class NaDiT(nn.Module):
             if block_release:
                 load_device = vid.device
                 block.to(load_device)
-                logging.info("SeedVR2 DiT residency allocated %.2f MB", module_residency_mb(block))
                 try:
                     vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
                         block,

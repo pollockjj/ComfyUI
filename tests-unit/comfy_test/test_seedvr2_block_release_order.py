@@ -46,7 +46,7 @@ def _run_block_loop(model, transformer_options):
     vid_shape = torch.tensor([[1]])
     txt_shape = torch.tensor([[1]])
     emb = torch.full((1, 1), 2.0)
-    cache = {}
+    cache = seedvr_model.Cache()
     return model._seedvr2_run_blocks(
         vid,
         txt,
