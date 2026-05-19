@@ -27,7 +27,6 @@ concatenation / cond-handling logic can be exercised in isolation
 without GPU, model weights, or ComfyUI's full sampling stack.
 """
 
-from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -501,8 +500,6 @@ def test_t2_worksplit_dispatches_chunks_and_restores_flags(monkeypatch):
 
     monkeypatch.setattr(nodes_seedvr_mod.importlib, "import_module",
                         lambda name: _FakeMultiGPUModule)
-    monkeypatch.setattr(nodes_seedvr_mod.comfy.model_management,
-                        "cuda_device_context", lambda device: nullcontext())
 
     with patch.object(comfy.sample, "sample", side_effect=_record), \
          patch.object(comfy.sample, "fix_empty_latent_channels",

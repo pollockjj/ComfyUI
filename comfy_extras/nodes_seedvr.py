@@ -1,4 +1,5 @@
 from typing_extensions import override
+from contextlib import nullcontext
 from comfy_api.latest import ComfyExtension, io
 import torch
 import math
@@ -967,7 +968,13 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 # ``context.chunk(2, dim=0)`` inside the DiT.
                 worker_patcher.disable_model_cfg1_optimization()
                 results = []
-                with comfy.model_management.cuda_device_context(device):
+                worker_device = torch.device(device)
+                worker_device_context = (
+                    torch.cuda.device(worker_device)
+                    if worker_device.type == "cuda"
+                    else nullcontext()
+                )
+                with worker_device_context:
                     for (idx, cs, ce) in ranges:
                         chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
                         results.append((idx, cs, ce, chunk_samples))
