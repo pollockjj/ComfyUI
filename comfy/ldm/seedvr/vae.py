@@ -44,6 +44,12 @@ def _seedvr2_clamped_spatial_overlap(overlap, tile_size):
     return min(overlap, tile_size - 1)
 
 
+def _seedvr2_clear_temporal_memory(model):
+    for module in model.modules():
+        if hasattr(module, "memory"):
+            module.memory = None
+
+
 @torch.inference_mode()
 def tiled_vae(
     x,
@@ -173,6 +179,8 @@ def tiled_vae(
                 continue
             workers.append((torch.device(device), model))
             seen_model_ids.add(id(model))
+    for _, worker_model in workers:
+        _seedvr2_clear_temporal_memory(worker_model)
 
     def run_tile(tile_index, tile_range, model=vae_model, device=storage_device):
         y_idx, y_end, x_idx, x_end = tile_range
@@ -275,6 +283,8 @@ def tiled_vae(
         bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
+    for _, worker_model in workers:
+        _seedvr2_clear_temporal_memory(worker_model)
 
     if result.device != x.device:
         result = result.to(x.device).to(x.dtype)
