@@ -955,16 +955,16 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             for i, (cs, ce) in enumerate(chunk_ranges):
                 per_device_ranges[devices[i % len(devices)]].append((i, cs, ce))
 
-            def _worker_run_chunks(device, patcher, ranges, clone_patcher=True):
-                # Per-worker patcher: extra-device workers use a shallow
-                # clone (no weight copy). The primary device runs on the
-                # primary patcher in the main execution thread so chunk 0
-                # follows the same patcher/thread path as the sequential
-                # baseline while the extra devices run concurrently.
-                worker_patcher = patcher.clone() if clone_patcher else patcher
-                saved_multigpu_models = None
-                if not clone_patcher:
-                    saved_multigpu_models = list(worker_patcher.get_additional_models_with_key("multigpu"))
+            def _worker_run_chunks(device, patcher, ranges):
+                # Per-worker patcher: use an independent patcher object for
+                # every concurrent sampler call, including the primary
+                # device. A shallow clone of the primary patcher shares the
+                # dynamic model object with the baseline patcher, which lets
+                # concurrent model-management state affect chunk 0.
+                if device == model.load_device:
+                    worker_patcher = patcher.deepclone_multigpu(new_load_device=device)
+                else:
+                    worker_patcher = patcher.clone()
                 worker_patcher.remove_additional_models("multigpu")
                 worker_patcher.is_multigpu_base_clone = False
                 # Propagate SeedVR2's CFG=1.0 contract: SeedVR2's
@@ -982,24 +982,20 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 # 2-batch and the others fail at
                 # ``context.chunk(2, dim=0)`` inside the DiT.
                 worker_patcher.disable_model_cfg1_optimization()
-                try:
-                    results = []
-                    with comfy.model_management.cuda_device_context(device):
-                        for (idx, cs, ce) in ranges:
-                            t0 = time.perf_counter()
-                            chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
-                            t1 = time.perf_counter()
-                            logging.info(
-                                f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=worksplit "
-                                f"chunk_idx={idx} chunk_start={cs} "
-                                f"chunk_end={ce} device={device} "
-                                f"duration_ms={(t1 - t0) * 1000.0:.2f}"
-                            )
-                            results.append((idx, cs, ce, chunk_samples))
-                    return results
-                finally:
-                    if saved_multigpu_models is not None:
-                        worker_patcher.set_additional_models("multigpu", saved_multigpu_models)
+                results = []
+                with comfy.model_management.cuda_device_context(device):
+                    for (idx, cs, ce) in ranges:
+                        t0 = time.perf_counter()
+                        chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
+                        t1 = time.perf_counter()
+                        logging.info(
+                            f"INSTRUMENT_SEEDVR2_CHUNK_TIME path=worksplit "
+                            f"chunk_idx={idx} chunk_start={cs} "
+                            f"chunk_end={ce} device={device} "
+                            f"duration_ms={(t1 - t0) * 1000.0:.2f}"
+                        )
+                        results.append((idx, cs, ce, chunk_samples))
+                return results
 
             # Flip the flag on every participating patcher BEFORE
             # dispatch so ``prepare_model_patcher_multigpu_clones``
@@ -1035,7 +1031,6 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                             primary_device,
                             patcher_for_device[primary_device],
                             per_device_ranges[primary_device],
-                            clone_patcher=False,
                         )
                     except Exception as err:
                         primary_error = err
