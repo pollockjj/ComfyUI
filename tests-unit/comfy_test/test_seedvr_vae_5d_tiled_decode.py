@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.nn as nn
@@ -60,6 +60,11 @@ class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
     def decode(self, z):
         self.calls.append({"tiled_args": dict(self.tiled_args), "shape": tuple(z.shape)})
         return z
+
+
+class _SeedVR2TiledDecodeForwarder(_SeedVR2DecodeStub):
+    def decode(self, z):
+        return vae_mod.tiled_vae(z, self, **self.tiled_args, encode=False)
 
 
 class _CloneFirstStage(nn.Module):
@@ -185,9 +190,9 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
     assert vae.first_stage_model.calls[0]["tiled_args"]["temporal_overlap"] == 4
 
 
-def test_seedvr2_decode_tiled_gates_multigpu_clone_models(monkeypatch):
+def test_seedvr2_decode_tiled_passes_multigpu_clone_models_to_seedvr2_tiler(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
-    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.first_stage_model = _SeedVR2TiledDecodeForwarder()
     vae.vae_dtype = torch.float32
     vae.device = torch.device("cpu")
     vae.output_device = torch.device("cpu")
@@ -200,13 +205,18 @@ def test_seedvr2_decode_tiled_gates_multigpu_clone_models(monkeypatch):
     vae.multigpu_clones = {clone_device: clone}
 
     monkeypatch.setattr(sd_mod.model_management, "free_memory", lambda *a, **k: None)
+    tiled_vae_mock = MagicMock(return_value=torch.zeros(1, 16, 3, 2, 2))
 
     latent = torch.zeros(1, 16, 3, 2, 2)
-    vae.decode_tiled_seedvr2(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
+    with patch.object(vae_mod, "tiled_vae", tiled_vae_mock):
+        vae.decode_tiled_seedvr2(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert "multigpu_vae_models" not in vae.first_stage_model.calls[0]["tiled_args"]
+    assert tiled_vae_mock.call_args.kwargs["encode"] is False
+    assert tiled_vae_mock.call_args.kwargs["multigpu_vae_models"] == {
+        clone_device: clone.first_stage_model
+    }
     assert clone.first_stage_model.tiled_args == {"stale": "clone"}
-    assert clone.first_stage_model.to_calls == []
+    assert clone.first_stage_model.to_calls == [clone_device, "cpu"]
 
 
 class _TemporalChunkRecorder(nn.Module):
