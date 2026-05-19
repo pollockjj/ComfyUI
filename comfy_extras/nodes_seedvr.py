@@ -220,7 +220,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 io.Vae.Input("vae"),
                 io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
                 io.Int.Input("spatial_tile_size", default = 512, min = 1),
-                io.Int.Input("spatial_overlap", default = 64, min = 1),
+                io.Int.Input("spatial_overlap", default = 64, min = 0),
                 io.Int.Input("temporal_tile_size", default=16, min=0, max=16384, step=4),
                 io.Int.Input("temporal_overlap", default=4, min=0, max=16384, step=4),
                 io.Boolean.Input("enable_tiling", default=False),
@@ -263,6 +263,8 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
         # in case users a non-compatiable number for tiling
         def make_divisible(val, divisor):
+            if val == 0:
+                return 0
             return max(divisor, round(val / divisor) * divisor)
 
         spatial_tile_size = make_divisible(spatial_tile_size, 32)
