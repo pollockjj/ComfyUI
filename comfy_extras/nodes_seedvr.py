@@ -294,7 +294,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
             images_bcthw = images_bcthw.to(vae_device)
             multigpu_clones = getattr(vae, "multigpu_clones", None)
             clone_models = {}
-            timing_devices = [vae_device]
             clone_previous_args = {}
             try:
                 if multigpu_clones:
@@ -305,11 +304,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
                         clone_previous_args[dev] = getattr(clone.first_stage_model, "tiled_args", {})
                         clone.first_stage_model.tiled_args = args
                         clone_models[dev] = clone.first_stage_model
-                    timing_devices.extend(clone_models.keys())
-                for dev in timing_devices:
-                    if torch.device(dev).type == "cuda":
-                        torch.cuda.synchronize(dev)
-                start_time = time.perf_counter()
                 latent = tiled_vae(
                     images_bcthw,
                     vae_model,
@@ -317,27 +311,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
                     encode=True,
                     multigpu_vae_models=clone_models or None,
                 )
-                for dev in timing_devices:
-                    if torch.device(dev).type == "cuda":
-                        torch.cuda.synchronize(dev)
-                duration_ms = (time.perf_counter() - start_time) * 1000.0
-                if clone_models:
-                    print(
-                        f"INSTRUMENT_VAE_ENCODE_TIME path=worksplit tile_t={args['temporal_size']} "
-                        f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                        f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                        f"devices={[str(d) for d in timing_devices]} samples_shape={tuple(images_bcthw.shape)} "
-                        f"duration_ms={duration_ms:.3f}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"INSTRUMENT_VAE_ENCODE_TIME path=standard tile_t={args['temporal_size']} "
-                        f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                        f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                        f"device={vae_device} samples_shape={tuple(images_bcthw.shape)} duration_ms={duration_ms:.3f}",
-                        flush=True,
-                    )
             finally:
                 for dev, clone in dict(multigpu_clones or {}).items():
                     if dev in clone_previous_args:

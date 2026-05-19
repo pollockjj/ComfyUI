@@ -3,7 +3,6 @@ import json
 import torch
 from enum import Enum
 import logging
-import time
 
 from comfy import model_management
 from comfy.utils import ProgressBar
@@ -1078,9 +1077,6 @@ class VAE:
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         clone_previous_args = {}
         clone_models = {}
-        timing_devices = [self.device]
-        if multigpu_clones:
-            timing_devices.extend(multigpu_clones.keys())
         try:
             if multigpu_clones:
                 for dev, c in multigpu_clones.items():
@@ -1093,32 +1089,7 @@ class VAE:
                 if clone_models:
                     args["multigpu_vae_models"] = clone_models
             self.first_stage_model.tiled_args = args
-            for dev in timing_devices:
-                if torch.device(dev).type == "cuda":
-                    torch.cuda.synchronize(dev)
-            start_time = time.perf_counter()
             output = self.first_stage_model.decode(samples.to(self.vae_dtype).to(self.device))
-            for dev in timing_devices:
-                if torch.device(dev).type == "cuda":
-                    torch.cuda.synchronize(dev)
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            if multigpu_clones:
-                print(
-                    f"INSTRUMENT_VAE_DECODE_TIME path=worksplit tile_t={args['temporal_size']} "
-                    f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                    f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                    f"devices={[str(d) for d in timing_devices]} samples_shape={tuple(samples.shape)} "
-                    f"duration_ms={duration_ms:.3f}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"INSTRUMENT_VAE_DECODE_TIME path=standard tile_t={args['temporal_size']} "
-                    f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                    f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                    f"device={self.device} samples_shape={tuple(samples.shape)} duration_ms={duration_ms:.3f}",
-                    flush=True,
-                )
         finally:
             self.first_stage_model.tiled_args = previous_args
             if multigpu_clones:
@@ -1243,9 +1214,6 @@ class VAE:
         multigpu_clones = getattr(self, 'multigpu_clones', None)
         clone_previous_args = {}
         clone_models = {}
-        timing_devices = [self.device]
-        if multigpu_clones:
-            timing_devices.extend(multigpu_clones.keys())
         try:
             if multigpu_clones:
                 for dev, c in multigpu_clones.items():
@@ -1260,10 +1228,6 @@ class VAE:
             self.first_stage_model.tiled_args = args
             self.first_stage_model.device = self.device
             x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
-            for dev in timing_devices:
-                if torch.device(dev).type == "cuda":
-                    torch.cuda.synchronize(dev)
-            start_time = time.perf_counter()
             output = comfy.ldm.seedvr.vae.tiled_vae(
                 x,
                 self.first_stage_model,
@@ -1274,27 +1238,6 @@ class VAE:
                 encode=True,
                 multigpu_vae_models=clone_models or None,
             )
-            for dev in timing_devices:
-                if torch.device(dev).type == "cuda":
-                    torch.cuda.synchronize(dev)
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            if multigpu_clones:
-                print(
-                    f"INSTRUMENT_VAE_ENCODE_TIME path=worksplit tile_t={args['temporal_size']} "
-                    f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                    f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                    f"devices={[str(d) for d in timing_devices]} samples_shape={tuple(pixel_samples.shape)} "
-                    f"duration_ms={duration_ms:.3f}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"INSTRUMENT_VAE_ENCODE_TIME path=standard tile_t={args['temporal_size']} "
-                    f"tile_x={args['tile_size'][1]} tile_y={args['tile_size'][0]} "
-                    f"overlap=({args['temporal_overlap']}, {args['tile_overlap'][1]}, {args['tile_overlap'][0]}) "
-                    f"device={self.device} samples_shape={tuple(pixel_samples.shape)} duration_ms={duration_ms:.3f}",
-                    flush=True,
-                )
         finally:
             self.first_stage_model.tiled_args = previous_args
             if multigpu_clones:
