@@ -4,6 +4,7 @@ import einops
 from einops import rearrange
 import torch.nn.functional as F
 from math import ceil, pi
+import logging
 import torch
 import comfy.model_management
 from itertools import chain
@@ -156,6 +157,14 @@ def repeat_concat_idx(
         lambda vid, txt: torch.cat([vid, txt])[tgt_idx],
         lambda all: unconcat_coalesce(all),
     )
+
+def module_residency_mb(module: nn.Module) -> float:
+    total = 0
+    if hasattr(module, "parameters"):
+        total += sum(p.numel() * p.element_size() for p in module.parameters())
+    if hasattr(module, "buffers"):
+        total += sum(b.numel() * b.element_size() for b in module.buffers())
+    return total / (1024 ** 2)
 
 @dataclass
 class MMArg:
@@ -813,6 +822,53 @@ class NaSwinAttention(NaMMAttention):
 
         self.window_op = get_window_op(window_method)
 
+    def _seedvr2_block_release_attention(
+        self,
+        vid_q,
+        txt_q,
+        vid_k,
+        txt_k,
+        vid_v,
+        txt_v,
+        vid_len_win,
+        txt_len,
+        window_count,
+    ):
+        vid_q_windows = vid_q.split(vid_len_win.tolist())
+        vid_k_windows = vid_k.split(vid_len_win.tolist())
+        vid_v_windows = vid_v.split(vid_len_win.tolist())
+        txt_q_items = txt_q.split(txt_len.tolist())
+        txt_k_items = txt_k.split(txt_len.tolist())
+        txt_v_items = txt_v.split(txt_len.tolist())
+        vid_out = []
+        txt_out = []
+        window_index = 0
+
+        for sample_index, repeat_count in enumerate(window_count.tolist()):
+            txt_sum = torch.zeros_like(txt_q_items[sample_index])
+            for _ in range(repeat_count):
+                q = torch.cat((vid_q_windows[window_index], txt_q_items[sample_index]))
+                k = torch.cat((vid_k_windows[window_index], txt_k_items[sample_index]))
+                v = torch.cat((vid_v_windows[window_index], txt_v_items[sample_index]))
+                seqlens = torch.tensor([0, q.shape[0]], device=q.device, dtype=torch.int32)
+                out = optimized_var_attention(
+                    q=q,
+                    k=k,
+                    v=v,
+                    heads=self.heads,
+                    skip_reshape=True,
+                    skip_output_reshape=True,
+                    cu_seqlens_q=seqlens,
+                    cu_seqlens_k=seqlens,
+                )
+                vid_part, txt_part = out.split((vid_q_windows[window_index].shape[0], txt_q_items[sample_index].shape[0]))
+                vid_out.append(vid_part)
+                txt_sum = txt_sum + txt_part
+                window_index += 1
+            txt_out.append(txt_sum / repeat_count)
+
+        return torch.cat(vid_out), torch.cat(txt_out)
+
     def forward(
         self,
         vid: torch.FloatTensor,  # l c
@@ -889,20 +945,33 @@ class NaSwinAttention(NaMMAttention):
             if self.rope:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
-        out = optimized_var_attention(
-            q=concat_win(vid_q, txt_q),
-            k=concat_win(vid_k, txt_k),
-            v=concat_win(vid_v, txt_v),
-            heads=self.heads, skip_reshape=True, skip_output_reshape=True,
-            cu_seqlens_q=cache_win(
-                "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-            cu_seqlens_k=cache_win(
-                "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-        )
+        if self.version_7b and cache.cache.get("seedvr2_block_release", False):
+            vid_out, txt_out = self._seedvr2_block_release_attention(
+                vid_q,
+                txt_q,
+                vid_k,
+                txt_k,
+                vid_v,
+                txt_v,
+                vid_len_win,
+                txt_len,
+                window_count,
+            )
+        else:
+            out = optimized_var_attention(
+                q=concat_win(vid_q, txt_q),
+                k=concat_win(vid_k, txt_k),
+                v=concat_win(vid_v, txt_v),
+                heads=self.heads, skip_reshape=True, skip_output_reshape=True,
+                cu_seqlens_q=cache_win(
+                    "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
+                ),
+                cu_seqlens_k=cache_win(
+                    "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
+                ),
+            )
 
-        vid_out, txt_out = unconcat_win(out)
+            vid_out, txt_out = unconcat_win(out)
 
         vid_out = rearrange(vid_out, "l h d -> l (h d)")
         txt_out = rearrange(txt_out, "l h d -> l (h d)")
@@ -1549,6 +1618,7 @@ class NaDiT(nn.Module):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         offload_device = comfy.model_management.unet_offload_device()
         if block_release:
+            cache.cache["seedvr2_block_release"] = True
             for block in self.blocks:
                 block.to(offload_device)
             self._seedvr2_synchronize_after_block(vid.device)
@@ -1558,6 +1628,7 @@ class NaDiT(nn.Module):
             if block_release:
                 load_device = vid.device
                 block.to(load_device)
+                logging.info("SeedVR2 DiT residency allocated %.2f MB", module_residency_mb(block))
                 try:
                     vid, txt, vid_shape, txt_shape = self._seedvr2_call_block(
                         block,
