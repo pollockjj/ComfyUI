@@ -1,10 +1,12 @@
 from typing_extensions import override
+from contextlib import nullcontext
 from comfy_api.latest import ComfyExtension, io
 import torch
 import math
 from einops import rearrange
 
 import gc
+import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
@@ -819,14 +821,30 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
 
         noise_mask = latent_image.get("noise_mask", None)
 
-        chunk_specs = []
+        # Build the flat list of chunk ranges first so the chunking
+        # geometry is fully known before any sample call. Slicing and
+        # ``comfy.sample.sample`` happen later in either the sequential
+        # path or the worksplit workers; keeping the geometry pass
+        # separate also lets the worksplit path round-robin chunks
+        # across devices without re-walking the stride logic.
+        chunk_ranges = []
         for chunk_start in range(0, T_latent, step_latent):
             chunk_end = min(chunk_start + chunk_latent, T_latent)
             if chunk_start >= chunk_end:
                 # The final iteration of a stride that lands exactly on
                 # T_latent produces a zero-length chunk; skip it.
                 break
+            chunk_ranges.append((chunk_start, chunk_end))
+            if chunk_end >= T_latent:
+                break
 
+        # Per-chunk sample call. Used by both the sequential path and
+        # by each worksplit worker so the slicing + sampler invocation
+        # logic stays in one place. ``patcher`` is the ModelPatcher to
+        # invoke for this chunk's sample call — the primary ``model``
+        # on the sequential path, or a per-device clone on the
+        # worksplit path.
+        def _sample_one_chunk(patcher, chunk_start, chunk_end):
             samples_chunk = _slice_collapsed_4d_along_t(
                 samples_4d, chunk_start, chunk_end,
                 _SEEDVR2_LATENT_CHANNELS,
@@ -842,23 +860,189 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 negative, chunk_start, chunk_end,
             )
 
-            # Per-chunk noise_mask handling: standard masks are passed through
-            # for KSampler expansion; pre-expanded collapsed masks are sliced.
+            # Per-chunk noise_mask handling: standard masks are passed
+            # through for KSampler expansion; pre-expanded collapsed
+            # masks are sliced.
             chunk_noise_mask = None
             if noise_mask is not None:
                 chunk_noise_mask = _slice_seedvr2_noise_mask_along_t(
                     noise_mask, samples_4d, chunk_start, chunk_end,
                 )
 
-            chunk_samples = comfy.sample.sample(
-                model, noise_chunk, steps, cfg, sampler_name, scheduler,
+            return comfy.sample.sample(
+                patcher, noise_chunk, steps, cfg, sampler_name, scheduler,
                 positive_chunk, negative_chunk, samples_chunk,
                 denoise=denoise, noise_mask=chunk_noise_mask, seed=seed,
             )
-            chunk_specs.append((chunk_start, chunk_end, chunk_samples))
 
-            if chunk_end >= T_latent:
-                break
+        # Worksplit clones are attached upstream by
+        # ``MultiGPU_WorkUnits`` (or any node that calls
+        # ``create_multigpu_deepclones``). They live in the
+        # additional-models registry under the ``"multigpu"`` key at
+        # ``execute()`` time — ``model_options["multigpu_clones"]`` is
+        # populated later, inside ``KSampler.outer_sample``, so we MUST
+        # read from the registry here rather than from
+        # ``model_options``.
+        extra_clones = (
+            model.get_additional_models_with_key("multigpu")
+            if model is not None else []
+        )
+
+        if not extra_clones:
+            # Sequential path — byte-identical to the pre-worksplit
+            # chunk loop. Each chunk runs on the primary model in
+            # temporal order.
+            chunk_specs = []
+            for idx, (chunk_start, chunk_end) in enumerate(chunk_ranges):
+                chunk_samples = _sample_one_chunk(model, chunk_start, chunk_end)
+                chunk_specs.append((chunk_start, chunk_end, chunk_samples))
+        else:
+            multigpu = importlib.import_module("comfy.multigpu")
+
+            # Worksplit path — round-robin chunks across
+            # ``[primary_device, *clone_devices]`` and run sample()
+            # calls in parallel through ``MultiGPUThreadPool``.
+            #
+            # Recursion / CFG-split guard:
+            # The existing multigpu CFG-split machinery in
+            # ``comfy/samplers.py`` (``_calc_cond_batch_multigpu``) is
+            # triggered when ``KSampler.outer_sample`` →
+            # ``prepare_model_patcher_multigpu_clones`` finds at least
+            # one ``ModelPatcher`` with ``is_multigpu_base_clone=True``
+            # in ``loaded_models`` and populates
+            # ``model_options["multigpu_clones"]``. When that happens,
+            # the sampler builds a 2-batch (cond+uncond) ``context``
+            # tensor — SeedVR2's ``model.forward`` requires either
+            # ``numel()==0`` (empty text, falls back to the model's
+            # built-in conditioning buffers) or
+            # ``shape[0]==2`` (cond+uncond). At cfg=1.0 with empty
+            # text and no multigpu CFG-split, the single-device
+            # ``_calc_cond_batch`` path produces ``numel()==0`` and
+            # SeedVR2 takes its built-in conditioning fallback.
+            #
+            # For chunk-half worksplit we want every worker to take
+            # exactly that single-device path so each chunk runs the
+            # same code as the sequential baseline — just on a
+            # different device. To make this deterministic we
+            # temporarily flip ``is_multigpu_base_clone=False`` on
+            # the primary and every extra clone for the duration of
+            # the dispatch, then restore. The flag only controls the
+            # filter inside ``prepare_model_patcher_multigpu_clones``;
+            # flipping it has no other side effects.
+            devices = [model.load_device]
+            patcher_for_device = {model.load_device: model}
+            for clone in extra_clones:
+                devices.append(clone.load_device)
+                patcher_for_device[clone.load_device] = clone
+
+            # Round-robin assignment: chunk i → devices[i % N]. Devices
+            # with no chunks (more devices than chunks) are skipped on
+            # both submit AND drain to avoid blocking on an empty
+            # result queue.
+            per_device_ranges: dict = {dev: [] for dev in devices}
+            for i, (cs, ce) in enumerate(chunk_ranges):
+                per_device_ranges[devices[i % len(devices)]].append((i, cs, ce))
+
+            def _worker_run_chunks(device, patcher, ranges):
+                # Per-worker patcher: shallow clone (no weight copy),
+                # strip the multigpu additional-models registry, and
+                # force ``is_multigpu_base_clone=False`` so the
+                # worker's ``outer_sample`` does not enter the
+                # multigpu CFG-split path inside the sampler.
+                worker_patcher = patcher.clone()
+                worker_patcher.remove_additional_models("multigpu")
+                worker_patcher.is_multigpu_base_clone = False
+                # Propagate SeedVR2's CFG=1.0 contract: SeedVR2's
+                # ``model.forward`` requires a 2-batch ``context``
+                # tensor (cond+uncond concatenated along dim 0). The
+                # primary patcher had ``disable_cfg1_optimization``
+                # set by ``SeedVR2Conditioning.execute`` so its sample
+                # call always processes both branches even at cfg=1.0.
+                # Extra clones were created by ``MultiGPU_WorkUnits``
+                # BEFORE that node ran, so their ``model_options`` do
+                # not carry the flag — we propagate it explicitly here
+                # so every worker (primary's clone OR extra clone's
+                # clone) takes the same 2-batch sampling path. Without
+                # this propagation, only the primary's clone runs
+                # 2-batch and the others fail at
+                # ``context.chunk(2, dim=0)`` inside the DiT.
+                worker_patcher.disable_model_cfg1_optimization()
+                results = []
+                worker_device = torch.device(device)
+                worker_device_context = (
+                    torch.cuda.device(worker_device)
+                    if worker_device.type == "cuda"
+                    else nullcontext()
+                )
+                with worker_device_context:
+                    for (idx, cs, ce) in ranges:
+                        chunk_samples = _sample_one_chunk(worker_patcher, cs, ce)
+                        results.append((idx, cs, ce, chunk_samples))
+                return results
+
+            # Flip the flag on every participating patcher BEFORE
+            # dispatch so ``prepare_model_patcher_multigpu_clones``
+            # cannot find any multigpu-base-clone in ``loaded_models``
+            # no matter which worker observes the cache first. Restore
+            # the original flags in ``finally`` so downstream nodes
+            # (and the next graph execution) see the model exactly as
+            # MultiGPU_WorkUnits left it.
+            saved_flag_model = model.is_multigpu_base_clone
+            saved_flag_extras = [c.is_multigpu_base_clone for c in extra_clones]
+            model.is_multigpu_base_clone = False
+            for c in extra_clones:
+                c.is_multigpu_base_clone = False
+
+            pool = None
+            try:
+                pool = multigpu.MultiGPUThreadPool(devices)
+                submitted_devices = []
+                for dev in devices:
+                    if per_device_ranges[dev]:
+                        pool.submit(dev, _worker_run_chunks, dev,
+                                    patcher_for_device[dev],
+                                    per_device_ranges[dev])
+                        submitted_devices.append(dev)
+
+                # Drain every submitted device. Surfacing the first
+                # worker exception (if any) as a chained RuntimeError
+                # tells the caller which device failed and preserves
+                # the original traceback via ``raise ... from``.
+                per_device_results = {}
+                first_error = None
+                for dev in submitted_devices:
+                    result, error = pool.get_result(dev)
+                    if error is not None and first_error is None:
+                        first_error = (dev, error)
+                    per_device_results[dev] = result
+            finally:
+                if pool is not None:
+                    pool.shutdown()
+                model.is_multigpu_base_clone = saved_flag_model
+                for c, f in zip(extra_clones, saved_flag_extras):
+                    c.is_multigpu_base_clone = f
+
+            if first_error is not None:
+                err_dev, err = first_error
+                raise RuntimeError(
+                    f"SeedVR2ProgressiveSampler: worksplit worker on "
+                    f"{err_dev} raised an exception during chunk "
+                    f"sampling."
+                ) from err
+
+            # Reassemble by chunk_idx so the temporal blender sees
+            # chunks in order regardless of which device produced
+            # them.
+            indexed = []
+            for dev in submitted_devices:
+                indexed.extend(per_device_results[dev])
+            indexed.sort(key=lambda x: x[0])
+
+            chunk_device = indexed[0][3].device
+            chunk_specs = [(cs, ce, chunk_samples)
+                           if chunk_samples.device == chunk_device
+                           else (cs, ce, chunk_samples.to(chunk_device))
+                           for (_, cs, ce, chunk_samples) in indexed]
 
         final = _concat_chunks_with_overlap_blend(
             chunk_specs, _SEEDVR2_LATENT_CHANNELS, temporal_overlap,

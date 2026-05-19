@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from typing import Literal, Optional, Tuple
 import gc
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,6 +44,12 @@ def _seedvr2_clamped_spatial_overlap(overlap, tile_size):
     return min(overlap, tile_size - 1)
 
 
+def _seedvr2_clear_temporal_memory(model):
+    for module in model.modules():
+        if hasattr(module, "memory"):
+            module.memory = None
+
+
 @torch.inference_mode()
 def tiled_vae(
     x,
@@ -52,6 +59,7 @@ def tiled_vae(
     temporal_size=16,
     temporal_overlap=0,
     encode=True,
+    multigpu_vae_models=None,
     **kwargs,
 ):
     gc.collect()
@@ -114,26 +122,28 @@ def tiled_vae(
     storage_device = vae_model.device
     result = None
     count = None
-    def run_temporal_chunks(spatial_tile):
-        t_chunk = spatial_tile.contiguous()
-        old_slicing_min_size = getattr(vae_model, slicing_attr, None)
+    def run_temporal_chunks(spatial_tile, model=vae_model, device=storage_device):
+        device = torch.device(device)
+        _seedvr2_clear_temporal_memory(model)
+        t_chunk = spatial_tile.to(device=device, dtype=next(model.parameters()).dtype, non_blocking=True).contiguous()
+        old_device = getattr(model, "device", None)
+        model.device = device
+        old_slicing_min_size = getattr(model, slicing_attr, None)
         if old_slicing_min_size is not None and slicing_min_size is not None:
             if slicing_min_size <= 0:
-                setattr(vae_model, slicing_attr, t_chunk.shape[2])
+                setattr(model, slicing_attr, t_chunk.shape[2])
             else:
-                setattr(vae_model, slicing_attr, slicing_min_size)
-        if encode:
-            try:
-                out = vae_model.encode(t_chunk)[0]
-            finally:
-                if old_slicing_min_size is not None and slicing_min_size is not None:
-                    setattr(vae_model, slicing_attr, old_slicing_min_size)
-        else:
-            try:
-                out = vae_model.decode_(t_chunk)
-            finally:
-                if old_slicing_min_size is not None and slicing_min_size is not None:
-                    setattr(vae_model, slicing_attr, old_slicing_min_size)
+                setattr(model, slicing_attr, slicing_min_size)
+        try:
+            if encode:
+                out = model.encode(t_chunk)[0]
+            else:
+                out = model.decode_(t_chunk)
+        finally:
+            if old_slicing_min_size is not None and slicing_min_size is not None:
+                setattr(model, slicing_attr, old_slicing_min_size)
+            if old_device is not None:
+                model.device = old_device
         if isinstance(out, (tuple, list)):
             out = out[0]
         if out.ndim == 4:
@@ -162,11 +172,61 @@ def tiled_vae(
     bar = ProgressBar(total_tiles)
     single_spatial_tile = h <= ti_h and w <= ti_w
 
-    for y_idx, y_end, x_idx, x_end in tile_ranges:
-        tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
+    workers = [(torch.device(storage_device), vae_model)]
+    if multigpu_vae_models and not single_spatial_tile:
+        seen_model_ids = {id(vae_model)}
+        for device, model in multigpu_vae_models.items():
+            if id(model) in seen_model_ids:
+                continue
+            workers.append((torch.device(device), model))
+            seen_model_ids.add(id(model))
+    for _, worker_model in workers:
+        _seedvr2_clear_temporal_memory(worker_model)
 
-        # Run VAE
-        tile_out = run_temporal_chunks(tile_x)
+    def run_tile(tile_index, tile_range, model=vae_model, device=storage_device):
+        y_idx, y_end, x_idx, x_end = tile_range
+        tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
+        tile_out = run_temporal_chunks(tile_x, model=model, device=device)
+        return tile_index, y_idx, y_end, x_idx, x_end, tile_out
+
+    if len(workers) > 1:
+        tile_outputs = [None] * len(tile_ranges)
+        worker_errors = []
+        worker_lock = threading.Lock()
+        assignments = {
+            device: list(enumerate(tile_ranges))[worker_idx::len(workers)]
+            for worker_idx, (device, _) in enumerate(workers)
+        }
+
+        def worker(device, model):
+            try:
+                if device.type == "cuda":
+                    torch.cuda.set_device(device)
+                with torch.inference_mode():
+                    for tile_index, tile_range in assignments[device]:
+                        tile_outputs[tile_index] = run_tile(tile_index, tile_range, model=model, device=device)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+            except BaseException as e:
+                with worker_lock:
+                    worker_errors.append((device, e))
+
+        threads = [threading.Thread(target=worker, args=(device, model)) for device, model in workers]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if worker_errors:
+            device, error = worker_errors[0]
+            raise RuntimeError(f"SeedVR2 VAE tiled worksplit failed on {device}") from error
+        ordered_tile_outputs = tile_outputs
+    else:
+        ordered_tile_outputs = (
+            run_tile(tile_index, tile_range)
+            for tile_index, tile_range in enumerate(tile_ranges)
+        )
+
+    for _, y_idx, y_end, x_idx, x_end, tile_out in ordered_tile_outputs:
 
         if single_spatial_tile:
             result = tile_out[:, :, :target_d, :target_h, :target_w]
@@ -220,10 +280,12 @@ def tiled_vae(
         result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
         count[:, :, :, ys:ye, xs:xe] += final_weight
 
-        del tile_out, final_weight, tile_x, w_h, w_w
+        del tile_out, final_weight, w_h, w_w
         bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
+    for _, worker_model in workers:
+        _seedvr2_clear_temporal_memory(worker_model)
 
     if result.device != x.device:
         result = result.to(x.device).to(x.dtype)
