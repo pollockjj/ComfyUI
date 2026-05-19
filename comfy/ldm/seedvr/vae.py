@@ -124,6 +124,7 @@ def tiled_vae(
     count = None
     def run_temporal_chunks(spatial_tile, model=vae_model, device=storage_device):
         device = torch.device(device)
+        _seedvr2_clear_temporal_memory(model)
         t_chunk = spatial_tile.to(device=device, dtype=next(model.parameters()).dtype, non_blocking=True).contiguous()
         old_device = getattr(model, "device", None)
         model.device = device

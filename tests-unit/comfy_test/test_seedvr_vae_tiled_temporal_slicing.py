@@ -116,6 +116,22 @@ class _WorksplitDecodeVAE(nn.Module):
         return z[:, :1] + offset
 
 
+class _StatefulSpatialDecodeVAE(nn.Module):
+    def __init__(self, device):
+        super().__init__()
+        self.device = torch.device(device)
+        self.slicing_latent_min_size = 99
+        self.spatial_downsample_factor = 1
+        self.temporal_downsample_factor = 1
+        self._dummy = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+        self.memory = None
+
+    def decode_(self, z):
+        offset = 0.0 if self.memory is None else self.memory
+        self.memory = z[:, :1, :, :1, :1].amax().detach()
+        return z[:, :1] + offset
+
+
 def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
     vae = _SlicingDecodeVAE(slicing_latent_min_size=2)
     z = torch.arange(1 * 16 * 5 * 8 * 8, dtype=torch.float32).reshape(1, 16, 5, 8, 8)
@@ -265,6 +281,34 @@ def test_seedvr2_tiled_vae_worksplit_dispatches_spatial_tiles_without_temporal_s
     assert clone.calls[0]["temporal_values"] == [2, 10, 18]
     assert torch.equal(out[:, :, :, :, :2], latent[:, :, :, :, :2] + 10.0)
     assert torch.equal(out[:, :, :, :, 2:], latent[:, :, :, :, 2:] + 100.0)
+
+
+def test_seedvr2_tiled_vae_clears_temporal_memory_per_spatial_tile_for_worksplit_equivalence():
+    latent = torch.arange(1 * 1 * 1 * 2 * 4, dtype=torch.float32).reshape(1, 1, 1, 2, 4)
+
+    single = tiled_vae(
+        latent,
+        _StatefulSpatialDecodeVAE(torch.device("cpu", 0)),
+        tile_size=(2, 2),
+        tile_overlap=(0, 0),
+        temporal_size=16,
+        temporal_overlap=4,
+        encode=False,
+    )
+    worksplit_primary = _StatefulSpatialDecodeVAE(torch.device("cpu", 0))
+    worksplit_clone = _StatefulSpatialDecodeVAE(torch.device("cpu", 1))
+    worksplit = tiled_vae(
+        latent,
+        worksplit_primary,
+        tile_size=(2, 2),
+        tile_overlap=(0, 0),
+        temporal_size=16,
+        temporal_overlap=4,
+        encode=False,
+        multigpu_vae_models={torch.device("cpu", 1): worksplit_clone},
+    )
+
+    assert torch.equal(worksplit, single)
 
 
 def test_seedvr2_tiled_vae_worksplit_worker_error_names_device():
