@@ -231,14 +231,28 @@ def create_vae_multigpu_deepclones(vae, max_gpus: int):
     existing = getattr(vae, 'multigpu_clones', None)
     limit_extra_device_set = set(limit_extra_devices)
     clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if d in limit_extra_device_set} if existing else {}
-    clone_source = copy.copy(vae)
-    if hasattr(clone_source, 'multigpu_clones'):
-        del clone_source.multigpu_clones
 
+    # Per-clone deepcopy via the patcher's deepclone_multigpu helper. This matches the
+    # pattern used by the CFG-split lane on the diffusion model (create_multigpu_deepclones
+    # above) and by every other ModelPatcher-wrapped object in comfy. deepclone_multigpu:
+    #   1. detaches the source from the loaded-models registry and from the dynamic-VRAM
+    #      allocator's per-model tracking via unload_model_and_clones(self)
+    #   2. invokes the patcher's cached_patcher_init factory (registered by VAELoader and
+    #      pointing at comfy.sd.load_vae_patcher) to build a fresh VAE patcher with no
+    #      inherited source-device state
+    #   3. sets the clone's load_device so later model loading places weights on the target
+    #      device
+    # A bare copy.deepcopy(vae) would carry source-device storage tracking forward and
+    # cause cuda:N worker threads to access weights through stale source-device storage.
     for device in limit_extra_devices:
         if device in clones:
             continue
-        clone_vae = copy.deepcopy(clone_source)
+        cloned_patcher = vae.patcher.deepclone_multigpu(new_load_device=device)
+        clone_vae = copy.copy(vae)
+        if hasattr(clone_vae, 'multigpu_clones'):
+            del clone_vae.multigpu_clones
+        clone_vae.first_stage_model = cloned_patcher.model
+        clone_vae.patcher = cloned_patcher
         clone_vae.first_stage_model.eval()
         for p in clone_vae.first_stage_model.parameters():
             p.requires_grad_(False)
