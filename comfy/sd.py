@@ -1066,10 +1066,7 @@ class VAE:
         args.setdefault("temporal_size", tile_t)
         args.setdefault("temporal_overlap", overlap_t)
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
-        # SeedVR2 VAE decode worker dispatch is gated until the decode worker
-        # path is byte-identical to the primary-model path. Encode workers stay
-        # enabled in encode_tiled_seedvr2.
-        multigpu_clones = None
+        multigpu_clones = getattr(self, 'multigpu_clones', None)
         clone_previous_args = {}
         clone_models = {}
         try:
