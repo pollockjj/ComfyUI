@@ -15,6 +15,8 @@ import math
 from comfy.ldm.flux.math import apply_rope1
 import numbers
 
+SEEDVR2_BLOCK_RELEASE_MLP_CHUNK = 8192
+
 def _torch_float8_types():
     return tuple(
         getattr(torch, name)
@@ -1074,6 +1076,22 @@ class NaMMSRTransformerBlock(nn.Module):
         self.is_last_layer = is_last_layer
         self.version = version
 
+    def _seedvr2_block_release_mlp(
+        self,
+        vid: torch.FloatTensor,
+        txt: torch.FloatTensor,
+    ) -> Tuple[
+        torch.FloatTensor,
+        torch.FloatTensor,
+    ]:
+        vid_module = self.mlp.vid if not self.mlp.shared_weights else self.mlp.all
+        vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_BLOCK_RELEASE_MLP_CHUNK, dim=0)], dim=0)
+        if not self.mlp.vid_only:
+            txt_module = self.mlp.txt if not self.mlp.shared_weights else self.mlp.all
+            txt = txt.to(device=vid.device, dtype=vid.dtype)
+            txt = txt_module(txt)
+        return vid, txt
+
     def forward(
         self,
         vid: torch.FloatTensor,  # l c
@@ -1107,7 +1125,10 @@ class NaMMSRTransformerBlock(nn.Module):
 
         vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="in", **ada_kwargs)
-        vid_mlp, txt_mlp = self.mlp(vid_mlp, txt_mlp)
+        if self.version and cache.cache.get("seedvr2_block_release", False):
+            vid_mlp, txt_mlp = self._seedvr2_block_release_mlp(vid_mlp, txt_mlp)
+        else:
+            vid_mlp, txt_mlp = self.mlp(vid_mlp, txt_mlp)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="out", **ada_kwargs)
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)
 
