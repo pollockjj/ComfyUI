@@ -62,6 +62,27 @@ class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
         return z
 
 
+class _CloneFirstStage(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.tiled_args = {"stale": "clone"}
+        self.device = torch.device("cpu")
+        self.to_calls = []
+
+    def to(self, device):
+        self.to_calls.append(device)
+        return self
+
+
+class _CloneVAE:
+    def __init__(self):
+        self.first_stage_model = _CloneFirstStage()
+        self.vae_dtype = torch.float32
+
+    def memory_used_decode(self, shape, dtype):
+        return 1
+
+
 def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
@@ -162,6 +183,32 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
 
     assert vae.first_stage_model.calls[0]["shape"] == (1, 48, 2, 2)
     assert vae.first_stage_model.calls[0]["tiled_args"]["temporal_overlap"] == 4
+
+
+def test_seedvr2_decode_tiled_passes_multigpu_clone_models(monkeypatch):
+    vae = sd_mod.VAE.__new__(sd_mod.VAE)
+    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.vae_dtype = torch.float32
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
+    vae.disable_offload = True
+    vae.extra_1d_channel = None
+    vae.memory_used_decode = lambda shape, dtype: 1
+    vae.process_output = lambda x: x
+    clone_device = torch.device("cpu", 1)
+    clone = _CloneVAE()
+    vae.multigpu_clones = {clone_device: clone}
+
+    monkeypatch.setattr(sd_mod.model_management, "free_memory", lambda *a, **k: None)
+
+    latent = torch.zeros(1, 16, 3, 2, 2)
+    vae.decode_tiled_seedvr2(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
+
+    assert vae.first_stage_model.calls[0]["tiled_args"]["multigpu_vae_models"] == {
+        clone_device: clone.first_stage_model
+    }
+    assert clone.first_stage_model.tiled_args == {"stale": "clone"}
+    assert clone.first_stage_model.to_calls == [clone_device, "cpu"]
 
 
 class _TemporalChunkRecorder(nn.Module):
