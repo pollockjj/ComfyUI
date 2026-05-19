@@ -1075,7 +1075,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             logging.info(
                 f"INSTRUMENT_SEEDVR2_DISPATCH_TIME path=worksplit "
                 f"n_chunks={len(chunk_ranges)} "
-                f"n_devices={len(submitted_devices)} "
+                f"n_devices={len(result_devices)} "
                 f"parallel_wall_ms={(dispatch_t1 - dispatch_t0) * 1000.0:.2f}"
             )
 
