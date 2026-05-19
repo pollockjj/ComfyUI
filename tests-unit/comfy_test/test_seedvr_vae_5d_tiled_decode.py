@@ -185,7 +185,7 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
     assert vae.first_stage_model.calls[0]["tiled_args"]["temporal_overlap"] == 4
 
 
-def test_seedvr2_decode_tiled_passes_multigpu_clone_models(monkeypatch):
+def test_seedvr2_decode_tiled_gates_multigpu_clone_models(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.vae_dtype = torch.float32
@@ -204,11 +204,9 @@ def test_seedvr2_decode_tiled_passes_multigpu_clone_models(monkeypatch):
     latent = torch.zeros(1, 16, 3, 2, 2)
     vae.decode_tiled_seedvr2(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert vae.first_stage_model.calls[0]["tiled_args"]["multigpu_vae_models"] == {
-        clone_device: clone.first_stage_model
-    }
+    assert "multigpu_vae_models" not in vae.first_stage_model.calls[0]["tiled_args"]
     assert clone.first_stage_model.tiled_args == {"stale": "clone"}
-    assert clone.first_stage_model.to_calls == [clone_device, "cpu"]
+    assert clone.first_stage_model.to_calls == []
 
 
 class _TemporalChunkRecorder(nn.Module):
