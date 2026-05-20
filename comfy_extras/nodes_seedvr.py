@@ -335,7 +335,6 @@ class SeedVR2Conditioning(io.ComfyNode):
         device = vae_conditioning.device
         model_patcher = model
         model = _resolve_seedvr2_diffusion_model(model_patcher)
-        model_patcher.disable_model_cfg1_optimization()
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
@@ -952,21 +951,6 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 worker_patcher = patcher.clone()
                 worker_patcher.remove_additional_models("multigpu")
                 worker_patcher.is_multigpu_base_clone = False
-                # Propagate SeedVR2's CFG=1.0 contract: SeedVR2's
-                # ``model.forward`` requires a 2-batch ``context``
-                # tensor (cond+uncond concatenated along dim 0). The
-                # primary patcher had ``disable_cfg1_optimization``
-                # set by ``SeedVR2Conditioning.execute`` so its sample
-                # call always processes both branches even at cfg=1.0.
-                # Extra clones were created by ``MultiGPU_WorkUnits``
-                # BEFORE that node ran, so their ``model_options`` do
-                # not carry the flag — we propagate it explicitly here
-                # so every worker (primary's clone OR extra clone's
-                # clone) takes the same 2-batch sampling path. Without
-                # this propagation, only the primary's clone runs
-                # 2-batch and the others fail at
-                # ``context.chunk(2, dim=0)`` inside the DiT.
-                worker_patcher.disable_model_cfg1_optimization()
                 results = []
                 worker_device = torch.device(device)
                 worker_device_context = (

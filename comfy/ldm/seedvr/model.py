@@ -1472,11 +1472,17 @@ class NaDiT(nn.Module):
         if context is None or getattr(context, "numel", lambda: None)() == 0:
             context = self.positive_conditioning
             return flatten([context])
+        if context.shape[0] == 1:
+            return flatten([context.squeeze(0)])
+        if context.shape[0] != 2:
+            raise ValueError(f"SeedVR2 expected 1 or 2 text-conditioning batches, got shape {tuple(context.shape)}")
         neg_cond, pos_cond = context.chunk(2, dim=0)
         pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
         return flatten([pos_cond, neg_cond])
 
-    def _swap_pos_neg_halves(self, out):
+    def _swap_pos_neg_halves(self, out, cond_or_uncond=None):
+        if cond_or_uncond is not None and len(cond_or_uncond) == 1:
+            return out
         # ``dim=0`` is explicit on both calls. The contract is "split
         # the batch axis into two halves and swap them"; making the
         # axis load-bearing in source guards against silent drift if a
@@ -1568,4 +1574,4 @@ class NaDiT(nn.Module):
         out =  torch.stack(vid)
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
-        return self._swap_pos_neg_halves(out)
+        return self._swap_pos_neg_halves(out, transformer_options.get("cond_or_uncond"))
