@@ -1485,7 +1485,8 @@ class NaDiT(nn.Module):
             return flatten([pos_cond, neg_cond])
         return flatten([*pos_cond, *neg_cond])
 
-    def _seedvr2_is_single_conditioning_branch(self, cond_or_uncond):
+    @staticmethod
+    def _seedvr2_is_single_conditioning_branch(cond_or_uncond):
         if cond_or_uncond is None or len(cond_or_uncond) == 0:
             return False
         first = cond_or_uncond[0]
