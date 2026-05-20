@@ -1468,15 +1468,33 @@ class NaDiT(nn.Module):
                 device=device, dtype=dtype
             )
 
-    def _resolve_text_conditioning(self, context):
+    def _resolve_text_conditioning(self, context, cond_or_uncond=None):
         if context is None or getattr(context, "numel", lambda: None)() == 0:
             context = self.positive_conditioning
             return flatten([context])
+        if NaDiT._seedvr2_is_single_conditioning_branch(cond_or_uncond):
+            if context.shape[0] == 1:
+                context = context.squeeze(0)
+                return flatten([context])
+            return flatten(context.unbind(0))
+        if context.shape[0] % 2 != 0:
+            raise ValueError(f"SeedVR2 expected an even text-conditioning batch, got shape {tuple(context.shape)}")
         neg_cond, pos_cond = context.chunk(2, dim=0)
-        pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
-        return flatten([pos_cond, neg_cond])
+        if pos_cond.shape[0] == 1:
+            pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
+            return flatten([pos_cond, neg_cond])
+        return flatten((*pos_cond.unbind(0), *neg_cond.unbind(0)))
 
-    def _swap_pos_neg_halves(self, out):
+    @staticmethod
+    def _seedvr2_is_single_conditioning_branch(cond_or_uncond):
+        if cond_or_uncond is None or len(cond_or_uncond) == 0:
+            return False
+        first = cond_or_uncond[0]
+        return all(entry == first for entry in cond_or_uncond)
+
+    def _swap_pos_neg_halves(self, out, cond_or_uncond=None):
+        if NaDiT._seedvr2_is_single_conditioning_branch(cond_or_uncond):
+            return out
         # ``dim=0`` is explicit on both calls. The contract is "split
         # the batch axis into two halves and swap them"; making the
         # axis load-bearing in source guards against silent drift if a
@@ -1503,7 +1521,7 @@ class NaDiT(nn.Module):
         conditions = conditions.movedim(1, -1)
         cache = Cache(disable=disable_cache)
 
-        txt, txt_shape = self._resolve_text_conditioning(context)
+        txt, txt_shape = self._resolve_text_conditioning(context, transformer_options.get("cond_or_uncond"))
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)
@@ -1568,4 +1586,4 @@ class NaDiT(nn.Module):
         out =  torch.stack(vid)
         out = out.movedim(-1, 1)
         out = rearrange(out, "b c t h w -> b (c t) h w")
-        return self._swap_pos_neg_halves(out)
+        return self._swap_pos_neg_halves(out, transformer_options.get("cond_or_uncond"))

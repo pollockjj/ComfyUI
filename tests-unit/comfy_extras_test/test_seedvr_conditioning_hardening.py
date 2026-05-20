@@ -227,11 +227,8 @@ def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
         restore()
 
 
-def test_seedvr2_conditioning_disables_cfg1_optimization():
-    """SeedVR2's native model consumes paired negative/positive text
-    context. Comfy's CFG=1 fast path drops the negative branch, so the
-    conditioning node must disable that optimization on the model patcher.
-    """
+def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
+    """SeedVR2 accepts Comfy's single-branch CFG=1 sampling path."""
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
         diffusion_model = _DiffusionModel()
@@ -244,7 +241,7 @@ def test_seedvr2_conditioning_disables_cfg1_optimization():
             0.0,
         )
 
-        assert patcher.disable_cfg1_optimization_calls == 1
+        assert patcher.disable_cfg1_optimization_calls == 0
         assert positive[0][0].shape == (1, 3, 4)
         assert negative[0][0].shape == (1, 3, 4)
         assert latent["samples"].shape == (1, 2, 1, 1)
