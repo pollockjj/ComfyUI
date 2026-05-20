@@ -82,7 +82,6 @@ SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL = 160
 
 
 def _seedvr2_vae_decode_memory_used(shape):
-    batch = shape[0]
     if len(shape) == 5:
         latent_t, latent_h, latent_w = shape[2], shape[3], shape[4]
     elif len(shape) == 4:
@@ -91,7 +90,7 @@ def _seedvr2_vae_decode_memory_used(shape):
     else:
         latent_t, latent_h, latent_w = 1, shape[-2], shape[-1]
     output_t = max(1, (latent_t - 1) * 4 + 1)
-    output_pixels = batch * output_t * latent_h * 8 * latent_w * 8
+    output_pixels = output_t * latent_h * 8 * latent_w * 8
     # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
     # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
     return output_pixels * SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL

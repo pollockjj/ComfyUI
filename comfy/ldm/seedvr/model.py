@@ -12,6 +12,7 @@ from torch.nn.modules.utils import _triple
 from torch import nn
 import math
 from comfy.ldm.flux.math import apply_rope1
+import comfy.model_management
 import comfy.ops
 import numbers
 
@@ -624,7 +625,8 @@ SEEDVR2_7B_MLP_CHUNK = 8192
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
     components of ``t``'s last dim, passing through the remaining dims
-    untouched in-place. Mirrors the partial-rope contract of the legacy
+    untouched in-place for inference tensors. Training tensors are cloned
+    before slice assignment to preserve autograd correctness. Mirrors the partial-rope contract of the legacy
     ``apply_rotary_emb`` wrapper at line 470 (``t_left``/``t_middle``/``t_right``
     split). For SeedVR2-3B this matters because ``rope_dim=128`` integer-
     divides into 3 axes as ``128 // 3 = 42`` per-axis, total ``42 * 3 = 126``;
@@ -632,16 +634,17 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     triggers when ``rot_d == t.shape[-1]`` (e.g. test rigs where dim is
     chosen divisible by 6) and avoids the cat entirely.
     """
+    out = t.clone() if t.requires_grad or comfy.model_management.in_training else t
     rot_d = 2 * freqs_cis.shape[-3]
-    seq_len = t.shape[-2]
+    seq_len = out.shape[-2]
     for start in range(0, seq_len, _ROPE1_PARTIAL_CHUNK_TOKENS):
         end = min(start + _ROPE1_PARTIAL_CHUNK_TOKENS, seq_len)
         freqs_chunk = freqs_cis[start:end]
-        if rot_d == t.shape[-1]:
-            t[..., start:end, :] = apply_rope1(t[..., start:end, :], freqs_chunk).to(t.dtype)
+        if rot_d == out.shape[-1]:
+            out[..., start:end, :] = apply_rope1(out[..., start:end, :], freqs_chunk).to(out.dtype)
         else:
-            t[..., start:end, :rot_d] = apply_rope1(t[..., start:end, :rot_d], freqs_chunk).to(t.dtype)
-    return t
+            out[..., start:end, :rot_d] = apply_rope1(out[..., start:end, :rot_d], freqs_chunk).to(out.dtype)
+    return out
 
 
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
@@ -947,7 +950,36 @@ class NaSwinAttention(NaMMAttention):
                     vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
         else:
             if self.rope:
-                vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
+                if self.rope.mm:
+                    _, num_h, _ = txt_q.shape
+                    txt_q_repeat = rearrange(txt_q, "l h d -> l (h d)")
+                    txt_q_repeat = unflatten(txt_q_repeat, txt_shape)
+                    txt_q_repeat = [[x] * n for x, n in zip(txt_q_repeat, window_count)]
+                    txt_q_repeat = list(chain(*txt_q_repeat))
+                    txt_q_repeat, txt_shape_repeat = flatten(txt_q_repeat)
+                    txt_q_repeat = rearrange(txt_q_repeat, "l (h d) -> l h d", h=num_h)
+
+                    txt_k_repeat = rearrange(txt_k, "l h d -> l (h d)")
+                    txt_k_repeat = unflatten(txt_k_repeat, txt_shape)
+                    txt_k_repeat = [[x] * n for x, n in zip(txt_k_repeat, window_count)]
+                    txt_k_repeat = list(chain(*txt_k_repeat))
+                    txt_k_repeat, _ = flatten(txt_k_repeat)
+                    txt_k_repeat = rearrange(txt_k_repeat, "l (h d) -> l h d", h=num_h)
+
+                    vid_q, vid_k, txt_q_repeat, txt_k_repeat = self.rope(
+                        vid_q, vid_k, window_shape, txt_q_repeat, txt_k_repeat, txt_shape_repeat, cache_win
+                    )
+                    txt_q_chunks = []
+                    txt_k_chunks = []
+                    txt_offset = 0
+                    for txt_len_i, repeat_i in zip(txt_len.tolist(), window_count.tolist()):
+                        txt_q_chunks.append(txt_q_repeat[txt_offset:txt_offset + txt_len_i])
+                        txt_k_chunks.append(txt_k_repeat[txt_offset:txt_offset + txt_len_i])
+                        txt_offset += txt_len_i * repeat_i
+                    txt_q = torch.cat(txt_q_chunks, dim=0)
+                    txt_k = torch.cat(txt_k_chunks, dim=0)
+                else:
+                    vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
         if self.version_7b:
             vid_out, txt_out = _seedvr2_7b_window_attention_split(

@@ -86,6 +86,27 @@ def test_apply_rope1_partial_chunks_sequence_dimension(monkeypatch):
     torch.testing.assert_close(out[..., 4:], original[..., 4:])
 
 
+def test_apply_rope1_partial_clones_training_tensor(monkeypatch):
+    def fake_apply_rope1(t, freqs_cis):
+        return t + 1.0
+
+    monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
+
+    base = torch.arange(12, dtype=torch.float32, requires_grad=True)
+    t = base.reshape(1, 2, 6)
+    original = t.clone()
+    freqs_cis = torch.zeros(2, 2, 2, 2)
+
+    out = seedvr_model._apply_rope1_partial(t, freqs_cis)
+    out.sum().backward()
+
+    assert out is not t
+    torch.testing.assert_close(t, original)
+    torch.testing.assert_close(out[..., :4], original[..., :4] + 1.0)
+    torch.testing.assert_close(out[..., 4:], original[..., 4:])
+    assert base.grad is not None
+
+
 def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():
     context = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
 
@@ -216,6 +237,37 @@ def test_seedvr2_split_var_attention_rejects_mismatched_sequence_count():
         raise AssertionError("mismatched cu_seqlens sequence counts must fail")
 
 
+def test_seedvr2_split_var_attention_rejects_malformed_offsets():
+    q = torch.randn(5, 2, 4)
+    k = torch.randn(7, 2, 4)
+    v = torch.randn(7, 2, 4)
+    cu_k = torch.tensor([0, 3, 7], dtype=torch.int32)
+
+    malformed_cases = (
+        (torch.tensor([1, 2, 5], dtype=torch.int32), "start at 0"),
+        (torch.tensor([0, 2, 2, 5], dtype=torch.int32), "strictly increasing"),
+        (torch.tensor([0.0, 2.0, 5.0], dtype=torch.float32), "integer dtype"),
+    )
+
+    for cu_q, message in malformed_cases:
+        try:
+            attention.var_attention_pytorch_split(
+                q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+                skip_reshape=True, skip_output_reshape=True,
+            )
+        except ValueError as exc:
+            assert message in str(exc)
+        else:
+            raise AssertionError("malformed cu_seqlens must fail")
+
+
+def test_seedvr2_7b_window_attention_handles_mm_rope_source():
+    source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
+
+    assert "if self.rope.mm" in source
+    assert "txt_q_repeat" in source
+
+
 def test_seedvr2_7b_window_attention_routes_to_split_var_attention():
     source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
 
@@ -312,3 +364,10 @@ def test_seedvr2_vae_decode_memory_covers_full_frame_lab_transfer():
     assert estimate == 101 * 960 * 1280 * 160
     assert estimate > 15 * 1024 ** 3
     assert estimate > old_estimate * 100
+
+
+def test_seedvr2_vae_decode_memory_estimate_is_per_sample():
+    single = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 26, 120, 160))
+    batch = comfy.sd._seedvr2_vae_decode_memory_used((2, 16, 26, 120, 160))
+
+    assert batch == single
