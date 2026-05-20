@@ -1029,10 +1029,10 @@ class VAE:
         args = dict(getattr(self.first_stage_model, "tiled_args", {}))
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
         args["enable_tiling"] = True
-        args.setdefault("tile_size", (tile_y * sf_s, tile_x * sf_s))
-        args.setdefault("tile_overlap", (overlap * sf_s, overlap * sf_s))
-        args.setdefault("temporal_size", tile_t)
-        args.setdefault("temporal_overlap", overlap_t)
+        args["tile_size"] = (tile_y * sf_s, tile_x * sf_s)
+        args["tile_overlap"] = (overlap * sf_s, overlap * sf_s)
+        args["temporal_size"] = tile_t
+        args["temporal_overlap"] = overlap_t
         previous_args = getattr(self.first_stage_model, "tiled_args", {})
         # SeedVR2 VAE decode worker dispatch is gated until the decode worker
         # path is byte-identical to the primary-model path. Encode workers stay
