@@ -194,7 +194,7 @@ def _seedvr2_7b_window_attention_split(
         txt_v_i = txt_v[txt_slice]
         txt_accum_dtype = torch.float32 if txt_q_i.dtype in (torch.float16, torch.bfloat16) else txt_q_i.dtype
         if autograd_path:
-            txt_repeat_chunks = []
+            txt_accum = None
         else:
             txt_accum = torch.zeros(txt_q_i.shape, device=txt_q_i.device, dtype=txt_accum_dtype)
 
@@ -216,7 +216,8 @@ def _seedvr2_7b_window_attention_split(
             vid_i, txt_i = out_i.split([vid_len_i, txt_len_i], dim=0)
             if autograd_path:
                 vid_chunks.append(vid_i)
-                txt_repeat_chunks.append(txt_i.to(txt_accum_dtype))
+                txt_i = txt_i.to(txt_accum_dtype)
+                txt_accum = txt_i if txt_accum is None else txt_accum + txt_i
             else:
                 vid_out[vid_slice] = vid_i
                 txt_accum += txt_i.to(txt_accum_dtype)
@@ -225,7 +226,7 @@ def _seedvr2_7b_window_attention_split(
             window_idx += 1
 
         if autograd_path:
-            txt_chunks.append(torch.stack(txt_repeat_chunks, dim=0).mean(0).to(txt_q.dtype))
+            txt_chunks.append((txt_accum / repeat_i).to(txt_q.dtype))
         else:
             txt_out[txt_slice] = (txt_accum / repeat_i).to(txt_out.dtype)
         txt_offset += txt_len_i
