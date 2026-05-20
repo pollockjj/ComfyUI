@@ -184,7 +184,8 @@ def _seedvr2_7b_window_attention_split(
         txt_q_i = txt_q[txt_slice]
         txt_k_i = txt_k[txt_slice]
         txt_v_i = txt_v[txt_slice]
-        txt_accum = torch.zeros_like(txt_q_i)
+        txt_accum_dtype = torch.float32 if txt_q_i.dtype in (torch.float16, torch.bfloat16) else txt_q_i.dtype
+        txt_accum = torch.zeros(txt_q_i.shape, device=txt_q_i.device, dtype=txt_accum_dtype)
 
         for _ in range(repeat_i):
             vid_len_i = vid_lengths[window_idx]
@@ -203,12 +204,12 @@ def _seedvr2_7b_window_attention_split(
             ).squeeze(0).permute(1, 0, 2)
             vid_i, txt_i = out_i.split([vid_len_i, txt_len_i], dim=0)
             vid_out[vid_slice] = vid_i
-            txt_accum += txt_i
+            txt_accum += txt_i.to(txt_accum_dtype)
 
             vid_offset += vid_len_i
             window_idx += 1
 
-        txt_out[txt_slice] = txt_accum / repeat_i
+        txt_out[txt_slice] = (txt_accum / repeat_i).to(txt_out.dtype)
         txt_offset += txt_len_i
 
     return vid_out, txt_out
