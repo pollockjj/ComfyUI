@@ -104,6 +104,15 @@ def test_seedvr2_text_conditioning_accepts_batched_cfg1_single_branch():
     torch.testing.assert_close(txt_shape, torch.tensor([[3], [3]], device=context.device))
 
 
+def test_seedvr2_text_conditioning_accepts_multi_entry_cfg1_single_branch():
+    context = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+
+    txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context, [0, 0])
+
+    torch.testing.assert_close(txt, context.flatten(0, -2))
+    torch.testing.assert_close(txt_shape, torch.tensor([[3], [3]], device=context.device))
+
+
 def test_seedvr2_text_conditioning_preserves_two_branch_swap_contract():
     neg = torch.full((1, 3, 2), -1.0)
     pos = torch.full((1, 3, 2), 1.0)
@@ -132,6 +141,14 @@ def test_seedvr2_cfg1_single_branch_output_is_not_swapped():
     out = torch.arange(6, dtype=torch.float32).reshape(1, 6)
 
     swapped = seedvr_model.NaDiT._swap_pos_neg_halves(object(), out, [0])
+
+    torch.testing.assert_close(swapped, out)
+
+
+def test_seedvr2_multi_entry_cfg1_output_is_not_swapped():
+    out = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+
+    swapped = seedvr_model.NaDiT._swap_pos_neg_halves(object(), out, [0, 0])
 
     torch.testing.assert_close(swapped, out)
 
