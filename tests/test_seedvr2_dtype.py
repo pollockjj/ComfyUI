@@ -1,7 +1,9 @@
+import inspect
 from pathlib import Path
 
 import torch
 
+import comfy.ldm.modules.attention as attention
 import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
 
@@ -113,3 +115,48 @@ def test_seedvr2_conditioning_keeps_comfy_cfg1_optimization_enabled():
     source = (Path(__file__).resolve().parents[1] / "comfy_extras" / "nodes_seedvr.py").read_text()
 
     assert "disable_model_cfg1_optimization()" not in source
+
+
+def test_seedvr2_split_var_attention_matches_nested_var_attention():
+    torch.manual_seed(1)
+    q = torch.randn(5, 2, 4)
+    k = torch.randn(7, 2, 4)
+    v = torch.randn(7, 2, 4)
+    cu_q = torch.tensor([0, 2, 5], dtype=torch.int32)
+    cu_k = torch.tensor([0, 3, 7], dtype=torch.int32)
+
+    nested = attention.var_attention_pytorch(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        skip_reshape=True, skip_output_reshape=True,
+    )
+    split = attention.var_attention_pytorch_split(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        skip_reshape=True, skip_output_reshape=True,
+    )
+
+    torch.testing.assert_close(split, nested, rtol=1e-5, atol=1e-5)
+
+
+def test_seedvr2_split_var_attention_preserves_flat_output_shape():
+    torch.manual_seed(2)
+    q = torch.randn(5, 8)
+    k = torch.randn(7, 8)
+    v = torch.randn(7, 8)
+    cu_q = torch.tensor([0, 1, 5], dtype=torch.int32)
+    cu_k = torch.tensor([0, 2, 7], dtype=torch.int32)
+
+    nested = attention.var_attention_pytorch(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+    )
+    split = attention.var_attention_pytorch_split(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+    )
+
+    assert split.shape == q.shape
+    torch.testing.assert_close(split, nested, rtol=1e-5, atol=1e-5)
+
+
+def test_seedvr2_7b_window_attention_routes_to_split_var_attention():
+    source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
+
+    assert "var_attention_pytorch_split if self.version_7b else optimized_var_attention" in source

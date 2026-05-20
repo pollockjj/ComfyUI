@@ -808,6 +808,25 @@ def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_resha
         return out.values().reshape(-1, heads * (q.shape[-1]))
     return out.values()
 
+
+def var_attention_pytorch_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
+
+    q_splits = torch.tensor_split(q, cu_seqlens_q[1:-1].long().cpu(), dim=0)
+    k_splits = torch.tensor_split(k, cu_seqlens_k[1:-1].long().cpu(), dim=0)
+    v_splits = torch.tensor_split(v, cu_seqlens_k[1:-1].long().cpu(), dim=0)
+
+    out = []
+    for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
+        q_i = q_i.permute(1, 0, 2).unsqueeze(0)
+        k_i = k_i.permute(1, 0, 2).unsqueeze(0)
+        v_i = v_i.permute(1, 0, 2).unsqueeze(0)
+        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, attn_mask=None, dropout_p=0.0, is_causal=False)
+        out.append(out_i.squeeze(0).permute(1, 0, 2))
+
+    out = torch.cat(out, dim=0)
+    return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
 @torch._dynamo.disable
 def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if not SAGE_ATTENTION_VARLEN_IS_AVAILABLE:

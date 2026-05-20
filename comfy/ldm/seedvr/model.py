@@ -7,7 +7,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention
+from comfy.ldm.modules.attention import optimized_var_attention, var_attention_pytorch_split
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
@@ -888,7 +888,8 @@ class NaSwinAttention(NaMMAttention):
             if self.rope:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
-        out = optimized_var_attention(
+        attention_fn = var_attention_pytorch_split if self.version_7b else optimized_var_attention
+        out = attention_fn(
             q=concat_win(vid_q, txt_q),
             k=concat_win(vid_k, txt_k),
             v=concat_win(vid_v, txt_v),
