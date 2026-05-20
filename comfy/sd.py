@@ -83,7 +83,10 @@ SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL = 160
 
 def _seedvr2_vae_decode_memory_used(shape):
     if len(shape) == 5:
-        latent_t, latent_h, latent_w = shape[2], shape[3], shape[4]
+        if shape[-1] == 16 and shape[1] != 16:
+            latent_t, latent_h, latent_w = shape[1], shape[2], shape[3]
+        else:
+            latent_t, latent_h, latent_w = shape[2], shape[3], shape[4]
     elif len(shape) == 4:
         latent_t = max(1, shape[1] // 16)
         latent_h, latent_w = shape[2], shape[3]

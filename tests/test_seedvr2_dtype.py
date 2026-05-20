@@ -371,3 +371,10 @@ def test_seedvr2_vae_decode_memory_estimate_is_per_sample():
     batch = comfy.sd._seedvr2_vae_decode_memory_used((2, 16, 26, 120, 160))
 
     assert batch == single
+
+
+def test_seedvr2_vae_decode_memory_accepts_channel_last_tiled_latents():
+    channel_first = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 26, 120, 160))
+    channel_last = comfy.sd._seedvr2_vae_decode_memory_used((1, 26, 120, 160, 16))
+
+    assert channel_last == channel_first
