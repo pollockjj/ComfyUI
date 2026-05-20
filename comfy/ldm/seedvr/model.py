@@ -1468,14 +1468,16 @@ class NaDiT(nn.Module):
                 device=device, dtype=dtype
             )
 
-    def _resolve_text_conditioning(self, context):
+    def _resolve_text_conditioning(self, context, cond_or_uncond=None):
         if context is None or getattr(context, "numel", lambda: None)() == 0:
             context = self.positive_conditioning
             return flatten([context])
-        if context.shape[0] == 1:
-            return flatten([context.squeeze(0)])
-        if context.shape[0] != 2:
-            raise ValueError(f"SeedVR2 expected 1 or 2 text-conditioning batches, got shape {tuple(context.shape)}")
+        if cond_or_uncond is not None and len(cond_or_uncond) == 1:
+            if context.shape[0] == 1:
+                context = context.squeeze(0)
+            return flatten([context])
+        if context.shape[0] % 2 != 0:
+            raise ValueError(f"SeedVR2 expected an even text-conditioning batch, got shape {tuple(context.shape)}")
         neg_cond, pos_cond = context.chunk(2, dim=0)
         pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
         return flatten([pos_cond, neg_cond])
@@ -1509,7 +1511,7 @@ class NaDiT(nn.Module):
         conditions = conditions.movedim(1, -1)
         cache = Cache(disable=disable_cache)
 
-        txt, txt_shape = self._resolve_text_conditioning(context)
+        txt, txt_shape = self._resolve_text_conditioning(context, transformer_options.get("cond_or_uncond"))
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)

@@ -62,10 +62,19 @@ def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch)
 def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():
     context = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
 
-    txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context)
+    txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context, [0])
 
     torch.testing.assert_close(txt, context.squeeze(0))
     torch.testing.assert_close(txt_shape, torch.tensor([[3]], device=context.device))
+
+
+def test_seedvr2_text_conditioning_accepts_batched_cfg1_single_branch():
+    context = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+
+    txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context, [0])
+
+    torch.testing.assert_close(txt, context.flatten(0, -2))
+    torch.testing.assert_close(txt_shape, torch.tensor([[2, 3]], device=context.device))
 
 
 def test_seedvr2_text_conditioning_preserves_two_branch_swap_contract():
@@ -78,6 +87,18 @@ def test_seedvr2_text_conditioning_preserves_two_branch_swap_contract():
     torch.testing.assert_close(txt[:3], pos.squeeze(0))
     torch.testing.assert_close(txt[3:], neg.squeeze(0))
     torch.testing.assert_close(txt_shape, torch.tensor([[3], [3]], device=context.device))
+
+
+def test_seedvr2_text_conditioning_preserves_batched_two_branch_swap_contract():
+    neg = torch.full((2, 3, 2), -1.0)
+    pos = torch.full((2, 3, 2), 1.0)
+    context = torch.cat([neg, pos], dim=0)
+
+    txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context, [1, 0])
+
+    torch.testing.assert_close(txt[:6], pos.flatten(0, -2))
+    torch.testing.assert_close(txt[6:], neg.flatten(0, -2))
+    torch.testing.assert_close(txt_shape, torch.tensor([[2, 3], [2, 3]], device=context.device))
 
 
 def test_seedvr2_cfg1_single_branch_output_is_not_swapped():
