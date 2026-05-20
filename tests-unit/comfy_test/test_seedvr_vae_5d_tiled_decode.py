@@ -25,6 +25,15 @@ def _decode_fingerprint(self, z, return_dict=True):
     return out
 
 
+def _decode_batch_time_fingerprint(self, z, return_dict=True):
+    b, _, t, h, w = z.shape
+    out = torch.empty(b, 3, t, h * 8, w * 8, dtype=z.dtype, device=z.device)
+    for batch_idx in range(b):
+        for time_idx in range(t):
+            out[batch_idx, :, time_idx].fill_(float(batch_idx * 100 + time_idx))
+    return out
+
+
 def _make_wrapper(b=2, t=3, enable_tiling=False):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
         vae_mod.VideoAutoencoderKLWrapper
@@ -47,6 +56,65 @@ def test_seedvr2_decode_accepts_5d_bcthw_latents_and_preserves_batch_time_axes()
     assert tuple(out.shape) == (2, 3, 3, 16, 16)
     assert out[0, 0, 0, 0, 0].item() == 1.0
     assert out[1, 0, 0, 0, 0].item() == 2.0
+
+
+def test_seedvr2_decode_chunked_color_transfer_uses_bounded_matching_slices():
+    wrapper = _make_wrapper(b=2, t=3, enable_tiling=False)
+    wrapper.tiled_args["tile_size"] = (1, 1)
+    for batch_idx in range(2):
+        for time_idx in range(3):
+            wrapper.original_image_video[batch_idx, :, time_idx].fill_(
+                float(batch_idx * 1000 + time_idx)
+            )
+    original_before = wrapper.original_image_video.clone()
+    calls = []
+
+    def _lab_spy(content, style):
+        calls.append(
+            {
+                "content": content.clone(),
+                "style": style.clone(),
+            }
+        )
+        style.add_(1000.0)
+        return content
+
+    latent = torch.zeros(2, 16, 3, 2, 2)
+
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_batch_time_fingerprint), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_spy):
+        out = wrapper.decode(latent)
+
+    assert len(calls) == 3
+    assert [call["content"].shape[0] for call in calls] == [2, 2, 2]
+    assert [call["content"][0, 0, 0, 0].item() for call in calls] == [0.0, 1.0, 2.0]
+    assert [call["content"][1, 0, 0, 0].item() for call in calls] == [100.0, 101.0, 102.0]
+    assert [call["style"][0, 0, 0, 0].item() for call in calls] == [0.0, 1.0, 2.0]
+    assert [call["style"][1, 0, 0, 0].item() for call in calls] == [1000.0, 1001.0, 1002.0]
+    assert torch.equal(wrapper.original_image_video, original_before)
+    assert tuple(out.shape) == (2, 3, 3, 16, 16)
+    assert [out[0, 0, t, 0, 0].item() for t in range(3)] == [0.0, 1.0, 2.0]
+    assert [out[1, 0, t, 0, 0].item() for t in range(3)] == [100.0, 101.0, 102.0]
+
+
+def test_seedvr2_decode_color_transfer_single_chunk_preserves_existing_shape():
+    wrapper = _make_wrapper(b=1, t=3, enable_tiling=False)
+    wrapper.tiled_args["tile_size"] = (64, 64)
+    calls = []
+
+    def _lab_spy(content, style):
+        calls.append((tuple(content.shape), tuple(style.shape)))
+        return content
+
+    latent = torch.zeros(1, 16, 3, 2, 2)
+
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_batch_time_fingerprint), \
+         patch.object(vae_mod, "lab_color_transfer", _lab_spy):
+        out = wrapper.decode(latent)
+
+    assert calls == [((3, 3, 16, 16), (3, 3, 16, 16))]
+    assert tuple(out.shape) == (1, 3, 3, 16, 16)
+    assert [out[0, 0, t, 0, 0].item() for t in range(3)] == [0.0, 1.0, 2.0]
 
 
 class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):

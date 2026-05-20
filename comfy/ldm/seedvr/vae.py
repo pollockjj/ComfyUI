@@ -2373,6 +2373,46 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         z = p.squeeze(2)
         return z, p
 
+    def _color_correction_frames_per_chunk(self, output_h: int, output_w: int, source_t: int) -> int:
+        tile_h, tile_w = self.tiled_args.get("tile_size", (512, 512))
+        output_pixels = max(1, int(output_h) * int(output_w))
+        tile_pixels = max(1, int(tile_h)) * max(1, int(tile_w))
+        pixel_budget = max(output_pixels, tile_pixels * 64)
+        return max(1, min(int(source_t), pixel_budget // output_pixels))
+
+    def _apply_chunked_lab_color_transfer(
+        self,
+        decoded: Tensor,
+        original: Tensor,
+        source_t: int,
+        output_h: int,
+        output_w: int,
+    ) -> Tensor:
+        decoded = decoded[..., :output_h, :output_w]
+        frames_per_chunk = self._color_correction_frames_per_chunk(output_h, output_w, source_t)
+
+        for start in range(0, source_t, frames_per_chunk):
+            end = min(source_t, start + frames_per_chunk)
+            chunk_t = end - start
+            decoded_flat = rearrange(
+                decoded[:, :, start:end].contiguous(),
+                "b c t h w -> (b t) c h w",
+            )
+            input_flat = rearrange(
+                original[:, :, start:end, :output_h, :output_w],
+                "b c t h w -> (b t) c h w",
+            ).to(decoded_flat.device).clone()
+            corrected_flat = lab_color_transfer(decoded_flat, input_flat)
+            corrected = rearrange(
+                corrected_flat,
+                "(b t) c h w -> b c t h w",
+                b=decoded.shape[0],
+                t=chunk_t,
+            )
+            decoded[:, :, start:end] = corrected.to(dtype=decoded.dtype)
+
+        return decoded
+
     def decode(self, z):
         if self.original_image_video is None:
             raise RuntimeError(
@@ -2471,26 +2511,19 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
 
         original = self.original_image_video
         source_b, _, source_t, _, _ = original.shape
-        input = rearrange(original, "b c t h w -> (b t) c h w")
 
         if source_t != 1:
             x = x[:, :, :source_t]
         if source_t == 1 and x.size(2) == 4:
             x = x[:, :, :source_t]
 
-        x_flat = rearrange(x, "b c t h w -> (b t) c h w")
-
-        input = input.to(x_flat.device)
         o_h, o_w = self.img_dims
-        x_flat = x_flat[..., :o_h, :o_w]
-        input = input[..., :o_h, :o_w ]
-        x_flat = lab_color_transfer(x_flat, input)
+        x = self._apply_chunked_lab_color_transfer(x, original, source_t, o_h, o_w)
 
         if input_was_5d:
-            x = rearrange(x_flat, "(b t) c h w -> b c t h w", b=source_b, t=source_t)
+            x = rearrange(x, "b c t h w -> b c t h w", b=source_b, t=source_t)
         else:
-            x = x_flat.unsqueeze(0)
-            x = rearrange(x, "b t c h w -> b c t h w")
+            x = rearrange(x, "b c t h w -> 1 c (b t) h w")
 
         # ensure even dims for save video
         h, w = x.shape[-2:]
