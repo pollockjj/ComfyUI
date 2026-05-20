@@ -1,5 +1,6 @@
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -225,3 +226,44 @@ def test_seedvr2_7b_window_attention_split_matches_concat_path():
 
     torch.testing.assert_close(split_vid, expected_vid, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(split_txt, expected_txt, rtol=1e-5, atol=1e-5)
+
+
+def test_seedvr2_7b_mlp_chunks_video_tokens(monkeypatch):
+    class TrackingModule(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.scale = scale
+            self.calls = []
+
+        def forward(self, x):
+            self.calls.append(x.shape[0])
+            return x * self.scale
+
+    monkeypatch.setattr(seedvr_model, "SEEDVR2_7B_MLP_CHUNK", 2)
+
+    vid_module = TrackingModule(2.0)
+    txt_module = TrackingModule(3.0)
+    block = SimpleNamespace(
+        mlp=SimpleNamespace(
+            shared_weights=False,
+            vid_only=False,
+            vid=vid_module,
+            txt=txt_module,
+        )
+    )
+    vid = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    txt = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+    out_vid, out_txt = seedvr_model.NaMMSRTransformerBlock._seedvr2_7b_mlp(block, vid, txt)
+
+    assert vid_module.calls == [2, 2, 2]
+    assert txt_module.calls == [3]
+    torch.testing.assert_close(out_vid, vid * 2.0)
+    torch.testing.assert_close(out_txt, txt * 3.0)
+
+
+def test_seedvr2_7b_block_routes_mlp_to_chunk_helper():
+    source = inspect.getsource(seedvr_model.NaMMSRTransformerBlock.forward)
+
+    assert "if self.version" in source
+    assert "_seedvr2_7b_mlp" in source
