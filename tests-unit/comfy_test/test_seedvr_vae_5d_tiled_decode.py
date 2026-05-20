@@ -10,6 +10,7 @@ if not torch.cuda.is_available():
 
 import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
 import comfy.sd as sd_mod  # noqa: E402
+import nodes as nodes_mod  # noqa: E402
 
 
 def _lab_color_passthrough(content, style):
@@ -83,6 +84,50 @@ class _CloneVAE:
         return 1
 
 
+def test_vae_decode_tiled_allows_zero_temporal_controls_and_passes_them_through():
+    input_types = nodes_mod.VAEDecodeTiled.INPUT_TYPES()["required"]
+    assert input_types["temporal_size"][1]["min"] == 0
+    assert input_types["temporal_overlap"][1]["min"] == 0
+    assert "SeedVR2 allows 0" in input_types["temporal_size"][1]["tooltip"]
+
+    class _DecodeRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def temporal_compression_decode(self):
+            return 4
+
+        def spacial_compression_decode(self):
+            return 8
+
+        def decode_tiled(self, samples, **kwargs):
+            self.calls.append({"shape": tuple(samples.shape), **kwargs})
+            return torch.zeros(1, 8, 8, 3)
+
+    recorder = _DecodeRecorder()
+    node = nodes_mod.VAEDecodeTiled()
+
+    node.decode(
+        recorder,
+        {"samples": torch.zeros(1, 16, 3, 32, 32)},
+        tile_size=256,
+        overlap=64,
+        temporal_size=0,
+        temporal_overlap=0,
+    )
+
+    assert recorder.calls == [
+        {
+            "shape": (1, 16, 3, 32, 32),
+            "tile_x": 32,
+            "tile_y": 32,
+            "overlap": 8,
+            "tile_t": 0,
+            "overlap_t": 0,
+        }
+    ]
+
+
 def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
@@ -114,6 +159,53 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
             },
         }
     ]
+
+
+def test_seedvr2_decode_tiled_explicit_args_override_stale_tiled_args():
+    vae = sd_mod.VAE.__new__(sd_mod.VAE)
+    vae.first_stage_model = _SeedVR2DecodeStub()
+    vae.first_stage_model.tiled_args = {
+        "enable_tiling": False,
+        "tile_size": (384, 384),
+        "tile_overlap": (128, 128),
+        "temporal_size": 16,
+        "temporal_overlap": 4,
+        "preserved": "metadata",
+    }
+    vae.vae_dtype = torch.float32
+    vae.device = torch.device("cpu")
+    vae.output_device = torch.device("cpu")
+    vae.disable_offload = True
+    vae.extra_1d_channel = None
+    vae.memory_used_decode = lambda shape, dtype: 1
+    vae.process_output = lambda x: x
+    vae.patcher = object()
+
+    latent = torch.zeros(1, 16, 3, 2, 2)
+    vae.decode_tiled_seedvr2(
+        latent,
+        tile_x=32,
+        tile_y=32,
+        overlap=8,
+        tile_t=0,
+        overlap_t=0,
+    )
+
+    captured = vae.first_stage_model.calls[0]["tiled_args"]
+    assert captured["enable_tiling"] is True
+    assert captured["tile_size"] == (256, 256)
+    assert captured["tile_overlap"] == (64, 64)
+    assert captured["temporal_size"] == 0
+    assert captured["temporal_overlap"] == 0
+    assert captured["preserved"] == "metadata"
+    assert vae.first_stage_model.tiled_args == {
+        "enable_tiling": False,
+        "tile_size": (384, 384),
+        "tile_overlap": (128, 128),
+        "temporal_size": 16,
+        "temporal_overlap": 4,
+        "preserved": "metadata",
+    }
 
 
 def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(monkeypatch):
