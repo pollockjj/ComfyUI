@@ -2409,7 +2409,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 b=decoded.shape[0],
                 t=chunk_t,
             )
-            decoded[:, :, start:end] = corrected.to(dtype=decoded.dtype)
+            decoded[:, :, start:end] = corrected.to(dtype=decoded.dtype).clone()
 
         return decoded
 
