@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import torch
 
 import comfy.ldm.modules.attention as attention
+import comfy.sd
 import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
 
@@ -267,3 +268,12 @@ def test_seedvr2_7b_block_routes_mlp_to_chunk_helper():
 
     assert "if self.version" in source
     assert "_seedvr2_7b_mlp" in source
+
+
+def test_seedvr2_vae_decode_memory_covers_full_frame_lab_transfer():
+    estimate = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 26, 120, 160))
+    old_estimate = 16 * 120 * 160 * (4 * 8 * 8) * 2
+
+    assert estimate == 101 * 960 * 1280 * 128
+    assert estimate > 15 * 1024 ** 3
+    assert estimate > old_estimate * 100

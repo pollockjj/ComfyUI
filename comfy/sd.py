@@ -78,6 +78,23 @@ import comfy.latent_formats
 
 import comfy.ldm.flux.redux
 
+
+def _seedvr2_vae_decode_memory_used(shape):
+    batch = shape[0]
+    if len(shape) == 5:
+        latent_t, latent_h, latent_w = shape[2], shape[3], shape[4]
+    elif len(shape) == 4:
+        latent_t = max(1, shape[1] // 16)
+        latent_h, latent_w = shape[2], shape[3]
+    else:
+        latent_t, latent_h, latent_w = 1, shape[-2], shape[-1]
+    output_t = max(1, (latent_t - 1) * 4 + 1)
+    output_pixels = batch * output_t * latent_h * 8 * latent_w * 8
+    # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
+    # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
+    return output_pixels * 128
+
+
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip):
     key_map = {}
     if model is not None:
@@ -520,7 +537,7 @@ class VAE:
                 self.latent_channels = 16
                 self.latent_dim = 3
                 self.disable_offload = True
-                self.memory_used_decode = lambda shape, dtype: (shape[1] * shape[-2] * shape[-1] * (4 * 8 * 8)) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: _seedvr2_vae_decode_memory_used(shape)
                 self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
