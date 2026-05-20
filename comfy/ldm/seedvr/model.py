@@ -12,6 +12,7 @@ from torch.nn.modules.utils import _triple
 from torch import nn
 import math
 from comfy.ldm.flux.math import apply_rope1
+import comfy.ops
 import numbers
 
 def _torch_float8_types():
@@ -172,8 +173,8 @@ def _seedvr2_7b_window_attention_split(
     txt_lengths = txt_len.tolist()
     window_counts = window_count.tolist()
 
-    vid_out = []
-    txt_out = []
+    vid_out = torch.empty_like(vid_q)
+    txt_out = torch.empty_like(txt_q)
     vid_offset = 0
     txt_offset = 0
     window_idx = 0
@@ -183,7 +184,7 @@ def _seedvr2_7b_window_attention_split(
         txt_q_i = txt_q[txt_slice]
         txt_k_i = txt_k[txt_slice]
         txt_v_i = txt_v[txt_slice]
-        txt_accum = None
+        txt_accum = torch.zeros_like(txt_q_i)
 
         for _ in range(repeat_i):
             vid_len_i = vid_lengths[window_idx]
@@ -192,7 +193,7 @@ def _seedvr2_7b_window_attention_split(
             k_i = torch.cat([vid_k[vid_slice], txt_k_i], dim=0)
             v_i = torch.cat([vid_v[vid_slice], txt_v_i], dim=0)
 
-            out_i = F.scaled_dot_product_attention(
+            out_i = comfy.ops.scaled_dot_product_attention(
                 q_i.permute(1, 0, 2).unsqueeze(0),
                 k_i.permute(1, 0, 2).unsqueeze(0),
                 v_i.permute(1, 0, 2).unsqueeze(0),
@@ -201,16 +202,16 @@ def _seedvr2_7b_window_attention_split(
                 is_causal=False,
             ).squeeze(0).permute(1, 0, 2)
             vid_i, txt_i = out_i.split([vid_len_i, txt_len_i], dim=0)
-            vid_out.append(vid_i)
-            txt_accum = txt_i if txt_accum is None else txt_accum + txt_i
+            vid_out[vid_slice] = vid_i
+            txt_accum += txt_i
 
             vid_offset += vid_len_i
             window_idx += 1
 
-        txt_out.append(txt_accum / repeat_i)
+        txt_out[txt_slice] = txt_accum / repeat_i
         txt_offset += txt_len_i
 
-    return torch.cat(vid_out, dim=0), torch.cat(txt_out, dim=0)
+    return vid_out, txt_out
 
 @dataclass
 class MMArg:
@@ -622,7 +623,7 @@ SEEDVR2_7B_MLP_CHUNK = 8192
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
     components of ``t``'s last dim, passing through the remaining dims
-    untouched. Mirrors the partial-rope contract of the legacy
+    untouched in-place. Mirrors the partial-rope contract of the legacy
     ``apply_rotary_emb`` wrapper at line 470 (``t_left``/``t_middle``/``t_right``
     split). For SeedVR2-3B this matters because ``rope_dim=128`` integer-
     divides into 3 axes as ``128 // 3 = 42`` per-axis, total ``42 * 3 = 126``;
@@ -1091,7 +1092,15 @@ class NaMMSRTransformerBlock(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.mlp.vid if not self.mlp.shared_weights else self.mlp.all
-        vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0)], dim=0)
+        vid_out = None
+        offset = 0
+        for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0):
+            chunk_out = vid_module(chunk)
+            if vid_out is None:
+                vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
+            vid_out[offset:offset + chunk_out.shape[0]] = chunk_out
+            offset += chunk_out.shape[0]
+        vid = vid_out
         if not self.mlp.vid_only:
             txt_module = self.mlp.txt if not self.mlp.shared_weights else self.mlp.all
             txt = txt.to(device=vid.device, dtype=vid.dtype)

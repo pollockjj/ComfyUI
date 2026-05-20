@@ -78,6 +78,8 @@ import comfy.latent_formats
 
 import comfy.ldm.flux.redux
 
+SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL = 160
+
 
 def _seedvr2_vae_decode_memory_used(shape):
     batch = shape[0]
@@ -92,7 +94,7 @@ def _seedvr2_vae_decode_memory_used(shape):
     output_pixels = batch * output_t * latent_h * 8 * latent_w * 8
     # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
     # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
-    return output_pixels * 160
+    return output_pixels * SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
 
 
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip):
