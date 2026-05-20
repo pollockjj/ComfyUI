@@ -182,4 +182,46 @@ def test_seedvr2_split_var_attention_preserves_flat_output_shape():
 def test_seedvr2_7b_window_attention_routes_to_split_var_attention():
     source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
 
-    assert "var_attention_pytorch_split if self.version_7b else optimized_var_attention" in source
+    assert "_seedvr2_7b_window_attention_split" in source
+    assert "if self.version_7b" in source
+
+
+def test_seedvr2_7b_window_attention_split_matches_concat_path():
+    torch.manual_seed(3)
+    vid_len_win = torch.tensor([1, 2, 3], dtype=torch.int64)
+    txt_len = torch.tensor([2, 3], dtype=torch.int64)
+    window_count = torch.tensor([2, 1], dtype=torch.int64)
+    heads = 2
+    dim = 4
+
+    vid_total = int(vid_len_win.sum().item())
+    txt_total = int(txt_len.sum().item())
+    vid_q = torch.randn(vid_total, heads, dim)
+    vid_k = torch.randn(vid_total, heads, dim)
+    vid_v = torch.randn(vid_total, heads, dim)
+    txt_q = torch.randn(txt_total, heads, dim)
+    txt_k = torch.randn(txt_total, heads, dim)
+    txt_v = torch.randn(txt_total, heads, dim)
+
+    concat_win, unconcat_win = seedvr_model.repeat_concat_idx(vid_len_win, txt_len, window_count)
+    all_len_win = vid_len_win + txt_len.repeat_interleave(window_count)
+    cu_seqlens = torch.nn.functional.pad(all_len_win.cumsum(0), (1, 0)).int()
+    concat_out = attention.var_attention_pytorch_split(
+        concat_win(vid_q, txt_q),
+        concat_win(vid_k, txt_k),
+        concat_win(vid_v, txt_v),
+        heads=heads,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        skip_reshape=True,
+        skip_output_reshape=True,
+    )
+    expected_vid, expected_txt = unconcat_win(concat_out)
+
+    split_vid, split_txt = seedvr_model._seedvr2_7b_window_attention_split(
+        vid_q, txt_q, vid_k, txt_k, vid_v, txt_v,
+        vid_len_win, txt_len, window_count,
+    )
+
+    torch.testing.assert_close(split_vid, expected_vid, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(split_txt, expected_txt, rtol=1e-5, atol=1e-5)

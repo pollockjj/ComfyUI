@@ -7,7 +7,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention, var_attention_pytorch_split
+from comfy.ldm.modules.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
@@ -155,6 +155,62 @@ def repeat_concat_idx(
         lambda vid, txt: torch.cat([vid, txt])[tgt_idx],
         lambda all: unconcat_coalesce(all),
     )
+
+
+def _seedvr2_7b_window_attention_split(
+    vid_q: torch.Tensor,
+    txt_q: torch.Tensor,
+    vid_k: torch.Tensor,
+    txt_k: torch.Tensor,
+    vid_v: torch.Tensor,
+    txt_v: torch.Tensor,
+    vid_len_win: torch.Tensor,
+    txt_len: torch.Tensor,
+    window_count: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    vid_lengths = vid_len_win.tolist()
+    txt_lengths = txt_len.tolist()
+    window_counts = window_count.tolist()
+
+    vid_out = []
+    txt_out = []
+    vid_offset = 0
+    txt_offset = 0
+    window_idx = 0
+
+    for txt_len_i, repeat_i in zip(txt_lengths, window_counts):
+        txt_slice = slice(txt_offset, txt_offset + txt_len_i)
+        txt_q_i = txt_q[txt_slice]
+        txt_k_i = txt_k[txt_slice]
+        txt_v_i = txt_v[txt_slice]
+        txt_accum = None
+
+        for _ in range(repeat_i):
+            vid_len_i = vid_lengths[window_idx]
+            vid_slice = slice(vid_offset, vid_offset + vid_len_i)
+            q_i = torch.cat([vid_q[vid_slice], txt_q_i], dim=0)
+            k_i = torch.cat([vid_k[vid_slice], txt_k_i], dim=0)
+            v_i = torch.cat([vid_v[vid_slice], txt_v_i], dim=0)
+
+            out_i = F.scaled_dot_product_attention(
+                q_i.permute(1, 0, 2).unsqueeze(0),
+                k_i.permute(1, 0, 2).unsqueeze(0),
+                v_i.permute(1, 0, 2).unsqueeze(0),
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False,
+            ).squeeze(0).permute(1, 0, 2)
+            vid_i, txt_i = out_i.split([vid_len_i, txt_len_i], dim=0)
+            vid_out.append(vid_i)
+            txt_accum = txt_i if txt_accum is None else txt_accum + txt_i
+
+            vid_offset += vid_len_i
+            window_idx += 1
+
+        txt_out.append(txt_accum / repeat_i)
+        txt_offset += txt_len_i
+
+    return torch.cat(vid_out, dim=0), torch.cat(txt_out, dim=0)
 
 @dataclass
 class MMArg:
@@ -860,11 +916,6 @@ class NaSwinAttention(NaMMAttention):
 
         vid_len_win = cache_win("vid_len", lambda: window_shape.prod(-1))
         txt_len = txt_len.to(window_count.device)
-        txt_len_win = cache_win("txt_len", lambda: txt_len.repeat_interleave(window_count))
-        all_len_win = cache_win("all_len", lambda: vid_len_win + txt_len_win)
-        concat_win, unconcat_win = cache_win(
-            "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
-        )
 
         # window rope
         if not self.version_7b:
@@ -895,21 +946,30 @@ class NaSwinAttention(NaMMAttention):
             if self.rope:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
-        attention_fn = var_attention_pytorch_split if self.version_7b else optimized_var_attention
-        out = attention_fn(
-            q=concat_win(vid_q, txt_q),
-            k=concat_win(vid_k, txt_k),
-            v=concat_win(vid_v, txt_v),
-            heads=self.heads, skip_reshape=True, skip_output_reshape=True,
-            cu_seqlens_q=cache_win(
-                "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-            cu_seqlens_k=cache_win(
-                "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
-            ),
-        )
-
-        vid_out, txt_out = unconcat_win(out)
+        if self.version_7b:
+            vid_out, txt_out = _seedvr2_7b_window_attention_split(
+                vid_q, txt_q, vid_k, txt_k, vid_v, txt_v,
+                vid_len_win, txt_len, window_count,
+            )
+        else:
+            txt_len_win = cache_win("txt_len", lambda: txt_len.repeat_interleave(window_count))
+            all_len_win = cache_win("all_len", lambda: vid_len_win + txt_len_win)
+            concat_win, unconcat_win = cache_win(
+                "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
+            )
+            out = optimized_var_attention(
+                q=concat_win(vid_q, txt_q),
+                k=concat_win(vid_k, txt_k),
+                v=concat_win(vid_v, txt_v),
+                heads=self.heads, skip_reshape=True, skip_output_reshape=True,
+                cu_seqlens_q=cache_win(
+                    "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
+                ),
+                cu_seqlens_k=cache_win(
+                    "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
+                ),
+            )
+            vid_out, txt_out = unconcat_win(out)
 
         vid_out = rearrange(vid_out, "l h d -> l (h d)")
         txt_out = rearrange(txt_out, "l h d -> l (h d)")
