@@ -1564,14 +1564,14 @@ class NaDiT(nn.Module):
             if context.shape[0] == 1:
                 context = context.squeeze(0)
                 return flatten([context])
-            return flatten(list(context))
+            return flatten(context.unbind(0))
         if context.shape[0] % 2 != 0:
             raise ValueError(f"SeedVR2 expected an even text-conditioning batch, got shape {tuple(context.shape)}")
         neg_cond, pos_cond = context.chunk(2, dim=0)
         if pos_cond.shape[0] == 1:
             pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
             return flatten([pos_cond, neg_cond])
-        return flatten([*pos_cond, *neg_cond])
+        return flatten((*pos_cond.unbind(0), *neg_cond.unbind(0)))
 
     @staticmethod
     def _seedvr2_is_single_conditioning_branch(cond_or_uncond):
