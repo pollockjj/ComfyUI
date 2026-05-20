@@ -173,9 +173,16 @@ def _seedvr2_7b_window_attention_split(
     vid_lengths = vid_len_win.tolist()
     txt_lengths = txt_len.tolist()
     window_counts = window_count.tolist()
+    autograd_path = comfy.model_management.in_training or any(
+        x.requires_grad for x in (vid_q, txt_q, vid_k, txt_k, vid_v, txt_v)
+    )
 
-    vid_out = torch.empty_like(vid_q)
-    txt_out = torch.empty_like(txt_q)
+    if autograd_path:
+        vid_chunks = []
+        txt_chunks = []
+    else:
+        vid_out = torch.empty_like(vid_q)
+        txt_out = torch.empty_like(txt_q)
     vid_offset = 0
     txt_offset = 0
     window_idx = 0
@@ -186,7 +193,10 @@ def _seedvr2_7b_window_attention_split(
         txt_k_i = txt_k[txt_slice]
         txt_v_i = txt_v[txt_slice]
         txt_accum_dtype = torch.float32 if txt_q_i.dtype in (torch.float16, torch.bfloat16) else txt_q_i.dtype
-        txt_accum = torch.zeros(txt_q_i.shape, device=txt_q_i.device, dtype=txt_accum_dtype)
+        if autograd_path:
+            txt_repeat_chunks = []
+        else:
+            txt_accum = torch.zeros(txt_q_i.shape, device=txt_q_i.device, dtype=txt_accum_dtype)
 
         for _ in range(repeat_i):
             vid_len_i = vid_lengths[window_idx]
@@ -204,15 +214,24 @@ def _seedvr2_7b_window_attention_split(
                 is_causal=False,
             ).squeeze(0).permute(1, 0, 2)
             vid_i, txt_i = out_i.split([vid_len_i, txt_len_i], dim=0)
-            vid_out[vid_slice] = vid_i
-            txt_accum += txt_i.to(txt_accum_dtype)
+            if autograd_path:
+                vid_chunks.append(vid_i)
+                txt_repeat_chunks.append(txt_i.to(txt_accum_dtype))
+            else:
+                vid_out[vid_slice] = vid_i
+                txt_accum += txt_i.to(txt_accum_dtype)
 
             vid_offset += vid_len_i
             window_idx += 1
 
-        txt_out[txt_slice] = (txt_accum / repeat_i).to(txt_out.dtype)
+        if autograd_path:
+            txt_chunks.append(torch.stack(txt_repeat_chunks, dim=0).mean(0).to(txt_q.dtype))
+        else:
+            txt_out[txt_slice] = (txt_accum / repeat_i).to(txt_out.dtype)
         txt_offset += txt_len_i
 
+    if autograd_path:
+        return torch.cat(vid_chunks, dim=0), torch.cat(txt_chunks, dim=0)
     return vid_out, txt_out
 
 @dataclass
@@ -1125,15 +1144,18 @@ class NaMMSRTransformerBlock(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.mlp.vid if not self.mlp.shared_weights else self.mlp.all
-        vid_out = None
-        offset = 0
-        for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0):
-            chunk_out = vid_module(chunk)
-            if vid_out is None:
-                vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
-            vid_out[offset:offset + chunk_out.shape[0]] = chunk_out
-            offset += chunk_out.shape[0]
-        vid = vid_out
+        if comfy.model_management.in_training or vid.requires_grad:
+            vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0)], dim=0)
+        else:
+            vid_out = None
+            offset = 0
+            for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0):
+                chunk_out = vid_module(chunk)
+                if vid_out is None:
+                    vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
+                vid_out[offset:offset + chunk_out.shape[0]] = chunk_out
+                offset += chunk_out.shape[0]
+            vid = vid_out
         if not self.mlp.vid_only:
             txt_module = self.mlp.txt if not self.mlp.shared_weights else self.mlp.all
             txt = txt.to(device=vid.device, dtype=vid.dtype)

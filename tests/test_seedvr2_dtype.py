@@ -316,6 +316,33 @@ def test_seedvr2_7b_window_attention_split_matches_concat_path():
     torch.testing.assert_close(split_txt, expected_txt, rtol=1e-5, atol=1e-5)
 
 
+def test_seedvr2_7b_window_attention_split_preserves_autograd():
+    torch.manual_seed(4)
+    vid_len_win = torch.tensor([1, 2, 3], dtype=torch.int64)
+    txt_len = torch.tensor([2, 3], dtype=torch.int64)
+    window_count = torch.tensor([2, 1], dtype=torch.int64)
+    heads = 2
+    dim = 4
+
+    vid_total = int(vid_len_win.sum().item())
+    txt_total = int(txt_len.sum().item())
+    vid_q = torch.randn(vid_total, heads, dim, requires_grad=True)
+    vid_k = torch.randn(vid_total, heads, dim, requires_grad=True)
+    vid_v = torch.randn(vid_total, heads, dim, requires_grad=True)
+    txt_q = torch.randn(txt_total, heads, dim, requires_grad=True)
+    txt_k = torch.randn(txt_total, heads, dim, requires_grad=True)
+    txt_v = torch.randn(txt_total, heads, dim, requires_grad=True)
+
+    split_vid, split_txt = seedvr_model._seedvr2_7b_window_attention_split(
+        vid_q, txt_q, vid_k, txt_k, vid_v, txt_v,
+        vid_len_win, txt_len, window_count,
+    )
+    (split_vid.sum() + split_txt.sum()).backward()
+
+    for tensor in (vid_q, vid_k, vid_v, txt_q, txt_k, txt_v):
+        assert tensor.grad is not None
+
+
 def test_seedvr2_7b_mlp_chunks_video_tokens(monkeypatch):
     class TrackingModule(torch.nn.Module):
         def __init__(self, scale):
@@ -350,6 +377,30 @@ def test_seedvr2_7b_mlp_chunks_video_tokens(monkeypatch):
     torch.testing.assert_close(out_txt, txt * 3.0)
 
 
+def test_seedvr2_7b_mlp_preserves_video_autograd(monkeypatch):
+    class TrackingModule(torch.nn.Module):
+        def forward(self, x):
+            return x * 2.0
+
+    monkeypatch.setattr(seedvr_model, "SEEDVR2_7B_MLP_CHUNK", 2)
+
+    block = SimpleNamespace(
+        mlp=SimpleNamespace(
+            shared_weights=False,
+            vid_only=True,
+            vid=TrackingModule(),
+        )
+    )
+    vid_base = torch.arange(24, dtype=torch.float32, requires_grad=True)
+    vid = vid_base.reshape(6, 4)
+    txt = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+    out_vid, _ = seedvr_model.NaMMSRTransformerBlock._seedvr2_7b_mlp(block, vid, txt)
+    out_vid.sum().backward()
+
+    assert vid_base.grad is not None
+
+
 def test_seedvr2_7b_block_routes_mlp_to_chunk_helper():
     source = inspect.getsource(seedvr_model.NaMMSRTransformerBlock.forward)
 
@@ -378,3 +429,11 @@ def test_seedvr2_vae_decode_memory_accepts_channel_last_tiled_latents():
     channel_last = comfy.sd._seedvr2_vae_decode_memory_used((1, 26, 120, 160, 16))
 
     assert channel_last == channel_first
+
+
+def test_seedvr2_vae_decode_memory_uses_conservative_ambiguous_5d_layout():
+    ambiguous = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 120, 160, 16))
+    channel_first = comfy.sd._seedvr2_vae_decode_output_pixels(120, 160, 16) * comfy.sd.SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
+    channel_last = comfy.sd._seedvr2_vae_decode_output_pixels(16, 120, 160) * comfy.sd.SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
+
+    assert ambiguous == max(channel_first, channel_last)
