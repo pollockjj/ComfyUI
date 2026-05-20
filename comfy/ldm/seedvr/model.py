@@ -573,9 +573,10 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     rot_d = 2 * freqs_cis.shape[-3]
     if rot_d == t.shape[-1]:
         return apply_rope1(t, freqs_cis).to(t.dtype)
-    t_rot = apply_rope1(t[..., :rot_d], freqs_cis).to(t.dtype)
-    t_pass = t[..., rot_d:]
-    return torch.cat((t_rot, t_pass), dim=-1)
+    out = torch.empty_like(t)
+    out[..., :rot_d] = apply_rope1(t[..., :rot_d], freqs_cis).to(t.dtype)
+    out[..., rot_d:] = t[..., rot_d:]
+    return out
 
 
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
