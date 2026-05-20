@@ -74,7 +74,7 @@ def test_seedvr2_text_conditioning_accepts_batched_cfg1_single_branch():
     txt, txt_shape = seedvr_model.NaDiT._resolve_text_conditioning(object(), context, [0])
 
     torch.testing.assert_close(txt, context.flatten(0, -2))
-    torch.testing.assert_close(txt_shape, torch.tensor([[2, 3]], device=context.device))
+    torch.testing.assert_close(txt_shape, torch.tensor([[3], [3]], device=context.device))
 
 
 def test_seedvr2_text_conditioning_preserves_two_branch_swap_contract():
@@ -98,7 +98,7 @@ def test_seedvr2_text_conditioning_preserves_batched_two_branch_swap_contract():
 
     torch.testing.assert_close(txt[:6], pos.flatten(0, -2))
     torch.testing.assert_close(txt[6:], neg.flatten(0, -2))
-    torch.testing.assert_close(txt_shape, torch.tensor([[2, 3], [2, 3]], device=context.device))
+    torch.testing.assert_close(txt_shape, torch.tensor([[3], [3], [3], [3]], device=context.device))
 
 
 def test_seedvr2_cfg1_single_branch_output_is_not_swapped():

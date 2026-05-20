@@ -1475,12 +1475,15 @@ class NaDiT(nn.Module):
         if cond_or_uncond is not None and len(cond_or_uncond) == 1:
             if context.shape[0] == 1:
                 context = context.squeeze(0)
-            return flatten([context])
+                return flatten([context])
+            return flatten(list(context))
         if context.shape[0] % 2 != 0:
             raise ValueError(f"SeedVR2 expected an even text-conditioning batch, got shape {tuple(context.shape)}")
         neg_cond, pos_cond = context.chunk(2, dim=0)
-        pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
-        return flatten([pos_cond, neg_cond])
+        if pos_cond.shape[0] == 1:
+            pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
+            return flatten([pos_cond, neg_cond])
+        return flatten([*pos_cond, *neg_cond])
 
     def _swap_pos_neg_halves(self, out, cond_or_uncond=None):
         if cond_or_uncond is not None and len(cond_or_uncond) == 1:
