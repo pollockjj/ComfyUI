@@ -1472,7 +1472,7 @@ class NaDiT(nn.Module):
         if context is None or getattr(context, "numel", lambda: None)() == 0:
             context = self.positive_conditioning
             return flatten([context])
-        if cond_or_uncond is not None and len(cond_or_uncond) == 1:
+        if self._seedvr2_is_single_conditioning_branch(cond_or_uncond):
             if context.shape[0] == 1:
                 context = context.squeeze(0)
                 return flatten([context])
@@ -1485,8 +1485,14 @@ class NaDiT(nn.Module):
             return flatten([pos_cond, neg_cond])
         return flatten([*pos_cond, *neg_cond])
 
+    def _seedvr2_is_single_conditioning_branch(self, cond_or_uncond):
+        if cond_or_uncond is None or len(cond_or_uncond) == 0:
+            return False
+        first = cond_or_uncond[0]
+        return all(entry == first for entry in cond_or_uncond)
+
     def _swap_pos_neg_halves(self, out, cond_or_uncond=None):
-        if cond_or_uncond is not None and len(cond_or_uncond) == 1:
+        if self._seedvr2_is_single_conditioning_branch(cond_or_uncond):
             return out
         # ``dim=0`` is explicit on both calls. The contract is "split
         # the batch axis into two halves and swap them"; making the
