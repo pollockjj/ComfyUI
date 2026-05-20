@@ -88,6 +88,7 @@ def test_vae_decode_tiled_allows_zero_temporal_controls_and_passes_them_through(
     input_types = nodes_mod.VAEDecodeTiled.INPUT_TYPES()["required"]
     assert input_types["temporal_size"][1]["min"] == 0
     assert input_types["temporal_overlap"][1]["min"] == 0
+    assert "SeedVR2 allows 0" in input_types["temporal_size"][1]["tooltip"]
 
     class _DecodeRecorder:
         def __init__(self):
