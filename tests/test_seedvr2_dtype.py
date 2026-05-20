@@ -34,12 +34,13 @@ def test_apply_rope1_partial_preserves_full_rotation_input_dtype(monkeypatch):
     monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
 
     t = torch.arange(8, dtype=torch.float16).reshape(1, 2, 4)
+    original = t.clone()
     freqs_cis = torch.zeros(1, 2, 2, 2)
 
     out = seedvr_model._apply_rope1_partial(t, freqs_cis)
 
     assert out.dtype is torch.float16
-    torch.testing.assert_close(out, (t.float() + 1.0).to(torch.float16))
+    torch.testing.assert_close(out, (original.float() + 1.0).to(torch.float16))
 
 
 def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch):
@@ -49,6 +50,7 @@ def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch)
     monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
 
     t = torch.arange(12, dtype=torch.float16).reshape(1, 2, 6)
+    original = t.clone()
     freqs_cis = torch.zeros(1, 2, 2, 2)
 
     out = seedvr_model._apply_rope1_partial(t, freqs_cis)
@@ -56,9 +58,30 @@ def test_apply_rope1_partial_preserves_partial_rotation_input_dtype(monkeypatch)
     assert out.dtype is torch.float16
     torch.testing.assert_close(
         out[..., :4],
-        (t[..., :4].float() + 1.0).to(torch.float16),
+        (original[..., :4].float() + 1.0).to(torch.float16),
     )
-    torch.testing.assert_close(out[..., 4:], t[..., 4:])
+    torch.testing.assert_close(out[..., 4:], original[..., 4:])
+
+
+def test_apply_rope1_partial_chunks_sequence_dimension(monkeypatch):
+    calls = []
+
+    def fake_apply_rope1(t, freqs_cis):
+        calls.append(t.shape[-2])
+        return t.float() + 1.0
+
+    monkeypatch.setattr(seedvr_model, "apply_rope1", fake_apply_rope1)
+    monkeypatch.setattr(seedvr_model, "_ROPE1_PARTIAL_CHUNK_TOKENS", 2)
+
+    t = torch.arange(30, dtype=torch.float16).reshape(1, 5, 6)
+    original = t.clone()
+    freqs_cis = torch.zeros(5, 2, 2, 2)
+
+    out = seedvr_model._apply_rope1_partial(t, freqs_cis)
+
+    assert calls == [2, 2, 1]
+    torch.testing.assert_close(out[..., :4], (original[..., :4].float() + 1.0).to(torch.float16))
+    torch.testing.assert_close(out[..., 4:], original[..., 4:])
 
 
 def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():

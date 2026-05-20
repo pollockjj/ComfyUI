@@ -559,6 +559,9 @@ def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
     return rearrange(out, "... d (i j) -> ... d i j", i=2, j=2)
 
 
+_ROPE1_PARTIAL_CHUNK_TOKENS = 4096
+
+
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
     components of ``t``'s last dim, passing through the remaining dims
@@ -571,11 +574,15 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     chosen divisible by 6) and avoids the cat entirely.
     """
     rot_d = 2 * freqs_cis.shape[-3]
-    if rot_d == t.shape[-1]:
-        return apply_rope1(t, freqs_cis).to(t.dtype)
-    t_rot = apply_rope1(t[..., :rot_d], freqs_cis).to(t.dtype)
-    t_pass = t[..., rot_d:]
-    return torch.cat((t_rot, t_pass), dim=-1)
+    seq_len = t.shape[-2]
+    for start in range(0, seq_len, _ROPE1_PARTIAL_CHUNK_TOKENS):
+        end = min(start + _ROPE1_PARTIAL_CHUNK_TOKENS, seq_len)
+        freqs_chunk = freqs_cis[start:end]
+        if rot_d == t.shape[-1]:
+            t[..., start:end, :] = apply_rope1(t[..., start:end, :], freqs_chunk).to(t.dtype)
+        else:
+            t[..., start:end, :rot_d] = apply_rope1(t[..., start:end, :rot_d], freqs_chunk).to(t.dtype)
+    return t
 
 
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
