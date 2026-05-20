@@ -198,6 +198,24 @@ def test_seedvr2_split_var_attention_preserves_flat_output_shape():
     torch.testing.assert_close(split, nested, rtol=1e-5, atol=1e-5)
 
 
+def test_seedvr2_split_var_attention_rejects_mismatched_sequence_count():
+    q = torch.randn(5, 2, 4)
+    k = torch.randn(7, 2, 4)
+    v = torch.randn(7, 2, 4)
+    cu_q = torch.tensor([0, 2, 5], dtype=torch.int32)
+    cu_k = torch.tensor([0, 3, 5, 7], dtype=torch.int32)
+
+    try:
+        attention.var_attention_pytorch_split(
+            q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+            skip_reshape=True, skip_output_reshape=True,
+        )
+    except ValueError as exc:
+        assert "same sequence count" in str(exc)
+    else:
+        raise AssertionError("mismatched cu_seqlens sequence counts must fail")
+
+
 def test_seedvr2_7b_window_attention_routes_to_split_var_attention():
     source = inspect.getsource(seedvr_model.NaSwinAttention.forward)
 

@@ -814,10 +814,16 @@ def var_attention_pytorch_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip
 
     if cu_seqlens_q.device.type != "cpu" or cu_seqlens_k.device.type != "cpu":
         raise ValueError("var_attention_pytorch_split requires CPU cu_seqlens tensors")
+    if cu_seqlens_q[-1].item() != q.shape[0]:
+        raise ValueError("cu_seqlens_q does not match q token count")
+    if cu_seqlens_k[-1].item() != k.shape[0] or cu_seqlens_k[-1].item() != v.shape[0]:
+        raise ValueError("cu_seqlens_k does not match k/v token count")
 
     q_splits = torch.tensor_split(q, cu_seqlens_q[1:-1].long(), dim=0)
     k_splits = torch.tensor_split(k, cu_seqlens_k[1:-1].long(), dim=0)
     v_splits = torch.tensor_split(v, cu_seqlens_k[1:-1].long(), dim=0)
+    if len(q_splits) != len(k_splits) or len(q_splits) != len(v_splits):
+        raise ValueError("cu_seqlens_q and cu_seqlens_k must describe the same sequence count")
 
     out = []
     for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
