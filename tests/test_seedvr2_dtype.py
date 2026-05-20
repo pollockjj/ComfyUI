@@ -274,6 +274,6 @@ def test_seedvr2_vae_decode_memory_covers_full_frame_lab_transfer():
     estimate = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 26, 120, 160))
     old_estimate = 16 * 120 * 160 * (4 * 8 * 8) * 2
 
-    assert estimate == 101 * 960 * 1280 * 128
+    assert estimate == 101 * 960 * 1280 * 160
     assert estimate > 15 * 1024 ** 3
     assert estimate > old_estimate * 100
