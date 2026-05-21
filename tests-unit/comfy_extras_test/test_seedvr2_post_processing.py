@@ -18,10 +18,9 @@ def _schema_ids(items):
 def test_seedvr2_post_processing_schema():
     schema = nodes_seedvr.SeedVR2PostProcessing.define_schema()
 
-    assert _schema_ids(schema.inputs) == ["decoded", "reference", "method", "resolution"]
+    assert _schema_ids(schema.inputs) == ["decoded", "reference", "method"]
     assert schema.inputs[2].options == ["lab", "none"]
     assert schema.inputs[2].default == "lab"
-    assert schema.inputs[3].default == 1280
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 
@@ -35,7 +34,7 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
         return torch.zeros_like(content)
 
     with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
-        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab", 8).result[0]
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
@@ -74,7 +73,7 @@ def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
 
     with patch.object(nodes_seedvr.TVF, "resize", _resize):
         with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
-            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab", 8).result[0]
+            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
@@ -89,7 +88,7 @@ def test_seedvr2_post_processing_none_trims_and_crops_without_color_correction()
     reference = torch.zeros(1, 2, 8, 10, 3)
 
     with patch.object(nodes_seedvr, "lab_color_transfer") as lab:
-        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 8).result[0]
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     assert lab.call_count == 0
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
@@ -100,7 +99,7 @@ def test_seedvr2_post_processing_restores_flattened_padded_batches_before_trimmi
     decoded = torch.arange(10 * 4 * 6 * 1, dtype=torch.float32).reshape(10, 4, 6, 1)
     reference = torch.zeros(2, 2, 4, 6, 1)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 4).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     expected = torch.cat((decoded[0:2], decoded[5:7]), dim=0)
     assert tuple(output.shape) == (4, 4, 6, 1)
@@ -119,40 +118,40 @@ def test_seedvr2_post_processing_none_preserves_decoded_spatial_size_when_refere
     assert torch.equal(output, decoded[:, :2, :, :, :])
 
 
-def test_seedvr2_post_processing_preserves_requested_resize_when_reference_is_smaller():
+def test_seedvr2_post_processing_crops_to_reference_tensor_when_reference_is_smaller():
     decoded = torch.ones((1, 1, 720, 1280, 3), dtype=torch.float32)
     reference = torch.ones((1, 1, 360, 640, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 720).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
-    assert tuple(output.shape) == (1, 1, 720, 1280, 3)
+    assert tuple(output.shape) == (1, 1, 360, 640, 3)
 
 
-def test_seedvr2_post_processing_crops_large_raw_reference_to_visible_resize():
+def test_seedvr2_post_processing_uses_decoded_size_when_reference_is_larger():
     decoded = torch.ones((1, 1, 128, 160, 3), dtype=torch.float32)
     reference = torch.ones((1, 1, 480, 640, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
-    assert tuple(output.shape) == (1, 1, 120, 160, 3)
+    assert tuple(output.shape) == (1, 1, 128, 160, 3)
 
 
-def test_seedvr2_post_processing_crops_to_explicit_visible_resize_width():
+def test_seedvr2_post_processing_does_not_recompute_size_from_resolution():
     decoded = torch.ones((1, 1, 128, 224, 3), dtype=torch.float32)
     reference = torch.ones((1, 1, 1080, 1920, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
-    assert tuple(output.shape) == (1, 1, 120, 212, 3)
+    assert tuple(output.shape) == (1, 1, 128, 224, 3)
 
 
-def test_seedvr2_post_processing_matches_preprocessing_integer_resize_rule():
+def test_seedvr2_post_processing_uses_tensor_sizes_with_odd_reference_width():
     decoded = torch.ones((1, 1, 128, 256, 3), dtype=torch.float32)
     reference = torch.ones((1, 1, 240, 483, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
-    assert tuple(output.shape) == (1, 1, 120, 240, 3)
+    assert tuple(output.shape) == (1, 1, 128, 256, 3)
 
 
 def test_seedvr2_post_processing_none_preserves_black_bottom_row_content():

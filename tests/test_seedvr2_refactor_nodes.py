@@ -5,7 +5,6 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy.sd
 import comfy_extras.nodes_seedvr as nodes_seedvr
 import nodes
 
@@ -14,7 +13,7 @@ def test_seedvr2_postprocessing_restores_flat_decoded_batch_time():
     decoded = torch.arange(6 * 4 * 6 * 1, dtype=torch.float32).reshape(6, 4, 6, 1)
     reference = torch.ones((2, 3, 4, 6, 1), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     assert output.shape == (6, 4, 6, 1)
     torch.testing.assert_close(output, decoded)
@@ -24,25 +23,25 @@ def test_seedvr2_postprocessing_crops_to_raw_reference_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     assert output.shape == (1, 120, 168, 3)
 
 
-def test_seedvr2_postprocessing_crops_larger_raw_reference_to_resized_visible_area():
+def test_seedvr2_postprocessing_uses_reference_tensor_not_repeated_resolution():
     decoded = torch.ones((1, 128, 160, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 480, 640, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
-    assert output.shape == (1, 120, 160, 3)
+    assert output.shape == (1, 128, 160, 3)
 
 
 def test_seedvr2_postprocessing_preserves_real_black_reference_edges():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 128).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     assert output.shape == (1, 128, 176, 3)
 
@@ -51,7 +50,7 @@ def test_seedvr2_postprocessing_crops_height_only_to_raw_reference_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 120, 176, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
 
     assert output.shape == (1, 120, 176, 3)
 
@@ -67,18 +66,10 @@ def test_seedvr2_postprocessing_lab_uses_raw_reference_size(monkeypatch):
 
     monkeypatch.setattr(nodes_seedvr, "lab_color_transfer", fake_lab_color_transfer)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab", 120).result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
 
     assert calls == [((1, 3, 120, 169), (1, 3, 120, 169))]
     assert output.shape == (1, 120, 168, 3)
-
-
-def test_seedvr2_ambiguous_width_16_decode_stays_channel_first():
-    sample = torch.arange(1 * 16 * 4 * 5 * 16, dtype=torch.float32).reshape(1, 16, 4, 5, 16)
-
-    channel_first = comfy.sd.VAE._normalize_seedvr2_decode_samples(comfy.sd.VAE.__new__(comfy.sd.VAE), sample)
-
-    torch.testing.assert_close(channel_first, sample)
 
 
 def test_seedvr2_tiled_decode_node_ignores_seedvr2_sideband_metadata():

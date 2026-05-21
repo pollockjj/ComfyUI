@@ -267,13 +267,12 @@ class SeedVR2PostProcessing(io.ComfyNode):
                 io.Image.Input("decoded"),
                 io.Image.Input("reference"),
                 io.Combo.Input("method", options=["lab", "none"], default="lab"),
-                io.Int.Input("resolution", default=1280, min=120),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, decoded, reference, method, resolution=1280):
+    def execute(cls, decoded, reference, method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
         reference_5d, _ = cls._as_bthwc(reference)
         decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
@@ -283,7 +282,8 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
         reference_5d = reference_5d[:b, :t, :, :, :]
-        target_h, target_w = cls._reference_target_size(decoded_5d, reference_5d, resolution)
+        target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
+        target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
         if method == "lab":
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
@@ -328,18 +328,6 @@ class SeedVR2PostProcessing(io.ComfyNode):
         if decoded_t < ref_t:
             return decoded
         return decoded.reshape(ref_b, decoded_t, decoded.shape[2], decoded.shape[3], decoded.shape[4])
-
-    @staticmethod
-    def _reference_target_size(decoded, reference, resolution):
-        decoded_h, decoded_w = decoded.shape[2:4]
-        reference_h, reference_w = reference.shape[2:4]
-        if reference_h <= reference_w:
-            target_h = resolution
-            target_w = max(1, int(reference_w * resolution / reference_h))
-        else:
-            target_w = resolution
-            target_h = max(1, int(reference_h * resolution / reference_w))
-        return min(target_h, decoded_h), min(target_w, decoded_w)
 
     @staticmethod
     def _to_seedvr2_raw(images):
