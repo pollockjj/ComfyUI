@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import torch
 
 from comfy.cli_args import args as cli_args
@@ -75,18 +73,15 @@ def test_seedvr2_postprocessing_lab_uses_raw_reference_size(monkeypatch):
     assert output.shape == (1, 120, 168, 3)
 
 
-def test_seedvr2_ambiguous_channel_last_decode_requires_explicit_flag():
+def test_seedvr2_ambiguous_width_16_decode_stays_channel_first():
     sample = torch.arange(1 * 16 * 4 * 5 * 16, dtype=torch.float32).reshape(1, 16, 4, 5, 16)
-    vae = SimpleNamespace(latent_channels=16)
 
-    channel_first = comfy.sd.VAE._normalize_seedvr2_decode_samples(vae, sample)
-    channel_last = comfy.sd.VAE._normalize_seedvr2_decode_samples(vae, sample, channel_last=True)
+    channel_first = comfy.sd.VAE._normalize_seedvr2_decode_samples(comfy.sd.VAE.__new__(comfy.sd.VAE), sample)
 
     torch.testing.assert_close(channel_first, sample)
-    torch.testing.assert_close(channel_last, sample.movedim(-1, 1))
 
 
-def test_seedvr2_tiled_decode_node_uses_channel_last_metadata():
+def test_seedvr2_tiled_decode_node_ignores_seedvr2_sideband_metadata():
     class FakeVAE:
         def __init__(self):
             self.decode_call = None
@@ -116,10 +111,10 @@ def test_seedvr2_tiled_decode_node_uses_channel_last_metadata():
         temporal_overlap=8,
     )
 
-    assert vae.decode_call["seedvr2_channel_last"] is True
+    assert "seedvr2_channel_last" not in vae.decode_call
 
 
-def test_seedvr2_decode_node_uses_channel_last_metadata():
+def test_seedvr2_decode_node_ignores_seedvr2_sideband_metadata():
     class FakeVAE:
         def __init__(self):
             self.decode_call = None
@@ -136,7 +131,7 @@ def test_seedvr2_decode_node_uses_channel_last_metadata():
 
     nodes.VAEDecode().decode(vae, samples)
 
-    assert vae.decode_call["seedvr2_channel_last"] is True
+    assert "seedvr2_channel_last" not in vae.decode_call
 
 
 def test_seedvr2_decode_node_leaves_unmarked_ambiguous_latent_unforced():
@@ -156,37 +151,27 @@ def test_seedvr2_decode_node_leaves_unmarked_ambiguous_latent_unforced():
     assert "seedvr2_channel_last" not in vae.decode_call
 
 
-def test_seedvr2_encode_node_marks_channel_last_latent_metadata():
+def test_seedvr2_encode_node_does_not_mark_model_specific_layout_metadata():
     class FakeVAE:
-        latent_channels = 16
-
-        def is_seedvr2(self):
-            return True
-
         def encode(self, pixels):
-            return torch.zeros((1, 2, 3, 4, 16), dtype=torch.float32)
+            return torch.zeros((1, 16, 2, 3, 4), dtype=torch.float32)
 
     output = nodes.VAEEncode().encode(FakeVAE(), torch.zeros((1, 8, 8, 3)))[0]
 
-    assert output["seedvr2_channel_last"] is True
+    assert set(output) == {"samples"}
 
 
-def test_seedvr2_tiled_encode_node_marks_channel_last_latent_metadata():
+def test_seedvr2_tiled_encode_node_does_not_mark_model_specific_layout_metadata():
     class FakeVAE:
-        latent_channels = 16
-
-        def is_seedvr2(self):
-            return True
-
         def encode_tiled(self, pixels, **kwargs):
-            return torch.zeros((1, 2, 3, 4, 16), dtype=torch.float32)
+            return torch.zeros((1, 16, 2, 3, 4), dtype=torch.float32)
 
     output = nodes.VAEEncodeTiled().encode(FakeVAE(), torch.zeros((1, 8, 8, 3)), 64, 0)[0]
 
-    assert output["seedvr2_channel_last"] is True
+    assert set(output) == {"samples"}
 
 
-def test_seedvr2_saved_latent_preserves_channel_last_metadata(monkeypatch):
+def test_seedvr2_saved_latent_does_not_persist_model_specific_layout_metadata(monkeypatch):
     saved = {}
 
     def fake_save_image_path(filename_prefix, output_dir):
@@ -204,8 +189,8 @@ def test_seedvr2_saved_latent_preserves_channel_last_metadata(monkeypatch):
     nodes.SaveLatent().save({"samples": original, "seedvr2_channel_last": True}, "seedvr2_latent")
     loaded = nodes.LoadLatent().load("seedvr2_latent")[0]
 
-    assert bool(saved["seedvr2_channel_last"].item()) is True
-    assert loaded["seedvr2_channel_last"] is True
+    assert "seedvr2_channel_last" not in saved
+    assert "seedvr2_channel_last" not in loaded
     torch.testing.assert_close(loaded["samples"], original)
 
 

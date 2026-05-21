@@ -233,7 +233,7 @@ def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
     try:
         diffusion_model = _DiffusionModel()
         patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         positive, negative, latent = nodes_seedvr.SeedVR2Conditioning.execute(
             vae_conditioning,
@@ -413,7 +413,7 @@ def test_seedvr2_conditioning_fails_loud_on_zero_buffers():
     try:
         diffusion_model = _DiffusionModel(zero_conditioning=True)
         patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
@@ -449,7 +449,7 @@ def test_seedvr2_conditioning_fails_loud_on_fp8_zero_buffers():
             conditioning_dtype=fp8_dtype,
         )
         patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
@@ -478,7 +478,7 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         # Baseline _DiffusionModel has positive=ones, negative=zeros.
         diffusion_model = _DiffusionModel(zero_conditioning=False)
         patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         # Should not raise.
         positive, negative, latent = (
@@ -507,7 +507,7 @@ def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available
             object(),  # function reference
             ("/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors",),
         )
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
@@ -533,7 +533,7 @@ def test_seedvr2_conditioning_fail_loud_falls_back_when_path_unavailable():
         diffusion_model = _DiffusionModel(zero_conditioning=True)
         patcher = _ModelPatcher(diffusion_model)
         # No cached_patcher_init set on the patcher.
-        vae_conditioning = {"samples": torch.zeros((1, 1, 1, 1, 2))}
+        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(

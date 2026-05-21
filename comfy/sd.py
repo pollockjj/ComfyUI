@@ -990,28 +990,18 @@ class VAE:
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
-    def _normalize_seedvr2_decode_samples(self, samples, channel_last=False):
+    def _normalize_seedvr2_decode_samples(self, samples):
         if samples.ndim != 5:
             return samples
         latent_channels = getattr(self, "latent_channels", 16)
         channel_first = samples.shape[1] == latent_channels
         has_channel_last = samples.shape[-1] == latent_channels
-        if channel_last:
-            if has_channel_last:
-                return samples.movedim(-1, 1)
-            if channel_first:
-                return samples
-            raise RuntimeError(
-                "SeedVR2 decode expected 5-D latent input with "
-                f"{latent_channels} channels in the first or last latent dimension; "
-                f"got shape {tuple(samples.shape)}."
-            )
         if has_channel_last and not channel_first:
             return samples.movedim(-1, 1)
         return samples
 
-    def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4, channel_last=False):
-        samples = self._normalize_seedvr2_decode_samples(samples, channel_last=channel_last)
+    def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
+        samples = self._normalize_seedvr2_decode_samples(samples)
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
         args = {
             "enable_tiling": True,
@@ -1048,7 +1038,7 @@ class VAE:
         if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
             if samples.ndim == 4:
                 samples = samples.unsqueeze(2)
-            samples = samples.movedim(1, -1).contiguous()
+            samples = samples.contiguous()
             samples = samples * 0.9152
         return samples
 
@@ -1135,7 +1125,7 @@ class VAE:
                     c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 
-    def decode(self, samples_in, vae_options=None, seedvr2_channel_last=False):
+    def decode(self, samples_in, vae_options=None):
         self.throw_exception_if_invalid()
         vae_options = {} if vae_options is None else vae_options
         pixel_samples = None
@@ -1143,7 +1133,7 @@ class VAE:
         if self.latent_dim == 2 and samples_in.ndim == 5:
             samples_in = samples_in[:, :, 0]
         if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-            samples_in = self._normalize_seedvr2_decode_samples(samples_in, channel_last=seedvr2_channel_last)
+            samples_in = self._normalize_seedvr2_decode_samples(samples_in)
         try:
             memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
             model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
@@ -1216,7 +1206,6 @@ class VAE:
         overlap=None,
         tile_t=None,
         overlap_t=None,
-        seedvr2_channel_last=False,
     ):
         self.throw_exception_if_invalid()
         memory_used = self.memory_used_decode(samples.shape, self.vae_dtype) #TODO: calculate mem required for tile
@@ -1242,7 +1231,7 @@ class VAE:
                 seedvr2_args["tile_t"] = tile_t
             if overlap_t is not None:
                 seedvr2_args["overlap_t"] = overlap_t
-            output = self.decode_tiled_seedvr2(samples, channel_last=seedvr2_channel_last, **seedvr2_args)
+            output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
         elif dims == 1 or self.extra_1d_channel is not None:
             args.pop("tile_y")
             output = self.decode_tiled_1d(samples, **args)

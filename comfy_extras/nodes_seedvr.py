@@ -383,6 +383,18 @@ class SeedVR2Conditioning(io.ComfyNode):
     def execute(cls, vae_conditioning, model, latent_noise_scale) -> io.NodeOutput:
 
         vae_conditioning = vae_conditioning["samples"]
+        if vae_conditioning.ndim != 5:
+            raise ValueError(
+                "SeedVR2Conditioning expects a 5-D VAE latent in Comfy "
+                f"channel-first layout; got shape {tuple(vae_conditioning.shape)}."
+            )
+        if vae_conditioning.shape[-1] == _SEEDVR2_LATENT_CHANNELS and vae_conditioning.shape[1] != _SEEDVR2_LATENT_CHANNELS:
+            raise ValueError(
+                "SeedVR2Conditioning expects SeedVR2 VAE latents in Comfy "
+                f"channel-first layout (B, {_SEEDVR2_LATENT_CHANNELS}, T, H, W); "
+                f"got channel-last shape {tuple(vae_conditioning.shape)}."
+            )
+        vae_conditioning = vae_conditioning.movedim(1, -1).contiguous()
         device = vae_conditioning.device
         model_patcher = model
         model = _resolve_seedvr2_diffusion_model(model_patcher)
