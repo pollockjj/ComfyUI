@@ -275,13 +275,12 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
         reference_5d = reference_5d[:b, :t, :, :, :]
-        target_h, target_w = cls._reference_visible_size(reference_5d)
-        target_h = min(target_h, decoded_5d.shape[2])
-        target_w = min(target_w, decoded_5d.shape[3])
-        decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
-        reference_5d = reference_5d[:, :, :target_h, :target_w, :]
-
         if method == "lab":
+            reference_h, reference_w, reference_has_padding = cls._reference_visible_area(reference_5d)
+            target_h = min(reference_h, decoded_5d.shape[2]) if reference_has_padding else decoded_5d.shape[2]
+            target_w = min(reference_w, decoded_5d.shape[3]) if reference_has_padding else decoded_5d.shape[3]
+            decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
+            reference_5d = reference_5d[:, :, :reference_h, :reference_w, :]
             reference_5d = cls._resize_reference(reference_5d, decoded_5d.shape[2], decoded_5d.shape[3])
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
@@ -291,6 +290,10 @@ class SeedVR2PostProcessing(io.ComfyNode):
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
         elif method == "none":
+            reference_h, reference_w, _ = cls._reference_visible_area(reference_5d)
+            target_h = min(reference_h, decoded_5d.shape[2])
+            target_w = min(reference_w, decoded_5d.shape[3])
+            decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
             output = decoded_5d
         else:
             raise ValueError(f"SeedVR2PostProcessing: unknown method {method!r}")
@@ -322,17 +325,20 @@ class SeedVR2PostProcessing(io.ComfyNode):
         return decoded.reshape(ref_b, ref_t, decoded.shape[2], decoded.shape[3], decoded.shape[4])
 
     @staticmethod
-    def _reference_visible_size(reference):
+    def _reference_visible_area(reference):
         height, width = reference.shape[2:4]
         if reference.numel() == 0 or reference.amin().item() >= 0.0:
-            return height, width
+            return height, width, False
 
         pad_value = torch.as_tensor(-1.0, device=reference.device, dtype=reference.dtype)
         row_is_pad = torch.isclose(reference, pad_value).all(dim=(0, 1, 3, 4))
         col_is_pad = torch.isclose(reference, pad_value).all(dim=(0, 1, 2, 4))
         visible_h = SeedVR2PostProcessing._first_trailing_pad_index(row_is_pad, height)
         visible_w = SeedVR2PostProcessing._first_trailing_pad_index(col_is_pad, width)
-        return visible_h, visible_w
+        has_rectangular_padding = visible_h < height and visible_w < width
+        if not has_rectangular_padding:
+            return height, width, False
+        return visible_h, visible_w, True
 
     @staticmethod
     def _first_trailing_pad_index(mask, fallback):

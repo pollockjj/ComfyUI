@@ -91,3 +91,25 @@ def test_seedvr2_post_processing_none_preserves_decoded_spatial_size_when_refere
     assert lab.call_count == 0
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, decoded[:, :2, :, :, :])
+
+
+def test_seedvr2_post_processing_none_preserves_black_bottom_row_content():
+    decoded = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
+    reference = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
+    reference[:, :, -1, :, :] = -1.0
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, decoded)
+
+
+def test_seedvr2_post_processing_none_preserves_black_right_column_content():
+    decoded = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
+    reference = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
+    reference[:, :, :, -1, :] = -1.0
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, decoded)
