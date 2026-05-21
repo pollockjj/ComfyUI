@@ -31,6 +31,15 @@ def test_seedvr2_postprocessing_crops_to_raw_reference_size():
     assert output.shape == (1, 120, 168, 3)
 
 
+def test_seedvr2_postprocessing_crops_larger_raw_reference_to_resized_visible_area():
+    decoded = torch.ones((1, 128, 160, 3), dtype=torch.float32)
+    reference = torch.full((1, 1, 480, 640, 3), 0.25, dtype=torch.float32)
+
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+
+    assert output.shape == (1, 120, 160, 3)
+
+
 def test_seedvr2_postprocessing_preserves_real_black_reference_edges():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)

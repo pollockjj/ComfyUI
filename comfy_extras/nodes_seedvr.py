@@ -319,7 +319,13 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
     @staticmethod
     def _reference_target_size(decoded, reference):
-        return min(reference.shape[2], decoded.shape[2]), min(reference.shape[3], decoded.shape[3])
+        decoded_h, decoded_w = decoded.shape[2:4]
+        reference_h, reference_w = reference.shape[2:4]
+        if reference_h <= decoded_h and reference_w <= decoded_w:
+            return reference_h, reference_w
+        if reference_h * decoded_w <= reference_w * decoded_h:
+            return max(1, round(decoded_w * reference_h / reference_w)), decoded_w
+        return decoded_h, max(1, round(decoded_h * reference_w / reference_h))
 
     @staticmethod
     def _to_seedvr2_raw(images):

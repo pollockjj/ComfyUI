@@ -37,8 +37,8 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
-    assert calls[0][0].shape == (2, 3, 9, 11)
-    assert calls[0][1].shape == (2, 3, 9, 11)
+    assert calls[0][0].shape == (2, 3, 8, 10)
+    assert calls[0][1].shape == (2, 3, 8, 10)
     assert torch.equal(calls[0][0], torch.full_like(calls[0][0], -0.5))
     assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
 
@@ -91,6 +91,15 @@ def test_seedvr2_post_processing_none_preserves_decoded_spatial_size_when_refere
     assert lab.call_count == 0
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, decoded[:, :2, :, :, :])
+
+
+def test_seedvr2_post_processing_crops_large_raw_reference_to_visible_resize():
+    decoded = torch.ones((1, 1, 128, 160, 3), dtype=torch.float32)
+    reference = torch.ones((1, 1, 480, 640, 3), dtype=torch.float32)
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+
+    assert tuple(output.shape) == (1, 1, 120, 160, 3)
 
 
 def test_seedvr2_post_processing_none_preserves_black_bottom_row_content():
