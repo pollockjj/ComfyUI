@@ -994,13 +994,15 @@ class VAE:
         channel_first = samples.shape[1] == latent_channels
         has_channel_last = samples.shape[-1] == latent_channels
         if channel_last:
-            if not has_channel_last:
-                raise RuntimeError(
-                    "SeedVR2 decode expected channel-last 5-D latent input "
-                    f"with {latent_channels} channels in the last dimension; "
-                    f"got shape {tuple(samples.shape)}."
-                )
-            return samples.movedim(-1, 1)
+            if has_channel_last:
+                return samples.movedim(-1, 1)
+            if channel_first:
+                return samples
+            raise RuntimeError(
+                "SeedVR2 decode expected 5-D latent input with "
+                f"{latent_channels} channels in the first or last latent dimension; "
+                f"got shape {tuple(samples.shape)}."
+            )
         if has_channel_last and not channel_first:
             return samples.movedim(-1, 1)
         return samples
@@ -1202,7 +1204,16 @@ class VAE:
         pixel_samples = pixel_samples.to(self.output_device).movedim(1,-1)
         return pixel_samples
 
-    def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+    def decode_tiled(
+        self,
+        samples,
+        tile_x=None,
+        tile_y=None,
+        overlap=None,
+        tile_t=None,
+        overlap_t=None,
+        seedvr2_channel_last=False,
+    ):
         self.throw_exception_if_invalid()
         memory_used = self.memory_used_decode(samples.shape, self.vae_dtype) #TODO: calculate mem required for tile
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
@@ -1227,7 +1238,7 @@ class VAE:
                 seedvr2_args["tile_t"] = tile_t
             if overlap_t is not None:
                 seedvr2_args["overlap_t"] = overlap_t
-            output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
+            output = self.decode_tiled_seedvr2(samples, channel_last=seedvr2_channel_last, **seedvr2_args)
         elif dims == 1 or self.extra_1d_channel is not None:
             args.pop("tile_y")
             output = self.decode_tiled_1d(samples, **args)

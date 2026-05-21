@@ -57,3 +57,17 @@ def test_seedvr2_wrapper_decode_rejects_wrong_5d_channel_count():
 
     with pytest.raises(RuntimeError, match="5-D latent input must have 16 channels"):
         wrapper.decode(torch.zeros(1, 8, 2, 4, 5))
+
+
+def test_seedvr2_wrapper_decode_rejects_misaligned_collapsed_4d_latents():
+    wrapper = _Wrapper()
+
+    with pytest.raises(RuntimeError, match=r"4-D latent input must use collapsed channel layout"):
+        wrapper.decode(torch.zeros(1, 17, 4, 5))
+
+
+def test_seedvr2_wrapper_decode_rejects_wrong_rank_latents():
+    wrapper = _Wrapper()
+
+    with pytest.raises(RuntimeError, match=r"latent input must be 4-D collapsed .* or 5-D"):
+        wrapper.decode(torch.zeros(1, 16, 4))

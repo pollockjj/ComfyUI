@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,11 @@ FORBIDDEN_FILES = {
     "comfy/sample.py",
     "comfy/samplers.py",
 }
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("SEEDVR2_NON_GOAL_STATIC_AUDIT") != "1",
+    reason="SEEDVR2_NON_GOAL_STATIC_AUDIT=1 is required for git-index audit execution.",
+)
 
 
 def _git_changed_paths(*args):

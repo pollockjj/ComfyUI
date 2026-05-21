@@ -2382,9 +2382,21 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                     f"have 16 channels; got shape {tuple(z.shape)}."
                 )
             latent = z
-        else:
+        elif z.ndim == 4:
             b, tc, h, w = z.shape
+            if tc % 16 != 0:
+                raise RuntimeError(
+                    "SeedVR2 VideoAutoencoderKLWrapper.decode: 4-D latent input must "
+                    "use collapsed channel layout (B, 16*T, H, W); "
+                    f"got shape {tuple(z.shape)}."
+                )
             latent = z.view(b, 16, -1, h, w)
+        else:
+            raise RuntimeError(
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: latent input must be "
+                "4-D collapsed (B, 16*T, H, W) or 5-D (B, 16, T, H, W); "
+                f"got shape {tuple(z.shape)}."
+            )
         scale = 0.9152
         shift = 0
         latent = latent / scale + shift

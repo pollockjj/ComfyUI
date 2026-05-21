@@ -161,6 +161,22 @@ def test_seedvr2_decode_tiled_preserves_direct_channel_first_width_16(monkeypatc
     assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 2, 4, 16)
 
 
+def test_seedvr2_vaedecode_tiled_normalizes_public_temporal_16_channel_last_latents(monkeypatch):
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    vae = _make_vae(_DecodeWrapper())
+
+    nodes_mod.VAEDecodeTiled().decode(
+        vae,
+        {"samples": torch.zeros(1, 16, 4, 5, 16)},
+        tile_size=512,
+        overlap=64,
+        temporal_size=16,
+        temporal_overlap=4,
+    )
+
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 16, 4, 5)
+
+
 def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
