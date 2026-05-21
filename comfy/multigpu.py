@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import queue
 import threading
 import torch
@@ -173,6 +174,92 @@ def create_multigpu_deepclones(model: ModelPatcher, max_gpus: int, gpu_options: 
     # if len(skip_devices) > 0 or "multigpu_skip_devices" in model.model_options:
     #     model.model_options["multigpu_skip_devices"] = skip_devices
     return model
+
+
+def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
+    '''Attach per-device deepclones of an UPSCALE_MODEL (spandrel ImageModelDescriptor) for tile-parallel dispatch.
+
+    Returns a shallow copy of the upscale_model with a `multigpu_clones: dict[torch.device, descriptor]`
+    attribute. Each clone is a *shallow-copied descriptor* whose `.model` is a `copy.deepcopy` of the
+    original `.model` moved to one extra CUDA device. The descriptor wrapper is preserved so the
+    `descriptor(x)` call path is identical to the primary's — same preprocessing, same output.
+
+    Downstream consumers (e.g. ImageUpscaleWithModel) check `getattr(upscale_model, 'multigpu_clones', None)`
+    and dispatch tiles across the devices when present.
+    '''
+    full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
+    limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
+        return upscale_model
+
+    # Shallow copy so we don't mutate the loader's cached descriptor.
+    cloned = copy.copy(upscale_model)
+    existing = getattr(upscale_model, 'multigpu_clones', None)
+    clones: dict[torch.device, object] = dict(existing) if existing else {}
+
+    for device in limit_extra_devices:
+        if device in clones:
+            continue
+        clone_desc = copy.deepcopy(upscale_model)
+        clone_desc.model.eval()
+        for p in clone_desc.model.parameters():
+            p.requires_grad_(False)
+        clone_desc.to(device)
+        clones[device] = clone_desc
+        logging.info(f"Created upscale_model descriptor deepclone for {device}")
+
+    cloned.multigpu_clones = clones
+    return cloned
+
+
+def create_vae_multigpu_deepclones(vae, max_gpus: int):
+    '''Attach per-device deepclones of a VAE (comfy.sd.VAE wrapper) for tile-parallel decode dispatch.
+
+    Returns a shallow copy of the vae with a `multigpu_clones: dict[torch.device, VAE]` attribute.
+    Each clone is a `copy.deepcopy` of the full VAE wrapper (including its `first_stage_model`,
+    `patcher`, and metadata) moved to CPU. Clones are moved to their target device by the
+    consumer at execute time (mirrors the upscale_model lane's CPU-resident-until-execute pattern).
+
+    Downstream consumers (VAE.decode_tiled_*) check `getattr(self, 'multigpu_clones', None)` and
+    dispatch tiles across the devices when present.
+    '''
+    full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
+    limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU VAE clones.")
+        return vae
+
+    # Shallow copy so we don't mutate the loader's cached VAE wrapper.
+    cloned = copy.copy(vae)
+    existing = getattr(vae, 'multigpu_clones', None)
+    clones: dict[torch.device, object] = dict(existing) if existing else {}
+
+    # Mirror the UNET CFG-split lane pattern (comfy/multigpu.py:create_multigpu_deepclones
+    # calling ModelPatcher.deepclone_multigpu). For each extra device, ask the source
+    # patcher to produce a deepclone routed to the target device — that helper:
+    #   1. calls model_management.unload_model_and_clones(self) to detach from comfy's
+    #      loaded-models registry and comfy_aimdo's per-model storage tracking
+    #   2. invokes self.cached_patcher_init[0](*[1]) to RE-LOAD weights fresh from disk
+    #      (VAELoader registers this factory pointing at comfy.sd.load_vae_patcher)
+    #   3. sets the clone's load_device to the target
+    # The result is a patcher whose model has zero inherited aimdo state.
+    for device in limit_extra_devices:
+        if device in clones:
+            continue
+        cloned_patcher = vae.patcher.deepclone_multigpu(new_load_device=device)
+        clone_vae = copy.copy(vae)
+        clone_vae.first_stage_model = cloned_patcher.model
+        clone_vae.patcher = cloned_patcher
+        clone_vae.first_stage_model.eval()
+        for p in clone_vae.first_stage_model.parameters():
+            p.requires_grad_(False)
+        clone_vae.first_stage_model.to("cpu")
+        clones[device] = clone_vae
+        logging.info(f"Created CPU VAE deepclone for {device}")
+
+    cloned.multigpu_clones = clones
+    return cloned
 
 
 LoadBalance = namedtuple('LoadBalance', ['work_per_device', 'idle_time'])
