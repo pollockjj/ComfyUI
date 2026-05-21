@@ -2408,16 +2408,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             decode_seedvr2_args = dict(seedvr2_tiling)
             tile_h, tile_w = decode_seedvr2_args.get("tile_size", (512, 512))
             ov_h, ov_w = decode_seedvr2_args.get("tile_overlap", (64, 64))
-            new_tile_h, new_tile_w = min(tile_h, 512), min(tile_w, 512)
-            # Clamp overlap with the same `overlap < tile_size - 8`
-            # invariant the encode path enforces (nodes_seedvr.py:244-245).
-            # Without this, capping tile_size alone can leave
-            # overlap >= tile_size, collapsing stride to 1 and producing
-            # O(H_lat * W_lat) overlapping tiles.
-            decode_seedvr2_args["tile_size"] = (new_tile_h, new_tile_w)
             decode_seedvr2_args["tile_overlap"] = (
-                min(ov_h, max(0, new_tile_h - 8)),
-                min(ov_w, max(0, new_tile_w - 8)),
+                min(ov_h, max(0, tile_h - 8)),
+                min(ov_w, max(0, tile_w - 8)),
             )
             x = tiled_vae(latent, self, **decode_seedvr2_args, encode=False)
             if x.ndim == 4:

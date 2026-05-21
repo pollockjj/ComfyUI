@@ -208,6 +208,35 @@ def test_seedvr2_decode_tiled_explicit_args_override_stale_tiled_args():
     }
 
 
+def test_seedvr2_decode_preserves_requested_spatial_tile_above_512(monkeypatch):
+    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
+        vae_mod.VideoAutoencoderKLWrapper
+    )
+    nn.Module.__init__(wrapper)
+
+    captured = {}
+
+    def fake_tiled_vae(latent, model, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1, 3, 1, 16, 16)
+
+    monkeypatch.setattr(vae_mod, "tiled_vae", fake_tiled_vae)
+
+    wrapper.decode(
+        torch.zeros(1, 16, 1, 2, 2),
+        seedvr2_tiling={
+            "enable_tiling": True,
+            "tile_size": (1024, 768),
+            "tile_overlap": (800, 800),
+            "temporal_size": 0,
+            "temporal_overlap": 0,
+        },
+    )
+
+    assert captured["tile_size"] == (1024, 768)
+    assert captured["tile_overlap"] == (800, 760)
+
+
 def test_seedvr2_decode_tiled_preserves_ambiguous_channel_first_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
