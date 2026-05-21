@@ -182,18 +182,32 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
     """
     full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
     limit_extra_devices = full_extra_devices[:max_gpus - 1]
+    limit_extra_device_set = set(limit_extra_devices)
+    cloned = copy.copy(upscale_model)
+    if hasattr(cloned, 'multigpu_clones'):
+        del cloned.multigpu_clones
     if len(limit_extra_devices) == 0:
         logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
-        return upscale_model
+        return cloned
 
-    cloned = copy.copy(upscale_model)
+    clone_source = copy.copy(upscale_model)
+    if hasattr(clone_source, 'multigpu_clones'):
+        del clone_source.multigpu_clones
     existing = getattr(upscale_model, 'multigpu_clones', None)
-    clones: dict[torch.device, object] = dict(existing) if existing else {}
+    clones: dict[torch.device, object] = {}
+    if existing:
+        for device, clone_desc in dict(existing).items():
+            if device not in limit_extra_device_set:
+                continue
+            clone_desc = copy.copy(clone_desc)
+            if hasattr(clone_desc, 'multigpu_clones'):
+                del clone_desc.multigpu_clones
+            clones[device] = clone_desc
 
     for device in limit_extra_devices:
         if device in clones:
             continue
-        clone_desc = copy.deepcopy(upscale_model)
+        clone_desc = copy.deepcopy(clone_source)
         clone_desc.model.eval()
         for p in clone_desc.model.parameters():
             p.requires_grad_(False)
