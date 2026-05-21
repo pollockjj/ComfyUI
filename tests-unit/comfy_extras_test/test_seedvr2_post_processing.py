@@ -37,10 +37,36 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
-    assert calls[0][0].shape == (2, 3, 8, 10)
-    assert calls[0][1].shape == (2, 3, 8, 10)
+    assert calls[0][0].shape == (2, 3, 9, 11)
+    assert calls[0][1].shape == (2, 3, 9, 11)
     assert torch.equal(calls[0][0], torch.full_like(calls[0][0], -0.5))
-    assert torch.equal(calls[0][1], torch.full_like(calls[0][1], 0.5))
+    assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
+
+
+def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
+    decoded = torch.full((1, 2, 8, 10, 3), 0.25)
+    reference = torch.full((1, 2, 16, 20, 3), 0.75)
+    resize_calls = []
+    lab_calls = []
+
+    def _resize(images, size, interpolation=None, antialias=None):
+        resize_calls.append((images.clone(), size, interpolation, antialias))
+        return torch.full((2, 3, size[0], size[1]), 0.5)
+
+    def _lab(content, style):
+        lab_calls.append((content.clone(), style.clone()))
+        return torch.zeros_like(content)
+
+    with patch.object(nodes_seedvr.TVF, "resize", _resize):
+        with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
+
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, torch.full_like(output, 0.5))
+    assert resize_calls[0][0].shape == (2, 3, 16, 20)
+    assert resize_calls[0][1] == (8, 10)
+    assert lab_calls[0][1].shape == (2, 3, 8, 10)
+    assert torch.equal(lab_calls[0][1], torch.zeros_like(lab_calls[0][1]))
 
 
 def test_seedvr2_post_processing_none_trims_and_crops_without_color_correction():
@@ -53,3 +79,15 @@ def test_seedvr2_post_processing_none_trims_and_crops_without_color_correction()
     assert lab.call_count == 0
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, decoded[:, :2, :8, :10, :])
+
+
+def test_seedvr2_post_processing_none_preserves_decoded_spatial_size_when_reference_is_larger():
+    decoded = torch.arange(1 * 3 * 8 * 10 * 3, dtype=torch.float32).reshape(1, 3, 8, 10, 3)
+    reference = torch.zeros(1, 2, 16, 20, 3)
+
+    with patch.object(nodes_seedvr, "lab_color_transfer") as lab:
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+
+    assert lab.call_count == 0
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, decoded[:, :2, :, :, :])

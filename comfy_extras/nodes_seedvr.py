@@ -271,13 +271,12 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
         b = min(decoded_5d.shape[0], reference_5d.shape[0])
         t = min(decoded_5d.shape[1], reference_5d.shape[1])
-        h = min(decoded_5d.shape[2], reference_5d.shape[2])
-        w = min(decoded_5d.shape[3], reference_5d.shape[3])
 
-        decoded_5d = decoded_5d[:b, :t, :h, :w, :]
-        reference_5d = reference_5d[:b, :t, :h, :w, :]
+        decoded_5d = decoded_5d[:b, :t, :, :, :]
+        reference_5d = reference_5d[:b, :t, :, :, :]
 
         if method == "lab":
+            reference_5d = cls._resize_reference(reference_5d, decoded_5d.shape[2], decoded_5d.shape[3])
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
@@ -314,6 +313,20 @@ class SeedVR2PostProcessing(io.ComfyNode):
         if images.amin().item() < 0.0:
             return images
         return images.mul(2.0).sub(1.0)
+
+    @staticmethod
+    def _resize_reference(reference, height, width):
+        if reference.shape[2] == height and reference.shape[3] == width:
+            return reference
+        b, t = reference.shape[:2]
+        reference_flat = rearrange(reference, "b t h w c -> (b t) c h w")
+        resized = TVF.resize(
+            reference_flat,
+            size=(height, width),
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=not (isinstance(reference_flat, torch.Tensor) and reference_flat.device.type == "mps"),
+        )
+        return rearrange(resized, "(b t) c h w -> b t h w c", b=b, t=t)
 
 
 class SeedVR2Conditioning(io.ComfyNode):

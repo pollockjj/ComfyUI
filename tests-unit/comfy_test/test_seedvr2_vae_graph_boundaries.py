@@ -123,6 +123,26 @@ def test_seedvr2_decode_and_decode_tiled_do_not_require_preprocessor_state(monke
     assert tuple(tiled.shape) == (2, 32, 40, 3)
 
 
+def test_seedvr2_decode_normalizes_public_channel_last_latents(monkeypatch):
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    vae = _make_vae(_DecodeWrapper())
+
+    latent = {"samples": torch.zeros(1, 2, 4, 5, 16)}
+    decoded = nodes_mod.VAEDecode().decode(vae, latent)[0]
+
+    assert tuple(decoded.shape) == (2, 32, 40, 3)
+    assert vae.first_stage_model.calls == [{"shape": (1, 16, 2, 4, 5), "seedvr2_tiling": None}]
+
+
+def test_seedvr2_decode_tiled_preserves_direct_channel_first_width_16(monkeypatch):
+    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
+    vae = _make_vae(_DecodeWrapper())
+
+    vae.decode_tiled_seedvr2(torch.zeros(1, 16, 2, 4, 16))
+
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 2, 4, 16)
+
+
 def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
