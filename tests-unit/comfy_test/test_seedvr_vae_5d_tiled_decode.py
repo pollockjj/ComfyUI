@@ -259,7 +259,7 @@ def test_seedvr2_decode_tiled_preserves_ambiguous_channel_first_latents(monkeypa
     assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 8, 8, 16)
 
 
-def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_latents(monkeypatch):
+def test_seedvr2_decode_tiled_does_not_repair_latent_layout(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
     vae.vae_dtype = torch.float32
@@ -278,7 +278,7 @@ def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_laten
     latent = torch.zeros(1, 9, 8, 8, 16)
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 9, 8, 8)
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 9, 8, 8, 16)
 
 
 def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypatch):

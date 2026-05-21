@@ -127,15 +127,14 @@ def test_seedvr2_decode_and_decode_tiled_do_not_require_preprocessor_state(monke
     assert tuple(tiled.shape) == (2, 32, 40, 3)
 
 
-def test_seedvr2_vaedecode_normalizes_legacy_nonambiguous_channel_last_latents(monkeypatch):
+def test_seedvr2_vaedecode_does_not_repair_latent_layout(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
 
     latent = {"samples": torch.zeros(1, 2, 4, 5, 16)}
-    decoded = nodes_mod.VAEDecode().decode(vae, latent)[0]
+    nodes_mod.VAEDecode().decode(vae, latent)
 
-    assert tuple(decoded.shape) == (2, 32, 40, 3)
-    assert vae.first_stage_model.calls == [{"shape": (1, 16, 2, 4, 5), "seedvr2_tiling": None}]
+    assert vae.first_stage_model.calls == [{"shape": (1, 2, 4, 5, 16), "seedvr2_tiling": None}]
 
 
 def test_seedvr2_vaedecode_keeps_public_channel_first_width_16_latents(monkeypatch):

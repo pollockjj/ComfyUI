@@ -987,18 +987,7 @@ class VAE:
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
-    def _normalize_seedvr2_decode_samples(self, samples):
-        if samples.ndim != 5:
-            return samples
-        latent_channels = getattr(self, "latent_channels", 16)
-        channel_first = samples.shape[1] == latent_channels
-        has_channel_last = samples.shape[-1] == latent_channels
-        if has_channel_last and not channel_first:
-            return samples.movedim(-1, 1)
-        return samples
-
     def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
-        samples = self._normalize_seedvr2_decode_samples(samples)
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
         args = {
             "enable_tiling": True,
@@ -1122,15 +1111,12 @@ class VAE:
                     c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 
-    def decode(self, samples_in, vae_options=None):
+    def decode(self, samples_in, vae_options={}):
         self.throw_exception_if_invalid()
-        vae_options = {} if vae_options is None else vae_options
         pixel_samples = None
         do_tile = False
         if self.latent_dim == 2 and samples_in.ndim == 5:
             samples_in = samples_in[:, :, 0]
-        if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-            samples_in = self._normalize_seedvr2_decode_samples(samples_in)
         try:
             memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
             model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
