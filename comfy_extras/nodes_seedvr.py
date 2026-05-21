@@ -287,6 +287,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
         if method == "lab":
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
+            reference_5d = reference_5d.to(device=decoded_5d.device)
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
@@ -321,9 +322,12 @@ class SeedVR2PostProcessing(io.ComfyNode):
         if decoded.shape[0] != 1:
             return decoded
         ref_b, ref_t = reference.shape[:2]
-        if decoded.shape[1] != ref_b * ref_t:
+        if ref_b < 1 or decoded.shape[1] % ref_b != 0:
             return decoded
-        return decoded.reshape(ref_b, ref_t, decoded.shape[2], decoded.shape[3], decoded.shape[4])
+        decoded_t = decoded.shape[1] // ref_b
+        if decoded_t < ref_t:
+            return decoded
+        return decoded.reshape(ref_b, decoded_t, decoded.shape[2], decoded.shape[3], decoded.shape[4])
 
     @staticmethod
     def _reference_target_size(decoded, reference, resolution):

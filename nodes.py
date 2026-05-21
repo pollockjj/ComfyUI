@@ -71,6 +71,16 @@ def _supports_kwarg(fn, name):
     )
 
 
+def _is_seedvr2_channel_last_latent(vae, latent):
+    is_seedvr2 = getattr(vae, "is_seedvr2", None)
+    return (
+        callable(is_seedvr2)
+        and is_seedvr2()
+        and getattr(latent, "ndim", 0) == 5
+        and latent.shape[-1] == getattr(vae, "latent_channels", 16)
+    )
+
+
 class CLIPTextEncode(ComfyNodeABC):
     @classmethod
     def INPUT_TYPES(s) -> InputTypeDict:
@@ -329,7 +339,7 @@ class VAEDecode:
             latent = latent.unbind()[0]
 
         kwargs = {}
-        if _supports_kwarg(vae.decode, "seedvr2_channel_last"):
+        if samples.get("seedvr2_channel_last", False) and _supports_kwarg(vae.decode, "seedvr2_channel_last"):
             kwargs["seedvr2_channel_last"] = True
         images = vae.decode(latent, **kwargs)
         if len(images.shape) == 5: #Combine batches
@@ -369,7 +379,7 @@ class VAEDecodeTiled:
 
         compression = vae.spacial_compression_decode()
         kwargs = {}
-        if _supports_kwarg(vae.decode_tiled, "seedvr2_channel_last"):
+        if samples.get("seedvr2_channel_last", False) and _supports_kwarg(vae.decode_tiled, "seedvr2_channel_last"):
             kwargs["seedvr2_channel_last"] = True
         images = vae.decode_tiled(
             samples["samples"],
@@ -396,7 +406,10 @@ class VAEEncode:
 
     def encode(self, vae, pixels):
         t = vae.encode(pixels)
-        return ({"samples":t}, )
+        output = {"samples": t}
+        if _is_seedvr2_channel_last_latent(vae, t):
+            output["seedvr2_channel_last"] = True
+        return (output, )
 
 class VAEEncodeTiled:
     @classmethod
@@ -414,7 +427,10 @@ class VAEEncodeTiled:
 
     def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8):
         t = vae.encode_tiled(pixels, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
-        return ({"samples": t}, )
+        output = {"samples": t}
+        if _is_seedvr2_channel_last_latent(vae, t):
+            output["seedvr2_channel_last"] = True
+        return (output, )
 
 class VAEEncodeForInpaint:
     @classmethod

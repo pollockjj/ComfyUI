@@ -45,6 +45,12 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
     assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
 
 
+def test_seedvr2_post_processing_lab_moves_reference_to_decoded_device():
+    source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing.execute)
+
+    assert "reference_5d.to(device=decoded_5d.device)" in source
+
+
 def test_seedvr2_post_processing_raw_conversion_does_not_probe_full_tensor_range():
     source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._to_seedvr2_raw)
 
@@ -88,6 +94,17 @@ def test_seedvr2_post_processing_none_trims_and_crops_without_color_correction()
     assert lab.call_count == 0
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, decoded[:, :2, :8, :10, :])
+
+
+def test_seedvr2_post_processing_restores_flattened_padded_batches_before_trimming():
+    decoded = torch.arange(10 * 4 * 6 * 1, dtype=torch.float32).reshape(10, 4, 6, 1)
+    reference = torch.zeros(2, 2, 4, 6, 1)
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 4).result[0]
+
+    expected = torch.cat((decoded[0:2], decoded[5:7]), dim=0)
+    assert tuple(output.shape) == (4, 4, 6, 1)
+    assert torch.equal(output, expected)
 
 
 def test_seedvr2_post_processing_none_preserves_decoded_spatial_size_when_reference_is_larger():

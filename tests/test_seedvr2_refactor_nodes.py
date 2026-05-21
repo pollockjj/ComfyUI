@@ -86,7 +86,7 @@ def test_seedvr2_ambiguous_channel_last_decode_requires_explicit_flag():
     torch.testing.assert_close(channel_last, sample.movedim(-1, 1))
 
 
-def test_seedvr2_tiled_decode_node_forces_channel_last():
+def test_seedvr2_tiled_decode_node_uses_channel_last_metadata():
     class FakeVAE:
         def __init__(self):
             self.decode_call = None
@@ -102,7 +102,10 @@ def test_seedvr2_tiled_decode_node_forces_channel_last():
             return torch.zeros((1, 1, 2, 2, 3), dtype=torch.float32)
 
     vae = FakeVAE()
-    samples = {"samples": torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32)}
+    samples = {
+        "samples": torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32),
+        "seedvr2_channel_last": True,
+    }
 
     nodes.VAEDecodeTiled().decode(
         vae,
@@ -116,7 +119,27 @@ def test_seedvr2_tiled_decode_node_forces_channel_last():
     assert vae.decode_call["seedvr2_channel_last"] is True
 
 
-def test_seedvr2_decode_node_forces_channel_last():
+def test_seedvr2_decode_node_uses_channel_last_metadata():
+    class FakeVAE:
+        def __init__(self):
+            self.decode_call = None
+
+        def decode(self, samples, **kwargs):
+            self.decode_call = kwargs
+            return torch.zeros((1, 1, 2, 2, 3), dtype=torch.float32)
+
+    vae = FakeVAE()
+    samples = {
+        "samples": torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32),
+        "seedvr2_channel_last": True,
+    }
+
+    nodes.VAEDecode().decode(vae, samples)
+
+    assert vae.decode_call["seedvr2_channel_last"] is True
+
+
+def test_seedvr2_decode_node_leaves_unmarked_ambiguous_latent_unforced():
     class FakeVAE:
         def __init__(self):
             self.decode_call = None
@@ -130,7 +153,37 @@ def test_seedvr2_decode_node_forces_channel_last():
 
     nodes.VAEDecode().decode(vae, samples)
 
-    assert vae.decode_call["seedvr2_channel_last"] is True
+    assert "seedvr2_channel_last" not in vae.decode_call
+
+
+def test_seedvr2_encode_node_marks_channel_last_latent_metadata():
+    class FakeVAE:
+        latent_channels = 16
+
+        def is_seedvr2(self):
+            return True
+
+        def encode(self, pixels):
+            return torch.zeros((1, 2, 3, 4, 16), dtype=torch.float32)
+
+    output = nodes.VAEEncode().encode(FakeVAE(), torch.zeros((1, 8, 8, 3)))[0]
+
+    assert output["seedvr2_channel_last"] is True
+
+
+def test_seedvr2_tiled_encode_node_marks_channel_last_latent_metadata():
+    class FakeVAE:
+        latent_channels = 16
+
+        def is_seedvr2(self):
+            return True
+
+        def encode_tiled(self, pixels, **kwargs):
+            return torch.zeros((1, 2, 3, 4, 16), dtype=torch.float32)
+
+    output = nodes.VAEEncodeTiled().encode(FakeVAE(), torch.zeros((1, 8, 8, 3)), 64, 0)[0]
+
+    assert output["seedvr2_channel_last"] is True
 
 
 def test_seedvr2_tiled_decode_node_preserves_legacy_decode_tiled_signature():
