@@ -19,6 +19,7 @@ class _NoHiddenStateWrapper:
 
 def _make_vae():
     vae = MagicMock()
+    vae.is_seedvr2 = MagicMock(return_value=True)
     vae.first_stage_model = _NoHiddenStateWrapper()
     vae.encode = MagicMock(side_effect=AssertionError("SeedVR2InputProcessing called encode"))
     vae.encode_tiled = MagicMock(side_effect=AssertionError("SeedVR2InputProcessing called encode_tiled"))
@@ -59,3 +60,16 @@ def test_input_processing_schema_and_execute_signature_are_preprocess_only():
     schema = nodes_seedvr.SeedVR2InputProcessing.define_schema()
     assert [item.id for item in schema.inputs] == ["images", "vae", "resolution"]
     assert [item.id for item in schema.outputs] == ["processed", "vae"]
+
+
+def test_input_processing_rejects_non_seedvr2_vae():
+    vae = _make_vae()
+    vae.is_seedvr2.return_value = False
+    images = torch.zeros(1, 3, 16, 16, 3)
+
+    try:
+        nodes_seedvr.SeedVR2InputProcessing.execute(images, vae, 120)
+    except ValueError as exc:
+        assert str(exc) == "SeedVR2InputProcessing requires a SeedVR2 VAE."
+    else:
+        raise AssertionError("SeedVR2InputProcessing accepted a non-SeedVR2 VAE")

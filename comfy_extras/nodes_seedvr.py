@@ -227,6 +227,9 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
     @classmethod
     def execute(cls, images, vae, resolution):
+        is_seedvr2 = getattr(vae, "is_seedvr2", None)
+        if not callable(is_seedvr2) or not is_seedvr2():
+            raise ValueError("SeedVR2InputProcessing requires a SeedVR2 VAE.")
         if images.dim() == 4:
             # Comfy video components arrive as a 4-D IMAGE frame sequence:
             # (frames, H, W, C). SeedVR2 consumes that as one video.
