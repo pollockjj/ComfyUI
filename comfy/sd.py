@@ -927,9 +927,6 @@ class VAE:
         self.size = comfy.model_management.module_size(self.first_stage_model)
         return self.size
 
-    def is_seedvr2(self):
-        return isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper)
-
     def throw_exception_if_invalid(self):
         if self.first_stage_model is None:
             raise RuntimeError("ERROR: VAE is invalid: None\n\nIf the VAE is from a checkpoint loader node your checkpoint does not contain a valid VAE.")
