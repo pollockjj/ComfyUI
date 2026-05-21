@@ -2390,7 +2390,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                     "use collapsed channel layout (B, 16*T, H, W); "
                     f"got shape {tuple(z.shape)}."
                 )
-            latent = z.view(b, 16, -1, h, w)
+            latent = z.reshape(b, 16, -1, h, w)
         else:
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: latent input must be "

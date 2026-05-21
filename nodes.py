@@ -48,13 +48,28 @@ import node_helpers
 if args.enable_manager:
     import comfyui_manager
 
+
 def before_node_execution():
     comfy.model_management.throw_exception_if_processing_interrupted()
+
 
 def interrupt_processing(value=True):
     comfy.model_management.interrupt_current_processing(value)
 
+
 MAX_RESOLUTION=16384
+
+
+def _supports_kwarg(fn, name):
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
 
 class CLIPTextEncode(ComfyNodeABC):
     @classmethod
@@ -313,7 +328,10 @@ class VAEDecode:
         if latent.is_nested:
             latent = latent.unbind()[0]
 
-        images = vae.decode(latent, seedvr2_channel_last=True)
+        kwargs = {}
+        if _supports_kwarg(vae.decode, "seedvr2_channel_last"):
+            kwargs["seedvr2_channel_last"] = True
+        images = vae.decode(latent, **kwargs)
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -350,6 +368,9 @@ class VAEDecodeTiled:
             temporal_overlap = None
 
         compression = vae.spacial_compression_decode()
+        kwargs = {}
+        if _supports_kwarg(vae.decode_tiled, "seedvr2_channel_last"):
+            kwargs["seedvr2_channel_last"] = True
         images = vae.decode_tiled(
             samples["samples"],
             tile_x=tile_size // compression,
@@ -357,7 +378,7 @@ class VAEDecodeTiled:
             overlap=overlap // compression,
             tile_t=temporal_size,
             overlap_t=temporal_overlap,
-            seedvr2_channel_last=True,
+            **kwargs,
         )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])

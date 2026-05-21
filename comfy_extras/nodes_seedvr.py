@@ -227,8 +227,13 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
     @classmethod
     def execute(cls, images, vae, resolution):
-        if images.dim() != 5: # add the t dim
-            images = images.unsqueeze(0)
+        if images.dim() == 4:
+            images = images.unsqueeze(1)
+        elif images.dim() != 5:
+            raise ValueError(
+                "SeedVR2InputProcessing: expected 4-D or 5-D IMAGE tensor, "
+                f"got shape {tuple(images.shape)}"
+            )
         images = images.permute(0, 1, 4, 2, 3)
 
         b, t, c, h, w = images.shape

@@ -104,7 +104,14 @@ def test_seedvr2_tiled_decode_node_forces_channel_last():
     vae = FakeVAE()
     samples = {"samples": torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32)}
 
-    nodes.VAEDecodeTiled().decode(vae, samples, tile_size=64, overlap=0, temporal_size=64, temporal_overlap=8)
+    nodes.VAEDecodeTiled().decode(
+        vae,
+        samples,
+        tile_size=64,
+        overlap=0,
+        temporal_size=64,
+        temporal_overlap=8,
+    )
 
     assert vae.decode_call["seedvr2_channel_last"] is True
 
@@ -124,3 +131,45 @@ def test_seedvr2_decode_node_forces_channel_last():
     nodes.VAEDecode().decode(vae, samples)
 
     assert vae.decode_call["seedvr2_channel_last"] is True
+
+
+def test_seedvr2_tiled_decode_node_preserves_legacy_decode_tiled_signature():
+    class FakeVAE:
+        def __init__(self):
+            self.decode_call = None
+
+        def temporal_compression_decode(self):
+            return 4
+
+        def spacial_compression_decode(self):
+            return 8
+
+        def decode_tiled(self, samples, tile_x, tile_y, overlap, tile_t, overlap_t):
+            self.decode_call = {
+                "tile_x": tile_x,
+                "tile_y": tile_y,
+                "overlap": overlap,
+                "tile_t": tile_t,
+                "overlap_t": overlap_t,
+            }
+            return torch.zeros((1, 1, 2, 2, 3), dtype=torch.float32)
+
+    vae = FakeVAE()
+    samples = {"samples": torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32)}
+
+    nodes.VAEDecodeTiled().decode(
+        vae,
+        samples,
+        tile_size=64,
+        overlap=0,
+        temporal_size=64,
+        temporal_overlap=8,
+    )
+
+    assert vae.decode_call == {
+        "tile_x": 8,
+        "tile_y": 8,
+        "overlap": 0,
+        "tile_t": 16,
+        "overlap_t": 2,
+    }

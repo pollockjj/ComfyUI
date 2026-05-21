@@ -45,6 +45,18 @@ def test_seedvr2_wrapper_decode_accepts_collapsed_4d_latents_without_preprocesso
     assert wrapper.calls == [(1, 16, 2, 4, 5)]
 
 
+def test_seedvr2_wrapper_decode_accepts_noncontiguous_collapsed_4d_latents():
+    wrapper = _Wrapper()
+    latent = torch.zeros(1, 4, 5, 32).permute(0, 3, 1, 2)
+
+    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_stub):
+        out = wrapper.decode(latent)
+
+    assert not latent.is_contiguous()
+    assert tuple(out.shape) == (1, 3, 2, 32, 40)
+    assert wrapper.calls == [(1, 16, 2, 4, 5)]
+
+
 def test_seedvr2_wrapper_decode_rejects_non_dict_tiling_options():
     wrapper = _Wrapper()
 
