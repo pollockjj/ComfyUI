@@ -44,7 +44,7 @@ def test_seedvr2_postprocessing_preserves_real_black_reference_edges():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 128)
 
     assert output.shape == (1, 128, 176, 3)
 
@@ -53,7 +53,7 @@ def test_seedvr2_postprocessing_crops_height_only_to_raw_reference_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 120, 176, 3), 0.25, dtype=torch.float32)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120)
 
     assert output.shape == (1, 120, 176, 3)
 
@@ -69,7 +69,7 @@ def test_seedvr2_postprocessing_lab_uses_raw_reference_size(monkeypatch):
 
     monkeypatch.setattr(nodes_seedvr, "lab_color_transfer", fake_lab_color_transfer)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab", 120)
 
     assert calls == [((1, 3, 120, 169), (1, 3, 120, 169))]
     assert output.shape == (1, 120, 168, 3)

@@ -329,8 +329,6 @@ class SeedVR2PostProcessing(io.ComfyNode):
     def _reference_target_size(decoded, reference, resolution):
         decoded_h, decoded_w = decoded.shape[2:4]
         reference_h, reference_w = reference.shape[2:4]
-        if reference_h <= decoded_h and reference_w <= decoded_w:
-            return reference_h, reference_w
         if reference_h <= reference_w:
             target_h = resolution
             target_w = round(reference_w * resolution / reference_h)
