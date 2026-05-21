@@ -104,7 +104,6 @@
   "9": {
     "inputs": {
       "method": "none",
-      "resolution": 120,
       "decoded": [
         "8",
         0
@@ -118,7 +117,7 @@
   },
   "10": {
     "inputs": {
-      "filename_prefix": "issue276_seedvr2_simple_refactor",
+      "filename_prefix": "seedvr2_simple_refactor",
       "images": [
         "9",
         0
