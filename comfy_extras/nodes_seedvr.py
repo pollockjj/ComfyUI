@@ -329,10 +329,6 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
     @staticmethod
     def _to_seedvr2_raw(images):
-        if images.numel() == 0:
-            return images
-        if images.amin().item() < 0.0:
-            return images
         return images.mul(2.0).sub(1.0)
 
     @staticmethod

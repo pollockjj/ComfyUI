@@ -1,3 +1,4 @@
+import inspect
 from unittest.mock import patch
 
 import torch
@@ -41,6 +42,13 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
     assert calls[0][1].shape == (2, 3, 8, 10)
     assert torch.equal(calls[0][0], torch.full_like(calls[0][0], -0.5))
     assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
+
+
+def test_seedvr2_post_processing_raw_conversion_does_not_probe_full_tensor_range():
+    source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._to_seedvr2_raw)
+
+    assert ".amin" not in source
+    assert ".item" not in source
 
 
 def test_seedvr2_post_processing_lab_resizes_full_reference_frame():

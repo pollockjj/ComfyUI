@@ -1132,8 +1132,9 @@ class VAE:
                     c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 
-    def decode(self, samples_in, vae_options={}, seedvr2_channel_last=False):
+    def decode(self, samples_in, vae_options=None, seedvr2_channel_last=False):
         self.throw_exception_if_invalid()
+        vae_options = {} if vae_options is None else vae_options
         pixel_samples = None
         do_tile = False
         if self.latent_dim == 2 and samples_in.ndim == 5:
