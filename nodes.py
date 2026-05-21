@@ -48,13 +48,38 @@ import node_helpers
 if args.enable_manager:
     import comfyui_manager
 
+
 def before_node_execution():
     comfy.model_management.throw_exception_if_processing_interrupted()
+
 
 def interrupt_processing(value=True):
     comfy.model_management.interrupt_current_processing(value)
 
+
 MAX_RESOLUTION=16384
+
+
+def _supports_kwarg(fn, name):
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+def _is_seedvr2_channel_last_latent(vae, latent):
+    is_seedvr2 = getattr(vae, "is_seedvr2", None)
+    return (
+        callable(is_seedvr2)
+        and is_seedvr2()
+        and getattr(latent, "ndim", 0) == 5
+        and latent.shape[-1] == getattr(vae, "latent_channels", 16)
+    )
+
 
 class CLIPTextEncode(ComfyNodeABC):
     @classmethod
@@ -313,7 +338,10 @@ class VAEDecode:
         if latent.is_nested:
             latent = latent.unbind()[0]
 
-        images = vae.decode(latent)
+        kwargs = {}
+        if samples.get("seedvr2_channel_last", False) and _supports_kwarg(vae.decode, "seedvr2_channel_last"):
+            kwargs["seedvr2_channel_last"] = True
+        images = vae.decode(latent, **kwargs)
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -350,7 +378,18 @@ class VAEDecodeTiled:
             temporal_overlap = None
 
         compression = vae.spacial_compression_decode()
-        images = vae.decode_tiled(samples["samples"], tile_x=tile_size // compression, tile_y=tile_size // compression, overlap=overlap // compression, tile_t=temporal_size, overlap_t=temporal_overlap)
+        kwargs = {}
+        if samples.get("seedvr2_channel_last", False) and _supports_kwarg(vae.decode_tiled, "seedvr2_channel_last"):
+            kwargs["seedvr2_channel_last"] = True
+        images = vae.decode_tiled(
+            samples["samples"],
+            tile_x=tile_size // compression,
+            tile_y=tile_size // compression,
+            overlap=overlap // compression,
+            tile_t=temporal_size,
+            overlap_t=temporal_overlap,
+            **kwargs,
+        )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -367,7 +406,10 @@ class VAEEncode:
 
     def encode(self, vae, pixels):
         t = vae.encode(pixels)
-        return ({"samples":t}, )
+        output = {"samples": t}
+        if _is_seedvr2_channel_last_latent(vae, t):
+            output["seedvr2_channel_last"] = True
+        return (output, )
 
 class VAEEncodeTiled:
     @classmethod
@@ -385,7 +427,10 @@ class VAEEncodeTiled:
 
     def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8):
         t = vae.encode_tiled(pixels, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
-        return ({"samples": t}, )
+        output = {"samples": t}
+        if _is_seedvr2_channel_last_latent(vae, t):
+            output["seedvr2_channel_last"] = True
+        return (output, )
 
 class VAEEncodeForInpaint:
     @classmethod
@@ -528,6 +573,8 @@ class SaveLatent:
         output = {}
         output["latent_tensor"] = samples["samples"].contiguous()
         output["latent_format_version_0"] = torch.tensor([])
+        if samples.get("seedvr2_channel_last", False):
+            output["seedvr2_channel_last"] = torch.tensor([True])
 
         comfy.utils.save_torch_file(output, file, metadata=metadata)
         return { "ui": { "latents": results } }
@@ -554,6 +601,9 @@ class LoadLatent:
         if "latent_format_version_0" not in latent:
             multiplier = 1.0 / 0.18215
         samples = {"samples": latent["latent_tensor"].float() * multiplier}
+        seedvr2_channel_last = latent.get("seedvr2_channel_last", None)
+        if torch.is_tensor(seedvr2_channel_last) and seedvr2_channel_last.numel() == 1 and bool(seedvr2_channel_last.item()):
+            samples["seedvr2_channel_last"] = True
         return (samples, )
 
     @classmethod

@@ -58,8 +58,8 @@ class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
         self.spatial_downsample_factor = 8
         self.temporal_downsample_factor = 4
 
-    def decode(self, z):
-        self.calls.append({"tiled_args": dict(self.tiled_args), "shape": tuple(z.shape)})
+    def decode(self, z, seedvr2_tiling=None):
+        self.calls.append({"seedvr2_tiling": seedvr2_tiling, "shape": tuple(z.shape)})
         return z
 
 
@@ -150,7 +150,7 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
     assert vae.first_stage_model.calls == [
         {
             "shape": (1, 16, 3, 2, 2),
-            "tiled_args": {
+            "seedvr2_tiling": {
                 "enable_tiling": True,
                 "tile_size": (16, 16),
                 "tile_overlap": (8, 8),
@@ -191,13 +191,13 @@ def test_seedvr2_decode_tiled_explicit_args_override_stale_tiled_args():
         overlap_t=0,
     )
 
-    captured = vae.first_stage_model.calls[0]["tiled_args"]
+    captured = vae.first_stage_model.calls[0]["seedvr2_tiling"]
     assert captured["enable_tiling"] is True
     assert captured["tile_size"] == (256, 256)
     assert captured["tile_overlap"] == (64, 64)
     assert captured["temporal_size"] == 0
     assert captured["temporal_overlap"] == 0
-    assert captured["preserved"] == "metadata"
+    assert "preserved" not in captured
     assert vae.first_stage_model.tiled_args == {
         "enable_tiling": False,
         "tile_size": (384, 384),
@@ -208,10 +208,9 @@ def test_seedvr2_decode_tiled_explicit_args_override_stale_tiled_args():
     }
 
 
-def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(monkeypatch):
+def test_seedvr2_decode_tiled_preserves_ambiguous_channel_first_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 61, 64, 64)
     vae.vae_dtype = torch.float32
     vae.device = torch.device("cpu")
     vae.output_device = torch.device("cpu")
@@ -228,13 +227,12 @@ def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(mon
     latent = torch.zeros(1, 16, 8, 8, 16)
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 16, 8, 8)
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 8, 8, 16)
 
 
 def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 32, 64, 64)
     vae.vae_dtype = torch.float32
     vae.device = torch.device("cpu")
     vae.output_device = torch.device("cpu")
@@ -274,7 +272,7 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
     assert vae.first_stage_model.calls[0]["shape"] == (1, 48, 2, 2)
-    assert vae.first_stage_model.calls[0]["tiled_args"]["temporal_overlap"] == 4
+    assert vae.first_stage_model.calls[0]["seedvr2_tiling"]["temporal_overlap"] == 4
 
 
 def test_seedvr2_decode_tiled_gates_multigpu_clone_models(monkeypatch):
@@ -296,7 +294,7 @@ def test_seedvr2_decode_tiled_gates_multigpu_clone_models(monkeypatch):
     latent = torch.zeros(1, 16, 3, 2, 2)
     vae.decode_tiled_seedvr2(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert "multigpu_vae_models" not in vae.first_stage_model.calls[0]["tiled_args"]
+    assert "multigpu_vae_models" not in vae.first_stage_model.calls[0]["seedvr2_tiling"]
     assert clone.first_stage_model.tiled_args == {"stale": "clone"}
     assert clone.first_stage_model.to_calls == []
 
