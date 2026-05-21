@@ -2,6 +2,11 @@ from types import SimpleNamespace
 
 import torch
 
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
 import comfy.sd
 import comfy_extras.nodes_seedvr as nodes_seedvr
 import nodes
@@ -27,6 +32,28 @@ def test_seedvr2_postprocessing_crops_processed_reference_padding():
     (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
 
     assert output.shape == (1, 120, 168, 3)
+
+
+def test_seedvr2_postprocessing_crops_width_only_reference_padding():
+    decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
+    reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
+    reference[:, :, :, :169, :] = 0.25
+    reference[:, :, :, 169:, :] = -1.0
+
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+
+    assert output.shape == (1, 128, 168, 3)
+
+
+def test_seedvr2_postprocessing_crops_height_only_reference_padding():
+    decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
+    reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
+    reference[:, :, :120, :, :] = 0.25
+    reference[:, :, 120:, :, :] = -1.0
+
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+
+    assert output.shape == (1, 120, 176, 3)
 
 
 def test_seedvr2_postprocessing_lab_uses_unpadded_reference(monkeypatch):

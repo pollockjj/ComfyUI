@@ -335,10 +335,11 @@ class SeedVR2PostProcessing(io.ComfyNode):
         col_is_pad = torch.isclose(reference, pad_value).all(dim=(0, 1, 2, 4))
         visible_h = SeedVR2PostProcessing._first_trailing_pad_index(row_is_pad, height)
         visible_w = SeedVR2PostProcessing._first_trailing_pad_index(col_is_pad, width)
-        has_rectangular_padding = visible_h < height and visible_w < width
-        if not has_rectangular_padding:
+        row_padding = visible_h < height and height % 16 == 0
+        col_padding = visible_w < width and width % 16 == 0
+        if not (row_padding or col_padding):
             return height, width, False
-        return visible_h, visible_w, True
+        return visible_h if row_padding else height, visible_w if col_padding else width, True
 
     @staticmethod
     def _first_trailing_pad_index(mask, fallback):
