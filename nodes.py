@@ -24,7 +24,6 @@ import safetensors.torch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
 import comfy.diffusers_load
-import comfy.ldm.seedvr.vae
 import comfy.samplers
 import comfy.sample
 import comfy.sd
@@ -314,10 +313,7 @@ class VAEDecode:
         if latent.is_nested:
             latent = latent.unbind()[0]
 
-        if isinstance(getattr(vae, "first_stage_model", None), comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-            images = vae.decode(latent, seedvr2_channel_last=True)
-        else:
-            images = vae.decode(latent)
+        images = vae.decode(latent, seedvr2_channel_last=True)
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -354,25 +350,15 @@ class VAEDecodeTiled:
             temporal_overlap = None
 
         compression = vae.spacial_compression_decode()
-        if isinstance(getattr(vae, "first_stage_model", None), comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-            images = vae.decode_tiled(
-                samples["samples"],
-                tile_x=tile_size // compression,
-                tile_y=tile_size // compression,
-                overlap=overlap // compression,
-                tile_t=temporal_size,
-                overlap_t=temporal_overlap,
-                seedvr2_channel_last=True,
-            )
-        else:
-            images = vae.decode_tiled(
-                samples["samples"],
-                tile_x=tile_size // compression,
-                tile_y=tile_size // compression,
-                overlap=overlap // compression,
-                tile_t=temporal_size,
-                overlap_t=temporal_overlap,
-            )
+        images = vae.decode_tiled(
+            samples["samples"],
+            tile_x=tile_size // compression,
+            tile_y=tile_size // compression,
+            overlap=overlap // compression,
+            tile_t=temporal_size,
+            overlap_t=temporal_overlap,
+            seedvr2_channel_last=True,
+        )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
