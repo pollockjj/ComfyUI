@@ -83,7 +83,9 @@ def test_seedvr2_encode_and_encode_tiled_preserve_native_latent_contract(monkeyp
     vae = _make_vae(_EncodeWrapper(encoded))
     pixels = torch.zeros(1, 5, 32, 40, 3)
 
-    node_latent = nodes_mod.VAEEncode().encode(vae, pixels)[0]["samples"]
+    node_output = nodes_mod.VAEEncode().encode(vae, pixels)[0]
+    node_latent = node_output["samples"]
+    assert node_output["seedvr2_channel_last"] is True
     assert tuple(node_latent.shape) == (1, 2, 4, 5, 16)
     assert node_latent.dtype == torch.float32
     assert node_latent.stride()[-1] == 1
@@ -91,14 +93,16 @@ def test_seedvr2_encode_and_encode_tiled_preserve_native_latent_contract(monkeyp
 
     tiled = torch.full((1, 16, 2, 4, 5), 3.0)
     monkeypatch.setattr(seedvr_vae_mod, "tiled_vae", MagicMock(return_value=tiled))
-    tiled_latent = nodes_mod.VAEEncodeTiled().encode(
+    tiled_output = nodes_mod.VAEEncodeTiled().encode(
         vae,
         pixels,
         tile_size=512,
         overlap=64,
         temporal_size=16,
         temporal_overlap=4,
-    )[0]["samples"]
+    )[0]
+    tiled_latent = tiled_output["samples"]
+    assert tiled_output["seedvr2_channel_last"] is True
     assert tuple(tiled_latent.shape) == (1, 2, 4, 5, 16)
     assert tiled_latent.dtype == torch.float32
     assert torch.equal(tiled_latent, torch.full_like(tiled_latent, 3.0 * 0.9152))
@@ -127,7 +131,7 @@ def test_seedvr2_vaedecode_normalizes_public_channel_last_latents(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
 
-    latent = {"samples": torch.zeros(1, 2, 4, 5, 16)}
+    latent = {"samples": torch.zeros(1, 2, 4, 5, 16), "seedvr2_channel_last": True}
     decoded = nodes_mod.VAEDecode().decode(vae, latent)[0]
 
     assert tuple(decoded.shape) == (2, 32, 40, 3)
@@ -138,7 +142,10 @@ def test_seedvr2_vaedecode_normalizes_public_temporal_16_channel_last_latents(mo
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
 
-    nodes_mod.VAEDecode().decode(vae, {"samples": torch.zeros(1, 16, 4, 5, 16)})
+    nodes_mod.VAEDecode().decode(
+        vae,
+        {"samples": torch.zeros(1, 16, 4, 5, 16), "seedvr2_channel_last": True},
+    )
 
     assert vae.first_stage_model.calls == [{"shape": (1, 16, 16, 4, 5), "seedvr2_tiling": None}]
 
@@ -167,7 +174,7 @@ def test_seedvr2_vaedecode_tiled_normalizes_public_temporal_16_channel_last_late
 
     nodes_mod.VAEDecodeTiled().decode(
         vae,
-        {"samples": torch.zeros(1, 16, 4, 5, 16)},
+        {"samples": torch.zeros(1, 16, 4, 5, 16), "seedvr2_channel_last": True},
         tile_size=512,
         overlap=64,
         temporal_size=16,
