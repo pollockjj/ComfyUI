@@ -268,12 +268,18 @@ class SeedVR2PostProcessing(io.ComfyNode):
     def execute(cls, decoded, reference, method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
         reference_5d, _ = cls._as_bthwc(reference)
+        decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
 
         b = min(decoded_5d.shape[0], reference_5d.shape[0])
         t = min(decoded_5d.shape[1], reference_5d.shape[1])
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
         reference_5d = reference_5d[:b, :t, :, :, :]
+        target_h, target_w = cls._reference_visible_size(reference_5d)
+        target_h = min(target_h, decoded_5d.shape[2])
+        target_w = min(target_w, decoded_5d.shape[3])
+        decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
+        reference_5d = reference_5d[:, :, :target_h, :target_w, :]
 
         if method == "lab":
             reference_5d = cls._resize_reference(reference_5d, decoded_5d.shape[2], decoded_5d.shape[3])
@@ -305,6 +311,35 @@ class SeedVR2PostProcessing(io.ComfyNode):
         raise ValueError(
             f"SeedVR2PostProcessing: expected 4-D or 5-D IMAGE tensor, got shape {tuple(images.shape)}"
         )
+
+    @staticmethod
+    def _restore_reference_batch_time(decoded, reference):
+        if decoded.shape[0] != 1:
+            return decoded
+        ref_b, ref_t = reference.shape[:2]
+        if decoded.shape[1] != ref_b * ref_t:
+            return decoded
+        return decoded.reshape(ref_b, ref_t, decoded.shape[2], decoded.shape[3], decoded.shape[4])
+
+    @staticmethod
+    def _reference_visible_size(reference):
+        height, width = reference.shape[2:4]
+        if reference.numel() == 0 or reference.amin().item() >= 0.0:
+            return height, width
+
+        pad_value = torch.as_tensor(-1.0, device=reference.device, dtype=reference.dtype)
+        row_is_pad = torch.isclose(reference, pad_value).all(dim=(0, 1, 3, 4))
+        col_is_pad = torch.isclose(reference, pad_value).all(dim=(0, 1, 2, 4))
+        visible_h = SeedVR2PostProcessing._first_trailing_pad_index(row_is_pad, height)
+        visible_w = SeedVR2PostProcessing._first_trailing_pad_index(col_is_pad, width)
+        return visible_h, visible_w
+
+    @staticmethod
+    def _first_trailing_pad_index(mask, fallback):
+        non_pad = torch.nonzero(~mask, as_tuple=False)
+        if non_pad.numel() == 0:
+            return fallback
+        return int(non_pad[-1].item()) + 1
 
     @staticmethod
     def _to_seedvr2_raw(images):
