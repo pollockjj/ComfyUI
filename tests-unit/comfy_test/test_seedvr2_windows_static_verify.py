@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -8,7 +10,7 @@ def _read(relative):
     return (ROOT / relative).read_text()
 
 
-def main():
+def test_seedvr2_windows_static_contract_tokens():
     nodes = _read("comfy_extras/nodes_seedvr.py")
     sd = _read("comfy/sd.py")
     vae = _read("comfy/ldm/seedvr/vae.py")
@@ -23,15 +25,13 @@ def main():
     ]
     for needle in required:
         if needle not in nodes + sd + vae:
-            raise SystemExit(f"missing required static token: {needle}")
+            pytest.fail(f"missing required static token: {needle}")
 
     forbidden = ["original_image_video", "img_dims", "tiled_args"]
     for needle in forbidden:
         if needle in nodes + sd + vae:
-            raise SystemExit(f"forbidden hidden-state token remains: {needle}")
-
-    print("PASS seedvr2 windows static verify")
+            pytest.fail(f"forbidden hidden-state token remains: {needle}")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(pytest.main([__file__]))

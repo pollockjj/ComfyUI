@@ -208,10 +208,9 @@ def test_seedvr2_decode_tiled_explicit_args_override_stale_tiled_args():
     }
 
 
-def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(monkeypatch):
+def test_seedvr2_decode_tiled_preserves_ambiguous_channel_first_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 61, 64, 64)
     vae.vae_dtype = torch.float32
     vae.device = torch.device("cpu")
     vae.output_device = torch.device("cpu")
@@ -228,13 +227,12 @@ def test_seedvr2_decode_tiled_disambiguates_channel_last_temporal_16_latents(mon
     latent = torch.zeros(1, 16, 8, 8, 16)
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
-    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 16, 8, 8)
+    assert vae.first_stage_model.calls[0]["shape"] == (1, 16, 8, 8, 16)
 
 
 def test_seedvr2_decode_tiled_disambiguates_temporally_padded_channel_last_latents(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.first_stage_model.original_image_video = torch.zeros(1, 3, 32, 64, 64)
     vae.vae_dtype = torch.float32
     vae.device = torch.device("cpu")
     vae.output_device = torch.device("cpu")

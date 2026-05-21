@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 GRAPHS = [
@@ -31,22 +33,21 @@ ALLOWED = {
 REQUIRED = {"SeedVR2InputProcessing", "SeedVR2PostProcessing"}
 
 
-def main():
+def test_seedvr2_workflow_graphs_use_native_boundary_nodes():
     for graph in GRAPHS:
         data = json.loads(graph.read_text())
         classes = {node["class_type"] for node in data.values()}
         unexpected = classes - ALLOWED
         missing = REQUIRED - classes
         if unexpected:
-            raise SystemExit(f"{graph}: unexpected class types {sorted(unexpected)}")
+            pytest.fail(f"{graph}: unexpected class types {sorted(unexpected)}")
         if missing:
-            raise SystemExit(f"{graph}: missing required class types {sorted(missing)}")
+            pytest.fail(f"{graph}: missing required class types {sorted(missing)}")
         if not {"VAEEncode", "VAEEncodeTiled"}.intersection(classes):
-            raise SystemExit(f"{graph}: missing VAE encode boundary node")
+            pytest.fail(f"{graph}: missing VAE encode boundary node")
         if not {"VAEDecode", "VAEDecodeTiled"}.intersection(classes):
-            raise SystemExit(f"{graph}: missing VAE decode boundary node")
-    print("PASS seedvr2 workflow static audit")
+            pytest.fail(f"{graph}: missing VAE decode boundary node")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(pytest.main([__file__]))
