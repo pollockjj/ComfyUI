@@ -16,7 +16,7 @@ def test_seedvr2_postprocessing_restores_flat_decoded_batch_time():
     decoded = torch.arange(6 * 4 * 6 * 1, dtype=torch.float32).reshape(6, 4, 6, 1)
     reference = torch.ones((2, 3, 4, 6, 1), dtype=torch.float32)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120)
 
     assert output.shape == (6, 4, 6, 1)
     torch.testing.assert_close(output, decoded)
@@ -26,7 +26,7 @@ def test_seedvr2_postprocessing_crops_to_raw_reference_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120)
 
     assert output.shape == (1, 120, 168, 3)
 
@@ -35,7 +35,7 @@ def test_seedvr2_postprocessing_crops_larger_raw_reference_to_resized_visible_ar
     decoded = torch.ones((1, 128, 160, 3), dtype=torch.float32)
     reference = torch.full((1, 1, 480, 640, 3), 0.25, dtype=torch.float32)
 
-    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none")
+    (output,) = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120)
 
     assert output.shape == (1, 120, 160, 3)
 

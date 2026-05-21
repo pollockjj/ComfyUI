@@ -121,6 +121,7 @@
   "9": {
     "inputs": {
       "method": "lab",
+      "resolution": 120,
       "decoded": [
         "8",
         0

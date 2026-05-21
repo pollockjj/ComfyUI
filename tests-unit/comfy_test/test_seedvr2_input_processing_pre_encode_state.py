@@ -44,7 +44,7 @@ def test_input_processing_returns_processed_image_and_same_vae_without_encoding(
     vae.decode_tiled.assert_not_called()
 
 
-def test_input_processing_preserves_4d_image_batch_as_batch_not_time():
+def test_input_processing_treats_4d_image_as_one_video_frame_sequence():
     vae = _make_vae()
     images = torch.zeros(2, 16, 16, 3)
 
@@ -52,7 +52,7 @@ def test_input_processing_preserves_4d_image_batch_as_batch_not_time():
 
     processed, returned_vae = output.result
     assert returned_vae is vae
-    assert tuple(processed.shape) == (2, 1, 128, 128, 3)
+    assert tuple(processed.shape) == (1, 5, 128, 128, 3)
 
 
 def test_input_processing_schema_and_execute_signature_are_preprocess_only():

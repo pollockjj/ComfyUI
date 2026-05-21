@@ -18,9 +18,10 @@ def _schema_ids(items):
 def test_seedvr2_post_processing_schema():
     schema = nodes_seedvr.SeedVR2PostProcessing.define_schema()
 
-    assert _schema_ids(schema.inputs) == ["decoded", "reference", "method"]
+    assert _schema_ids(schema.inputs) == ["decoded", "reference", "method", "resolution"]
     assert schema.inputs[2].options == ["lab", "none"]
     assert schema.inputs[2].default == "lab"
+    assert schema.inputs[3].default == 1280
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 
@@ -67,7 +68,7 @@ def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
 
     with patch.object(nodes_seedvr.TVF, "resize", _resize):
         with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
-            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
+            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab", 8).result[0]
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
@@ -105,9 +106,18 @@ def test_seedvr2_post_processing_crops_large_raw_reference_to_visible_resize():
     decoded = torch.ones((1, 1, 128, 160, 3), dtype=torch.float32)
     reference = torch.ones((1, 1, 480, 640, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
 
     assert tuple(output.shape) == (1, 1, 120, 160, 3)
+
+
+def test_seedvr2_post_processing_crops_to_explicit_visible_resize_width():
+    decoded = torch.ones((1, 1, 128, 224, 3), dtype=torch.float32)
+    reference = torch.ones((1, 1, 1080, 1920, 3), dtype=torch.float32)
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+
+    assert tuple(output.shape) == (1, 1, 120, 212, 3)
 
 
 def test_seedvr2_post_processing_none_preserves_black_bottom_row_content():

@@ -104,6 +104,7 @@
   "9": {
     "inputs": {
       "method": "none",
+      "resolution": 120,
       "decoded": [
         "8",
         0
