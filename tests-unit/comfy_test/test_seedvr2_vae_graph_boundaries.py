@@ -38,8 +38,8 @@ class _DecodeWrapper(seedvr_vae_mod.VideoAutoencoderKLWrapper):
         self.temporal_downsample_factor = 4
         self.calls = []
 
-    def decode(self, z, tiled_args=None):
-        self.calls.append({"shape": tuple(z.shape), "tiled_args": tiled_args})
+    def decode(self, z, seedvr2_tiling=None):
+        self.calls.append({"shape": tuple(z.shape), "seedvr2_tiling": seedvr2_tiling})
         if z.ndim == 4:
             b, tc, h, w = z.shape
             t = tc // 16
@@ -139,7 +139,7 @@ def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monk
     assert vae.first_stage_model.calls == [
         {
             "shape": (1, 16, 2, 4, 5),
-            "tiled_args": {
+            "seedvr2_tiling": {
                 "enable_tiling": True,
                 "tile_size": (512, 512),
                 "tile_overlap": (64, 64),

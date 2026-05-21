@@ -101,7 +101,7 @@ def test_seedvr2_3d_routes_to_encode_tiled_seedvr2_on_oom():
     )
 
 
-def test_seedvr2_oom_fallback_preserves_existing_wrapper_tile_args():
+def test_seedvr2_oom_fallback_uses_explicit_seedvr2_tile_defaults():
     vae = _make_seedvr2_vae()
     vae.first_stage_model.tiled_args = {
         "tile_size": (128, 128),
@@ -126,7 +126,11 @@ def test_seedvr2_oom_fallback_preserves_existing_wrapper_tile_args():
         vae.encode(pixel_samples)
 
     assert seedvr2_call.call_count == 1
-    assert seedvr2_call.call_args.kwargs == {}
+    assert seedvr2_call.call_args.kwargs == {
+        "tile_x": 256,
+        "tile_y": 256,
+        "overlap": 64,
+    }
 
 
 def test_oom_fallback_dispatcher_breakdown():

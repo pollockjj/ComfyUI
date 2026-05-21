@@ -2366,12 +2366,12 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         z = p.squeeze(2)
         return z, p
 
-    def decode(self, z, tiled_args=None):
-        tiled_args = {} if tiled_args is None else tiled_args
-        if not isinstance(tiled_args, dict):
+    def decode(self, z, seedvr2_tiling=None):
+        seedvr2_tiling = {} if seedvr2_tiling is None else seedvr2_tiling
+        if not isinstance(seedvr2_tiling, dict):
             raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `tiled_args` must be a dict; "
-                f"got {type(tiled_args).__name__} with value {tiled_args!r}."
+                "SeedVR2 VideoAutoencoderKLWrapper.decode: `seedvr2_tiling` must be a dict; "
+                f"got {type(seedvr2_tiling).__name__} with value {seedvr2_tiling!r}."
             )
 
         if z.ndim == 5:
@@ -2390,24 +2390,24 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         latent = latent / scale + shift
 
         self.device = latent.device
-        self.enable_tiling = tiled_args.get("enable_tiling", False)
+        self.enable_tiling = seedvr2_tiling.get("enable_tiling", False)
 
         if self.enable_tiling:
-            decode_tiled_args = dict(tiled_args)
-            tile_h, tile_w = decode_tiled_args.get("tile_size", (512, 512))
-            ov_h, ov_w = decode_tiled_args.get("tile_overlap", (64, 64))
+            decode_seedvr2_args = dict(seedvr2_tiling)
+            tile_h, tile_w = decode_seedvr2_args.get("tile_size", (512, 512))
+            ov_h, ov_w = decode_seedvr2_args.get("tile_overlap", (64, 64))
             new_tile_h, new_tile_w = min(tile_h, 512), min(tile_w, 512)
             # Clamp overlap with the same `overlap < tile_size - 8`
             # invariant the encode path enforces (nodes_seedvr.py:244-245).
             # Without this, capping tile_size alone can leave
             # overlap >= tile_size, collapsing stride to 1 and producing
             # O(H_lat * W_lat) overlapping tiles.
-            decode_tiled_args["tile_size"] = (new_tile_h, new_tile_w)
-            decode_tiled_args["tile_overlap"] = (
+            decode_seedvr2_args["tile_size"] = (new_tile_h, new_tile_w)
+            decode_seedvr2_args["tile_overlap"] = (
                 min(ov_h, max(0, new_tile_h - 8)),
                 min(ov_w, max(0, new_tile_w - 8)),
             )
-            x = tiled_vae(latent, self, **decode_tiled_args, encode=False)
+            x = tiled_vae(latent, self, **decode_seedvr2_args, encode=False)
             if x.ndim == 4:
                 # tiled_vae squeezes the temporal axis when
                 # temporal_downsample_factor == 1 AND latent T == 1

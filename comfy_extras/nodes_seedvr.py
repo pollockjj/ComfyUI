@@ -239,7 +239,6 @@ class SeedVR2InputProcessing(io.ComfyNode):
         images = side_resize(images, resolution)
 
         images = clip(images)
-        o_h, o_w = images.shape[-2:]
         images = div_pad(images, (16, 16))
         images = normalize(images)
         _, _, new_h, new_w = images.shape

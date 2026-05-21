@@ -8,13 +8,14 @@ FILES = [
     ROOT / "comfy/sd.py",
     ROOT / "comfy_extras/nodes_seedvr.py",
 ]
-FORBIDDEN_ATTRS = {"original_image_video", "img_dims"}
+FORBIDDEN_ATTRS = {"original_image_video", "img_dims", "tiled_args"}
 FORBIDDEN_KEYS = {
     "sampler_metadata",
     "latent_sidecar_metadata",
     "saved_latent_metadata",
     "workflow_hidden_state",
 }
+FORBIDDEN_GETSET_KEYS = {"original_image_video", "img_dims", "tiled_args"}
 
 
 def main():
@@ -23,6 +24,11 @@ def main():
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRS:
                 raise SystemExit(f"{path}: forbidden VAE object state attr {node.attr}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in {"getattr", "setattr", "delattr"} and len(node.args) >= 2:
+                    key = node.args[1]
+                    if isinstance(key, ast.Constant) and key.value in FORBIDDEN_GETSET_KEYS:
+                        raise SystemExit(f"{path}: forbidden VAE object state access {key.value}")
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if node.value in FORBIDDEN_ATTRS or node.value in FORBIDDEN_KEYS:
                     raise SystemExit(f"{path}: forbidden hidden-state string {node.value}")

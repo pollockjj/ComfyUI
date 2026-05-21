@@ -19,13 +19,13 @@ def main():
         'io.Image.Input("reference")',
         'io.Combo.Input("method", options=["lab", "none"], default="lab")',
         "def _format_seedvr2_encoded_samples",
-        "def decode(self, z, tiled_args=None)",
+        "def decode(self, z, seedvr2_tiling=None)",
     ]
     for needle in required:
         if needle not in nodes + sd + vae:
             raise SystemExit(f"missing required static token: {needle}")
 
-    forbidden = ["original_image_video", "img_dims"]
+    forbidden = ["original_image_video", "img_dims", "tiled_args"]
     for needle in forbidden:
         if needle in nodes + sd + vae:
             raise SystemExit(f"forbidden hidden-state token remains: {needle}")

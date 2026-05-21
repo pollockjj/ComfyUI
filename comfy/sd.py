@@ -993,7 +993,7 @@ class VAE:
         latent_channels = getattr(self, "latent_channels", 16)
         channel_first = samples.shape[1] == latent_channels
         channel_last = samples.shape[-1] == latent_channels
-        if channel_last and not channel_first:
+        if channel_last:
             return samples.movedim(-1, 1)
         return samples
 
@@ -1023,7 +1023,7 @@ class VAE:
                     args["multigpu_vae_models"] = clone_models
             output = self.first_stage_model.decode(
                 samples.to(self.vae_dtype).to(self.device),
-                tiled_args=args,
+                seedvr2_tiling=args,
             )
         finally:
             if multigpu_clones:
@@ -1076,32 +1076,23 @@ class VAE:
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
     def encode_tiled_seedvr2(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
-        args = dict(getattr(self.first_stage_model, "tiled_args", {}))
-        stored_tile_size = args.get("tile_size", (512, 512))
-        stored_tile_overlap = args.get("tile_overlap", (64, 64))
-        args["enable_tiling"] = True
         if tile_y is None:
-            tile_y = stored_tile_size[0]
+            tile_y = 512
         if tile_x is None:
-            tile_x = stored_tile_size[1]
+            tile_x = 512
         if overlap is None:
-            overlap_y, overlap_x = stored_tile_overlap
+            overlap_y = 64
+            overlap_x = 64
         else:
             overlap_y = overlap
             overlap_x = overlap
         if tile_t is None:
-            tile_t = args.get("temporal_size", 9999)
+            tile_t = 9999
         if overlap_t is None:
-            overlap_t = args.get("temporal_overlap", 0)
+            overlap_t = 0
         overlap_y = min(overlap_y, max(0, tile_y - 8))
         overlap_x = min(overlap_x, max(0, tile_x - 8))
-        args["tile_size"] = (tile_y, tile_x)
-        args["tile_overlap"] = (overlap_y, overlap_x)
-        args["temporal_size"] = tile_t
-        args["temporal_overlap"] = overlap_t
-        previous_args = getattr(self.first_stage_model, "tiled_args", {})
         multigpu_clones = getattr(self, 'multigpu_clones', None)
-        clone_previous_args = {}
         clone_previous_devices = {}
         clone_models = {}
         try:
@@ -1111,30 +1102,22 @@ class VAE:
                     c.first_stage_model.to(dev)
                     clone_previous_devices[dev] = getattr(c.first_stage_model, "device", torch.device("cpu"))
                     c.first_stage_model.device = dev
-                    clone_previous_args[dev] = getattr(c.first_stage_model, "tiled_args", {})
-                    c.first_stage_model.tiled_args = args
                     clone_models[dev] = c.first_stage_model
-                if clone_models:
-                    args["multigpu_vae_models"] = clone_models
-            self.first_stage_model.tiled_args = args
             self.first_stage_model.device = self.device
             x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
             output = comfy.ldm.seedvr.vae.tiled_vae(
                 x,
                 self.first_stage_model,
-                tile_size=args["tile_size"],
-                tile_overlap=args["tile_overlap"],
-                temporal_size=args["temporal_size"],
-                temporal_overlap=args["temporal_overlap"],
+                tile_size=(tile_y, tile_x),
+                tile_overlap=(overlap_y, overlap_x),
+                temporal_size=tile_t,
+                temporal_overlap=overlap_t,
                 encode=True,
                 multigpu_vae_models=clone_models or None,
             )
         finally:
-            self.first_stage_model.tiled_args = previous_args
             if multigpu_clones:
                 for dev, c in multigpu_clones.items():
-                    if dev in clone_previous_args:
-                        c.first_stage_model.tiled_args = clone_previous_args[dev]
                     c.first_stage_model.to("cpu")
                     c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
@@ -1297,11 +1280,7 @@ class VAE:
                 tile = 256
                 overlap = tile // 4
                 if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                    tiled_args = getattr(self.first_stage_model, "tiled_args", {})
-                    if isinstance(tiled_args, dict) and "tile_size" in tiled_args:
-                        samples = self.encode_tiled_seedvr2(pixel_samples)
-                    else:
-                        samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
+                    samples = self.encode_tiled_seedvr2(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
                 else:
                     samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
             elif self.latent_dim == 1 or self.extra_1d_channel is not None:
