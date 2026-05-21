@@ -573,6 +573,8 @@ class SaveLatent:
         output = {}
         output["latent_tensor"] = samples["samples"].contiguous()
         output["latent_format_version_0"] = torch.tensor([])
+        if samples.get("seedvr2_channel_last", False):
+            output["seedvr2_channel_last"] = torch.tensor([True])
 
         comfy.utils.save_torch_file(output, file, metadata=metadata)
         return { "ui": { "latents": results } }
@@ -599,6 +601,9 @@ class LoadLatent:
         if "latent_format_version_0" not in latent:
             multiplier = 1.0 / 0.18215
         samples = {"samples": latent["latent_tensor"].float() * multiplier}
+        seedvr2_channel_last = latent.get("seedvr2_channel_last", None)
+        if torch.is_tensor(seedvr2_channel_last) and seedvr2_channel_last.numel() == 1 and bool(seedvr2_channel_last.item()):
+            samples["seedvr2_channel_last"] = True
         return (samples, )
 
     @classmethod

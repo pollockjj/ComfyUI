@@ -186,6 +186,29 @@ def test_seedvr2_tiled_encode_node_marks_channel_last_latent_metadata():
     assert output["seedvr2_channel_last"] is True
 
 
+def test_seedvr2_saved_latent_preserves_channel_last_metadata(monkeypatch):
+    saved = {}
+
+    def fake_save_image_path(filename_prefix, output_dir):
+        return output_dir, filename_prefix, 1, "", filename_prefix
+
+    def fake_save_torch_file(output, file, metadata=None):
+        saved.update(output)
+
+    monkeypatch.setattr(nodes.folder_paths, "get_save_image_path", fake_save_image_path)
+    monkeypatch.setattr(nodes.comfy.utils, "save_torch_file", fake_save_torch_file)
+    monkeypatch.setattr(nodes.folder_paths, "get_annotated_filepath", lambda latent: latent)
+    monkeypatch.setattr(nodes.safetensors.torch, "load_file", lambda latent_path, device="cpu": saved)
+
+    original = torch.zeros((1, 16, 4, 4, 16), dtype=torch.float32)
+    nodes.SaveLatent().save({"samples": original, "seedvr2_channel_last": True}, "seedvr2_latent")
+    loaded = nodes.LoadLatent().load("seedvr2_latent")[0]
+
+    assert bool(saved["seedvr2_channel_last"].item()) is True
+    assert loaded["seedvr2_channel_last"] is True
+    torch.testing.assert_close(loaded["samples"], original)
+
+
 def test_seedvr2_tiled_decode_node_preserves_legacy_decode_tiled_signature():
     class FakeVAE:
         def __init__(self):
