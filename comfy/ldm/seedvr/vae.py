@@ -2347,10 +2347,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.spatial_downsample_factor = spatial_downsample_factor
         self.temporal_downsample_factor = temporal_downsample_factor
         self.freeze_encoder = freeze_encoder
-        self.original_image_video = None
-        self.img_dims = None
         self.enable_tiling = False
-        self.tiled_args = {}
         super().__init__(*args, **kwargs)
         self.set_memory_limit(0.5, 0.5)
 
@@ -2361,10 +2358,6 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return x, z, p
 
     def encode(self, x, orig_dims=None):
-        # we need to keep a reference to the image/video so we later can do a colour fix later
-        #self.original_image_video = x
-        if orig_dims is not None:
-            self.img_dims = orig_dims
         if x.ndim == 4:
             x = x.unsqueeze(2)
         x = x.to(dtype=next(self.parameters()).dtype)
@@ -2373,60 +2366,15 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         z = p.squeeze(2)
         return z, p
 
-    def decode(self, z):
-        if self.original_image_video is None:
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` is None. "
-                "This attribute must be populated by SeedVR2InputProcessing.execute before "
-                "decode() is invoked; calling decode() directly without the SeedVR2 input "
-                "processing node is not supported."
-            )
-        if not torch.is_tensor(self.original_image_video):
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be "
-                f"a torch.Tensor; got {type(self.original_image_video).__name__}. "
-                "This attribute is populated by SeedVR2InputProcessing.execute with the "
-                "5-D (B, C, T, H, W) input video tensor; non-tensor values cannot be "
-                "decoded and indicate a wrapper-misuse path."
-            )
-        if self.original_image_video.ndim != 5:
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `original_image_video` must be a "
-                "5-D tensor of shape (B, C, T, H, W); got rank "
-                f"{self.original_image_video.ndim} with shape "
-                f"{tuple(self.original_image_video.shape)}."
-            )
-        img_dims = getattr(self, "img_dims", None)
-        if img_dims is None:
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` is None or unset. "
-                "This attribute must be populated by encode(orig_dims=...) before decode() "
-                "is invoked."
-            )
-        if not isinstance(img_dims, (tuple, list)):
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a tuple or "
-                f"list of (H, W); got {type(img_dims).__name__} with value {img_dims!r}. "
-                "This attribute is populated by encode(orig_dims=...) with the original "
-                "(H, W) spatial dimensions of the input video; non-sequence values cannot "
-                "be unpacked downstream."
-            )
-        if len(img_dims) != 2:
-            raise RuntimeError(
-                "SeedVR2 VideoAutoencoderKLWrapper.decode: `img_dims` must be a 2-tuple "
-                f"(H, W); got arity {len(img_dims)} with value {img_dims!r}."
-            )
-        tiled_args = getattr(self, "tiled_args", None)
+    def decode(self, z, tiled_args=None):
+        tiled_args = {} if tiled_args is None else tiled_args
         if not isinstance(tiled_args, dict):
             raise RuntimeError(
                 "SeedVR2 VideoAutoencoderKLWrapper.decode: `tiled_args` must be a dict; "
-                f"got {type(tiled_args).__name__} with value {tiled_args!r}. "
-                "__init__ initialises this to {} as the default (tiling disabled); "
-                "explicit non-dict assignment is a wrapper-misuse path."
+                f"got {type(tiled_args).__name__} with value {tiled_args!r}."
             )
 
-        input_was_5d = z.ndim == 5
-        if input_was_5d:
+        if z.ndim == 5:
             b, c, t_latent, h, w = z.shape
             if c != 16:
                 raise RuntimeError(
@@ -2442,10 +2390,10 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         latent = latent / scale + shift
 
         self.device = latent.device
-        self.enable_tiling = self.tiled_args.get("enable_tiling", False)
+        self.enable_tiling = tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
-            decode_tiled_args = dict(self.tiled_args)
+            decode_tiled_args = dict(tiled_args)
             tile_h, tile_w = decode_tiled_args.get("tile_size", (512, 512))
             ov_h, ov_w = decode_tiled_args.get("tile_overlap", (64, 64))
             new_tile_h, new_tile_w = min(tile_h, 512), min(tile_w, 512)
@@ -2468,29 +2416,6 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 x = x.unsqueeze(2)
         else:
             x = super().decode_(latent)
-
-        original = self.original_image_video
-        source_b, _, source_t, _, _ = original.shape
-        input = rearrange(original, "b c t h w -> (b t) c h w")
-
-        if source_t != 1:
-            x = x[:, :, :source_t]
-        if source_t == 1 and x.size(2) == 4:
-            x = x[:, :, :source_t]
-
-        x_flat = rearrange(x, "b c t h w -> (b t) c h w")
-
-        input = input.to(x_flat.device)
-        o_h, o_w = self.img_dims
-        x_flat = x_flat[..., :o_h, :o_w]
-        input = input[..., :o_h, :o_w ]
-        x_flat = lab_color_transfer(x_flat, input)
-
-        if input_was_5d:
-            x = rearrange(x_flat, "(b t) c h w -> b c t h w", b=source_b, t=source_t)
-        else:
-            x = x_flat.unsqueeze(0)
-            x = rearrange(x, "b t c h w -> b c t h w")
 
         # ensure even dims for save video
         h, w = x.shape[-2:]

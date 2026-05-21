@@ -10,7 +10,7 @@ import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
-from comfy.ldm.seedvr.vae import tiled_vae
+from comfy.ldm.seedvr.vae import lab_color_transfer
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
@@ -218,24 +218,15 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 io.Image.Input("images"),
                 io.Vae.Input("vae"),
                 io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
-                io.Int.Input("spatial_tile_size", default = 512, min = 1),
-                io.Int.Input("spatial_overlap", default = 64, min = 1),
-                io.Int.Input("temporal_tile_size", default=16, min=0, max=16384, step=4),
-                io.Int.Input("temporal_overlap", default=4, min=0, max=16384, step=4),
-                io.Boolean.Input("enable_tiling", default=False),
             ],
             outputs = [
-                io.Latent.Output("vae_conditioning")
+                io.Image.Output("processed"),
+                io.Vae.Output("vae"),
             ]
         )
 
     @classmethod
-    def execute(cls, images, vae, resolution, spatial_tile_size, spatial_overlap, temporal_tile_size, temporal_overlap, enable_tiling):
-
-        comfy.model_management.load_models_gpu([vae.patcher])
-        vae_model = vae.first_stage_model
-        scale = 0.9152
-        shift = 0
+    def execute(cls, images, vae, resolution):
         if images.dim() != 5: # add the t dim
             images = images.unsqueeze(0)
         images = images.permute(0, 1, 4, 2, 3)
@@ -254,63 +245,77 @@ class SeedVR2InputProcessing(io.ComfyNode):
         _, _, new_h, new_w = images.shape
 
         images = images.reshape(b, t, c, new_h, new_w)
-        # Preserve the unpadded user-visible temporal length for decode trim.
-        images_bcthw_unpadded = rearrange(images, "b t c h w -> b c t h w")
         images = cut_videos(images)
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
-        original_image_video = images_bcthw_unpadded
 
-        # in case users a non-compatiable number for tiling
-        def make_divisible(val, divisor):
-            return max(divisor, round(val / divisor) * divisor)
+        return io.NodeOutput(images_bthwc, vae)
 
-        spatial_tile_size = make_divisible(spatial_tile_size, 32)
-        spatial_overlap = make_divisible(spatial_overlap, 32)
 
-        if spatial_overlap >= spatial_tile_size:
-            spatial_overlap = max(0, spatial_tile_size - 8)
+class SeedVR2PostProcessing(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SeedVR2PostProcessing",
+            category="image/video",
+            inputs=[
+                io.Image.Input("decoded"),
+                io.Image.Input("reference"),
+                io.Combo.Input("method", options=["lab", "none"], default="lab"),
+            ],
+            outputs=[io.Image.Output()],
+        )
 
-        args = {
-            "tile_size": (spatial_tile_size, spatial_tile_size),
-            "tile_overlap": (spatial_overlap, spatial_overlap),
-            "temporal_size": temporal_tile_size,
-            "temporal_overlap": temporal_overlap,
-        }
-        if enable_tiling:
-            vae_model.img_dims = [o_h, o_w]
-            vae_model.original_image_video = original_image_video
-            images_bcthw = rearrange(images_bthwc, "b t h w c -> b c t h w")
-            # Move input to the VAE's loaded execution device. VideoAutoencoderKLWrapper.encode
-            # adopts x.device as self.device without moving x, so a CPU input against a
-            # GPU-loaded VAE silently falls back to CPU encode. Use vae.patcher.load_device
-            # (the device load_models_gpu loaded the wrapper to) when available; fall back
-            # to the wrapper's parameter device.
-            vae_device = getattr(getattr(vae, "patcher", None), "load_device", None)
-            if vae_device is None:
-                vae_device = next(vae_model.parameters()).device
-            images_bcthw = images_bcthw.to(vae_device)
-            latent = tiled_vae(images_bcthw, vae_model, **args, encode=True)
+    @classmethod
+    def execute(cls, decoded, reference, method):
+        decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
+        reference_5d, _ = cls._as_bthwc(reference)
+
+        b = min(decoded_5d.shape[0], reference_5d.shape[0])
+        t = min(decoded_5d.shape[1], reference_5d.shape[1])
+        h = min(decoded_5d.shape[2], reference_5d.shape[2])
+        w = min(decoded_5d.shape[3], reference_5d.shape[3])
+
+        decoded_5d = decoded_5d[:b, :t, :h, :w, :]
+        reference_5d = reference_5d[:b, :t, :h, :w, :]
+
+        if method == "lab":
+            decoded_raw = cls._to_seedvr2_raw(decoded_5d)
+            reference_raw = cls._to_seedvr2_raw(reference_5d)
+            decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
+            reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
+            output = lab_color_transfer(decoded_flat, reference_flat)
+            output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
+            output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
+        elif method == "none":
+            output = decoded_5d
         else:
-            vae_model.img_dims = [o_h, o_w]
-            vae_model.original_image_video = original_image_video
-            vae_model.tiled_args = {**args, "enable_tiling": False}
-            latent = vae.encode(images_bthwc)
+            raise ValueError(f"SeedVR2PostProcessing: unknown method {method!r}")
 
-        clear_vae_memory(vae_model)
-        #images = images.to(offload_device)
-        #vae_model = vae_model.to(offload_device)
+        h2 = output.shape[-3] - (output.shape[-3] % 2)
+        w2 = output.shape[-2] - (output.shape[-2] % 2)
+        output = output[:, :, :h2, :w2, :]
+        if decoded_was_4d:
+            output = output.reshape(-1, output.shape[-3], output.shape[-2], output.shape[-1])
+        return io.NodeOutput(output)
 
-        vae_model.img_dims = [o_h, o_w]
-        args["enable_tiling"] = enable_tiling
-        vae_model.tiled_args = args
-        vae_model.original_image_video = original_image_video
+    @staticmethod
+    def _as_bthwc(images):
+        if images.ndim == 4:
+            return images.unsqueeze(0), True
+        if images.ndim == 5:
+            return images, False
+        raise ValueError(
+            f"SeedVR2PostProcessing: expected 4-D or 5-D IMAGE tensor, got shape {tuple(images.shape)}"
+        )
 
-        latent = latent.unsqueeze(2) if latent.ndim == 4 else latent
-        latent = rearrange(latent, "b c ... -> b ... c")
+    @staticmethod
+    def _to_seedvr2_raw(images):
+        if images.numel() == 0:
+            return images
+        if images.amin().item() < 0.0:
+            return images
+        return images.mul(2.0).sub(1.0)
 
-        latent = (latent - shift) * scale
-
-        return io.NodeOutput({"samples": latent})
 
 class SeedVR2Conditioning(io.ComfyNode):
     @classmethod
@@ -1044,6 +1049,7 @@ class SeedVRExtension(ComfyExtension):
         return [
             SeedVR2Conditioning,
             SeedVR2InputProcessing,
+            SeedVR2PostProcessing,
             SeedVR2ProgressiveSampler,
         ]
 

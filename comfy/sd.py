@@ -987,58 +987,30 @@ class VAE:
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
-    def _seedvr2_expected_latent_shape(self):
-        original = getattr(self.first_stage_model, "original_image_video", None)
-        if not torch.is_tensor(original) or original.ndim != 5:
-            return None
-        temporal_factor = getattr(self.first_stage_model, "temporal_downsample_factor", 4)
-        spatial_factor = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
-        source_t = original.shape[2]
-        source_h = original.shape[3]
-        source_w = original.shape[4]
-        if source_t == 1:
-            padded_t = source_t
-        elif source_t <= temporal_factor:
-            padded_t = temporal_factor + 1
-        else:
-            remainder = (source_t - 1) % temporal_factor
-            padded_t = source_t if remainder == 0 else source_t + (temporal_factor - remainder)
-        return (
-            math.ceil(padded_t / temporal_factor),
-            math.ceil(source_h / spatial_factor),
-            math.ceil(source_w / spatial_factor),
-        )
-
     def _normalize_seedvr2_decode_samples(self, samples):
         if samples.ndim != 5:
             return samples
         latent_channels = getattr(self, "latent_channels", 16)
-        expected_shape = self._seedvr2_expected_latent_shape()
         channel_first = samples.shape[1] == latent_channels
         channel_last = samples.shape[-1] == latent_channels
-        if expected_shape is not None:
-            expected_t, expected_h, expected_w = expected_shape
-            channel_first = channel_first and tuple(samples.shape[2:5]) == (expected_t, expected_h, expected_w)
-            channel_last = channel_last and tuple(samples.shape[1:4]) == (expected_t, expected_h, expected_w)
         if channel_last and not channel_first:
             return samples.movedim(-1, 1)
         return samples
 
     def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
         samples = self._normalize_seedvr2_decode_samples(samples)
-        args = dict(getattr(self.first_stage_model, "tiled_args", {}))
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
-        args["enable_tiling"] = True
-        args["tile_size"] = (tile_y * sf_s, tile_x * sf_s)
-        args["tile_overlap"] = (overlap * sf_s, overlap * sf_s)
-        args["temporal_size"] = tile_t
-        args["temporal_overlap"] = overlap_t
-        previous_args = getattr(self.first_stage_model, "tiled_args", {})
+        args = {
+            "enable_tiling": True,
+            "tile_size": (tile_y * sf_s, tile_x * sf_s),
+            "tile_overlap": (overlap * sf_s, overlap * sf_s),
+            "temporal_size": tile_t,
+            "temporal_overlap": overlap_t,
+        }
         # SeedVR2 VAE decode worker dispatch is gated until the decode worker
         # path is byte-identical to the primary-model path. Encode workers stay
         # enabled in encode_tiled_seedvr2.
         multigpu_clones = None
-        clone_previous_args = {}
         clone_models = {}
         try:
             if multigpu_clones:
@@ -1046,21 +1018,26 @@ class VAE:
                     model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                     c.first_stage_model.device = dev
-                    clone_previous_args[dev] = getattr(c.first_stage_model, "tiled_args", {})
-                    c.first_stage_model.tiled_args = args
                     clone_models[dev] = c.first_stage_model
                 if clone_models:
                     args["multigpu_vae_models"] = clone_models
-            self.first_stage_model.tiled_args = args
-            output = self.first_stage_model.decode(samples.to(self.vae_dtype).to(self.device))
+            output = self.first_stage_model.decode(
+                samples.to(self.vae_dtype).to(self.device),
+                tiled_args=args,
+            )
         finally:
-            self.first_stage_model.tiled_args = previous_args
             if multigpu_clones:
                 for dev, c in multigpu_clones.items():
-                    if dev in clone_previous_args:
-                        c.first_stage_model.tiled_args = clone_previous_args[dev]
                     c.first_stage_model.to("cpu")
         return self.process_output(output.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
+
+    def _format_seedvr2_encoded_samples(self, samples):
+        if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+            if samples.ndim == 4:
+                samples = samples.unsqueeze(2)
+            samples = samples.movedim(1, -1).contiguous()
+            samples = samples * 0.9152
+        return samples
 
     def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap = 64):
         steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap)
@@ -1332,14 +1309,14 @@ class VAE:
             else:
                 samples = self.encode_tiled_(pixel_samples)
 
-        return samples
+        return self._format_seedvr2_encoded_samples(samples)
 
     def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         dims = self.latent_dim
         pixel_samples = pixel_samples.movedim(-1, 1)
-        if dims == 3:
+        if dims == 3 and pixel_samples.ndim < 5:
             if not self.not_video:
                 pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
             else:
@@ -1401,7 +1378,7 @@ class VAE:
 
                 samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
 
-        return samples
+        return self._format_seedvr2_encoded_samples(samples)
 
     def get_sd(self):
         return self.first_stage_model.state_dict()
