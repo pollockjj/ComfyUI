@@ -338,10 +338,10 @@ class SeedVR2PostProcessing(io.ComfyNode):
         reference_h, reference_w = reference.shape[2:4]
         if reference_h <= reference_w:
             target_h = resolution
-            target_w = round(reference_w * resolution / reference_h)
+            target_w = max(1, int(reference_w * resolution / reference_h))
         else:
             target_w = resolution
-            target_h = round(reference_h * resolution / reference_w)
+            target_h = max(1, int(reference_h * resolution / reference_w))
         return min(target_h, decoded_h), min(target_w, decoded_w)
 
     @staticmethod

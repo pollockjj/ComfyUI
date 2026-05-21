@@ -146,6 +146,15 @@ def test_seedvr2_post_processing_crops_to_explicit_visible_resize_width():
     assert tuple(output.shape) == (1, 1, 120, 212, 3)
 
 
+def test_seedvr2_post_processing_matches_preprocessing_integer_resize_rule():
+    decoded = torch.ones((1, 1, 128, 256, 3), dtype=torch.float32)
+    reference = torch.ones((1, 1, 240, 483, 3), dtype=torch.float32)
+
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none", 120).result[0]
+
+    assert tuple(output.shape) == (1, 1, 120, 240, 3)
+
+
 def test_seedvr2_post_processing_none_preserves_black_bottom_row_content():
     decoded = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
     reference = torch.ones((1, 2, 8, 10, 3), dtype=torch.float32)
