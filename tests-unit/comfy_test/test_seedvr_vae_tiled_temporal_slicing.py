@@ -154,15 +154,13 @@ def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
         vae_mod.VideoAutoencoderKLWrapper
     )
     nn.Module.__init__(wrapper)
-    wrapper.tiled_args = {
+    seedvr2_tiling = {
         "enable_tiling": True,
         "tile_size": (64, 64),
         "tile_overlap": (0, 0),
         "temporal_size": 8,
         "temporal_overlap": 7,
     }
-    wrapper.original_image_video = torch.zeros(1, 3, 1, 16, 16)
-    wrapper.img_dims = (16, 16)
 
     captured = {}
 
@@ -174,7 +172,7 @@ def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
         patch.object(vae_mod, "tiled_vae", side_effect=_fake_tiled_vae),
         patch.object(vae_mod, "lab_color_transfer", side_effect=lambda content, style: content),
     ):
-        wrapper.decode(torch.zeros(1, 16, 2, 2))
+        wrapper.decode(torch.zeros(1, 16, 2, 2), seedvr2_tiling=seedvr2_tiling)
 
     assert captured["temporal_overlap"] == 7
 

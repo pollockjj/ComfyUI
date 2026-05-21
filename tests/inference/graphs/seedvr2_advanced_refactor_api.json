@@ -1,0 +1,164 @@
+{
+  "1": {
+    "inputs": {
+      "file": "UDM10_BIx4_000.mp4"
+    },
+    "class_type": "LoadVideo"
+  },
+  "11": {
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "GetVideoComponents"
+  },
+  "2": {
+    "inputs": {
+      "unet_name": "seedvr2_3b_fp16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader"
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "ema_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader"
+  },
+  "4": {
+    "inputs": {
+      "resolution": 120,
+      "images": [
+        "11",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SeedVR2InputProcessing"
+  },
+  "5": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 8,
+      "temporal_overlap": 4,
+      "pixels": [
+        "4",
+        0
+      ],
+      "vae": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "VAEEncodeTiled"
+  },
+  "6": {
+    "inputs": {
+      "latent_noise_scale": 0.0,
+      "vae_conditioning": [
+        "5",
+        0
+      ],
+      "model": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SeedVR2Conditioning"
+  },
+  "7": {
+    "inputs": {
+      "seed": 2762,
+      "steps": 1,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "frames_per_chunk": 1,
+      "temporal_overlap": 0,
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "6",
+        2
+      ]
+    },
+    "class_type": "SeedVR2ProgressiveSampler"
+  },
+  "8": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 16,
+      "temporal_overlap": 4,
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "VAEDecodeTiled"
+  },
+  "9": {
+    "inputs": {
+      "method": "lab",
+      "decoded": [
+        "8",
+        0
+      ],
+      "reference": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "SeedVR2PostProcessing"
+  },
+  "10": {
+    "inputs": {
+      "fps": [
+        "11",
+        2
+      ],
+      "images": [
+        "9",
+        0
+      ],
+      "audio": [
+        "11",
+        1
+      ]
+    },
+    "class_type": "CreateVideo"
+  },
+  "12": {
+    "inputs": {
+      "filename_prefix": "seedvr2_advanced_refactor",
+      "format": "mp4",
+      "codec": "auto",
+      "video": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "SaveVideo"
+  }
+}

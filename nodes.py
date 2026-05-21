@@ -48,13 +48,17 @@ import node_helpers
 if args.enable_manager:
     import comfyui_manager
 
+
 def before_node_execution():
     comfy.model_management.throw_exception_if_processing_interrupted()
+
 
 def interrupt_processing(value=True):
     comfy.model_management.interrupt_current_processing(value)
 
+
 MAX_RESOLUTION=16384
+
 
 class CLIPTextEncode(ComfyNodeABC):
     @classmethod
@@ -350,7 +354,14 @@ class VAEDecodeTiled:
             temporal_overlap = None
 
         compression = vae.spacial_compression_decode()
-        images = vae.decode_tiled(samples["samples"], tile_x=tile_size // compression, tile_y=tile_size // compression, overlap=overlap // compression, tile_t=temporal_size, overlap_t=temporal_overlap)
+        images = vae.decode_tiled(
+            samples["samples"],
+            tile_x=tile_size // compression,
+            tile_y=tile_size // compression,
+            overlap=overlap // compression,
+            tile_t=temporal_size,
+            overlap_t=temporal_overlap,
+        )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -367,7 +378,7 @@ class VAEEncode:
 
     def encode(self, vae, pixels):
         t = vae.encode(pixels)
-        return ({"samples":t}, )
+        return ({"samples": t}, )
 
 class VAEEncodeTiled:
     @classmethod

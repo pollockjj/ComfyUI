@@ -33,10 +33,18 @@ import inspect
 import sys
 from unittest.mock import MagicMock, patch
 
+from comfy.cli_args import args as cli_args
+
 
 def test_seedvr_node_signature_matches_schema():
     mock_model_management = MagicMock()
+    mock_model_management.xformers_enabled.return_value = False
+    mock_model_management.xformers_enabled_vae.return_value = False
+    mock_model_management.sage_attention_enabled.return_value = False
+    mock_model_management.flash_attention_enabled.return_value = False
     sentinel = object()
+    prior_cpu = cli_args.cpu
+    cli_args.cpu = True
 
     comfy_module_pre = sys.modules.get("comfy")
     comfy_extras_module_pre = sys.modules.get("comfy_extras")
@@ -53,6 +61,8 @@ def test_seedvr_node_signature_matches_schema():
     prior_comfy_extras_seedvr_module = sys.modules.get("comfy_extras.nodes_seedvr", sentinel)
 
     with patch.dict(sys.modules, {"comfy.model_management": mock_model_management}):
+        if comfy_module_pre is not None:
+            setattr(comfy_module_pre, "model_management", mock_model_management)
         sys.modules.pop("comfy_extras.nodes_seedvr", None)
         try:
             nodes_seedvr = importlib.import_module("comfy_extras.nodes_seedvr")
@@ -71,6 +81,7 @@ def test_seedvr_node_signature_matches_schema():
                 sys.modules.pop("comfy_extras.nodes_seedvr", None)
             else:
                 sys.modules["comfy_extras.nodes_seedvr"] = prior_comfy_extras_seedvr_module
+            cli_args.cpu = prior_cpu
             comfy_extras_module = sys.modules.get("comfy_extras")
             if comfy_extras_module is not None:
                 if prior_comfy_extras_seedvr_attr is sentinel:
