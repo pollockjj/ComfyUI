@@ -9,20 +9,24 @@ GRAPHS = [
 ]
 ALLOWED = {
     "CheckpointLoaderSimple",
-    "UNETLoader",
-    "VAELoader",
+    "CreateVideo",
+    "GetVideoComponents",
     "LoadImage",
-    "SeedVR2InputProcessing",
-    "VAEEncode",
-    "VAEEncodeTiled",
+    "LoadVideo",
+    "SaveAnimatedWEBP",
+    "SaveImage",
+    "SaveVideo",
     "SeedVR2Conditioning",
+    "SeedVR2InputProcessing",
+    "SeedVR2PostProcessing",
     "KSampler",
     "SeedVR2ProgressiveSampler",
+    "UNETLoader",
     "VAEDecode",
     "VAEDecodeTiled",
-    "SeedVR2PostProcessing",
-    "SaveImage",
-    "SaveAnimatedWEBP",
+    "VAEEncode",
+    "VAEEncodeTiled",
+    "VAELoader",
 }
 REQUIRED = {"SeedVR2InputProcessing", "SeedVR2PostProcessing"}
 
