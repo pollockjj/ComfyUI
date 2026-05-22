@@ -19,6 +19,7 @@ from enum import Enum
 from comfy.ops import NVIDIA_MEMORY_CONV_BUG_WORKAROUND
 
 import logging
+import comfy.model_management
 import comfy.ops
 ops = comfy.ops.disable_weight_init
 
@@ -63,7 +64,7 @@ def tiled_vae(
     **kwargs,
 ):
     gc.collect()
-    torch.cuda.empty_cache()
+    comfy.model_management.soft_empty_cache()
 
     x = x.to(next(vae_model.parameters()).dtype)
     if x.ndim != 5:
