@@ -126,3 +126,22 @@ def test_checkpoint_loader_registers_vae_cached_patcher(monkeypatch):
     assert model_patcher.cached_patcher_init[0] is comfy.sd.load_checkpoint_guess_config
     assert vae.patcher.cached_patcher_init[0] is comfy.sd.load_checkpoint_vae_patcher
     assert vae.patcher.cached_patcher_init[1][0] == "checkpoint.safetensors"
+
+
+def test_checkpoint_loader_skips_cached_patcher_for_placeholder_vae(monkeypatch):
+    install_fake_comfy_aimdo(monkeypatch)
+    import comfy.sd
+    importlib.reload(comfy.sd)
+
+    model_patcher = types.SimpleNamespace(cached_patcher_init=None)
+    placeholder_vae = types.SimpleNamespace()
+    metadata = {"format": "checkpoint"}
+    monkeypatch.setattr(comfy.utils, "load_torch_file", lambda path, return_metadata=False: ({}, metadata))
+    monkeypatch.setattr(
+        comfy.sd,
+        "load_state_dict_guess_config",
+        lambda *args, **kwargs: (model_patcher, None, placeholder_vae, None),
+    )
+
+    assert comfy.sd.load_checkpoint_guess_config("diffusion_only.safetensors", output_vae=True)[2] is placeholder_vae
+    assert model_patcher.cached_patcher_init[0] is comfy.sd.load_checkpoint_guess_config
