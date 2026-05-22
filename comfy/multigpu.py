@@ -193,7 +193,10 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
     for device in limit_extra_devices:
         if device in clones:
             continue
-        clone_desc = copy.deepcopy(upscale_model)
+        clone_source = copy.copy(upscale_model)
+        if hasattr(clone_source, 'multigpu_clones'):
+            del clone_source.multigpu_clones
+        clone_desc = copy.deepcopy(clone_source)
         clone_desc.model.eval()
         for p in clone_desc.model.parameters():
             p.requires_grad_(False)

@@ -890,8 +890,8 @@ class VAELoader:
         vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=resolved)
         vae.throw_exception_if_invalid()
         # Register a reload factory on the patcher so MultiGPU work-units can use
-        # ModelPatcher.deepclone_multigpu to produce per-device clones backed by a
-        # fresh on-disk load (mirrors UNETLoader / CLIPLoader / checkpoint loader).
+        # ModelPatcher.deepclone_multigpu to produce per-device clones from the
+        # same loader context (mirrors UNETLoader / CLIPLoader / checkpoint loader).
         if vae_path is not None:
             vae.patcher.cached_patcher_init = (comfy.sd.load_vae_patcher, (vae_path, metadata, resolved))
         return (vae,)
