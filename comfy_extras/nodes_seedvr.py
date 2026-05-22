@@ -14,7 +14,7 @@ from comfy.ldm.seedvr.vae import lab_color_transfer
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
-from torchvision.transforms import Lambda, Normalize
+from torchvision.transforms import Lambda
 from torchvision.transforms.functional import InterpolationMode
 
 
@@ -242,12 +242,10 @@ class SeedVR2InputProcessing(io.ComfyNode):
         images = images.reshape(b * t, c, h, w)
 
         clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        normalize = Normalize(0.5, 0.5)
         images = side_resize(images, resolution)
 
         images = clip(images)
         images = div_pad(images, (16, 16))
-        images = normalize(images)
         _, _, new_h, new_w = images.shape
 
         images = images.reshape(b, t, c, new_h, new_w)
@@ -361,7 +359,8 @@ class SeedVR2Conditioning(io.ComfyNode):
             ],
             outputs=[io.Conditioning.Output(display_name = "positive"),
                      io.Conditioning.Output(display_name = "negative"),
-                     io.Latent.Output(display_name = "latent")],
+                     io.Latent.Output(display_name = "latent"),
+                     io.Model.Output(display_name = "model")],
         )
 
     @classmethod
@@ -446,7 +445,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        return io.NodeOutput(positive, negative, {"samples": noises})
+        return io.NodeOutput(positive, negative, {"samples": noises}, model_patcher)
 
 # SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
 # stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent

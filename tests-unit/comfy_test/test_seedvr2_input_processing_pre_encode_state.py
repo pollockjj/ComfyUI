@@ -36,8 +36,8 @@ def test_input_processing_returns_processed_image_and_same_vae_without_encoding(
     processed, returned_vae = output.result
     assert returned_vae is vae
     assert tuple(processed.shape) == (1, 5, 128, 128, 3)
-    assert processed.min().item() == -1.0
-    assert processed.max().item() == -1.0
+    assert processed.min().item() == 0.0
+    assert processed.max().item() == 0.0
     vae.encode.assert_not_called()
     vae.encode_tiled.assert_not_called()
     vae.decode.assert_not_called()

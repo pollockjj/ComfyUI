@@ -70,8 +70,8 @@
       "frames_per_chunk": 1,
       "temporal_overlap": 0,
       "model": [
-        "2",
-        0
+        "6",
+        3
       ],
       "positive": [
         "6",
