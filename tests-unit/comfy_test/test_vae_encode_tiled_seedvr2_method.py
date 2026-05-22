@@ -21,6 +21,7 @@ if not torch.cuda.is_available():
 
 import comfy.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
 import comfy.sd as sd_mod  # noqa: E402
+import nodes as nodes_mod  # noqa: E402
 
 
 def _make_minimal_seedvr2_vae():
@@ -75,6 +76,45 @@ def test_method_exists_with_seedvr2_signature():
             f"VAE.encode_tiled_seedvr2 missing required parameter "
             f"{required!r}; got parameters {params}."
         )
+
+
+def test_vae_encode_tiled_allows_zero_temporal_controls_and_passes_zero_through():
+    input_types = nodes_mod.VAEEncodeTiled.INPUT_TYPES()["required"]
+    assert input_types["temporal_size"][1]["min"] == 0
+    assert input_types["temporal_overlap"][1]["min"] == 0
+    assert "SeedVR2 allows 0" in input_types["temporal_size"][1]["tooltip"]
+
+    class _EncodeRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def encode_tiled(self, pixels, **kwargs):
+            self.calls.append({"shape": tuple(pixels.shape), **kwargs})
+            return torch.zeros(1, 16, 1, 8, 8)
+
+    recorder = _EncodeRecorder()
+    node = nodes_mod.VAEEncodeTiled()
+
+    output = node.encode(
+        recorder,
+        torch.zeros(1, 64, 64, 3),
+        tile_size=256,
+        overlap=64,
+        temporal_size=0,
+        temporal_overlap=8,
+    )
+
+    assert recorder.calls == [
+        {
+            "shape": (1, 64, 64, 3),
+            "tile_x": 256,
+            "tile_y": 256,
+            "overlap": 64,
+            "tile_t": 0,
+            "overlap_t": 0,
+        }
+    ]
+    assert torch.equal(output[0]["samples"], torch.zeros(1, 16, 1, 8, 8))
 
 
 def test_method_routes_through_tiled_vae_encode_true():
