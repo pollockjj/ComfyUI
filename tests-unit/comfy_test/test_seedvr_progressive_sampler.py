@@ -21,10 +21,11 @@ Covers:
   uses a linear ramp; Hann blend reconstructs source under a
   passthrough inner sampler.
 
-The tests mock ``comfy.sample.sample``, ``comfy.sample.prepare_noise``,
+Most tests mock ``comfy.sample.sample``, ``comfy.sample.prepare_noise``,
 and ``comfy.sample.fix_empty_latent_channels`` so the slicing /
 concatenation / cond-handling logic can be exercised in isolation
-without GPU, model weights, or ComfyUI's full sampling stack.
+without GPU, model weights, or ComfyUI's full sampling stack. Dedicated
+integration regressions leave ``fix_empty_latent_channels`` unmocked.
 """
 
 from unittest.mock import patch
@@ -81,6 +82,22 @@ def _make_inputs(B: int = 1, T: int = 5, H: int = 8, W: int = 8):
 
 def _identity_fix_empty(model, latent_image, downscale_ratio_spacial=None):
     return latent_image
+
+
+class _FakeSeedVR2LatentFormat:
+    latent_channels = _LAT_C
+    latent_dimensions = 3
+    spacial_downscale_ratio = 8
+
+
+class _FakeSeedVR2ModelForLatentFix:
+    def get_model_object(self, name):
+        if name != "latent_format":
+            raise KeyError(name)
+        return _FakeSeedVR2LatentFormat()
+
+    def get_additional_models_with_key(self, key):
+        return []
 
 
 def _fingerprinted_prepare_noise(latent_image, seed, batch_inds=None):
@@ -308,6 +325,31 @@ def test_t1_single_chunk_degeneracy_calls_sampler_once_with_full_latent():
     assert tuple(out_latent["samples"].shape) == full_shape
 
 
+def test_t1_real_latent_fix_keeps_collapsed_4d_short_circuit_latent():
+    latent, pos, neg, _, _ = _make_inputs(T=5)
+    full_shape = tuple(latent["samples"].shape)
+    calls = []
+
+    def _record(model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise=1.0,
+                noise_mask=None, seed=None):
+        calls.append(tuple(latent_image.shape))
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_record), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        out = SeedVR2ProgressiveSampler.execute(
+            model=_FakeSeedVR2ModelForLatentFix(), seed=0, steps=2,
+            cfg=1.0, sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert calls == [full_shape]
+    assert tuple(out.result[0]["samples"].shape) == full_shape
+
+
 # ---------------------------------------------------------------------------
 # Multi-chunk path
 # ---------------------------------------------------------------------------
@@ -356,6 +398,31 @@ def test_t2_two_chunk_path_shape_preserved_and_no_nan_inf():
     samples_out = out_latent["samples"]
     assert not torch.isnan(samples_out).any()
     assert not torch.isinf(samples_out).any()
+
+
+def test_t2_real_latent_fix_keeps_collapsed_4d_chunk_latents():
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    full_shape = tuple(latent["samples"].shape)
+    chunk_shapes = []
+
+    def _record(model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise=1.0,
+                noise_mask=None, seed=None):
+        chunk_shapes.append(tuple(latent_image.shape))
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_record), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        out = SeedVR2ProgressiveSampler.execute(
+            model=_FakeSeedVR2ModelForLatentFix(), seed=123, steps=2,
+            cfg=1.0, sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert chunk_shapes == [(1, _LAT_C * 6, 8, 8), (1, _LAT_C * 5, 8, 8)]
+    assert tuple(out.result[0]["samples"].shape) == full_shape
 
 
 def test_t2_concat_equals_source_under_passthrough_sampler():

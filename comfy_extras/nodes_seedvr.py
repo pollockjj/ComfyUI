@@ -10,6 +10,7 @@ import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
+import comfy.utils
 from comfy.ldm.seedvr.vae import lab_color_transfer
 
 import torch.nn.functional as F
@@ -709,7 +710,7 @@ def _run_standard_sample(model, seed: int, steps: int, cfg: float,
     chunk so chunking introduces no overhead for small videos.
     """
     samples_in = latent_image["samples"]
-    samples_in = comfy.sample.fix_empty_latent_channels(
+    samples_in = _fix_seedvr2_collapsed_latent_for_sampling(
         model, samples_in, latent_image.get("downscale_ratio_spacial", None),
     )
     batch_inds = latent_image.get("batch_index", None)
@@ -724,6 +725,32 @@ def _run_standard_sample(model, seed: int, steps: int, cfg: float,
     out.pop("downscale_ratio_spacial", None)
     out["samples"] = samples
     return out
+
+
+def _fix_seedvr2_collapsed_latent_for_sampling(
+    model, samples_4d: torch.Tensor, downscale_ratio_spacial=None,
+) -> torch.Tensor:
+    if samples_4d.is_nested:
+        return samples_4d
+    if samples_4d.ndim != 4:
+        return samples_4d
+    if torch.count_nonzero(samples_4d) != 0:
+        return samples_4d
+    if downscale_ratio_spacial is None:
+        return samples_4d
+
+    latent_format = model.get_model_object("latent_format")
+    if downscale_ratio_spacial == latent_format.spacial_downscale_ratio:
+        return samples_4d
+
+    ratio = downscale_ratio_spacial / latent_format.spacial_downscale_ratio
+    return comfy.utils.common_upscale(
+        samples_4d,
+        round(samples_4d.shape[-1] * ratio),
+        round(samples_4d.shape[-2] * ratio),
+        "nearest-exact",
+        crop="disabled",
+    )
 
 
 class SeedVR2ProgressiveSampler(io.ComfyNode):
@@ -806,7 +833,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         samples_4d = latent_image["samples"]
-        samples_4d = comfy.sample.fix_empty_latent_channels(
+        samples_4d = _fix_seedvr2_collapsed_latent_for_sampling(
             model, samples_4d,
             latent_image.get("downscale_ratio_spacial", None),
         )
