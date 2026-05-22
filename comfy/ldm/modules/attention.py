@@ -789,6 +789,30 @@ def _var_attention_output(out, heads, head_dim, skip_output_reshape):
     return out.reshape(-1, heads * head_dim)
 
 
+def _var_attention_has_nested_api():
+    _nested = getattr(torch, "nested", None)
+    return _nested is not None and hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME)
+
+
+def _var_attention_pytorch_impl():
+    if _var_attention_has_nested_api():
+        return var_attention_pytorch
+    return var_attention_pytorch_split
+
+
+def _var_attention_pytorch_compatible(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    return _var_attention_pytorch_impl()(
+        q,
+        k,
+        v,
+        heads,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        skip_reshape=skip_reshape,
+        skip_output_reshape=skip_output_reshape,
+    )
+
+
 def _use_blackwell_attention():
     device = model_management.get_torch_device()
     if device.type != "cuda":
@@ -798,8 +822,7 @@ def _use_blackwell_attention():
 
 
 def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-    _nested = getattr(torch, "nested", None)
-    if _nested is None or not hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME):
+    if not _var_attention_has_nested_api():
         raise RuntimeError(_VAR_ATTENTION_GUARD_MESSAGE)
 
     if not skip_reshape:
@@ -868,7 +891,7 @@ def var_attention_pytorch_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip
 @torch._dynamo.disable
 def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if not SAGE_ATTENTION_VARLEN_IS_AVAILABLE:
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -905,7 +928,7 @@ def var_attention_sage(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_r
         )
     except Exception as e:
         logging.error("Error running sage var-len attention: %s, using pytorch var-len attention instead.", e)
-        out = var_attention_pytorch(
+        out = _var_attention_pytorch_compatible(
             fallback_q,
             fallback_k,
             fallback_v,
@@ -938,7 +961,7 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
                 skip_output_reshape=skip_output_reshape,
                 **kwargs,
             )
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -966,7 +989,7 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
                 skip_output_reshape=skip_output_reshape,
                 **kwargs,
             )
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -1006,7 +1029,7 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
                 skip_output_reshape=skip_output_reshape,
                 **kwargs,
             )
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             fallback_q,
             fallback_k,
             fallback_v,
@@ -1025,7 +1048,7 @@ def var_attention_sage3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
 @torch._dynamo.disable
 def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if not FLASH_ATTENTION_VARLEN_IS_AVAILABLE:
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -1053,7 +1076,7 @@ def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
         )
     except Exception as e:
         logging.error("Error running Flash Attention var-len attention: %s, using pytorch var-len attention instead.", e)
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -1069,7 +1092,7 @@ def var_attention_flash(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
 @torch._dynamo.disable
 def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if not FLASH_ATTENTION3_IS_AVAILABLE:
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -1099,7 +1122,7 @@ def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip
         )
     except Exception as e:
         logging.error("Error running Flash Attention 3 var-len attention: %s, using pytorch var-len attention instead.", e)
-        return var_attention_pytorch(
+        return _var_attention_pytorch_compatible(
             q,
             k,
             v,
@@ -1116,7 +1139,7 @@ def var_attention_flash3(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip
 
 @torch._dynamo.disable
 def var_attention_sub_quad(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
-    return var_attention_pytorch(
+    return _var_attention_pytorch_compatible(
         q,
         k,
         v,
@@ -1130,7 +1153,7 @@ def var_attention_sub_quad(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, sk
 
 @torch._dynamo.disable
 def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
-    return var_attention_pytorch(
+    return _var_attention_pytorch_compatible(
         q,
         k,
         v,
@@ -1142,7 +1165,7 @@ def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     )
 
 
-optimized_var_attention = var_attention_pytorch
+optimized_var_attention = _var_attention_pytorch_impl()
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
@@ -1156,7 +1179,7 @@ if model_management.sage_attention_enabled():
         optimized_var_attention = var_attention_sage
     else:
         logging.info("Using pytorch attention for variable-length attention")
-        optimized_var_attention = var_attention_pytorch
+        optimized_var_attention = _var_attention_pytorch_impl()
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
     optimized_attention = attention_xformers
@@ -1168,11 +1191,11 @@ elif model_management.flash_attention_enabled():
         optimized_var_attention = var_attention_flash
     else:
         logging.info("Using pytorch attention for variable-length attention")
-        optimized_var_attention = var_attention_pytorch
+        optimized_var_attention = _var_attention_pytorch_impl()
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
     optimized_attention = attention_pytorch
-    optimized_var_attention = var_attention_pytorch
+    optimized_var_attention = _var_attention_pytorch_impl()
 else:
     if args.use_split_cross_attention:
         logging.info("Using split optimization for attention")
