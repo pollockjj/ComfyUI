@@ -58,4 +58,4 @@ def test_input_processing_treats_4d_image_as_one_video_frame_sequence():
 def test_input_processing_schema_and_execute_signature_are_preprocess_only():
     schema = nodes_seedvr.SeedVR2InputProcessing.define_schema()
     assert [item.id for item in schema.inputs] == ["images", "vae", "resolution"]
-    assert [item.id for item in schema.outputs] == ["processed", "vae"]
+    assert [item.id for item in schema.outputs] == ["input_pixels", "vae"]
