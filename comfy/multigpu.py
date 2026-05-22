@@ -188,7 +188,8 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
 
     cloned = copy.copy(upscale_model)
     existing = getattr(upscale_model, 'multigpu_clones', None)
-    clones: dict[torch.device, object] = dict(existing) if existing else {}
+    limit_extra_device_set = set(limit_extra_devices)
+    clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if d in limit_extra_device_set} if existing else {}
 
     for device in limit_extra_devices:
         if device in clones:
