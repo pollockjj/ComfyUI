@@ -20,7 +20,7 @@ def test_input_processing_schema_is_preprocess_only():
     schema = nodes_seedvr.SeedVR2InputProcessing.define_schema()
 
     assert _schema_ids(schema.inputs) == ["images", "vae", "resolution"]
-    assert _schema_ids(schema.outputs) == ["input_pixels", "vae"]
+    assert _schema_ids(schema.outputs) == ["processed", "vae"]
     assert schema.outputs[0].get_io_type() == "IMAGE"
     assert schema.outputs[1].get_io_type() == "VAE"
 

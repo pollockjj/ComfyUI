@@ -18,7 +18,7 @@ def _schema_ids(items):
 def test_seedvr2_post_processing_schema():
     schema = nodes_seedvr.SeedVR2PostProcessing.define_schema()
 
-    assert _schema_ids(schema.inputs) == ["decoded", "input_pixels", "method"]
+    assert _schema_ids(schema.inputs) == ["decoded", "reference", "method"]
     assert schema.inputs[2].options == ["lab", "none"]
     assert schema.inputs[2].default == "lab"
     assert schema.outputs[0].get_io_type() == "IMAGE"
