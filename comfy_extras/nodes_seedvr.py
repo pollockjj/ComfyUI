@@ -285,12 +285,12 @@ class SeedVR2PostProcessing(io.ComfyNode):
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
         if method == "lab":
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
-            reference_5d = reference_5d.to(device=decoded_5d.device)
+            output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
             reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
-            output = lab_color_transfer(decoded_flat, reference_flat)
+            output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
         elif method == "none":
@@ -330,6 +330,14 @@ class SeedVR2PostProcessing(io.ComfyNode):
     @staticmethod
     def _to_seedvr2_raw(images):
         return images.mul(2.0).sub(1.0)
+
+    @staticmethod
+    def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):
+        color_device = comfy.model_management.vae_device()
+        decoded_flat = decoded_flat.to(device=color_device)
+        reference_flat = reference_flat.to(device=color_device)
+        output = lab_color_transfer(decoded_flat, reference_flat)
+        return output.to(device=output_device)
 
     @staticmethod
     def _resize_reference(reference, height, width):

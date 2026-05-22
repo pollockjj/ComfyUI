@@ -44,10 +44,15 @@ def test_seedvr2_post_processing_lab_uses_explicit_decoded_and_reference():
     assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
 
 
-def test_seedvr2_post_processing_lab_moves_reference_to_decoded_device():
+def test_seedvr2_post_processing_lab_runs_color_transfer_on_vae_device():
     source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing.execute)
+    helper_source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._lab_color_transfer_on_vae_device)
 
-    assert "reference_5d.to(device=decoded_5d.device)" in source
+    assert "_lab_color_transfer_on_vae_device" in source
+    assert "reference_5d.to(device=decoded_5d.device)" not in source
+    assert "comfy.model_management.vae_device()" in helper_source
+    assert ".to(device=color_device)" in helper_source
+    assert ".to(device=output_device)" in helper_source
 
 
 def test_seedvr2_post_processing_raw_conversion_does_not_probe_full_tensor_range():
