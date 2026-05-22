@@ -34,6 +34,8 @@ def get_timestep_embedding(timesteps, embedding_dim, flip_sin_to_cos = False, do
     assert len(timesteps.shape) == 1
 
     half_dim = embedding_dim // 2
+    if half_dim - downscale_freq_shift <= 0:
+        raise ValueError("downscale_freq_shift must be less than half the embedding dimension")
     emb = math.log(10000) / (half_dim - downscale_freq_shift)
     emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
     emb = emb.to(device=timesteps.device)

@@ -180,6 +180,48 @@ torch.nested = _MissingNestedApi()
     assert result.stdout.strip() == "var_attention_pytorch_split"
 
 
+def test_var_attention_compatible_split_fallback_moves_offsets_to_cpu(monkeypatch):
+    captured = {}
+
+    class _CudaOffsets:
+        def __init__(self, name):
+            self.name = name
+
+        def cpu(self):
+            return f"{self.name}_cpu"
+
+    def fake_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+        captured.update(
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
+        return "ok"
+
+    monkeypatch.setattr(attention, "var_attention_pytorch_split", fake_split)
+    monkeypatch.setattr(attention, "_var_attention_pytorch_impl", lambda: attention.var_attention_pytorch_split)
+
+    out = attention._var_attention_pytorch_compatible(
+        "q",
+        "k",
+        "v",
+        2,
+        _CudaOffsets("q"),
+        _CudaOffsets("k"),
+        skip_reshape=True,
+        skip_output_reshape=True,
+    )
+
+    assert out == "ok"
+    assert captured == {
+        "cu_seqlens_q": "q_cpu",
+        "cu_seqlens_k": "k_cpu",
+        "skip_reshape": True,
+        "skip_output_reshape": True,
+    }
+
+
 def test_var_attention_rebind_split_launch_flag():
     result = _run_attention_import("--use-split-cross-attention")
     assert result.returncode == 0, result.stderr

@@ -2,6 +2,11 @@ from unittest.mock import patch
 
 import torch
 
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
 import comfy.ldm.seedvr.vae as seedvr_vae
 
 

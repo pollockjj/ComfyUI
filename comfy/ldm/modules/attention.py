@@ -801,7 +801,11 @@ def _var_attention_pytorch_impl():
 
 
 def _var_attention_pytorch_compatible(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-    return _var_attention_pytorch_impl()(
+    impl = _var_attention_pytorch_impl()
+    if impl is var_attention_pytorch_split:
+        cu_seqlens_q = cu_seqlens_q.cpu()
+        cu_seqlens_k = cu_seqlens_k.cpu()
+    return impl(
         q,
         k,
         v,
