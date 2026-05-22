@@ -27,17 +27,17 @@ def _make_vae():
     return vae
 
 
-def test_input_processing_returns_processed_image_and_same_vae_without_encoding():
+def test_input_processing_returns_input_pixels_and_same_vae_without_encoding():
     vae = _make_vae()
     images = torch.zeros(1, 3, 16, 16, 3)
 
     output = nodes_seedvr.SeedVR2InputProcessing.execute(images, vae, 120)
 
-    processed, returned_vae = output.result
+    input_pixels, returned_vae = output.result
     assert returned_vae is vae
-    assert tuple(processed.shape) == (1, 5, 128, 128, 3)
-    assert processed.min().item() == 0.0
-    assert processed.max().item() == 0.0
+    assert tuple(input_pixels.shape) == (1, 5, 128, 128, 3)
+    assert input_pixels.min().item() == 0.0
+    assert input_pixels.max().item() == 0.0
     vae.encode.assert_not_called()
     vae.encode_tiled.assert_not_called()
     vae.decode.assert_not_called()
@@ -50,12 +50,12 @@ def test_input_processing_treats_4d_image_as_one_video_frame_sequence():
 
     output = nodes_seedvr.SeedVR2InputProcessing.execute(images, vae, 120)
 
-    processed, returned_vae = output.result
+    input_pixels, returned_vae = output.result
     assert returned_vae is vae
-    assert tuple(processed.shape) == (1, 5, 128, 128, 3)
+    assert tuple(input_pixels.shape) == (1, 5, 128, 128, 3)
 
 
 def test_input_processing_schema_and_execute_signature_are_preprocess_only():
     schema = nodes_seedvr.SeedVR2InputProcessing.define_schema()
     assert [item.id for item in schema.inputs] == ["images", "vae", "resolution"]
-    assert [item.id for item in schema.outputs] == ["processed", "vae"]
+    assert [item.id for item in schema.outputs] == ["input_pixels", "vae"]

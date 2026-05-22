@@ -106,5 +106,26 @@ def test_seedvr2_workflow_graphs_route_model_through_conditioning():
             )
 
 
+def test_seedvr2_workflow_graphs_route_preprocessed_pixels_to_post_processing():
+    for graph in GRAPHS:
+        data = json.loads(graph.read_text())
+        input_processing_ids = [
+            node_id
+            for node_id, node in data.items()
+            if node["class_type"] == "SeedVR2InputProcessing"
+        ]
+        post_processing_nodes = [
+            (node_id, node)
+            for node_id, node in data.items()
+            if node["class_type"] == "SeedVR2PostProcessing"
+        ]
+        assert len(input_processing_ids) == 1
+        for node_id, node in post_processing_nodes:
+            assert node["inputs"]["input_pixels"] == [input_processing_ids[0], 0], (
+                f"{graph} node {node_id}: post-processing must receive the "
+                "SeedVR2InputProcessing input_pixels output"
+            )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

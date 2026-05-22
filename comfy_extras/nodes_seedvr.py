@@ -220,7 +220,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
                 io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
             ],
             outputs = [
-                io.Image.Output("processed"),
+                io.Image.Output("input_pixels"),
                 io.Vae.Output("vae"),
             ]
         )
@@ -263,16 +263,16 @@ class SeedVR2PostProcessing(io.ComfyNode):
             category="image/video",
             inputs=[
                 io.Image.Input("decoded"),
-                io.Image.Input("reference"),
+                io.Image.Input("input_pixels"),
                 io.Combo.Input("method", options=["lab", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, decoded, reference, method):
+    def execute(cls, decoded, input_pixels, method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        reference_5d, _ = cls._as_bthwc(reference)
+        reference_5d, _ = cls._as_bthwc(input_pixels)
         decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
 
         b = min(decoded_5d.shape[0], reference_5d.shape[0])
