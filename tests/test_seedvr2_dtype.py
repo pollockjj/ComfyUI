@@ -4,6 +4,11 @@ from types import SimpleNamespace
 
 import torch
 
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
 import comfy.ldm.modules.attention as attention
 import comfy.sd
 import comfy.supported_models
