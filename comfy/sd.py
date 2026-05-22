@@ -557,7 +557,7 @@ class VAE:
                 self.downscale_index_formula = (4, 8, 8)
                 self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
                 self.upscale_index_formula = (4, 8, 8)
-                self.process_input = lambda image: image
+                self.process_input = lambda image: image * 2.0 - 1.0
                 self.crop_input = False
             elif "decoder.conv_in.weight" in sd:
                 if sd['decoder.conv_in.weight'].shape[1] == 64:

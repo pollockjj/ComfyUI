@@ -10,7 +10,7 @@ sets ``latent_channels=16``, ``latent_dim=3``, ``disable_offload=True``,
 ``downscale_index_formula=(4, 8, 8)``, ``upscale_index_formula=(4, 8,
 8)``, plus the SeedVR2 ``memory_used_decode`` / ``memory_used_encode``
 lambdas, the ``downscale_ratio`` / ``upscale_ratio`` tuples, and the
-no-op ``process_input`` / ``crop_input=False`` overrides.
+SeedVR2 ``process_input`` / ``crop_input=False`` overrides.
 
 This module exercises the real ``VAE.__init__`` detection-and-load path
 with a stubbed state dict containing only the SeedVR2 magic key, and
@@ -155,3 +155,11 @@ def test_seedvr2_loader_sets_disable_offload(seedvr2_vae):
         "offload during decode (the wrapper retains memory-state references "
         "across slice boundaries — see VideoAutoencoderKL.slicing_decode)."
     )
+
+
+def test_seedvr2_loader_normalizes_comfy_pixels_at_vae_boundary(seedvr2_vae):
+    pixels = torch.tensor([0.0, 0.5, 1.0])
+
+    normalized = seedvr2_vae.process_input(pixels)
+
+    assert torch.equal(normalized, torch.tensor([-1.0, 0.0, 1.0]))

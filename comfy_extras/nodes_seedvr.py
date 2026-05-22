@@ -14,7 +14,7 @@ from comfy.ldm.seedvr.vae import lab_color_transfer
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
-from torchvision.transforms import Lambda, Normalize
+from torchvision.transforms import Lambda
 from torchvision.transforms.functional import InterpolationMode
 
 
@@ -242,12 +242,10 @@ class SeedVR2InputProcessing(io.ComfyNode):
         images = images.reshape(b * t, c, h, w)
 
         clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        normalize = Normalize(0.5, 0.5)
         images = side_resize(images, resolution)
 
         images = clip(images)
         images = div_pad(images, (16, 16))
-        images = normalize(images)
         _, _, new_h, new_w = images.shape
 
         images = images.reshape(b, t, c, new_h, new_w)
