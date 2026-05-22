@@ -182,14 +182,15 @@ def create_upscale_model_multigpu_deepclones(upscale_model, max_gpus: int):
     """
     full_extra_devices = comfy.model_management.get_all_torch_devices(exclude_current=True)
     limit_extra_devices = full_extra_devices[:max_gpus - 1]
-    if len(limit_extra_devices) == 0:
-        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
-        return upscale_model
-
     cloned = copy.copy(upscale_model)
     existing = getattr(upscale_model, 'multigpu_clones', None)
     limit_extra_device_set = set(limit_extra_devices)
     clones: dict[torch.device, object] = {d: c for d, c in dict(existing).items() if d in limit_extra_device_set} if existing else {}
+    if len(limit_extra_devices) == 0:
+        logging.info("No extra torch devices need initialization, skipping initializing MultiGPU upscale clones.")
+        if hasattr(cloned, 'multigpu_clones'):
+            del cloned.multigpu_clones
+        return cloned
 
     for device in limit_extra_devices:
         if device in clones:

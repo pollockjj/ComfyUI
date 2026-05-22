@@ -97,6 +97,10 @@ def test_upscale_model_deepclone_does_not_copy_existing_clone_graph(monkeypatch)
     assert cloned.multigpu_clones[second_device].device == "cpu"
     assert not cloned.multigpu_clones[second_device].model.param.requires_grad
 
+    single_gpu_clone = comfy.multigpu.create_upscale_model_multigpu_deepclones(source, max_gpus=1)
+    assert single_gpu_clone is not source
+    assert not hasattr(single_gpu_clone, "multigpu_clones")
+
 
 def test_checkpoint_loader_registers_vae_cached_patcher(monkeypatch):
     install_fake_comfy_aimdo(monkeypatch)
