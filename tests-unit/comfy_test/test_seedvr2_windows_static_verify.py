@@ -18,7 +18,7 @@ def test_seedvr2_windows_static_contract_tokens():
     required = [
         "SeedVR2PostProcessing",
         'io.Image.Input("decoded")',
-        'io.Image.Input("reference")',
+        'io.Image.Input("input_pixels")',
         'io.Combo.Input("method", options=["lab", "none"], default="lab")',
         "def _format_seedvr2_encoded_samples",
         "def decode(self, z, seedvr2_tiling=None)",
