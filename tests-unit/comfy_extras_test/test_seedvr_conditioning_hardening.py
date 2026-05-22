@@ -231,6 +231,8 @@ def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
         schema = nodes_seedvr.SeedVR2Conditioning.define_schema()
+        assert schema.inputs[0].id == "vae_conditioning"
+        assert schema.inputs[0].display_name == "LATENT"
         assert [output.display_name for output in schema.outputs] == [
             "positive",
             "negative",

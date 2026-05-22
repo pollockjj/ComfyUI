@@ -361,7 +361,7 @@ class SeedVR2Conditioning(io.ComfyNode):
             node_id="SeedVR2Conditioning",
             category="image/video",
             inputs=[
-                io.Latent.Input("vae_conditioning"),
+                io.Latent.Input("vae_conditioning", display_name="LATENT"),
                 io.Model.Input("model"),
                 io.Float.Input("latent_noise_scale", default=0.0, step=0.001)
             ],
