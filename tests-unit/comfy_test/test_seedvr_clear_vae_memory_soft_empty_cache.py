@@ -8,6 +8,7 @@ correct call shape on non-CUDA hosts and on managed-device hosts where
 """
 
 from unittest.mock import patch
+import inspect
 
 import torch
 
@@ -28,6 +29,7 @@ from comfy.cli_args import args as _cli_args
 _cli_args.cpu = True
 
 import comfy.model_management  # noqa: E402
+import comfy.ldm.seedvr.vae as seedvr_vae  # noqa: E402
 import comfy_extras.nodes_seedvr as nodes_seedvr  # noqa: E402
 
 
@@ -59,3 +61,10 @@ def test_clear_vae_memory_uses_soft_empty_cache():
         f"clear_vae_memory must dispatch its cache clear via the canonical "
         f"per-backend helper at comfy/model_management.py:1780."
     )
+
+
+def test_tiled_vae_uses_soft_empty_cache():
+    source = inspect.getsource(seedvr_vae.tiled_vae)
+
+    assert "comfy.model_management.soft_empty_cache()" in source
+    assert "torch.cuda.empty_cache()" not in source

@@ -855,10 +855,6 @@ class NaMMAttention(nn.Module):
 
 
         self.rope = get_na_rope(rope_type=rope_type, dim=rope_dim)
-
-    def forward(self):
-        pass
-
 def window(
     hid: torch.FloatTensor,  # (L c)
     hid_shape: torch.LongTensor,  # (b n)
@@ -1660,7 +1656,7 @@ class NaDiT(nn.Module):
         x,
         timestep,
         context,  # l c
-        disable_cache: bool = False,  # for test # TODO ? // gives an error when set to True
+        disable_cache: bool = False,
         **kwargs
     ):
         transformer_options = kwargs.get("transformer_options", {})
