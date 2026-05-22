@@ -1041,28 +1041,10 @@ class VAE:
             "temporal_size": tile_t,
             "temporal_overlap": overlap_t,
         }
-        # SeedVR2 VAE decode worker dispatch is gated until the decode worker
-        # path is byte-identical to the primary-model path. Encode workers stay
-        # enabled in encode_tiled_seedvr2.
-        multigpu_clones = None
-        clone_models = {}
-        try:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
-                    c.first_stage_model.to(dev)
-                    c.first_stage_model.device = dev
-                    clone_models[dev] = c.first_stage_model
-                if clone_models:
-                    args["multigpu_vae_models"] = clone_models
-            output = self.first_stage_model.decode(
-                samples.to(self.vae_dtype).to(self.device),
-                seedvr2_tiling=args,
-            )
-        finally:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    c.first_stage_model.to("cpu")
+        output = self.first_stage_model.decode(
+            samples.to(self.vae_dtype).to(self.device),
+            seedvr2_tiling=args,
+        )
         return self.process_output(output.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
 
     def _format_seedvr2_encoded_samples(self, samples):
