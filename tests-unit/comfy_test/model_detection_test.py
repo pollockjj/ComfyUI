@@ -73,6 +73,18 @@ def _make_flux_schnell_comfyui_sd():
     return sd
 
 
+def _make_seedvr2_7b_separate_mm_sd():
+    return {
+        "blocks.35.mlp.vid.proj_in.weight": torch.empty(1, 3072),
+    }
+
+
+def _make_seedvr2_3b_shared_mm_sd():
+    return {
+        "blocks.31.mlp.all.proj_in_gate.weight": torch.empty(1, 1),
+    }
+
+
 class TestModelDetection:
     """Verify that first-match model detection selects the correct model
     based on list ordering and unet_config specificity."""
@@ -142,3 +154,30 @@ class TestModelDetection:
             "combination, which makes detection ambiguous: "
             + "; ".join(", ".join(names) for names in duplicates.values())
         )
+
+    def test_seedvr2_7b_separate_mm_detection_config(self):
+        sd = _make_seedvr2_7b_separate_mm_sd()
+        unet_config = detect_unet_config(sd, "")
+
+        assert unet_config is not None
+        assert unet_config["image_model"] == "seedvr2"
+        assert unet_config["vid_dim"] == 3072
+        assert unet_config["heads"] == 24
+        assert unet_config["num_layers"] == 36
+        assert unet_config["mm_layers"] == 36
+        assert unet_config["mlp_type"] == "normal"
+        assert unet_config["qk_rope"] is True
+        assert unet_config["rope_type"] == "rope3d"
+        assert unet_config["rope_dim"] == 64
+
+    def test_seedvr2_3b_shared_mm_detection_config(self):
+        sd = _make_seedvr2_3b_shared_mm_sd()
+        unet_config = detect_unet_config(sd, "")
+
+        assert unet_config is not None
+        assert unet_config["image_model"] == "seedvr2"
+        assert unet_config["vid_dim"] == 2560
+        assert unet_config["heads"] == 20
+        assert unet_config["num_layers"] == 32
+        assert unet_config["mlp_type"] == "swiglu"
+        assert unet_config["qk_rope"] is None
