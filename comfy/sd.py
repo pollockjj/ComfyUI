@@ -948,7 +948,7 @@ class VAE:
             functions = {self.device: decode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_decode(samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
@@ -986,7 +986,7 @@ class VAE:
             functions = {self.device: decode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_decode(memory_shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_decode(memory_shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = clone_decode_fn_factory(c, dev)
@@ -1005,7 +1005,7 @@ class VAE:
             functions = {self.device: decode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_decode(samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.decode(a.to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
@@ -1029,7 +1029,7 @@ class VAE:
             functions = {self.device: encode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_encode(pixel_samples.shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_encode(pixel_samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.encode((_c.process_input(a)).to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
@@ -1068,7 +1068,7 @@ class VAE:
             functions = {self.device: encode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_encode(samples.shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_encode(samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = clone_encode_fn_factory(c, dev)
@@ -1092,7 +1092,7 @@ class VAE:
             functions = {self.device: encode_fn}
             try:
                 for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_encode(samples.shape, c.vae_dtype), dev)
+                    model_management.free_memory(c.model_size() + c.memory_used_encode(samples.shape, c.vae_dtype), dev)
                     c.first_stage_model.to(dev)
                 for dev, c in multigpu_clones.items():
                     functions[dev] = lambda a, _c=c, _dev=dev: _c.first_stage_model.encode((_c.process_input(a)).to(_c.vae_dtype).to(_dev)).to(dtype=_c.vae_output_dtype())
