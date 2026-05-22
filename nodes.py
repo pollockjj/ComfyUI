@@ -48,13 +48,17 @@ import node_helpers
 if args.enable_manager:
     import comfyui_manager
 
+
 def before_node_execution():
     comfy.model_management.throw_exception_if_processing_interrupted()
+
 
 def interrupt_processing(value=True):
     comfy.model_management.interrupt_current_processing(value)
 
+
 MAX_RESOLUTION=16384
+
 
 class CLIPTextEncode(ComfyNodeABC):
     @classmethod
@@ -324,8 +328,8 @@ class VAEDecodeTiled:
         return {"required": {"samples": ("LATENT", ), "vae": ("VAE", ),
                              "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32, "advanced": True}),
                              "overlap": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 32, "advanced": True}),
-                             "temporal_size": ("INT", {"default": 64, "min": 8, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to decode at a time.", "advanced": True}),
-                             "temporal_overlap": ("INT", {"default": 8, "min": 4, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to overlap.", "advanced": True}),
+                             "temporal_size": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to decode at a time. SeedVR2 allows 0 to disable temporal slicing.", "advanced": True}),
+                             "temporal_overlap": ("INT", {"default": 8, "min": 0, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to overlap.", "advanced": True}),
                             }}
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "decode"
@@ -335,18 +339,29 @@ class VAEDecodeTiled:
     def decode(self, vae, samples, tile_size, overlap=64, temporal_size=64, temporal_overlap=8):
         if tile_size < overlap * 4:
             overlap = tile_size // 4
-        if temporal_size < temporal_overlap * 2:
-            temporal_overlap = temporal_overlap // 2
         temporal_compression = vae.temporal_compression_decode()
         if temporal_compression is not None:
-            temporal_size = max(2, temporal_size // temporal_compression)
-            temporal_overlap = max(1, min(temporal_size // 2, temporal_overlap // temporal_compression))
+            if temporal_size <= 0:
+                temporal_size = 0
+                temporal_overlap = 0
+            else:
+                if temporal_size < temporal_overlap * 2:
+                    temporal_overlap = temporal_overlap // 2
+                temporal_size = max(2, temporal_size // temporal_compression)
+                temporal_overlap = max(0, min(temporal_size // 2, temporal_overlap // temporal_compression))
         else:
             temporal_size = None
             temporal_overlap = None
 
         compression = vae.spacial_compression_decode()
-        images = vae.decode_tiled(samples["samples"], tile_x=tile_size // compression, tile_y=tile_size // compression, overlap=overlap // compression, tile_t=temporal_size, overlap_t=temporal_overlap)
+        images = vae.decode_tiled(
+            samples["samples"],
+            tile_x=tile_size // compression,
+            tile_y=tile_size // compression,
+            overlap=overlap // compression,
+            tile_t=temporal_size,
+            overlap_t=temporal_overlap,
+        )
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
@@ -363,7 +378,7 @@ class VAEEncode:
 
     def encode(self, vae, pixels):
         t = vae.encode(pixels)
-        return ({"samples":t}, )
+        return ({"samples": t}, )
 
 class VAEEncodeTiled:
     @classmethod
@@ -2408,6 +2423,7 @@ async def init_builtin_extra_nodes():
         "nodes_camera_trajectory.py",
         "nodes_edit_model.py",
         "nodes_tcfg.py",
+        "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
         "nodes_chroma_radiance.py",
