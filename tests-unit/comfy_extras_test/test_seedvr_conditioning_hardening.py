@@ -227,6 +227,20 @@ def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
         restore()
 
 
+def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        schema = nodes_seedvr.SeedVR2Conditioning.define_schema()
+        assert [output.display_name for output in schema.outputs] == [
+            "positive",
+            "negative",
+            "latent",
+            "model",
+        ]
+    finally:
+        restore()
+
+
 def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
     """SeedVR2 accepts Comfy's single-branch CFG=1 sampling path."""
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
@@ -235,16 +249,19 @@ def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
         patcher = _ModelPatcher(diffusion_model)
         vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
-        positive, negative, latent = nodes_seedvr.SeedVR2Conditioning.execute(
-            vae_conditioning,
-            patcher,
-            0.0,
+        positive, negative, latent, passthrough_model = (
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                vae_conditioning,
+                patcher,
+                0.0,
+            )
         )
 
         assert patcher.disable_cfg1_optimization_calls == 0
         assert positive[0][0].shape == (1, 3, 4)
         assert negative[0][0].shape == (1, 3, 4)
         assert latent["samples"].shape == (1, 2, 1, 1)
+        assert passthrough_model is patcher
     finally:
         restore()
 
@@ -481,13 +498,14 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         # Should not raise.
-        positive, negative, latent = (
+        positive, negative, latent, passthrough_model = (
             nodes_seedvr.SeedVR2Conditioning.execute(
                 vae_conditioning, patcher, 0.0,
             )
         )
         assert positive[0][0].shape == (1, 3, 4)
         assert negative[0][0].shape == (1, 3, 4)
+        assert passthrough_model is patcher
     finally:
         restore()
 

@@ -84,5 +84,27 @@ def test_seedvr2_workflow_graphs_match_seedvr2_node_input_schemas():
                 )
 
 
+def test_seedvr2_workflow_graphs_route_model_through_conditioning():
+    for graph in GRAPHS:
+        data = json.loads(graph.read_text())
+        conditioning_ids = {
+            node_id
+            for node_id, node in data.items()
+            if node["class_type"] == "SeedVR2Conditioning"
+        }
+        sampler_nodes = [
+            (node_id, node)
+            for node_id, node in data.items()
+            if node["class_type"] == "SeedVR2ProgressiveSampler"
+        ]
+        for node_id, node in sampler_nodes:
+            model_input = node["inputs"]["model"]
+            assert model_input[0] in conditioning_ids
+            assert model_input[1] == 3, (
+                f"{graph} node {node_id}: sampler model input must use the "
+                f"SeedVR2Conditioning model passthrough output"
+            )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

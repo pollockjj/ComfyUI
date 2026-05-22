@@ -361,7 +361,8 @@ class SeedVR2Conditioning(io.ComfyNode):
             ],
             outputs=[io.Conditioning.Output(display_name = "positive"),
                      io.Conditioning.Output(display_name = "negative"),
-                     io.Latent.Output(display_name = "latent")],
+                     io.Latent.Output(display_name = "latent"),
+                     io.Model.Output(display_name = "model")],
         )
 
     @classmethod
@@ -446,7 +447,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        return io.NodeOutput(positive, negative, {"samples": noises})
+        return io.NodeOutput(positive, negative, {"samples": noises}, model_patcher)
 
 # SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
 # stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent
