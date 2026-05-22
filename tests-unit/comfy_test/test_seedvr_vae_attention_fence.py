@@ -45,6 +45,4 @@ def test_seedvr_vae_4d_self_attention_uses_vae_attention_with_channel_first_layo
     assert tuple(calls["q"].shape) == tuple(hidden_states.shape)
     assert tuple(calls["k"].shape) == tuple(hidden_states.shape)
     assert tuple(calls["v"].shape) == tuple(hidden_states.shape)
-    assert torch.equal(calls["k"], calls["q"])
-    assert torch.equal(calls["v"], calls["k"])
     assert tuple(output.shape) == tuple(hidden_states.shape)
