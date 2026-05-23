@@ -106,7 +106,7 @@ def test_seedvr2_workflow_graphs_route_model_through_conditioning():
             )
 
 
-def test_seedvr2_workflow_graphs_route_original_pixels_to_post_processing():
+def test_seedvr2_workflow_graphs_route_original_image_to_post_processing():
     for graph in GRAPHS:
         data = json.loads(graph.read_text())
         resize_and_pad_nodes = [
@@ -122,11 +122,11 @@ def test_seedvr2_workflow_graphs_route_original_pixels_to_post_processing():
         assert len(resize_and_pad_nodes) == 1
         _, resize_and_pad = resize_and_pad_nodes[0]
         for node_id, node in post_processing_nodes:
-            assert node["inputs"]["original"] == resize_and_pad["inputs"]["images"], (
+            assert node["inputs"]["original_image"] == [resize_and_pad_nodes[0][0], 1], (
                 f"{graph} node {node_id}: post-processing must receive the "
-                "same original IMAGE input as SeedVR2ResizeAndPad"
+                "SeedVR2ResizeAndPad original_image output"
             )
-            assert node["inputs"]["shorter_edge"] == [resize_and_pad_nodes[0][0], 1], (
+            assert node["inputs"]["shorter_edge"] == [resize_and_pad_nodes[0][0], 2], (
                 f"{graph} node {node_id}: post-processing must use the same "
                 "SeedVR2ResizeAndPad shorter_edge output"
             )

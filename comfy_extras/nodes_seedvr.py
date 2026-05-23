@@ -220,12 +220,14 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
             ],
             outputs = [
                 io.Image.Output("input_pixels"),
+                io.Image.Output("original_image"),
                 io.Int.Output("shorter_edge"),
             ]
         )
 
     @classmethod
     def execute(cls, images, shorter_edge):
+        original_image = images
         if images.dim() == 4:
             # Comfy video components arrive as a 4-D IMAGE frame sequence:
             # (frames, H, W, C). SeedVR2 consumes that as one video.
@@ -251,7 +253,7 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
         images = cut_videos(images)
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
 
-        return io.NodeOutput(images_bthwc, shorter_edge)
+        return io.NodeOutput(images_bthwc, original_image, shorter_edge)
 
 
 class SeedVR2PostProcessing(io.ComfyNode):
@@ -262,7 +264,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
             category="image/video",
             inputs=[
                 io.Image.Input("decoded"),
-                io.Image.Input("original"),
+                io.Image.Input("original_image"),
                 io.Int.Input("shorter_edge", default=1280, min=120),
                 io.Combo.Input("method", options=["lab", "none"], default="lab"),
             ],
@@ -270,9 +272,9 @@ class SeedVR2PostProcessing(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, decoded, original, shorter_edge, method):
+    def execute(cls, decoded, original_image, shorter_edge, method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        reference_5d = cls._resize_original_reference(original, shorter_edge)
+        reference_5d = cls._resize_original_reference(original_image, shorter_edge)
         decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
 
         b = min(decoded_5d.shape[0], reference_5d.shape[0])
