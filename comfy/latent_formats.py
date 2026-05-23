@@ -10,6 +10,7 @@ class LatentFormat:
     taesd_decoder_name = None
     spacial_downscale_ratio = 8
     temporal_downscale_ratio = 1
+    latent_temporal_collapsed = False
 
     def process_in(self, latent):
         return latent * self.scale_factor
@@ -772,6 +773,7 @@ class ACEAudio(LatentFormat):
 class SeedVR2(LatentFormat):
     latent_channels = 16
     latent_dimensions = 3
+    latent_temporal_collapsed = True
 
 class ACEAudio15(LatentFormat):
     latent_channels = 64

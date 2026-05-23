@@ -41,16 +41,21 @@ def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None,
     if latent_image.is_nested:
         return latent_image
     latent_format = model.get_model_object("latent_format") #Resize the empty latent image so it has the right number of channels
+    latent_temporal_collapsed = (
+        latent_image.ndim == 4
+        and getattr(latent_format, "latent_temporal_collapsed", False)
+        and latent_image.shape[1] % latent_format.latent_channels == 0
+    )
     is_empty = torch.count_nonzero(latent_image) == 0
     if is_empty:
-        if latent_format.latent_channels != latent_image.shape[1]:
+        if latent_format.latent_channels != latent_image.shape[1] and not latent_temporal_collapsed:
             latent_image = comfy.utils.repeat_to_batch_size(latent_image, latent_format.latent_channels, dim=1)
         if downscale_ratio_spacial is not None:
             if downscale_ratio_spacial != latent_format.spacial_downscale_ratio:
                 ratio = downscale_ratio_spacial / latent_format.spacial_downscale_ratio
                 latent_image = comfy.utils.common_upscale(latent_image, round(latent_image.shape[-1] * ratio), round(latent_image.shape[-2] * ratio), "nearest-exact", crop="disabled")
 
-    if latent_format.latent_dimensions == 3 and latent_image.ndim == 4:
+    if latent_format.latent_dimensions == 3 and latent_image.ndim == 4 and not latent_temporal_collapsed:
         latent_image = latent_image.unsqueeze(2)
 
     if is_empty and downscale_ratio_temporal is not None:

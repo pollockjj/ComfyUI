@@ -203,8 +203,8 @@ def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monk
                 "enable_tiling": True,
                 "tile_size": (512, 512),
                 "tile_overlap": (64, 64),
-                "temporal_size": 4,
-                "temporal_overlap": 1,
+                "temporal_size": 16,
+                "temporal_overlap": 4,
             },
         }
     ]

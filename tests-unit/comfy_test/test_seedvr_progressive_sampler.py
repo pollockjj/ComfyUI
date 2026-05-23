@@ -87,6 +87,7 @@ def _identity_fix_empty(model, latent_image, downscale_ratio_spacial=None):
 class _FakeSeedVR2LatentFormat:
     latent_channels = _LAT_C
     latent_dimensions = 3
+    latent_temporal_collapsed = True
     spacial_downscale_ratio = 8
 
 
@@ -98,6 +99,49 @@ class _FakeSeedVR2ModelForLatentFix:
 
     def get_additional_models_with_key(self, key):
         return []
+
+
+class _FakeVideoLatentFormat:
+    latent_channels = _LAT_C
+    latent_dimensions = 3
+    spacial_downscale_ratio = 8
+
+
+class _FakeVideoModelForLatentFix:
+    def get_model_object(self, name):
+        if name != "latent_format":
+            raise KeyError(name)
+        return _FakeVideoLatentFormat()
+
+
+def test_fix_empty_latent_channels_preserves_seedvr2_collapsed_4d_latents():
+    latent = torch.ones(1, _LAT_C * 3, 8, 8)
+
+    fixed = comfy.sample.fix_empty_latent_channels(
+        _FakeSeedVR2ModelForLatentFix(), latent,
+    )
+
+    assert fixed.shape == latent.shape
+
+
+def test_fix_empty_latent_channels_preserves_empty_seedvr2_collapsed_4d_latents():
+    latent = torch.zeros(1, _LAT_C * 3, 8, 8)
+
+    fixed = comfy.sample.fix_empty_latent_channels(
+        _FakeSeedVR2ModelForLatentFix(), latent,
+    )
+
+    assert fixed.shape == latent.shape
+
+
+def test_fix_empty_latent_channels_unsqueezes_standard_video_4d_latents():
+    latent = torch.ones(1, _LAT_C, 8, 8)
+
+    fixed = comfy.sample.fix_empty_latent_channels(
+        _FakeVideoModelForLatentFix(), latent,
+    )
+
+    assert fixed.shape == (1, _LAT_C, 1, 8, 8)
 
 
 def _fingerprinted_prepare_noise(latent_image, seed, batch_inds=None):
