@@ -371,18 +371,19 @@ class SeedVR2Conditioning(io.ComfyNode):
             node_id="SeedVR2Conditioning",
             category="image/video",
             inputs=[
-                io.Latent.Input("vae_conditioning", display_name="LATENT"),
                 io.Model.Input("model"),
-                io.Float.Input("latent_noise_scale", default=0.0, step=0.001)
+                io.Latent.Input("vae_conditioning", display_name="LATENT"),
             ],
-            outputs=[io.Conditioning.Output(display_name = "positive"),
-                     io.Conditioning.Output(display_name = "negative"),
-                     io.Latent.Output(display_name = "latent"),
-                     io.Model.Output(display_name = "model")],
+            outputs=[
+                io.Model.Output(display_name = "model"),
+                io.Conditioning.Output(display_name = "positive"),
+                io.Conditioning.Output(display_name = "negative"),
+                io.Latent.Output(display_name = "latent"),
+            ],
         )
 
     @classmethod
-    def execute(cls, vae_conditioning, model, latent_noise_scale) -> io.NodeOutput:
+    def execute(cls, model, vae_conditioning) -> io.NodeOutput:
 
         vae_conditioning = vae_conditioning["samples"]
         if vae_conditioning.ndim != 5:
@@ -437,7 +438,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises = noises * 0.1 + aug_noises * 0.05
-        cond_noise_scale = latent_noise_scale
+        cond_noise_scale = 0.0
         t = (
             torch.tensor([1000.0])
             * cond_noise_scale
@@ -463,7 +464,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        return io.NodeOutput(positive, negative, {"samples": noises}, model_patcher)
+        return io.NodeOutput(model_patcher, positive, negative, {"samples": noises})
 
 # SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
 # stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent

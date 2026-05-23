@@ -100,10 +100,13 @@ def test_seedvr2_workflow_graphs_route_model_through_conditioning():
         for node_id, node in sampler_nodes:
             model_input = node["inputs"]["model"]
             assert model_input[0] in conditioning_ids
-            assert model_input[1] == 3, (
+            assert model_input[1] == 0, (
                 f"{graph} node {node_id}: sampler model input must use the "
                 f"SeedVR2Conditioning model passthrough output"
             )
+            assert node["inputs"]["positive"] == [model_input[0], 1]
+            assert node["inputs"]["negative"] == [model_input[0], 2]
+            assert node["inputs"]["latent_image"] == [model_input[0], 3]
 
 
 def test_seedvr2_workflow_graphs_route_original_image_to_post_processing():

@@ -43,13 +43,12 @@
   },
   "6": {
     "inputs": {
-      "latent_noise_scale": 0.0,
-      "vae_conditioning": [
-        "5",
-        0
-      ],
       "model": [
         "2",
+        0
+      ],
+      "vae_conditioning": [
+        "5",
         0
       ]
     },
@@ -67,19 +66,19 @@
       "temporal_overlap": 0,
       "model": [
         "6",
-        3
+        0
       ],
       "positive": [
         "6",
-        0
+        1
       ],
       "negative": [
         "6",
-        1
+        2
       ],
       "latent_image": [
         "6",
-        2
+        3
       ]
     },
     "class_type": "SeedVR2ProgressiveSampler"

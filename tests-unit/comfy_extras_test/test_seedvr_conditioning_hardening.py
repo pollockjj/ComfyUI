@@ -231,13 +231,16 @@ def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
         schema = nodes_seedvr.SeedVR2Conditioning.define_schema()
-        assert schema.inputs[0].id == "vae_conditioning"
-        assert schema.inputs[0].display_name == "LATENT"
+        assert [input_item.id for input_item in schema.inputs] == [
+            "model",
+            "vae_conditioning",
+        ]
+        assert schema.inputs[1].display_name == "LATENT"
         assert [output.display_name for output in schema.outputs] == [
+            "model",
             "positive",
             "negative",
             "latent",
-            "model",
         ]
     finally:
         restore()
@@ -251,11 +254,10 @@ def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
         patcher = _ModelPatcher(diffusion_model)
         vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
-        positive, negative, latent, passthrough_model = (
+        passthrough_model, positive, negative, latent = (
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning,
                 patcher,
-                0.0,
+                vae_conditioning,
             )
         )
 
@@ -436,7 +438,7 @@ def test_seedvr2_conditioning_fails_loud_on_zero_buffers():
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
+                patcher, vae_conditioning,
             )
 
         message = str(excinfo.value)
@@ -472,7 +474,7 @@ def test_seedvr2_conditioning_fails_loud_on_fp8_zero_buffers():
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
+                patcher, vae_conditioning,
             )
 
         message = str(excinfo.value)
@@ -500,9 +502,9 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
 
         # Should not raise.
-        positive, negative, latent, passthrough_model = (
+        passthrough_model, positive, negative, latent = (
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
+                patcher, vae_conditioning,
             )
         )
         assert positive[0][0].shape == (1, 3, 4)
@@ -531,7 +533,7 @@ def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
+                patcher, vae_conditioning,
             )
 
         assert (
@@ -557,7 +559,7 @@ def test_seedvr2_conditioning_fail_loud_falls_back_when_path_unavailable():
 
         with pytest.raises(RuntimeError) as excinfo:
             nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
+                patcher, vae_conditioning,
             )
         message = str(excinfo.value)
         assert "Source file:" not in message  # no empty path leak
