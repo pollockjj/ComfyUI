@@ -261,16 +261,17 @@ class SeedVR2PostProcessing(io.ComfyNode):
             category="image/video",
             inputs=[
                 io.Image.Input("decoded"),
-                io.Image.Input("input_pixels"),
+                io.Image.Input("original"),
+                io.Int.Input("shorter_edge", default=1280, min=120),
                 io.Combo.Input("method", options=["lab", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, decoded, input_pixels, method):
+    def execute(cls, decoded, original, shorter_edge, method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        reference_5d, _ = cls._as_bthwc(input_pixels)
+        reference_5d = cls._resize_original_reference(original, shorter_edge)
         decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
 
         b = min(decoded_5d.shape[0], reference_5d.shape[0])
@@ -328,6 +329,14 @@ class SeedVR2PostProcessing(io.ComfyNode):
     @staticmethod
     def _to_seedvr2_raw(images):
         return images.mul(2.0).sub(1.0)
+
+    @classmethod
+    def _resize_original_reference(cls, original, shorter_edge):
+        original_5d, _ = cls._as_bthwc(original)
+        b, t = original_5d.shape[:2]
+        original_flat = rearrange(original_5d, "b t h w c -> (b t) c h w")
+        resized_flat = side_resize(original_flat, shorter_edge).clamp(0.0, 1.0)
+        return rearrange(resized_flat, "(b t) c h w -> b t h w c", b=b, t=t)
 
     @staticmethod
     def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):

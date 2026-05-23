@@ -121,10 +121,11 @@
         "8",
         0
       ],
-      "input_pixels": [
-        "4",
+      "original": [
+        "11",
         0
-      ]
+      ],
+      "shorter_edge": 120
     },
     "class_type": "SeedVR2PostProcessing"
   },

@@ -31,8 +31,8 @@ def test_saved_loaded_seedvr2_latent_decode_boundary_does_not_rerun_preprocessin
 
     vae = _DecodeOnlyVAE()
     decoded = nodes_mod.VAEDecode().decode(vae, loaded)[0]
-    reference = torch.full((1, 2, 32, 40, 3), 0.75)
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    original = torch.full((1, 2, 32, 40, 3), 0.75)
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 32, "none").result[0]
 
     assert vae.decode_calls == 1
     assert tuple(output.shape) == (2, 32, 40, 3)

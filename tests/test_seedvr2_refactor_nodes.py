@@ -11,53 +11,53 @@ import nodes
 
 def test_seedvr2_postprocessing_restores_flat_decoded_batch_time():
     decoded = torch.arange(6 * 4 * 6 * 1, dtype=torch.float32).reshape(6, 4, 6, 1)
-    reference = torch.ones((2, 3, 4, 6, 1), dtype=torch.float32)
+    original = torch.ones((2, 3, 4, 6, 1), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 4, "none").result[0]
 
     assert output.shape == (6, 4, 6, 1)
     torch.testing.assert_close(output, decoded)
 
 
-def test_seedvr2_postprocessing_crops_to_raw_reference_size():
+def test_seedvr2_postprocessing_crops_to_resized_original_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
-    reference = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
+    original = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 120, "none").result[0]
 
     assert output.shape == (1, 120, 168, 3)
 
 
-def test_seedvr2_postprocessing_uses_reference_tensor_not_repeated_resolution():
+def test_seedvr2_postprocessing_uses_decoded_size_when_resized_original_is_larger():
     decoded = torch.ones((1, 128, 160, 3), dtype=torch.float32)
-    reference = torch.full((1, 1, 480, 640, 3), 0.25, dtype=torch.float32)
+    original = torch.full((1, 1, 480, 640, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 480, "none").result[0]
 
     assert output.shape == (1, 128, 160, 3)
 
 
-def test_seedvr2_postprocessing_preserves_real_black_reference_edges():
+def test_seedvr2_postprocessing_does_not_trim_real_black_original_edges():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
-    reference = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
+    original = torch.zeros((1, 1, 128, 176, 3), dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 128, "none").result[0]
 
     assert output.shape == (1, 128, 176, 3)
 
 
-def test_seedvr2_postprocessing_crops_height_only_to_raw_reference_size():
+def test_seedvr2_postprocessing_crops_height_only_to_resized_original_size():
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
-    reference = torch.full((1, 1, 120, 176, 3), 0.25, dtype=torch.float32)
+    original = torch.full((1, 1, 120, 176, 3), 0.25, dtype=torch.float32)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 120, "none").result[0]
 
     assert output.shape == (1, 120, 176, 3)
 
 
-def test_seedvr2_postprocessing_lab_uses_raw_reference_size(monkeypatch):
+def test_seedvr2_postprocessing_lab_uses_resized_original_size(monkeypatch):
     decoded = torch.ones((1, 128, 176, 3), dtype=torch.float32)
-    reference = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
+    original = torch.full((1, 1, 120, 169, 3), 0.25, dtype=torch.float32)
     calls = []
 
     def fake_lab_color_transfer(decoded_flat, reference_flat):
@@ -66,7 +66,7 @@ def test_seedvr2_postprocessing_lab_uses_raw_reference_size(monkeypatch):
 
     monkeypatch.setattr(nodes_seedvr, "lab_color_transfer", fake_lab_color_transfer)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "lab").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 120, "lab").result[0]
 
     assert calls == [((1, 3, 120, 169), (1, 3, 120, 169))]
     assert output.shape == (1, 120, 168, 3)
