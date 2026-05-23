@@ -29,7 +29,7 @@
   },
   "4": {
     "inputs": {
-      "shorter_edge": 120,
+      "shorter_edge": 128,
       "multiplier": 1.0,
       "images": [
         "11",

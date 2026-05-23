@@ -240,7 +240,7 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
             category="image/video",
             inputs = [
                 io.Image.Input("images"),
-                io.Int.Input("shorter_edge", default = 1280, min = 120),
+                io.Int.Input("shorter_edge", default = 1280, min = 128, step=16),
                 io.Float.Input("multiplier", default=1.0, min=0.01),
             ],
             outputs = [
@@ -261,6 +261,13 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
             raise ValueError(
                 "SeedVR2ResizeAndPad: shorter_edge * multiplier must resolve "
                 f"to at least 1 pixel; got {upscaled_shorter_edge}."
+            )
+        if upscaled_shorter_edge % 16 != 0:
+            raise ValueError(
+                "SeedVR2ResizeAndPad: shorter_edge * multiplier must resolve "
+                "to a size divisible by 16; "
+                f"got {upscaled_shorter_edge} from shorter_edge={shorter_edge} "
+                f"and multiplier={multiplier}."
             )
         original_image = images
         if images.dim() == 4:
