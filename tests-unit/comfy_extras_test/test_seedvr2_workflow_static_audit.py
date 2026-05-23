@@ -27,7 +27,7 @@ ALLOWED = {
     "SaveImage",
     "SaveVideo",
     "SeedVR2Conditioning",
-    "SeedVR2InputProcessing",
+    "SeedVR2ResizeAndPad",
     "SeedVR2PostProcessing",
     "KSampler",
     "SeedVR2ProgressiveSampler",
@@ -38,10 +38,10 @@ ALLOWED = {
     "VAEEncodeTiled",
     "VAELoader",
 }
-REQUIRED = {"SeedVR2InputProcessing", "SeedVR2PostProcessing"}
+REQUIRED = {"SeedVR2ResizeAndPad", "SeedVR2PostProcessing"}
 SEEDVR2_SCHEMAS = {
     "SeedVR2Conditioning": nodes_seedvr.SeedVR2Conditioning,
-    "SeedVR2InputProcessing": nodes_seedvr.SeedVR2InputProcessing,
+    "SeedVR2ResizeAndPad": nodes_seedvr.SeedVR2ResizeAndPad,
     "SeedVR2PostProcessing": nodes_seedvr.SeedVR2PostProcessing,
     "SeedVR2ProgressiveSampler": nodes_seedvr.SeedVR2ProgressiveSampler,
 }
@@ -109,21 +109,21 @@ def test_seedvr2_workflow_graphs_route_model_through_conditioning():
 def test_seedvr2_workflow_graphs_route_preprocessed_pixels_to_post_processing():
     for graph in GRAPHS:
         data = json.loads(graph.read_text())
-        input_processing_ids = [
+        resize_and_pad_ids = [
             node_id
             for node_id, node in data.items()
-            if node["class_type"] == "SeedVR2InputProcessing"
+            if node["class_type"] == "SeedVR2ResizeAndPad"
         ]
         post_processing_nodes = [
             (node_id, node)
             for node_id, node in data.items()
             if node["class_type"] == "SeedVR2PostProcessing"
         ]
-        assert len(input_processing_ids) == 1
+        assert len(resize_and_pad_ids) == 1
         for node_id, node in post_processing_nodes:
-            assert node["inputs"]["input_pixels"] == [input_processing_ids[0], 0], (
+            assert node["inputs"]["input_pixels"] == [resize_and_pad_ids[0], 0], (
                 f"{graph} node {node_id}: post-processing must receive the "
-                "SeedVR2InputProcessing input_pixels output"
+                "SeedVR2ResizeAndPad input_pixels output"
             )
 
 

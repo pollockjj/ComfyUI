@@ -1,4 +1,4 @@
-"""Regression test: SeedVR2InputProcessing schema input ids must match
+"""Regression test: SeedVR2ResizeAndPad schema input ids must match
 execute() positional parameter order. Drift between the two would silently
 swap arguments at runtime; this test fails loudly on any future drift.
 
@@ -66,14 +66,14 @@ def test_seedvr_node_signature_matches_schema():
         sys.modules.pop("comfy_extras.nodes_seedvr", None)
         try:
             nodes_seedvr = importlib.import_module("comfy_extras.nodes_seedvr")
-            schema_ids = [i.id for i in nodes_seedvr.SeedVR2InputProcessing.define_schema().inputs]
+            schema_ids = [i.id for i in nodes_seedvr.SeedVR2ResizeAndPad.define_schema().inputs]
             exec_params = [
                 p
-                for p in inspect.signature(nodes_seedvr.SeedVR2InputProcessing.execute).parameters.keys()
+                for p in inspect.signature(nodes_seedvr.SeedVR2ResizeAndPad.execute).parameters.keys()
                 if p != "cls"
             ]
             assert schema_ids == exec_params, (
-                f"SeedVR2InputProcessing schema input ids do not match execute() "
+                f"SeedVR2ResizeAndPad schema input ids do not match execute() "
                 f"parameter order: schema_ids={schema_ids}, exec_params={exec_params}"
             )
         finally:

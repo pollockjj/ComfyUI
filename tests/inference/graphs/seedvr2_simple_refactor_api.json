@@ -26,7 +26,7 @@
         0
       ]
     },
-    "class_type": "SeedVR2InputProcessing"
+    "class_type": "SeedVR2ResizeAndPad"
   },
   "5": {
     "inputs": {

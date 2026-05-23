@@ -208,11 +208,11 @@ def side_resize(image, size):
     resized = TVF.resize(image, size, InterpolationMode.BICUBIC, antialias=antialias)
     return resized
 
-class SeedVR2InputProcessing(io.ComfyNode):
+class SeedVR2ResizeAndPad(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id = "SeedVR2InputProcessing",
+            node_id = "SeedVR2ResizeAndPad",
             category="image/video",
             inputs = [
                 io.Image.Input("images"),
@@ -231,7 +231,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
             images = images.unsqueeze(0)
         elif images.dim() != 5:
             raise ValueError(
-                "SeedVR2InputProcessing: expected 4-D or 5-D IMAGE tensor, "
+                "SeedVR2ResizeAndPad: expected 4-D or 5-D IMAGE tensor, "
                 f"got shape {tuple(images.shape)}"
             )
         images = images.permute(0, 1, 4, 2, 3)
@@ -1096,7 +1096,7 @@ class SeedVRExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SeedVR2Conditioning,
-            SeedVR2InputProcessing,
+            SeedVR2ResizeAndPad,
             SeedVR2PostProcessing,
             SeedVR2ProgressiveSampler,
         ]
