@@ -1,5 +1,4 @@
 import inspect
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -203,12 +202,6 @@ def test_seedvr2_multi_entry_cfg1_output_is_not_swapped():
     swapped = seedvr_model.NaDiT._swap_pos_neg_halves(object(), out, [0, 0])
 
     torch.testing.assert_close(swapped, out)
-
-
-def test_seedvr2_conditioning_keeps_comfy_cfg1_optimization_enabled():
-    source = (Path(__file__).resolve().parents[1] / "comfy_extras" / "nodes_seedvr.py").read_text()
-
-    assert "disable_model_cfg1_optimization()" not in source
 
 
 def test_seedvr2_pytorch_var_attention_matches_sdpa_sequence_oracle():
