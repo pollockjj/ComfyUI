@@ -343,18 +343,22 @@ class VAEDecodeTiled:
         temporal_compression = vae.temporal_compression_decode()
         is_seedvr2_vae = isinstance(getattr(vae, "first_stage_model", None), comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper)
         if temporal_compression is not None:
-            if temporal_size <= 0:
-                if is_seedvr2_vae:
+            if is_seedvr2_vae:
+                if temporal_size <= 0:
                     temporal_size = 0
                     temporal_overlap = 0
                 else:
+                    if temporal_size < temporal_overlap * 2:
+                        temporal_overlap = temporal_overlap // 2
+            else:
+                if temporal_size <= 0:
                     temporal_size = None
                     temporal_overlap = None
-            else:
-                if temporal_size < temporal_overlap * 2:
-                    temporal_overlap = temporal_overlap // 2
-                temporal_size = max(2, temporal_size // temporal_compression)
-                temporal_overlap = max(0, min(temporal_size // 2, temporal_overlap // temporal_compression))
+                else:
+                    if temporal_size < temporal_overlap * 2:
+                        temporal_overlap = temporal_overlap // 2
+                    temporal_size = max(2, temporal_size // temporal_compression)
+                    temporal_overlap = max(1, min(temporal_size // 2, temporal_overlap // temporal_compression))
         else:
             temporal_size = None
             temporal_overlap = None

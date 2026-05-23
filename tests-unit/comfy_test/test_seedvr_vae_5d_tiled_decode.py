@@ -168,6 +168,84 @@ def test_vae_decode_tiled_zero_temporal_controls_are_seedvr2_only():
     ]
 
 
+def test_vae_decode_tiled_seedvr2_keeps_positive_temporal_controls_in_pixel_units():
+    class _DecodeRecorder:
+        def __init__(self):
+            self.calls = []
+            self.first_stage_model = _SeedVR2DecodeStub()
+
+        def temporal_compression_decode(self):
+            return 4
+
+        def spacial_compression_decode(self):
+            return 8
+
+        def decode_tiled(self, samples, **kwargs):
+            self.calls.append({"shape": tuple(samples.shape), **kwargs})
+            return torch.zeros(1, 8, 8, 3)
+
+    recorder = _DecodeRecorder()
+
+    nodes_mod.VAEDecodeTiled().decode(
+        recorder,
+        {"samples": torch.zeros(1, 16, 3, 32, 32)},
+        tile_size=256,
+        overlap=64,
+        temporal_size=64,
+        temporal_overlap=8,
+    )
+
+    assert recorder.calls == [
+        {
+            "shape": (1, 16, 3, 32, 32),
+            "tile_x": 32,
+            "tile_y": 32,
+            "overlap": 8,
+            "tile_t": 64,
+            "overlap_t": 8,
+        }
+    ]
+
+
+def test_vae_decode_tiled_non_seedvr2_keeps_positive_temporal_overlap_nonzero():
+    class _DecodeRecorder:
+        def __init__(self):
+            self.calls = []
+            self.first_stage_model = object()
+
+        def temporal_compression_decode(self):
+            return 4
+
+        def spacial_compression_decode(self):
+            return 8
+
+        def decode_tiled(self, samples, **kwargs):
+            self.calls.append({"shape": tuple(samples.shape), **kwargs})
+            return torch.zeros(1, 8, 8, 3)
+
+    recorder = _DecodeRecorder()
+
+    nodes_mod.VAEDecodeTiled().decode(
+        recorder,
+        {"samples": torch.zeros(1, 16, 3, 32, 32)},
+        tile_size=256,
+        overlap=64,
+        temporal_size=4,
+        temporal_overlap=0,
+    )
+
+    assert recorder.calls == [
+        {
+            "shape": (1, 16, 3, 32, 32),
+            "tile_x": 32,
+            "tile_y": 32,
+            "overlap": 8,
+            "tile_t": 2,
+            "overlap_t": 1,
+        }
+    ]
+
+
 def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
