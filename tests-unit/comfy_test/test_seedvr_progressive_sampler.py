@@ -908,12 +908,48 @@ def test_t7_hann_blend_bounded_under_passthrough_inner_sampler():
     assert not torch.isinf(samples_out).any()
 
 
-def test_t7_overlap_too_large_rejected():
-    """``temporal_overlap`` must be strictly less than ``chunk_latent``
-    or the chunk-loop stride goes non-positive and produces an
-    infinite loop. The validator must raise ``ValueError`` before the
-    inner sampler is invoked.
+@pytest.mark.parametrize(
+    ("frames_per_chunk", "expected_sample_calls"),
+    [
+        (1, 5),  # chunk_latent=1; overlap=999 resolves to 0.
+        (5, 4),  # chunk_latent=2; overlap=999 resolves to 1.
+    ],
+)
+def test_t7_oversized_overlap_uses_maximum_valid_overlap(
+    frames_per_chunk, expected_sample_calls,
+):
+    """Users do not know the latent chunk length. Oversized positive
+    ``temporal_overlap`` values must resolve to the maximum valid
+    overlap instead of hard-failing.
     """
+    latent, pos, neg, _, _ = _make_inputs(T=5)
+    src = latent["samples"].clone()
+
+    sampler_called = {"n": 0}
+
+    def _sample(*args, **kwargs):
+        sampler_called["n"] += 1
+        return _passthrough_sample_returning_latent(*args, **kwargs)
+
+    with patch.object(comfy.sample, "sample",
+                      side_effect=_sample), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        out = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=frames_per_chunk,
+            temporal_overlap=999,
+        )
+    assert torch.equal(out.result[0]["samples"], src)
+    assert sampler_called["n"] == expected_sample_calls
+
+
+def test_t7_negative_overlap_rejected():
+    """Negative ``temporal_overlap`` still fails before sampling."""
     latent, pos, neg, _, _ = _make_inputs(T=5)
 
     sampler_called = {"n": 0}
@@ -928,13 +964,12 @@ def test_t7_overlap_too_large_rejected():
                       side_effect=_identity_fix_empty), \
          patch.object(comfy.sample, "prepare_noise",
                       side_effect=_fingerprinted_prepare_noise):
-        # frames_per_chunk=5 -> chunk_latent=2; overlap=2 must be rejected.
         with pytest.raises(ValueError) as excinfo:
             SeedVR2ProgressiveSampler.execute(
                 model=None, seed=0, steps=2, cfg=1.0,
                 sampler_name="euler", scheduler="simple",
                 positive=pos, negative=neg, latent_image=latent,
-                denoise=1.0, frames_per_chunk=5, temporal_overlap=2,
+                denoise=1.0, frames_per_chunk=5, temporal_overlap=-1,
             )
     assert "temporal_overlap" in str(excinfo.value)
     assert sampler_called["n"] == 0

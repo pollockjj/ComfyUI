@@ -799,10 +799,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                      "adjacent chunks; blended with a "
                                      "Hann window (linear for overlap "
                                      "< 3). 0 = no blend, pure concat. "
-                                     "Must be < chunk_latent derived "
-                                     "from frames_per_chunk; 1 latent "
-                                     "frame corresponds to ~4 pixel "
-                                     "frames."),
+                                     "Values >= the chunk's latent-frame "
+                                     "length use the maximum valid "
+                                     "overlap; 1 latent frame corresponds "
+                                     "to ~4 pixel frames."),
             ],
             outputs=[io.Latent.Output()],
         )
@@ -863,17 +863,16 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # T_latent corresponds to a valid 4n+1 pixel count).
         chunk_latent = (frames_per_chunk - 1) // 4 + 1
 
-        # ``temporal_overlap`` is exposed in latent-frame units. The
-        # validation here keeps the chunk loop's stride strictly
-        # positive; without it a config like overlap >= chunk would
-        # produce zero or negative stride and an infinite loop.
-        if temporal_overlap < 0 or temporal_overlap >= chunk_latent:
+        # ``temporal_overlap`` is exposed in latent-frame units, but users
+        # do not know the derived latent chunk length. Treat oversized
+        # values as "maximum valid overlap" while preserving a strictly
+        # positive chunk-loop stride.
+        if temporal_overlap < 0:
             raise ValueError(
-                f"SeedVR2ProgressiveSampler: temporal_overlap must be in "
-                f"[0, chunk_latent) latent frames where chunk_latent="
-                f"{chunk_latent} (derived from frames_per_chunk="
-                f"{frames_per_chunk}); got {temporal_overlap}."
+                f"SeedVR2ProgressiveSampler: temporal_overlap must be >= 0; "
+                f"got {temporal_overlap}."
             )
+        temporal_overlap = min(temporal_overlap, chunk_latent - 1)
         step_latent = chunk_latent - temporal_overlap
 
         # Generate full noise once from the user seed, then slice along T
