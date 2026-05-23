@@ -23,7 +23,7 @@ def torch_cat_if_needed(xl, dim):
     else:
         return None
 
-def get_timestep_embedding(timesteps, embedding_dim, flip_sin_to_cos = False, downscale_freq_shift = 1):
+def get_timestep_embedding(timesteps, embedding_dim, flip_sin_to_cos=False, downscale_freq_shift=1):
     """
     This matches the implementation in Denoising Diffusion Probabilistic Models:
     From Fairseq.
