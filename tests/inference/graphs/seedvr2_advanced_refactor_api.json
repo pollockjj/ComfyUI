@@ -29,7 +29,7 @@
   },
   "4": {
     "inputs": {
-      "resolution": 120,
+      "shorter_edge": 120,
       "images": [
         "11",
         0

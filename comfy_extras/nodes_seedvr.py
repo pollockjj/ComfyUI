@@ -216,7 +216,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
             category="image/video",
             inputs = [
                 io.Image.Input("images"),
-                io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
+                io.Int.Input("shorter_edge", default = 1280, min = 120),
             ],
             outputs = [
                 io.Image.Output("input_pixels"),
@@ -224,7 +224,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, resolution):
+    def execute(cls, images, shorter_edge):
         if images.dim() == 4:
             # Comfy video components arrive as a 4-D IMAGE frame sequence:
             # (frames, H, W, C). SeedVR2 consumes that as one video.
@@ -240,7 +240,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         images = images.reshape(b * t, c, h, w)
 
         clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        images = side_resize(images, resolution)
+        images = side_resize(images, shorter_edge)
 
         images = clip(images)
         images = div_pad(images, (16, 16))
