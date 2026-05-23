@@ -125,7 +125,10 @@
         "11",
         0
       ],
-      "shorter_edge": 120
+      "shorter_edge": [
+        "4",
+        1
+      ]
     },
     "class_type": "SeedVR2PostProcessing"
   },

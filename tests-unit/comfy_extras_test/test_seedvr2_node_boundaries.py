@@ -20,7 +20,7 @@ def test_resize_and_pad_schema_is_preprocess_only():
     schema = nodes_seedvr.SeedVR2ResizeAndPad.define_schema()
 
     assert _schema_ids(schema.inputs) == ["images", "shorter_edge"]
-    assert _schema_ids(schema.outputs) == ["input_pixels"]
+    assert _schema_ids(schema.outputs) == ["input_pixels", "shorter_edge"]
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 

@@ -220,6 +220,7 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
             ],
             outputs = [
                 io.Image.Output("input_pixels"),
+                io.Int.Output("shorter_edge"),
             ]
         )
 
@@ -250,7 +251,7 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
         images = cut_videos(images)
         images_bthwc = rearrange(images, "b t c h w -> b t h w c")
 
-        return io.NodeOutput(images_bthwc)
+        return io.NodeOutput(images_bthwc, shorter_edge)
 
 
 class SeedVR2PostProcessing(io.ComfyNode):
