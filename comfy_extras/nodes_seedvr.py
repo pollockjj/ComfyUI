@@ -266,13 +266,13 @@ class SeedVR2PostProcessing(io.ComfyNode):
                 io.Image.Input("decoded"),
                 io.Image.Input("original_image"),
                 io.Int.Input("shorter_edge", default=1280, min=120),
-                io.Combo.Input("method", options=["lab", "none"], default="lab"),
+                io.Combo.Input("color_correction_method", options=["lab", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, decoded, original_image, shorter_edge, method):
+    def execute(cls, decoded, original_image, shorter_edge, color_correction_method):
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
         reference_5d = cls._resize_original_reference(original_image, shorter_edge)
         decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
@@ -285,7 +285,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
         target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
         target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
-        if method == "lab":
+        if color_correction_method == "lab":
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
             output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
@@ -295,10 +295,10 @@ class SeedVR2PostProcessing(io.ComfyNode):
             output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
-        elif method == "none":
+        elif color_correction_method == "none":
             output = decoded_5d
         else:
-            raise ValueError(f"SeedVR2PostProcessing: unknown method {method!r}")
+            raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
 
         h2 = output.shape[-3] - (output.shape[-3] % 2)
         w2 = output.shape[-2] - (output.shape[-2] % 2)

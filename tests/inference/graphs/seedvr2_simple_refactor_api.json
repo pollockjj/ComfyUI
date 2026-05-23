@@ -98,7 +98,7 @@
   },
   "9": {
     "inputs": {
-      "method": "none",
+      "color_correction_method": "none",
       "decoded": [
         "8",
         0

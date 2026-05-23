@@ -115,7 +115,7 @@
   },
   "9": {
     "inputs": {
-      "method": "lab",
+      "color_correction_method": "lab",
       "decoded": [
         "8",
         0
