@@ -781,16 +781,8 @@ def _var_attention_output(out, heads, head_dim, skip_output_reshape):
     return out.reshape(-1, heads * head_dim)
 
 
-def _var_attention_pytorch_impl():
-    return var_attention_pytorch
-
-
 def _var_attention_pytorch_compatible(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-    impl = _var_attention_pytorch_impl()
-    if impl is var_attention_pytorch_split:
-        cu_seqlens_q = cu_seqlens_q.cpu()
-        cu_seqlens_k = cu_seqlens_k.cpu()
-    return impl(
+    return var_attention_pytorch(
         q,
         k,
         v,
@@ -1140,7 +1132,7 @@ def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_
     )
 
 
-optimized_var_attention = _var_attention_pytorch_impl()
+optimized_var_attention = var_attention_pytorch
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
@@ -1154,7 +1146,7 @@ if model_management.sage_attention_enabled():
         optimized_var_attention = var_attention_sage
     else:
         logging.info("Using pytorch attention for variable-length attention")
-        optimized_var_attention = _var_attention_pytorch_impl()
+        optimized_var_attention = var_attention_pytorch
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
     optimized_attention = attention_xformers
@@ -1166,11 +1158,11 @@ elif model_management.flash_attention_enabled():
         optimized_var_attention = var_attention_flash
     else:
         logging.info("Using pytorch attention for variable-length attention")
-        optimized_var_attention = _var_attention_pytorch_impl()
+        optimized_var_attention = var_attention_pytorch
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
     optimized_attention = attention_pytorch
-    optimized_var_attention = _var_attention_pytorch_impl()
+    optimized_var_attention = var_attention_pytorch
 else:
     if args.use_split_cross_attention:
         logging.info("Using split optimization for attention")
