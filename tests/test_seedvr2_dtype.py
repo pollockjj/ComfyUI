@@ -15,6 +15,32 @@ import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
 
 
+def _reference_var_attention(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    if not skip_reshape:
+        total_tokens, embed_dim = q.shape
+        head_dim = embed_dim // heads
+        q = q.view(total_tokens, heads, head_dim)
+        k = k.view(k.shape[0], heads, head_dim)
+        v = v.view(v.shape[0], heads, head_dim)
+    else:
+        head_dim = q.shape[-1]
+
+    out = []
+    for i in range(cu_seqlens_q.numel() - 1):
+        qs = slice(cu_seqlens_q[i].item(), cu_seqlens_q[i + 1].item())
+        ks = slice(cu_seqlens_k[i].item(), cu_seqlens_k[i + 1].item())
+        q_i = q[qs].permute(1, 0, 2).unsqueeze(0)
+        k_i = k[ks].permute(1, 0, 2).unsqueeze(0)
+        v_i = v[ks].permute(1, 0, 2).unsqueeze(0)
+        out_i = torch.nn.functional.scaled_dot_product_attention(q_i, k_i, v_i, attn_mask=None, dropout_p=0.0, is_causal=False)
+        out.append(out_i.squeeze(0).permute(1, 0, 2))
+
+    out = torch.cat(out, dim=0)
+    if skip_output_reshape:
+        return out
+    return out.reshape(-1, heads * head_dim)
+
+
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
     bf16_device = object()
     fp16_device = object()
@@ -185,7 +211,7 @@ def test_seedvr2_conditioning_keeps_comfy_cfg1_optimization_enabled():
     assert "disable_model_cfg1_optimization()" not in source
 
 
-def test_seedvr2_split_var_attention_matches_nested_var_attention():
+def test_seedvr2_pytorch_var_attention_matches_sdpa_sequence_oracle():
     torch.manual_seed(1)
     q = torch.randn(5, 2, 4)
     k = torch.randn(7, 2, 4)
@@ -193,7 +219,11 @@ def test_seedvr2_split_var_attention_matches_nested_var_attention():
     cu_q = torch.tensor([0, 2, 5], dtype=torch.int32)
     cu_k = torch.tensor([0, 3, 7], dtype=torch.int32)
 
-    nested = attention.var_attention_pytorch(
+    actual = attention.var_attention_pytorch(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+        skip_reshape=True, skip_output_reshape=True,
+    )
+    reference = _reference_var_attention(
         q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
         skip_reshape=True, skip_output_reshape=True,
     )
@@ -202,7 +232,8 @@ def test_seedvr2_split_var_attention_matches_nested_var_attention():
         skip_reshape=True, skip_output_reshape=True,
     )
 
-    torch.testing.assert_close(split, nested, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual, reference, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(split, reference, rtol=1e-5, atol=1e-5)
 
 
 def test_seedvr2_split_var_attention_preserves_flat_output_shape():
@@ -213,7 +244,10 @@ def test_seedvr2_split_var_attention_preserves_flat_output_shape():
     cu_q = torch.tensor([0, 1, 5], dtype=torch.int32)
     cu_k = torch.tensor([0, 2, 7], dtype=torch.int32)
 
-    nested = attention.var_attention_pytorch(
+    actual = attention.var_attention_pytorch(
+        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+    )
+    reference = _reference_var_attention(
         q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
     )
     split = attention.var_attention_pytorch_split(
@@ -221,7 +255,9 @@ def test_seedvr2_split_var_attention_preserves_flat_output_shape():
     )
 
     assert split.shape == q.shape
-    torch.testing.assert_close(split, nested, rtol=1e-5, atol=1e-5)
+    assert actual.shape == q.shape
+    torch.testing.assert_close(actual, reference, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(split, reference, rtol=1e-5, atol=1e-5)
 
 
 def test_seedvr2_split_var_attention_rejects_mismatched_sequence_count():

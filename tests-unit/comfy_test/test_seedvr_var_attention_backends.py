@@ -163,7 +163,7 @@ def test_var_attention_rebind_pytorch_launch_flag():
     assert result.stdout.strip() == "var_attention_pytorch"
 
 
-def test_var_attention_rebind_pytorch_launch_flag_without_nested_api_uses_split():
+def test_var_attention_rebind_pytorch_launch_flag_without_nested_api_stays_pytorch():
     result = _run_attention_import(
         "--use-pytorch-cross-attention",
         fake_modules=False,
@@ -177,7 +177,7 @@ torch.nested = _MissingNestedApi()
 """,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "var_attention_pytorch_split"
+    assert result.stdout.strip() == "var_attention_pytorch"
 
 
 def test_var_attention_compatible_split_fallback_moves_offsets_to_cpu(monkeypatch):
