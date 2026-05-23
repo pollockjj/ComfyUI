@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from comfy_api.latest import ComfyExtension, io
 import torch
 import math
+import logging
 from einops import rearrange
 
 import gc
@@ -25,6 +26,29 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
+
+
+def _seedvr2_auto_chunk_attempts(t_latent, t_pixel, frames_per_chunk):
+    """Return stricter 4n+1 frame chunk sizes for auto OOM retries."""
+    attempts = [frames_per_chunk]
+    current_chunk_latent = (
+        t_latent if t_pixel <= frames_per_chunk
+        else (frames_per_chunk - 1) // 4 + 1
+    )
+    current_chunk_count = max(1, math.ceil(t_latent / current_chunk_latent))
+    seen = {frames_per_chunk}
+
+    for target_chunks in range(max(2, current_chunk_count + 1), t_latent + 1):
+        chunk_latent = max(1, math.ceil(t_latent / target_chunks))
+        candidate = 4 * (chunk_latent - 1) + 1
+        if candidate in seen:
+            continue
+        if candidate >= attempts[-1]:
+            continue
+        attempts.append(candidate)
+        seen.add(candidate)
+
+    return attempts
 
 
 def _resolve_seedvr2_diffusion_model(model):
@@ -803,6 +827,13 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                      "length use the maximum valid "
                                      "overlap; 1 latent frame corresponds "
                                      "to ~4 pixel frames."),
+                io.Combo.Input("chunking_mode",
+                               options=["manual", "auto"],
+                               default="manual",
+                               tooltip="manual = use frames_per_chunk "
+                                       "exactly; auto = retry only real OOM "
+                                       "failures with progressively smaller "
+                                       "temporal chunks."),
             ],
             outputs=[io.Latent.Output()],
         )
@@ -810,7 +841,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
     @classmethod
     def execute(cls, model, seed, steps, cfg, sampler_name, scheduler,
                 positive, negative, latent_image, denoise,
-                frames_per_chunk, temporal_overlap) -> io.NodeOutput:
+                frames_per_chunk, temporal_overlap,
+                chunking_mode="manual") -> io.NodeOutput:
         # 4n+1 validation in pixel-frame domain. The SeedVR2 native pipeline
         # requires pixel-frame counts of the form 4n+1 (1, 5, 9, 13, ...),
         # imposed at ``cut_videos`` upstream and propagated through the VAE's
@@ -844,6 +876,47 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
         T_latent = CT // _SEEDVR2_LATENT_CHANNELS
         T_pixel = 4 * (T_latent - 1) + 1
+
+        if chunking_mode not in ("manual", "auto"):
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: chunking_mode must be "
+                f"'manual' or 'auto'; got {chunking_mode!r}."
+            )
+
+        if chunking_mode == "auto":
+            attempts = _seedvr2_auto_chunk_attempts(
+                T_latent, T_pixel, frames_per_chunk,
+            )
+            for i, attempt_frames_per_chunk in enumerate(attempts):
+                retry = False
+                try:
+                    return cls.execute(
+                        model=model, seed=seed, steps=steps, cfg=cfg,
+                        sampler_name=sampler_name, scheduler=scheduler,
+                        positive=positive, negative=negative,
+                        latent_image=latent_image, denoise=denoise,
+                        frames_per_chunk=attempt_frames_per_chunk,
+                        temporal_overlap=temporal_overlap,
+                        chunking_mode="manual",
+                    )
+                except Exception as e:
+                    comfy.model_management.raise_non_oom(e)
+                    if i == len(attempts) - 1:
+                        raise RuntimeError(
+                            "SeedVR2ProgressiveSampler: exhausted auto "
+                            "chunking attempts after OOM. Tried "
+                            f"frames_per_chunk values {attempts}."
+                        ) from e
+                    retry = True
+
+                if retry:
+                    logging.warning(
+                        "SeedVR2ProgressiveSampler auto chunking OOM at "
+                        "frames_per_chunk=%s; retrying with "
+                        "frames_per_chunk=%s.",
+                        attempt_frames_per_chunk, attempts[i + 1],
+                    )
+                    comfy.model_management.soft_empty_cache()
 
         # Short-circuit: total fits in one chunk -> standard path with no
         # chunking overhead. Output of this branch is byte-identical to the
@@ -1073,6 +1146,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
 
             if first_error is not None:
                 err_dev, err = first_error
+                if comfy.model_management.is_oom(err):
+                    raise err
                 raise RuntimeError(
                     f"SeedVR2ProgressiveSampler: worksplit worker on "
                     f"{err_dev} raised an exception during chunk "

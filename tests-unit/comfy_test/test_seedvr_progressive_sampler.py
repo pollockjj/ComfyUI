@@ -152,9 +152,44 @@ class _RaisingMultiGPUThreadPool:
         raise RuntimeError("pool construction failed")
 
 
+class _OneShotOOMMultiGPUThreadPool:
+    instances = []
+
+    def __init__(self, devices):
+        self.devices = list(devices)
+        self.results = {}
+        self.shutdown_called = False
+        _OneShotOOMMultiGPUThreadPool.instances.append(self)
+
+    def submit(self, device, fn, *args):
+        if len(_OneShotOOMMultiGPUThreadPool.instances) == 1:
+            self.results[device] = (
+                None, torch.cuda.OutOfMemoryError("worker oom"),
+            )
+            return
+        try:
+            self.results[device] = (fn(*args), None)
+        except Exception as e:
+            self.results[device] = (None, e)
+
+    def get_result(self, device):
+        return self.results[device]
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
 # ---------------------------------------------------------------------------
 # Helper-level tests (slicing / concat / cond plumbing)
 # ---------------------------------------------------------------------------
+
+
+def test_progressive_sampler_schema_exposes_manual_default_auto_chunking():
+    schema = SeedVR2ProgressiveSampler.define_schema()
+    inputs = {item.id: item for item in schema.inputs}
+
+    assert inputs["chunking_mode"].options == ["manual", "auto"]
+    assert inputs["chunking_mode"].default == "manual"
 
 
 def test_slice_collapsed_4d_along_t_shape_correct():
@@ -553,6 +588,252 @@ def test_t2_worksplit_restores_flags_when_pool_construction_fails(monkeypatch):
 
     assert model.is_multigpu_base_clone is True
     assert clone.is_multigpu_base_clone is True
+
+
+# ---------------------------------------------------------------------------
+# Auto chunking OOM fallback
+# ---------------------------------------------------------------------------
+
+
+def test_auto_chunking_success_without_retry():
+    """Auto mode must leave a successful current chunk geometry alone."""
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    calls = []
+
+    def _record(model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, latent_image, denoise=1.0,
+                noise_mask=None, seed=None):
+        calls.append(tuple(latent_image.shape))
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_record), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        out = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+            chunking_mode="auto",
+        )
+
+    assert calls == [(1, _LAT_C * 6, 8, 8), (1, _LAT_C * 5, 8, 8)]
+    assert torch.equal(out.result[0]["samples"], latent["samples"])
+    soft_empty.assert_not_called()
+
+
+def test_auto_chunking_retries_current_oom_with_next_stricter_chunk():
+    """An OOM in the current geometry must retry with a smaller chunk."""
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    calls = []
+
+    def _oom_on_full(model, noise, steps, cfg, sampler_name, scheduler,
+                     positive, negative, latent_image, denoise=1.0,
+                     noise_mask=None, seed=None):
+        calls.append(tuple(latent_image.shape))
+        if latent_image.shape[1] == _LAT_C * 11:
+            raise torch.cuda.OutOfMemoryError("full oom")
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_oom_on_full), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        out = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=45, temporal_overlap=0,
+            chunking_mode="auto",
+        )
+
+    assert calls == [
+        (1, _LAT_C * 11, 8, 8),
+        (1, _LAT_C * 6, 8, 8),
+        (1, _LAT_C * 5, 8, 8),
+    ]
+    assert torch.equal(out.result[0]["samples"], latent["samples"])
+    assert soft_empty.call_count == 1
+
+
+def test_auto_chunking_walks_two_three_four_chunk_ladder():
+    """Auto mode must walk 2-, 3-, then 4-chunk geometries on OOM."""
+    latent, pos, neg, _, _ = _make_inputs(T=17)
+    calls = []
+
+    def _oom_until_four_chunks(model, noise, steps, cfg, sampler_name,
+                               scheduler, positive, negative,
+                               latent_image, denoise=1.0,
+                               noise_mask=None, seed=None):
+        calls.append(tuple(latent_image.shape))
+        if latent_image.shape[1] > _LAT_C * 5:
+            raise torch.cuda.OutOfMemoryError("chunk too large")
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample",
+                      side_effect=_oom_until_four_chunks), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        out = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=65, temporal_overlap=0,
+            chunking_mode="auto",
+        )
+
+    assert calls[:4] == [
+        (1, _LAT_C * 17, 8, 8),
+        (1, _LAT_C * 9, 8, 8),
+        (1, _LAT_C * 6, 8, 8),
+        (1, _LAT_C * 5, 8, 8),
+    ]
+    assert torch.equal(out.result[0]["samples"], latent["samples"])
+    assert soft_empty.call_count == 3
+
+
+def test_auto_chunking_exhausted_floor_rethrows_loudly():
+    """If one-latent-frame chunks still OOM, auto mode must fail loud."""
+    latent, pos, neg, _, _ = _make_inputs(T=3)
+
+    def _always_oom(*args, **kwargs):
+        raise torch.cuda.OutOfMemoryError("stable oom")
+
+    with patch.object(comfy.sample, "sample", side_effect=_always_oom), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        with pytest.raises(RuntimeError) as excinfo:
+            SeedVR2ProgressiveSampler.execute(
+                model=None, seed=0, steps=2, cfg=1.0,
+                sampler_name="euler", scheduler="simple",
+                positive=pos, negative=neg, latent_image=latent,
+                denoise=1.0, frames_per_chunk=9, temporal_overlap=0,
+                chunking_mode="auto",
+            )
+
+    assert "exhausted auto chunking attempts" in str(excinfo.value)
+    assert "[9, 5, 1]" in str(excinfo.value)
+    assert soft_empty.call_count == 2
+
+
+def test_auto_chunking_non_oom_does_not_retry():
+    """Only real OOM failures are eligible for auto chunk retry."""
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+
+    def _raise_non_oom(*args, **kwargs):
+        raise ValueError("not oom")
+
+    with patch.object(comfy.sample, "sample", side_effect=_raise_non_oom), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        with pytest.raises(ValueError, match="not oom"):
+            SeedVR2ProgressiveSampler.execute(
+                model=None, seed=0, steps=2, cfg=1.0,
+                sampler_name="euler", scheduler="simple",
+                positive=pos, negative=neg, latent_image=latent,
+                denoise=1.0, frames_per_chunk=45, temporal_overlap=0,
+                chunking_mode="auto",
+            )
+
+    soft_empty.assert_not_called()
+
+
+def test_auto_chunking_matches_manual_at_resolved_chunk_size():
+    """After resolving to a chunk size, auto output must match manual."""
+    latent_auto, pos_auto, neg_auto, _, _ = _make_inputs(T=11)
+    latent_manual, pos_manual, neg_manual, _, _ = _make_inputs(T=11)
+
+    def _oom_full_only(model, noise, steps, cfg, sampler_name, scheduler,
+                       positive, negative, latent_image, denoise=1.0,
+                       noise_mask=None, seed=None):
+        if latent_image.shape[1] == _LAT_C * 11:
+            raise torch.cuda.OutOfMemoryError("full oom")
+        return latent_image.clone()
+
+    with patch.object(comfy.sample, "sample", side_effect=_oom_full_only), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache"):
+        out_auto = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=123, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos_auto, negative=neg_auto, latent_image=latent_auto,
+            denoise=1.0, frames_per_chunk=45, temporal_overlap=0,
+            chunking_mode="auto",
+        )
+
+    with patch.object(comfy.sample, "sample",
+                      side_effect=_passthrough_sample_returning_latent), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise):
+        out_manual = SeedVR2ProgressiveSampler.execute(
+            model=None, seed=123, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos_manual, negative=neg_manual,
+            latent_image=latent_manual, denoise=1.0,
+            frames_per_chunk=21, temporal_overlap=0,
+        )
+
+    assert torch.equal(out_auto.result[0]["samples"],
+                       out_manual.result[0]["samples"])
+
+
+def test_auto_chunking_retries_worksplit_worker_oom(monkeypatch):
+    """Worksplit worker OOM must be classified as OOM for auto retry."""
+    latent, pos, neg, _, _ = _make_inputs(T=11)
+    clone = _FakeSeedVR2Patcher("clone", "cpu:1")
+    model = _FakeSeedVR2Patcher("primary", "cpu:0", [clone])
+    _OneShotOOMMultiGPUThreadPool.instances = []
+
+    class _FakeMultiGPUModule:
+        MultiGPUThreadPool = _OneShotOOMMultiGPUThreadPool
+
+    monkeypatch.setattr(nodes_seedvr_mod.importlib, "import_module",
+                        lambda name: _FakeMultiGPUModule)
+
+    with patch.object(comfy.sample, "sample",
+                      side_effect=_passthrough_sample_returning_latent), \
+         patch.object(comfy.sample, "fix_empty_latent_channels",
+                      side_effect=_identity_fix_empty), \
+         patch.object(comfy.sample, "prepare_noise",
+                      side_effect=_fingerprinted_prepare_noise), \
+         patch.object(nodes_seedvr_mod.comfy.model_management,
+                      "soft_empty_cache") as soft_empty:
+        out = SeedVR2ProgressiveSampler.execute(
+            model=model, seed=0, steps=2, cfg=1.0,
+            sampler_name="euler", scheduler="simple",
+            positive=pos, negative=neg, latent_image=latent,
+            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
+            chunking_mode="auto",
+        )
+
+    assert len(_OneShotOOMMultiGPUThreadPool.instances) == 2
+    assert torch.equal(out.result[0]["samples"], latent["samples"])
+    assert soft_empty.call_count == 1
 
 
 # ---------------------------------------------------------------------------
