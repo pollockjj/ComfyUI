@@ -27,6 +27,7 @@ import comfy.diffusers_load
 import comfy.samplers
 import comfy.sample
 import comfy.sd
+import comfy.ldm.seedvr.vae
 import comfy.utils
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
@@ -340,10 +341,15 @@ class VAEDecodeTiled:
         if tile_size < overlap * 4:
             overlap = tile_size // 4
         temporal_compression = vae.temporal_compression_decode()
+        is_seedvr2_vae = isinstance(getattr(vae, "first_stage_model", None), comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper)
         if temporal_compression is not None:
             if temporal_size <= 0:
-                temporal_size = 0
-                temporal_overlap = 0
+                if is_seedvr2_vae:
+                    temporal_size = 0
+                    temporal_overlap = 0
+                else:
+                    temporal_size = None
+                    temporal_overlap = None
             else:
                 if temporal_size < temporal_overlap * 2:
                     temporal_overlap = temporal_overlap // 2

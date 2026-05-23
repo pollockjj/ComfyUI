@@ -1091,6 +1091,7 @@ class VAE:
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
     def encode_tiled_seedvr2(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+        """Return raw SeedVR2 wrapper latents; encode callers apply final formatting."""
         if tile_y is None:
             tile_y = 512
         if tile_x is None:
