@@ -176,13 +176,6 @@ class _DiffusionModel(nn.Module):
         super().__init__()
         self.blocks = nn.ModuleList([_Block() for _ in range(n_blocks)])
         if zero_conditioning:
-            # Simulates a numz-format DiT-only file loaded via UNETLoader:
-            # ``register_buffer`` zero-init at ``comfy/ldm/seedvr/model.py``
-            # leaves the buffers at zero when ``load_state_dict`` cannot
-            # find ``positive_conditioning`` / ``negative_conditioning``
-            # keys in the state_dict. The fail-loud guard at
-            # ``SeedVR2Conditioning.execute`` distinguishes this from a
-            # properly-baked file by ``abs().sum() == 0`` on both buffers.
             self.register_buffer(
                 "positive_conditioning",
                 torch.zeros((2, 4), dtype=conditioning_dtype),
