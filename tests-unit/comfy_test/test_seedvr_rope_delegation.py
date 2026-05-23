@@ -103,22 +103,6 @@ _CPU_BF16_TRIG_OK = _cpu_trig_supported(torch.bfloat16)
 _CASES = [
     pytest.param("cpu", torch.float32, (1, 8, 16), (8, 16), 0, 1.0,
                  id="cpu-float32-base"),
-    pytest.param(
-        "cpu", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
-        id="cpu-float16-base",
-        marks=pytest.mark.skipif(
-            not _CPU_FP16_TRIG_OK,
-            reason="torch.cos/torch.sin unsupported for float16 tensors on CPU",
-        ),
-    ),
-    pytest.param(
-        "cpu", torch.bfloat16, (1, 8, 16), (8, 16), 0, 1.0,
-        id="cpu-bfloat16-base",
-        marks=pytest.mark.skipif(
-            not _CPU_BF16_TRIG_OK,
-            reason="torch.cos/torch.sin unsupported for bfloat16 tensors on CPU",
-        ),
-    ),
     pytest.param("cpu", torch.float32, (2, 16, 32), (16, 32), 0, 1.0,
                  id="cpu-float32-larger"),
     pytest.param("cpu", torch.float32, (1, 8, 24), (8, 16), 4, 1.0,
@@ -127,12 +111,22 @@ _CASES = [
                  id="cpu-float32-non-default-scale"),
     pytest.param("cpu", torch.float32, (1, 8, 16), (12, 16), 0, 1.0,
                  id="cpu-float32-freqs-longer-than-seq"),
-    pytest.param(
+]
+if _CPU_FP16_TRIG_OK:
+    _CASES.append(pytest.param(
+        "cpu", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
+        id="cpu-float16-base",
+    ))
+if _CPU_BF16_TRIG_OK:
+    _CASES.append(pytest.param(
+        "cpu", torch.bfloat16, (1, 8, 16), (8, 16), 0, 1.0,
+        id="cpu-bfloat16-base",
+    ))
+if torch.cuda.is_available():
+    _CASES.append(pytest.param(
         "cuda", torch.float16, (1, 8, 16), (8, 16), 0, 1.0,
         id="cuda-float16-base",
-        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no cuda"),
-    ),
-]
+    ))
 
 
 @pytest.mark.parametrize("device,dtype,t_shape,freqs_shape,start_index,scale", _CASES)
