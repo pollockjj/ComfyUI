@@ -40,9 +40,9 @@ import torch
 # ``comfy.model_management``, whose import-time ``get_torch_device()`` call
 # probes ``torch.cuda.current_device()`` unless ``comfy.cli_args.args.cpu`` is
 # set. On a CPU-only build that probe can raise during test collection before
-# the ``cuda`` case has had a chance to be skipped. Match the pattern used by
-# ``tests-unit/comfy_quant/test_mixed_precision.py``: flip ``args.cpu`` before
-# importing any ``comfy.ldm.*`` symbol.
+# the ``cuda`` case has had a chance to be conditionally omitted. Match the
+# pattern used by ``tests-unit/comfy_quant/test_mixed_precision.py``: flip
+# ``args.cpu`` before importing any ``comfy.ldm.*`` symbol.
 from comfy.cli_args import args
 
 if not torch.cuda.is_available():
@@ -85,7 +85,7 @@ def _cpu_trig_supported(dtype):
     """Return whether ``torch.cos`` (and by symmetry ``torch.sin``) is
     implemented for the given dtype on CPU on the current runtime. Some
     PyTorch CPU wheels don't implement trig ops for ``float16`` / ``bfloat16``
-    and raise at runtime; the parametrized cases for those dtypes are skipped
+    and raise at runtime; the parametrized cases for those dtypes are omitted
     when that's the case so CI remains stable across PyTorch builds.
     """
     try:
