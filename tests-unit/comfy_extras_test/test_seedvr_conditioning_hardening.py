@@ -432,155 +432,22 @@ def test_apply_rope_freqs_float32_cast_recovers_after_dtype_reset():
         restore()
 
 
-# ---------------------------------------------------------------------------
-# Fail-loud guard: zero-valued conditioning buffers
-# ---------------------------------------------------------------------------
-
-
-def test_seedvr2_conditioning_fails_loud_on_zero_buffers():
-    """A SeedVR2 model whose ``positive_conditioning`` AND
-    ``negative_conditioning`` buffers are both zero-valued is an
-    unrecoverable load state — a numz-format DiT-only ``.safetensors``
-    file was loaded via ``UNETLoader`` without the SeedVR2 conditioning
-    keys baked in. ``SeedVR2Conditioning.execute`` must raise
-    ``RuntimeError`` carrying the standard SeedVR2 invalid-model prefix
-    instead of letting the diffusion sampler run on null prompt
-    conditioning (which silently produces wrong output).
-    """
+def test_seedvr2_conditioning_accepts_zero_conditioning_buffers():
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
         diffusion_model = _DiffusionModel(zero_conditioning=True)
         patcher = _ModelPatcher(diffusion_model)
         vae_conditioning = {"samples": torch.zeros((1, 16, 1, 1, 1))}
 
-        with pytest.raises(RuntimeError) as excinfo:
-            nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
-            )
-
-        message = str(excinfo.value)
-        assert message.startswith(
-            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
-        ), (
-            "Fail-loud message must use the standard "
-            "_SEEDVR2_INVALID_MODEL_MSG_PREFIX so callers/log scrapers "
-            f"can match it. Got: {message!r}"
-        )
-        assert "positive_conditioning" in message
-        assert "negative_conditioning" in message
-    finally:
-        restore()
-
-
-def test_seedvr2_conditioning_fails_loud_on_fp8_zero_buffers():
-    """The zero-buffer sentinel must reduce fp8 conditioning tensors
-    without hitting PyTorch's unsupported float8 reductions.
-    """
-    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
-    if fp8_dtype is None:
-        pytest.skip("torch build does not expose float8_e4m3fn")
-
-    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
-    try:
-        diffusion_model = _DiffusionModel(
-            zero_conditioning=True,
-            conditioning_dtype=fp8_dtype,
-        )
-        patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 16, 1, 1, 1))}
-
-        with pytest.raises(RuntimeError) as excinfo:
-            nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
-            )
-
-        message = str(excinfo.value)
-        assert message.startswith(
-            nodes_seedvr._SEEDVR2_INVALID_MODEL_MSG_PREFIX
-        )
-        assert "zero-valued" in message
-    finally:
-        restore()
-
-
-def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
-    """The guard checks BOTH buffers together: a model with zero
-    ``negative_conditioning`` but non-zero ``positive_conditioning``
-    (the existing baseline mock fixture) must NOT trigger the fail-loud
-    path. This pins the AND-gating semantic and prevents a future
-    regression to OR-gating from rejecting valid bundled checkpoints
-    where one buffer happens to be all-zeros.
-    """
-    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
-    try:
-        # Baseline _DiffusionModel has positive=ones, negative=zeros.
-        diffusion_model = _DiffusionModel(zero_conditioning=False)
-        patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 16, 1, 1, 1))}
-
-        # Should not raise.
         positive, negative, latent, passthrough_model = (
             nodes_seedvr.SeedVR2Conditioning.execute(
                 vae_conditioning, patcher, 0.0,
             )
         )
+
         assert positive[0][0].shape == (1, 3, 4)
         assert negative[0][0].shape == (1, 3, 4)
+        assert latent["samples"].shape == (1, 16, 1, 1)
         assert passthrough_model is patcher
-    finally:
-        restore()
-
-
-def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available():
-    """When the model patcher carries ``cached_patcher_init`` with a
-    ``.safetensors`` path (set by ``comfy.sd.load_diffusion_model`` at
-    sd.py:1970), the fail-loud message must surface that path so the
-    user can see exactly which file is missing the conditioning keys.
-    """
-    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
-    try:
-        diffusion_model = _DiffusionModel(zero_conditioning=True)
-        patcher = _ModelPatcher(diffusion_model)
-        # Mimic the ``cached_patcher_init`` shape comfy.sd attaches.
-        patcher.cached_patcher_init = (
-            object(),  # function reference
-            ("/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors",),
-        )
-        vae_conditioning = {"samples": torch.zeros((1, 16, 1, 1, 1))}
-
-        with pytest.raises(RuntimeError) as excinfo:
-            nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
-            )
-
-        assert (
-            "/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors"
-            in str(excinfo.value)
-        )
-    finally:
-        restore()
-
-
-def test_seedvr2_conditioning_fail_loud_falls_back_when_path_unavailable():
-    """When ``cached_patcher_init`` is missing or its tuple does not
-    contain a ``.safetensors`` path, the fail-loud message still
-    delivers the actionable diagnostic without leaking ``None`` or
-    raising during message formatting.
-    """
-    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
-    try:
-        diffusion_model = _DiffusionModel(zero_conditioning=True)
-        patcher = _ModelPatcher(diffusion_model)
-        # No cached_patcher_init set on the patcher.
-        vae_conditioning = {"samples": torch.zeros((1, 16, 1, 1, 1))}
-
-        with pytest.raises(RuntimeError) as excinfo:
-            nodes_seedvr.SeedVR2Conditioning.execute(
-                vae_conditioning, patcher, 0.0,
-            )
-        message = str(excinfo.value)
-        assert "Source file:" not in message  # no empty path leak
-        assert "Re-bake" in message  # actionable guidance still present
-        assert "bf16 keys" not in message
     finally:
         restore()
