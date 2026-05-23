@@ -16,16 +16,26 @@ def _schema_ids(items):
     return [item.id for item in items]
 
 
-def test_resize_and_pad_schema_is_preprocess_only():
-    schema = nodes_seedvr.SeedVR2ResizeAndPad.define_schema()
+def test_resize_schemas_are_preprocess_only():
+    simple = nodes_seedvr.SeedVR2Resize.define_schema()
+    advanced = nodes_seedvr.SeedVR2ResizeAdvanced.define_schema()
 
-    assert _schema_ids(schema.inputs) == ["images", "shorter_edge", "multiplier"]
-    assert _schema_ids(schema.outputs) == ["input_pixels", "original_image", "upscaled_shorter_edge"]
-    assert schema.outputs[0].get_io_type() == "IMAGE"
+    assert _schema_ids(simple.inputs) == ["images", "multiplier"]
+    assert _schema_ids(simple.outputs) == ["input_pixels", "original_image", "upscaled_shorter_edge"]
+    assert simple.outputs[0].get_io_type() == "IMAGE"
+
+    assert _schema_ids(advanced.inputs) == ["images", "shorter_edge"]
+    assert _schema_ids(advanced.outputs) == ["input_pixels", "original_image", "upscaled_shorter_edge"]
+    assert advanced.outputs[0].get_io_type() == "IMAGE"
 
 
-def test_resize_and_pad_does_not_call_encode_decode_or_color_transfer():
-    source = inspect.getsource(nodes_seedvr.SeedVR2ResizeAndPad.execute)
+def test_resize_nodes_do_not_call_encode_decode_or_color_transfer():
+    source = "\n".join(
+        [
+            inspect.getsource(nodes_seedvr.SeedVR2Resize.execute),
+            inspect.getsource(nodes_seedvr.SeedVR2ResizeAdvanced.execute),
+        ]
+    )
     tree = ast.parse(textwrap.dedent(source))
     forbidden_names = {
         "encode",

@@ -16,6 +16,8 @@ def test_seedvr2_windows_static_contract_tokens():
     vae = _read("comfy/ldm/seedvr/vae.py")
 
     required = [
+        "SeedVR2Resize",
+        "SeedVR2ResizeAdvanced",
         "SeedVR2PostProcessing",
         'io.Image.Input("decoded")',
         'io.Image.Input("original_image")',

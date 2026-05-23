@@ -27,7 +27,8 @@ ALLOWED = {
     "SaveImage",
     "SaveVideo",
     "SeedVR2Conditioning",
-    "SeedVR2ResizeAndPad",
+    "SeedVR2Resize",
+    "SeedVR2ResizeAdvanced",
     "SeedVR2PostProcessing",
     "KSampler",
     "SeedVR2ProgressiveSampler",
@@ -38,10 +39,11 @@ ALLOWED = {
     "VAEEncodeTiled",
     "VAELoader",
 }
-REQUIRED = {"SeedVR2ResizeAndPad", "SeedVR2PostProcessing"}
+REQUIRED = {"SeedVR2PostProcessing"}
 SEEDVR2_SCHEMAS = {
     "SeedVR2Conditioning": nodes_seedvr.SeedVR2Conditioning,
-    "SeedVR2ResizeAndPad": nodes_seedvr.SeedVR2ResizeAndPad,
+    "SeedVR2Resize": nodes_seedvr.SeedVR2Resize,
+    "SeedVR2ResizeAdvanced": nodes_seedvr.SeedVR2ResizeAdvanced,
     "SeedVR2PostProcessing": nodes_seedvr.SeedVR2PostProcessing,
     "SeedVR2ProgressiveSampler": nodes_seedvr.SeedVR2ProgressiveSampler,
 }
@@ -61,6 +63,8 @@ def test_seedvr2_workflow_graphs_use_native_boundary_nodes():
             pytest.fail(f"{graph}: unexpected class types {sorted(unexpected)}")
         if missing:
             pytest.fail(f"{graph}: missing required class types {sorted(missing)}")
+        if not {"SeedVR2Resize", "SeedVR2ResizeAdvanced"}.intersection(classes):
+            pytest.fail(f"{graph}: missing required SeedVR2 resize boundary node")
         if not {"VAEEncode", "VAEEncodeTiled"}.intersection(classes):
             pytest.fail(f"{graph}: missing VAE encode boundary node")
         if not {"VAEDecode", "VAEDecodeTiled"}.intersection(classes):
@@ -112,26 +116,25 @@ def test_seedvr2_workflow_graphs_route_model_through_conditioning():
 def test_seedvr2_workflow_graphs_route_original_image_to_post_processing():
     for graph in GRAPHS:
         data = json.loads(graph.read_text())
-        resize_and_pad_nodes = [
+        resize_nodes = [
             (node_id, node)
             for node_id, node in data.items()
-            if node["class_type"] == "SeedVR2ResizeAndPad"
+            if node["class_type"] in {"SeedVR2Resize", "SeedVR2ResizeAdvanced"}
         ]
         post_processing_nodes = [
             (node_id, node)
             for node_id, node in data.items()
             if node["class_type"] == "SeedVR2PostProcessing"
         ]
-        assert len(resize_and_pad_nodes) == 1
-        _, resize_and_pad = resize_and_pad_nodes[0]
+        assert len(resize_nodes) == 1
         for node_id, node in post_processing_nodes:
-            assert node["inputs"]["original_image"] == [resize_and_pad_nodes[0][0], 1], (
+            assert node["inputs"]["original_image"] == [resize_nodes[0][0], 1], (
                 f"{graph} node {node_id}: post-processing must receive the "
-                "SeedVR2ResizeAndPad original_image output"
+                "SeedVR2 resize original_image output"
             )
-            assert node["inputs"]["upscaled_shorter_edge"] == [resize_and_pad_nodes[0][0], 2], (
+            assert node["inputs"]["upscaled_shorter_edge"] == [resize_nodes[0][0], 2], (
                 f"{graph} node {node_id}: post-processing must use the same "
-                "SeedVR2ResizeAndPad upscaled_shorter_edge output"
+                "SeedVR2 resize upscaled_shorter_edge output"
             )
 
 
