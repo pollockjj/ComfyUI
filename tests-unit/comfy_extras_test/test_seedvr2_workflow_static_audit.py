@@ -129,9 +129,9 @@ def test_seedvr2_workflow_graphs_route_original_image_to_post_processing():
                 f"{graph} node {node_id}: post-processing must receive the "
                 "SeedVR2ResizeAndPad original_image output"
             )
-            assert node["inputs"]["shorter_edge"] == [resize_and_pad_nodes[0][0], 2], (
+            assert node["inputs"]["upscaled_shorter_edge"] == [resize_and_pad_nodes[0][0], 2], (
                 f"{graph} node {node_id}: post-processing must use the same "
-                "SeedVR2ResizeAndPad shorter_edge output"
+                "SeedVR2ResizeAndPad upscaled_shorter_edge output"
             )
 
 

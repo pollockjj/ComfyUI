@@ -21,6 +21,7 @@
   "4": {
     "inputs": {
       "shorter_edge": 120,
+      "multiplier": 1.0,
       "images": [
         "1",
         0
@@ -107,7 +108,7 @@
         "4",
         1
       ],
-      "shorter_edge": [
+      "upscaled_shorter_edge": [
         "4",
         2
       ]

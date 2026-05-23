@@ -18,13 +18,13 @@ def _schema_ids(items):
 def test_seedvr2_post_processing_schema():
     schema = nodes_seedvr.SeedVR2PostProcessing.define_schema()
 
-    assert _schema_ids(schema.inputs) == ["decoded", "original_image", "shorter_edge", "color_correction_method"]
+    assert _schema_ids(schema.inputs) == ["decoded", "original_image", "upscaled_shorter_edge", "color_correction_method"]
     assert schema.inputs[3].options == ["lab", "none"]
     assert schema.inputs[3].default == "lab"
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 
-def test_seedvr2_post_processing_lab_derives_reference_from_original_and_shorter_edge():
+def test_seedvr2_post_processing_lab_derives_reference_from_original_and_upscaled_shorter_edge():
     decoded = torch.full((1, 3, 9, 11, 3), 0.25)
     original = torch.full((1, 2, 16, 20, 3), 0.75)
     calls = []
@@ -145,7 +145,7 @@ def test_seedvr2_post_processing_uses_decoded_size_when_reference_is_larger():
     assert tuple(output.shape) == (1, 1, 128, 160, 3)
 
 
-def test_seedvr2_post_processing_derives_crop_from_shorter_edge():
+def test_seedvr2_post_processing_derives_crop_from_upscaled_shorter_edge():
     decoded = torch.ones((1, 1, 128, 224, 3), dtype=torch.float32)
     original = torch.ones((1, 1, 1080, 1920, 3), dtype=torch.float32)
 
