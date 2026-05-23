@@ -11,7 +11,11 @@ import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
-from comfy.ldm.seedvr.vae import lab_color_transfer
+from comfy.ldm.seedvr.vae import (
+    adain_color_transfer,
+    lab_color_transfer,
+    wavelet_color_transfer,
+)
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
@@ -308,7 +312,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
                 io.Image.Input("decoded"),
                 io.Image.Input("original_image"),
                 io.Int.Input("upscaled_shorter_edge", default=1280, min=1),
-                io.Combo.Input("color_correction_method", options=["lab", "none"], default="lab"),
+                io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
@@ -327,14 +331,19 @@ class SeedVR2PostProcessing(io.ComfyNode):
         target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
         target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
-        if color_correction_method == "lab":
+        if color_correction_method in ("lab", "wavelet", "adain"):
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
             output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
             reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
-            output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
+            if color_correction_method == "lab":
+                output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
+            elif color_correction_method == "wavelet":
+                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, wavelet_color_transfer)
+            else:
+                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, adain_color_transfer)
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
         elif color_correction_method == "none":
@@ -382,6 +391,14 @@ class SeedVR2PostProcessing(io.ComfyNode):
         original_flat = rearrange(original_5d, "b t h w c -> (b t) c h w")
         resized_flat = side_resize(original_flat, upscaled_shorter_edge).clamp(0.0, 1.0)
         return rearrange(resized_flat, "(b t) c h w -> b t h w c", b=b, t=t)
+
+    @staticmethod
+    def _color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, transfer_fn):
+        color_device = comfy.model_management.vae_device()
+        decoded_flat = decoded_flat.to(device=color_device)
+        reference_flat = reference_flat.to(device=color_device)
+        output = transfer_fn(decoded_flat, reference_flat)
+        return output.to(device=output_device)
 
     @staticmethod
     def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):

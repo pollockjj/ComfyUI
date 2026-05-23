@@ -19,7 +19,7 @@ def test_seedvr2_post_processing_schema():
     schema = nodes_seedvr.SeedVR2PostProcessing.define_schema()
 
     assert _schema_ids(schema.inputs) == ["decoded", "original_image", "upscaled_shorter_edge", "color_correction_method"]
-    assert schema.inputs[3].options == ["lab", "none"]
+    assert schema.inputs[3].options == ["lab", "wavelet", "adain", "none"]
     assert schema.inputs[3].default == "lab"
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
@@ -183,3 +183,123 @@ def test_seedvr2_post_processing_none_preserves_black_right_column_content():
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, decoded)
+
+
+def test_seedvr2_post_processing_wavelet_dispatch_routes_through_wavelet_color_transfer():
+    decoded = torch.full((1, 3, 9, 11, 3), 0.25)
+    original = torch.full((1, 2, 16, 20, 3), 0.75)
+    wavelet_calls = []
+    lab_calls = []
+
+    def _wavelet(content, style):
+        wavelet_calls.append((content.clone(), style.clone()))
+        return torch.zeros_like(content)
+
+    def _lab(content, style):
+        lab_calls.append((content.clone(), style.clone()))
+        return torch.zeros_like(content)
+
+    with patch.object(nodes_seedvr, "wavelet_color_transfer", _wavelet):
+        with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 8, "wavelet").result[0]
+
+    assert len(wavelet_calls) == 1
+    assert len(lab_calls) == 0
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, torch.full_like(output, 0.5))
+    assert wavelet_calls[0][0].shape == (2, 3, 8, 10)
+    assert wavelet_calls[0][1].shape == (2, 3, 8, 10)
+    assert torch.equal(wavelet_calls[0][0], torch.full_like(wavelet_calls[0][0], -0.5))
+    assert torch.allclose(wavelet_calls[0][1], torch.full_like(wavelet_calls[0][1], 0.5))
+
+
+def test_seedvr2_post_processing_adain_dispatch_routes_through_adain_color_transfer():
+    decoded = torch.full((1, 3, 9, 11, 3), 0.25)
+    original = torch.full((1, 2, 16, 20, 3), 0.75)
+    adain_calls = []
+    lab_calls = []
+
+    def _adain(content, style):
+        adain_calls.append((content.clone(), style.clone()))
+        return torch.zeros_like(content)
+
+    def _lab(content, style):
+        lab_calls.append((content.clone(), style.clone()))
+        return torch.zeros_like(content)
+
+    with patch.object(nodes_seedvr, "adain_color_transfer", _adain):
+        with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 8, "adain").result[0]
+
+    assert len(adain_calls) == 1
+    assert len(lab_calls) == 0
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+    assert torch.equal(output, torch.full_like(output, 0.5))
+    assert adain_calls[0][0].shape == (2, 3, 8, 10)
+    assert adain_calls[0][1].shape == (2, 3, 8, 10)
+
+
+def test_seedvr2_color_transfer_helper_runs_on_vae_device():
+    import inspect as _inspect
+    helper_source = _inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._color_transfer_on_vae_device)
+    assert "comfy.model_management.vae_device()" in helper_source
+    assert ".to(device=color_device)" in helper_source
+    assert ".to(device=output_device)" in helper_source
+    assert "transfer_fn" in helper_source
+
+
+def test_seedvr2_wavelet_color_transfer_matches_primary_source_reconstruction():
+    from comfy.ldm.seedvr import vae as seedvr_vae
+    torch.manual_seed(0)
+    content = torch.rand(1, 3, 12, 16) * 2.0 - 1.0
+    style = torch.rand(1, 3, 12, 16) * 2.0 - 1.0
+    out = seedvr_vae.wavelet_color_transfer(content, style)
+    expected = seedvr_vae.wavelet_reconstruction(content.clone(), style.clone())
+    assert torch.equal(out, expected)
+
+
+def test_seedvr2_adain_color_transfer_matches_huang_belongie_formula():
+    from comfy.ldm.seedvr import vae as seedvr_vae
+    torch.manual_seed(0)
+    content = torch.rand(2, 3, 5, 7) * 2.0 - 1.0
+    style = torch.rand(2, 3, 5, 7) * 2.0 - 1.0
+    out = seedvr_vae.adain_color_transfer(content.clone(), style.clone())
+
+    b, c = 2, 3
+    cf = content.float().reshape(b, c, -1)
+    sf = style.float().reshape(b, c, -1)
+    eps = 1e-5
+    mu_c = cf.mean(dim=2).reshape(b, c, 1, 1)
+    sd_c = (cf.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    mu_s = sf.mean(dim=2).reshape(b, c, 1, 1)
+    sd_s = (sf.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    expected = ((content.float() - mu_c) / sd_c) * sd_s + mu_s
+    expected = expected.clamp(-1.0, 1.0)
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_seedvr2_adain_preserves_input_dtype():
+    from comfy.ldm.seedvr import vae as seedvr_vae
+    content = (torch.rand(1, 3, 4, 4) * 2.0 - 1.0).to(torch.float16)
+    style = (torch.rand(1, 3, 4, 4) * 2.0 - 1.0).to(torch.float16)
+    out = seedvr_vae.adain_color_transfer(content, style)
+    assert out.dtype == torch.float16
+
+
+def test_seedvr2_adain_resizes_mismatched_style_to_content_shape():
+    from comfy.ldm.seedvr import vae as seedvr_vae
+    content = torch.rand(1, 3, 8, 10) * 2.0 - 1.0
+    style = torch.rand(1, 3, 16, 20) * 2.0 - 1.0
+    out = seedvr_vae.adain_color_transfer(content, style)
+    assert tuple(out.shape) == (1, 3, 8, 10)
+
+
+def test_seedvr2_post_processing_unknown_color_correction_method_raises():
+    decoded = torch.zeros(1, 2, 4, 4, 3)
+    original = torch.zeros(1, 2, 4, 4, 3)
+    try:
+        nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 4, "bogus")
+    except ValueError as exc:
+        assert "color_correction_method" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown color_correction_method")
