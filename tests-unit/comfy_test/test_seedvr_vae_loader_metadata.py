@@ -31,11 +31,10 @@ import torch
 # ``comfy.cli_args.args.cpu``. Match the pattern at
 # ``tests-unit/comfy_test/test_seedvr_vae_decode_unpadded_t.py:33-44``: flip
 # ``args.cpu`` BEFORE importing any ``comfy.sd`` / ``comfy.ldm.*`` symbol
-# when CUDA is unavailable. Issue-191 AC-3 additionally requires the
-# ``_cli_args.cpu = True`` assignment line number to precede every line
-# matching ``^import comfy`` or ``^from comfy`` in the committed file, so
-# the cli_args module is loaded via ``importlib`` here rather than via
-# ``from comfy.cli_args import args``.
+# when CUDA is unavailable. Keep the ``_cli_args.cpu = True`` assignment
+# line before every line matching ``^import comfy`` or ``^from comfy`` in
+# this file, so the cli_args module is loaded via ``importlib`` here rather
+# than via ``from comfy.cli_args import args``.
 import importlib
 
 _cli_args = importlib.import_module("comfy.cli_args").args
