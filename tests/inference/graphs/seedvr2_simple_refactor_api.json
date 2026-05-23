@@ -1,0 +1,128 @@
+{
+  "1": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage"
+  },
+  "2": {
+    "inputs": {
+      "unet_name": "seedvr2_3b_fp16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader"
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "ema_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader"
+  },
+  "4": {
+    "inputs": {
+      "resolution": 120,
+      "images": [
+        "1",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SeedVR2InputProcessing"
+  },
+  "5": {
+    "inputs": {
+      "pixels": [
+        "4",
+        0
+      ],
+      "vae": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "VAEEncode"
+  },
+  "6": {
+    "inputs": {
+      "latent_noise_scale": 0.0,
+      "vae_conditioning": [
+        "5",
+        0
+      ],
+      "model": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SeedVR2Conditioning"
+  },
+  "7": {
+    "inputs": {
+      "seed": 2761,
+      "steps": 1,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "frames_per_chunk": 1,
+      "temporal_overlap": 0,
+      "model": [
+        "6",
+        3
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "negative": [
+        "6",
+        1
+      ],
+      "latent_image": [
+        "6",
+        2
+      ]
+    },
+    "class_type": "SeedVR2ProgressiveSampler"
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "4",
+        1
+      ]
+    },
+    "class_type": "VAEDecode"
+  },
+  "9": {
+    "inputs": {
+      "method": "none",
+      "decoded": [
+        "8",
+        0
+      ],
+      "reference": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "SeedVR2PostProcessing"
+  },
+  "10": {
+    "inputs": {
+      "filename_prefix": "seedvr2_simple_refactor",
+      "images": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "SaveImage"
+  }
+}
