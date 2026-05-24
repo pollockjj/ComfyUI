@@ -405,11 +405,15 @@ def test_var_attention_split_uses_cu_seqlens_contract(monkeypatch):
     q, k, v, heads, cu = _inputs()
     captured = {}
 
-    def fake_var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
+    def fake_var_attention_pytorch_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
         captured.update(cu_q=cu_seqlens_q, cu_k=cu_seqlens_k, skip_reshape=skip_reshape)
         return torch.zeros_like(q)
 
-    monkeypatch.setattr(attention, "var_attention_pytorch", fake_var_attention_pytorch)
+    def fail_var_attention_pytorch(*args, **kwargs):
+        raise AssertionError("split backend must not use nested-tensor pytorch var attention")
+
+    monkeypatch.setattr(attention, "var_attention_pytorch", fail_var_attention_pytorch)
+    monkeypatch.setattr(attention, "var_attention_pytorch_split", fake_var_attention_pytorch_split)
 
     out = attention.var_attention_split(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
 

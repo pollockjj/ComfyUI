@@ -81,7 +81,7 @@ def _make_seedvr2_7b_separate_mm_sd():
 
 def _make_seedvr2_7b_shared_mm_sd():
     return {
-        "blocks.36.mlp.all.proj_in_gate.weight": torch.empty(1, 1),
+        "blocks.35.mlp.all.proj_in_gate.weight": torch.empty(1, 1),
     }
 
 
