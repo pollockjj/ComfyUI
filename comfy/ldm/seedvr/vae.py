@@ -1,7 +1,6 @@
 from contextlib import nullcontext
 from typing import Literal, Optional, Tuple
 import gc
-import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,7 +59,6 @@ def tiled_vae(
     temporal_size=16,
     temporal_overlap=0,
     encode=True,
-    multigpu_vae_models=None,
     **kwargs,
 ):
     gc.collect()
@@ -157,59 +155,18 @@ def tiled_vae(
     bar = ProgressBar(total_tiles)
     single_spatial_tile = h <= ti_h and w <= ti_w
 
-    workers = [(torch.device(storage_device), vae_model)]
-    if multigpu_vae_models and not single_spatial_tile:
-        seen_model_ids = {id(vae_model)}
-        for device, model in multigpu_vae_models.items():
-            if id(model) in seen_model_ids:
-                continue
-            workers.append((torch.device(device), model))
-            seen_model_ids.add(id(model))
-    for _, worker_model in workers:
-        _seedvr2_clear_temporal_memory(worker_model)
+    _seedvr2_clear_temporal_memory(vae_model)
 
-    def run_tile(tile_index, tile_range, model=vae_model, device=storage_device):
+    def run_tile(tile_index, tile_range):
         y_idx, y_end, x_idx, x_end = tile_range
         tile_x = x[:, :, :, y_idx:y_end, x_idx:x_end]
-        tile_out = run_temporal_chunks(tile_x, model=model, device=device)
+        tile_out = run_temporal_chunks(tile_x)
         return tile_index, y_idx, y_end, x_idx, x_end, tile_out
 
-    if len(workers) > 1:
-        tile_outputs = [None] * len(tile_ranges)
-        worker_errors = []
-        worker_lock = threading.Lock()
-        assignments = {
-            device: list(enumerate(tile_ranges))[worker_idx::len(workers)]
-            for worker_idx, (device, _) in enumerate(workers)
-        }
-
-        def worker(device, model):
-            try:
-                if device.type == "cuda":
-                    torch.cuda.set_device(device)
-                with torch.inference_mode():
-                    for tile_index, tile_range in assignments[device]:
-                        tile_outputs[tile_index] = run_tile(tile_index, tile_range, model=model, device=device)
-                if device.type == "cuda":
-                    torch.cuda.synchronize(device)
-            except BaseException as e:
-                with worker_lock:
-                    worker_errors.append((device, e))
-
-        threads = [threading.Thread(target=worker, args=(device, model)) for device, model in workers]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        if worker_errors:
-            device, error = worker_errors[0]
-            raise RuntimeError(f"SeedVR2 VAE tiled worksplit failed on {device}") from error
-        ordered_tile_outputs = tile_outputs
-    else:
-        ordered_tile_outputs = (
-            run_tile(tile_index, tile_range)
-            for tile_index, tile_range in enumerate(tile_ranges)
-        )
+    ordered_tile_outputs = (
+        run_tile(tile_index, tile_range)
+        for tile_index, tile_range in enumerate(tile_ranges)
+    )
 
     for _, y_idx, y_end, x_idx, x_end, tile_out in ordered_tile_outputs:
 
@@ -269,8 +226,7 @@ def tiled_vae(
         bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
-    for _, worker_model in workers:
-        _seedvr2_clear_temporal_memory(worker_model)
+    _seedvr2_clear_temporal_memory(vae_model)
 
     if result.device != x.device:
         result = result.to(x.device).to(x.dtype)
