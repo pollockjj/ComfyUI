@@ -473,7 +473,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
     @classmethod
     def _run_color_transfer_chunks(cls, decoded_flat, reference_flat, output_device, color_correction_method, chunk_size):
-        outputs = []
+        result = None
         for start in range(0, decoded_flat.shape[0], chunk_size):
             end = min(start + chunk_size, decoded_flat.shape[0])
             decoded_chunk = decoded_flat[start:end]
@@ -488,8 +488,16 @@ class SeedVR2PostProcessing(io.ComfyNode):
                 output = cls._color_transfer_on_vae_device(
                     decoded_chunk, reference_chunk, output_device, adain_color_transfer,
                 )
-            outputs.append(output)
-        return torch.cat(outputs, dim=0)
+            if result is None:
+                result = torch.empty(
+                    (decoded_flat.shape[0],) + tuple(output.shape[1:]),
+                    device=output_device,
+                    dtype=output.dtype,
+                )
+            result[start:end].copy_(output)
+        if result is None:
+            raise ValueError("SeedVR2PostProcessing: color correction requires at least one frame.")
+        return result
 
     @classmethod
     def _estimate_color_correction_chunk_size(cls, decoded_flat, color_correction_method):

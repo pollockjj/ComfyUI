@@ -103,6 +103,9 @@ def test_seedvr2_post_processing_lab_runs_color_transfer_on_vae_device():
 
     assert "_color_transfer_chunked" in source
     assert "_lab_color_transfer_on_vae_device" in chunk_source
+    assert "torch.cat" not in chunk_source
+    assert "torch.empty" in chunk_source
+    assert ".copy_(" in chunk_source
     assert "reference_5d.to(device=decoded_5d.device)" not in source
     assert "comfy.model_management.vae_device()" in helper_source
     assert ".to(device=color_device)" in helper_source
