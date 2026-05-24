@@ -1,11 +1,10 @@
 """Regression tests for the diffusers-format guard inside ``comfy.sd.VAE.__init__``.
 
-Tracks pollockjj/mydevelopment#119. The guard previously indexed
-``metadata["keep_diffusers_format"]`` directly, raising ``KeyError`` when
-``metadata`` was non-``None`` but lacked that key. The merged fix on
-``pollockjj/ComfyUI:issue_101`` uses
-``metadata.get("keep_diffusers_format") != "true"``: a missing key flows
-through to ``convert_vae_state_dict``; the explicit ``"true"`` value bypasses it.
+The guard previously indexed ``metadata["keep_diffusers_format"]`` directly,
+raising ``KeyError`` when ``metadata`` was non-``None`` but lacked that key. The
+fixed guard uses ``metadata.get("keep_diffusers_format") != "true"``: a missing
+key flows through to ``convert_vae_state_dict``; the explicit ``"true"`` value
+bypasses it.
 
 Five cells exercise every reachable shape of the guard input — missing key,
 explicit ``"true"``, ``None``, explicit non-``"true"``, empty dict — and halt
