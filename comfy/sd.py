@@ -101,7 +101,7 @@ def _seedvr2_vae_decode_memory_used(shape):
             candidates.append((shape[2], shape[3], shape[4]))
         output_pixels = max(_seedvr2_vae_decode_output_pixels(*candidate) for candidate in candidates)
     elif len(shape) == 4:
-        latent_t = max(1, shape[1] // 16)
+        latent_t = max(1, (shape[1] + 15) // 16)
         latent_h, latent_w = shape[2], shape[3]
         output_pixels = _seedvr2_vae_decode_output_pixels(latent_t, latent_h, latent_w)
     else:
@@ -1034,12 +1034,23 @@ class VAE:
 
     def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
         sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
+        sf_t = getattr(self.first_stage_model, "temporal_downsample_factor", 4)
+        if tile_t is None:
+            tile_t = 16
+        if overlap_t is None:
+            overlap_t = 4
+        if tile_t > 0:
+            temporal_size = tile_t * sf_t
+            temporal_overlap = max(0, overlap_t) * sf_t
+        else:
+            temporal_size = 0
+            temporal_overlap = 0
         args = {
             "enable_tiling": True,
             "tile_size": (tile_y * sf_s, tile_x * sf_s),
             "tile_overlap": (overlap * sf_s, overlap * sf_s),
-            "temporal_size": tile_t,
-            "temporal_overlap": overlap_t,
+            "temporal_size": temporal_size,
+            "temporal_overlap": temporal_overlap,
         }
         output = self.first_stage_model.decode(
             samples.to(self.vae_dtype).to(self.device),
