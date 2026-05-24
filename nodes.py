@@ -345,10 +345,13 @@ class VAEDecodeTiled:
                 temporal_size = 0
                 temporal_overlap = 0
             else:
+                requested_temporal_overlap = temporal_overlap
                 if temporal_size < temporal_overlap * 2:
                     temporal_overlap = temporal_overlap // 2
                 temporal_size = max(2, temporal_size // temporal_compression)
-                temporal_overlap = max(0, min(temporal_size // 2, temporal_overlap // temporal_compression))
+                temporal_overlap = min(temporal_size // 2, temporal_overlap // temporal_compression)
+                if requested_temporal_overlap > 0:
+                    temporal_overlap = max(1, temporal_overlap)
         else:
             temporal_size = None
             temporal_overlap = None
