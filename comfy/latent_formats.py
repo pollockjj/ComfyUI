@@ -771,7 +771,6 @@ class ACEAudio(LatentFormat):
 
 class SeedVR2(LatentFormat):
     latent_channels = 16
-    latent_dimensions = 16
 
 class ACEAudio15(LatentFormat):
     latent_channels = 64

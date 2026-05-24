@@ -1130,7 +1130,7 @@ def var_attention_sub_quad(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, sk
 
 @torch._dynamo.disable
 def var_attention_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
-    return var_attention_pytorch(
+    return var_attention_pytorch_split(
         q,
         k,
         v,
