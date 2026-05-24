@@ -759,11 +759,6 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 _VAR_ATTENTION_NESTED_API_NAME = "nested_tensor_from_jagged"
-_VAR_ATTENTION_GUARD_MESSAGE = (
-    "SeedVR2 var_attention_pytorch: torch.nested.nested_tensor_from_jagged "
-    "is required by this attention path; the installed PyTorch build "
-    "does not provide it"
-)
 
 
 def _var_attention_max_seqlen(cu_seqlens):
@@ -797,10 +792,26 @@ def _use_blackwell_attention():
     return (major, minor) >= (12, 0)
 
 
+def _nested_tensor_from_jagged():
+    nested = getattr(torch, "nested", None)
+    if nested is None:
+        return None
+    return getattr(nested, _VAR_ATTENTION_NESTED_API_NAME, None)
+
+
 def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_reshape=False, skip_output_reshape=False):
-    _nested = getattr(torch, "nested", None)
-    if _nested is None or not hasattr(_nested, _VAR_ATTENTION_NESTED_API_NAME):
-        raise RuntimeError(_VAR_ATTENTION_GUARD_MESSAGE)
+    nested_tensor_from_jagged = _nested_tensor_from_jagged()
+    if nested_tensor_from_jagged is None:
+        return var_attention_pytorch_split(
+            q,
+            k,
+            v,
+            heads,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+        )
 
     if not skip_reshape:
         # assumes 2D q, k,v [total_tokens, embed_dim]
@@ -810,9 +821,9 @@ def var_attention_pytorch(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, skip_resha
         k = k.view(k.shape[0], heads, head_dim)
         v = v.view(v.shape[0], heads, head_dim)
 
-    q = torch.nested.nested_tensor_from_jagged(q, offsets=cu_seqlens_q.long())
-    k = torch.nested.nested_tensor_from_jagged(k, offsets=cu_seqlens_k.long())
-    v = torch.nested.nested_tensor_from_jagged(v, offsets=cu_seqlens_k.long())
+    q = nested_tensor_from_jagged(q, offsets=cu_seqlens_q.long())
+    k = nested_tensor_from_jagged(k, offsets=cu_seqlens_k.long())
+    v = nested_tensor_from_jagged(v, offsets=cu_seqlens_k.long())
 
     q = q.transpose(1, 2)
     k = k.transpose(1, 2)
