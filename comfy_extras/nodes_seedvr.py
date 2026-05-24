@@ -253,9 +253,9 @@ def _seedvr2_input_shorter_edge(images, node_name):
 
 
 def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
-    if upscaled_shorter_edge < 1:
+    if upscaled_shorter_edge < 2:
         raise ValueError(
-            f"{node_name}: resolved shorter edge must be at least 1 pixel; "
+            f"{node_name}: resolved upscaled_shorter_edge must be at least 2 pixels; "
             f"got {upscaled_shorter_edge}."
         )
     original_image = images
@@ -312,6 +312,12 @@ class SeedVR2Resize(io.ComfyNode):
             )
         shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Resize")
         upscaled_shorter_edge = int(round(shorter_edge * multiplier))
+        if upscaled_shorter_edge < 2:
+            raise ValueError(
+                "SeedVR2Resize: multiplier resolved upscaled_shorter_edge "
+                f"to {upscaled_shorter_edge}; use a multiplier that resolves "
+                "to at least 2 pixels."
+            )
         return _seedvr2_resize_and_pad(
             images, upscaled_shorter_edge, "SeedVR2Resize",
         )
@@ -325,7 +331,7 @@ class SeedVR2ResizeAdvanced(io.ComfyNode):
             category="image/video",
             inputs=[
                 io.Image.Input("images"),
-                io.Int.Input("shorter_edge", default=1280, min=1),
+                io.Int.Input("shorter_edge", default=1280, min=2),
             ],
             outputs=[
                 io.Image.Output("input_pixels"),
@@ -350,7 +356,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
             inputs=[
                 io.Image.Input("decoded"),
                 io.Image.Input("original_image"),
-                io.Int.Input("upscaled_shorter_edge", min=1, force_input=True),
+                io.Int.Input("upscaled_shorter_edge", min=2, force_input=True),
                 io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],

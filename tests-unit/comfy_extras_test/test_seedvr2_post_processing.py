@@ -20,6 +20,7 @@ def test_seedvr2_post_processing_schema():
 
     assert _schema_ids(schema.inputs) == ["decoded", "original_image", "upscaled_shorter_edge", "color_correction_method"]
     assert schema.inputs[2].default is None
+    assert schema.inputs[2].min == 2
     assert schema.inputs[2].force_input is True
     assert schema.inputs[3].options == ["lab", "wavelet", "adain", "none"]
     assert schema.inputs[3].default == "lab"

@@ -21,7 +21,7 @@ def test_seedvr2_windows_static_contract_tokens():
         "SeedVR2PostProcessing",
         'io.Image.Input("decoded")',
         'io.Image.Input("original_image")',
-        'io.Int.Input("upscaled_shorter_edge", min=1, force_input=True)',
+        'io.Int.Input("upscaled_shorter_edge", min=2, force_input=True)',
         'io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab")',
         "def _format_seedvr2_encoded_samples",
         "def decode(self, z, seedvr2_tiling=None)",

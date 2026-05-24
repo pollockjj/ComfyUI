@@ -43,6 +43,18 @@ def test_resize_simple_rejects_non_positive_multiplier():
         raise AssertionError("non-positive multiplier was not rejected")
 
 
+def test_resize_simple_rejects_multiplier_resolving_to_too_small_edge():
+    images = torch.zeros(1, 1, 16, 16, 3)
+
+    try:
+        nodes_seedvr.SeedVR2Resize.execute(images, 0.01)
+    except ValueError as e:
+        assert "multiplier resolved upscaled_shorter_edge" in str(e)
+        assert "at least 2 pixels" in str(e)
+    else:
+        raise AssertionError("too-small resolved edge was not rejected")
+
+
 def test_resize_advanced_takes_exact_shorter_edge():
     images = torch.zeros(1, 1, 16, 16, 3)
 
@@ -65,6 +77,17 @@ def test_resize_advanced_treats_4d_image_as_one_video_frame_sequence():
     assert upscaled_shorter_edge == 120
 
 
+def test_resize_advanced_rejects_one_pixel_shorter_edge():
+    images = torch.zeros(1, 1, 16, 16, 3)
+
+    try:
+        nodes_seedvr.SeedVR2ResizeAdvanced.execute(images, 1)
+    except ValueError as e:
+        assert "upscaled_shorter_edge must be at least 2 pixels" in str(e)
+    else:
+        raise AssertionError("one-pixel shorter_edge was not rejected")
+
+
 def test_resize_node_schemas_and_execute_signatures_are_preprocess_only():
     simple = nodes_seedvr.SeedVR2Resize.define_schema()
     advanced = nodes_seedvr.SeedVR2ResizeAdvanced.define_schema()
@@ -78,7 +101,7 @@ def test_resize_node_schemas_and_execute_signatures_are_preprocess_only():
     ]
 
     assert [item.id for item in advanced.inputs] == ["images", "shorter_edge"]
-    assert advanced.inputs[1].min == 1
+    assert advanced.inputs[1].min == 2
     assert advanced.inputs[1].step is None
     assert [item.id for item in advanced.outputs] == [
         "input_pixels",
