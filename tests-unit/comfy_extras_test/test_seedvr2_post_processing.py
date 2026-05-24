@@ -26,6 +26,55 @@ def test_seedvr2_post_processing_schema():
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 
+def test_seedvr2_post_processing_color_correction_memory_multipliers_are_named():
+    assert nodes_seedvr.LAB_SCALE_MULTIPLIER == 13
+    assert nodes_seedvr.WAVELET_SCALE_MULTIPLIER == 10
+    assert nodes_seedvr.ADAIN_SCALE_MULTIPLIER == 6
+
+
+def test_seedvr2_post_processing_lab_autochunks_from_memory_estimate(monkeypatch):
+    decoded = torch.full((1, 5, 2, 2, 3), 0.25)
+    original = torch.full((1, 5, 2, 2, 3), 0.75)
+    calls = []
+
+    def _lab(content, style):
+        calls.append(content.shape[0])
+        return content
+
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "get_free_memory", lambda device: 1700)
+
+    with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 2, "lab").result[0]
+
+    assert calls == [2, 2, 1]
+    assert tuple(output.shape) == (1, 5, 2, 2, 3)
+
+
+def test_seedvr2_post_processing_lab_oom_fallback_halves_chunks(monkeypatch):
+    decoded = torch.full((1, 4, 2, 2, 3), 0.25)
+    original = torch.full((1, 4, 2, 2, 3), 0.75)
+    calls = []
+    cache_clears = []
+
+    def _lab(content, style):
+        calls.append(content.shape[0])
+        if content.shape[0] > 1:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return content
+
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "get_free_memory", lambda device: 1_000_000)
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "soft_empty_cache", lambda: cache_clears.append(True))
+
+    with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 2, "lab").result[0]
+
+    assert calls == [4, 2, 1, 1, 1, 1]
+    assert len(cache_clears) == 2
+    assert tuple(output.shape) == (1, 4, 2, 2, 3)
+
+
 def test_seedvr2_post_processing_lab_derives_reference_from_original_and_upscaled_shorter_edge():
     decoded = torch.full((1, 3, 9, 11, 3), 0.25)
     original = torch.full((1, 2, 16, 20, 3), 0.75)
@@ -48,9 +97,11 @@ def test_seedvr2_post_processing_lab_derives_reference_from_original_and_upscale
 
 def test_seedvr2_post_processing_lab_runs_color_transfer_on_vae_device():
     source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing.execute)
+    chunk_source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._run_color_transfer_chunks)
     helper_source = inspect.getsource(nodes_seedvr.SeedVR2PostProcessing._lab_color_transfer_on_vae_device)
 
-    assert "_lab_color_transfer_on_vae_device" in source
+    assert "_color_transfer_chunked" in source
+    assert "_lab_color_transfer_on_vae_device" in chunk_source
     assert "reference_5d.to(device=decoded_5d.device)" not in source
     assert "comfy.model_management.vae_device()" in helper_source
     assert ".to(device=color_device)" in helper_source

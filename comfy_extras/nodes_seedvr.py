@@ -26,6 +26,10 @@ from torchvision.transforms.functional import InterpolationMode
 _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
 )
+LAB_SCALE_MULTIPLIER = 13
+WAVELET_SCALE_MULTIPLIER = 10
+ADAIN_SCALE_MULTIPLIER = 6
+COLOR_CORRECTION_MEMORY_HEADROOM = 0.75
 
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
@@ -373,12 +377,9 @@ class SeedVR2PostProcessing(io.ComfyNode):
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
             reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
-            if color_correction_method == "lab":
-                output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
-            elif color_correction_method == "wavelet":
-                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, wavelet_color_transfer)
-            else:
-                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, adain_color_transfer)
+            output = cls._color_transfer_chunked(
+                decoded_flat, reference_flat, output_device, color_correction_method,
+            )
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
         elif color_correction_method == "none":
@@ -442,6 +443,71 @@ class SeedVR2PostProcessing(io.ComfyNode):
         reference_flat = reference_flat.to(device=color_device)
         output = lab_color_transfer(decoded_flat, reference_flat)
         return output.to(device=output_device)
+
+    @classmethod
+    def _color_transfer_chunked(cls, decoded_flat, reference_flat, output_device, color_correction_method):
+        chunk_size = cls._estimate_color_correction_chunk_size(decoded_flat, color_correction_method)
+        while True:
+            next_chunk_size = None
+            try:
+                return cls._run_color_transfer_chunks(
+                    decoded_flat, reference_flat, output_device, color_correction_method, chunk_size,
+                )
+            except Exception as e:
+                comfy.model_management.raise_non_oom(e)
+                if chunk_size <= 1:
+                    raise RuntimeError(
+                        "SeedVR2PostProcessing: color correction OOM at one frame; "
+                        f"method={color_correction_method}, shape={tuple(decoded_flat.shape)}."
+                    ) from e
+                next_chunk_size = max(1, chunk_size // 2)
+
+            comfy.model_management.soft_empty_cache()
+            chunk_size = next_chunk_size
+
+    @classmethod
+    def _run_color_transfer_chunks(cls, decoded_flat, reference_flat, output_device, color_correction_method, chunk_size):
+        outputs = []
+        for start in range(0, decoded_flat.shape[0], chunk_size):
+            end = min(start + chunk_size, decoded_flat.shape[0])
+            decoded_chunk = decoded_flat[start:end]
+            reference_chunk = reference_flat[start:end]
+            if color_correction_method == "lab":
+                output = cls._lab_color_transfer_on_vae_device(decoded_chunk, reference_chunk, output_device)
+            elif color_correction_method == "wavelet":
+                output = cls._color_transfer_on_vae_device(
+                    decoded_chunk, reference_chunk, output_device, wavelet_color_transfer,
+                )
+            else:
+                output = cls._color_transfer_on_vae_device(
+                    decoded_chunk, reference_chunk, output_device, adain_color_transfer,
+                )
+            outputs.append(output)
+        return torch.cat(outputs, dim=0)
+
+    @classmethod
+    def _estimate_color_correction_chunk_size(cls, decoded_flat, color_correction_method):
+        multiplier = cls._color_correction_memory_multiplier(color_correction_method)
+        frames = decoded_flat.shape[0]
+        _, channels, height, width = decoded_flat.shape
+        dtype_bytes = max(decoded_flat.element_size(), 4)
+        bytes_per_frame = height * width * channels * dtype_bytes * multiplier
+        if bytes_per_frame <= 0:
+            return frames
+        color_device = comfy.model_management.vae_device()
+        free_memory = comfy.model_management.get_free_memory(color_device)
+        chunk_size = int((free_memory * COLOR_CORRECTION_MEMORY_HEADROOM) // bytes_per_frame)
+        return max(1, min(frames, chunk_size))
+
+    @staticmethod
+    def _color_correction_memory_multiplier(color_correction_method):
+        if color_correction_method == "lab":
+            return LAB_SCALE_MULTIPLIER
+        if color_correction_method == "wavelet":
+            return WAVELET_SCALE_MULTIPLIER
+        if color_correction_method == "adain":
+            return ADAIN_SCALE_MULTIPLIER
+        raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
 
     @staticmethod
     def _resize_reference(reference, height, width):
