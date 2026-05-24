@@ -48,31 +48,26 @@ def test_seedvr2_post_processing_lab_autochunks_from_memory_estimate(monkeypatch
     with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
         output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 2, "lab").result[0]
 
-    assert calls == [2, 2, 1]
+    assert calls == [1, 1, 1, 1, 1]
     assert tuple(output.shape) == (1, 5, 2, 2, 3)
 
 
-def test_seedvr2_post_processing_lab_oom_fallback_halves_chunks(monkeypatch):
+def test_seedvr2_post_processing_lab_runs_each_frame_independently(monkeypatch):
     decoded = torch.full((1, 4, 2, 2, 3), 0.25)
     original = torch.full((1, 4, 2, 2, 3), 0.75)
     calls = []
-    cache_clears = []
 
     def _lab(content, style):
         calls.append(content.shape[0])
-        if content.shape[0] > 1:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
         return content
 
     monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
     monkeypatch.setattr(nodes_seedvr.comfy.model_management, "get_free_memory", lambda device: 1_000_000)
-    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "soft_empty_cache", lambda: cache_clears.append(True))
 
     with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
         output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 2, "lab").result[0]
 
-    assert calls == [4, 2, 1, 1, 1, 1]
-    assert len(cache_clears) == 2
+    assert calls == [1, 1, 1, 1]
     assert tuple(output.shape) == (1, 4, 2, 2, 3)
 
 
@@ -90,8 +85,9 @@ def test_seedvr2_post_processing_lab_derives_reference_from_original_and_upscale
 
     assert tuple(output.shape) == (1, 2, 8, 10, 3)
     assert torch.equal(output, torch.full_like(output, 0.5))
-    assert calls[0][0].shape == (2, 3, 8, 10)
-    assert calls[0][1].shape == (2, 3, 8, 10)
+    assert len(calls) == 2
+    assert calls[0][0].shape == (1, 3, 8, 10)
+    assert calls[0][1].shape == (1, 3, 8, 10)
     assert torch.equal(calls[0][0], torch.full_like(calls[0][0], -0.5))
     assert torch.allclose(calls[0][1], torch.full_like(calls[0][1], 0.5))
 
@@ -110,6 +106,73 @@ def test_seedvr2_post_processing_lab_runs_color_transfer_on_vae_device():
     assert "comfy.model_management.vae_device()" in helper_source
     assert ".to(device=color_device)" in helper_source
     assert ".to(device=output_device)" in helper_source
+
+
+def test_seedvr2_post_processing_lab_chunking_is_frame_independent(monkeypatch):
+    decoded = torch.linspace(-0.9, 0.9, 3 * 3 * 24 * 24).reshape(3, 3, 24, 24)
+    reference = torch.linspace(0.8, -0.8, 3 * 3 * 24 * 24).reshape(3, 3, 24, 24)
+
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
+
+    one_frame = nodes_seedvr.SeedVR2PostProcessing._run_color_transfer_chunks(
+        decoded.clone(), reference.clone(), torch.device("cpu"), "lab", 1,
+    )
+    multi_frame = nodes_seedvr.SeedVR2PostProcessing._run_color_transfer_chunks(
+        decoded.clone(), reference.clone(), torch.device("cpu"), "lab", 3,
+    )
+
+    assert torch.equal(one_frame, multi_frame)
+
+
+def test_seedvr2_post_processing_lab_retry_does_not_mutate_reference(monkeypatch):
+    decoded = torch.full((2, 3, 4, 4), 0.25)
+    reference = torch.full((2, 3, 4, 4), 0.75)
+    original_reference = reference.clone()
+    calls = []
+    cache_clears = []
+
+    def _lab(content, style):
+        calls.append((content.clone(), style.clone()))
+        style.add_(10.0)
+        if len(calls) == 1:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return content
+
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "get_free_memory", lambda device: 1_000_000)
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "soft_empty_cache", lambda: cache_clears.append(True))
+
+    with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+        nodes_seedvr.SeedVR2PostProcessing._color_transfer_chunked(
+            decoded, reference, torch.device("cpu"), "lab",
+        )
+
+    assert len(cache_clears) == 1
+    assert torch.equal(reference, original_reference)
+    assert torch.equal(calls[1][1], original_reference[0:1])
+
+
+def test_seedvr2_post_processing_oom_error_uses_color_correction_method(monkeypatch):
+    decoded = torch.full((1, 3, 4, 4), 0.25)
+    reference = torch.full((1, 3, 4, 4), 0.75)
+
+    def _lab(content, style):
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "vae_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "get_free_memory", lambda device: 1_000_000)
+    monkeypatch.setattr(nodes_seedvr.comfy.model_management, "soft_empty_cache", lambda: None)
+
+    with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
+        try:
+            nodes_seedvr.SeedVR2PostProcessing._color_transfer_chunked(
+                decoded, reference, torch.device("cpu"), "lab",
+            )
+        except RuntimeError as exc:
+            assert "color_correction_method=lab" in str(exc)
+            assert " method=lab" not in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError for one-frame LAB OOM")
 
 
 def test_seedvr2_post_processing_raw_conversion_does_not_probe_full_tensor_range():
@@ -145,7 +208,8 @@ def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
     assert resize_calls[0][1] == 8
     assert resize_calls[1][0].shape == (2, 3, 8, 10)
     assert resize_calls[1][1] == (4, 5)
-    assert lab_calls[0][1].shape == (2, 3, 4, 5)
+    assert len(lab_calls) == 2
+    assert lab_calls[0][1].shape == (1, 3, 4, 5)
     assert torch.equal(lab_calls[0][1], torch.zeros_like(lab_calls[0][1]))
 
 

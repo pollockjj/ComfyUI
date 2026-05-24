@@ -445,10 +445,21 @@ class SeedVR2PostProcessing(io.ComfyNode):
     @staticmethod
     def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):
         color_device = comfy.model_management.vae_device()
-        decoded_flat = decoded_flat.to(device=color_device)
-        reference_flat = reference_flat.to(device=color_device)
-        output = lab_color_transfer(decoded_flat, reference_flat)
-        return output.to(device=output_device)
+        result = None
+        for start in range(decoded_flat.shape[0]):
+            decoded_frame = decoded_flat[start:start + 1].to(device=color_device).clone()
+            reference_frame = reference_flat[start:start + 1].to(device=color_device).clone()
+            output = lab_color_transfer(decoded_frame, reference_frame).to(device=output_device)
+            if result is None:
+                result = torch.empty(
+                    (decoded_flat.shape[0],) + tuple(output.shape[1:]),
+                    device=output_device,
+                    dtype=output.dtype,
+                )
+            result[start:start + 1].copy_(output)
+        if result is None:
+            raise ValueError("SeedVR2PostProcessing: LAB color correction requires at least one frame.")
+        return result
 
     @classmethod
     def _color_transfer_chunked(cls, decoded_flat, reference_flat, output_device, color_correction_method):
@@ -464,7 +475,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
                 if chunk_size <= 1:
                     raise RuntimeError(
                         "SeedVR2PostProcessing: color correction OOM at one frame; "
-                        f"method={color_correction_method}, shape={tuple(decoded_flat.shape)}."
+                        f"color_correction_method={color_correction_method}, shape={tuple(decoded_flat.shape)}."
                     ) from e
                 next_chunk_size = max(1, chunk_size // 2)
 
