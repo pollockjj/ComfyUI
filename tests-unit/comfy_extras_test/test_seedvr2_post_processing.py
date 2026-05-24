@@ -323,12 +323,23 @@ def test_seedvr2_adain_color_transfer_matches_huang_belongie_formula():
     sf = style.float().reshape(b, c, -1)
     eps = 1e-5
     mu_c = cf.mean(dim=2).reshape(b, c, 1, 1)
-    sd_c = (cf.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    sd_c = (cf.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
     mu_s = sf.mean(dim=2).reshape(b, c, 1, 1)
-    sd_s = (sf.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    sd_s = (sf.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
     expected = ((content.float() - mu_c) / sd_c) * sd_s + mu_s
     expected = expected.clamp(-1.0, 1.0)
     assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_seedvr2_adain_single_pixel_uses_population_variance_without_nan():
+    from comfy.ldm.seedvr import vae as seedvr_vae
+    content = torch.tensor([[[[0.25]], [[-0.5]], [[0.75]]]], dtype=torch.float32)
+    style = torch.tensor([[[[-0.25]], [[0.5]], [[-0.75]]]], dtype=torch.float32)
+
+    out = seedvr_vae.adain_color_transfer(content, style)
+
+    assert torch.isfinite(out).all()
+    assert torch.equal(out, style)
 
 
 def test_seedvr2_adain_preserves_input_dtype():
