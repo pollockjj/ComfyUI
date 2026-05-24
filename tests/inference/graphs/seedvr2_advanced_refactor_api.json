@@ -29,17 +29,13 @@
   },
   "4": {
     "inputs": {
-      "resolution": 120,
+      "shorter_edge": 120,
       "images": [
         "11",
         0
-      ],
-      "vae": [
-        "3",
-        0
       ]
     },
-    "class_type": "SeedVR2InputProcessing"
+    "class_type": "SeedVR2ResizeAdvanced"
   },
   "5": {
     "inputs": {
@@ -52,21 +48,20 @@
         0
       ],
       "vae": [
-        "4",
-        1
+        "3",
+        0
       ]
     },
     "class_type": "VAEEncodeTiled"
   },
   "6": {
     "inputs": {
-      "latent_noise_scale": 0.0,
-      "vae_conditioning": [
-        "5",
-        0
-      ],
       "model": [
         "2",
+        0
+      ],
+      "vae_conditioning": [
+        "5",
         0
       ]
     },
@@ -84,19 +79,19 @@
       "temporal_overlap": 0,
       "model": [
         "6",
-        3
+        0
       ],
       "positive": [
         "6",
-        0
+        1
       ],
       "negative": [
         "6",
-        1
+        2
       ],
       "latent_image": [
         "6",
-        2
+        3
       ]
     },
     "class_type": "SeedVR2ProgressiveSampler"
@@ -112,22 +107,26 @@
         0
       ],
       "vae": [
-        "4",
-        1
+        "3",
+        0
       ]
     },
     "class_type": "VAEDecodeTiled"
   },
   "9": {
     "inputs": {
-      "method": "lab",
+      "color_correction_method": "lab",
       "decoded": [
         "8",
         0
       ],
-      "reference": [
-        "11",
-        0
+      "original_image": [
+        "4",
+        1
+      ],
+      "upscaled_shorter_edge": [
+        "4",
+        2
       ]
     },
     "class_type": "SeedVR2PostProcessing"

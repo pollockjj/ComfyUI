@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from comfy_api.latest import ComfyExtension, io
 import torch
 import math
+import logging
 from einops import rearrange
 
 import gc
@@ -10,7 +11,11 @@ import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
-from comfy.ldm.seedvr.vae import lab_color_transfer
+from comfy.ldm.seedvr.vae import (
+    adain_color_transfer,
+    lab_color_transfer,
+    wavelet_color_transfer,
+)
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
@@ -21,10 +26,37 @@ from torchvision.transforms.functional import InterpolationMode
 _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
 )
+LAB_SCALE_MULTIPLIER = 13
+WAVELET_SCALE_MULTIPLIER = 10
+ADAIN_SCALE_MULTIPLIER = 6
+COLOR_CORRECTION_MEMORY_HEADROOM = 0.75
 
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
+
+
+def _seedvr2_auto_chunk_attempts(t_latent, t_pixel, frames_per_chunk):
+    """Return stricter 4n+1 frame chunk sizes for auto OOM retries."""
+    attempts = [frames_per_chunk]
+    current_chunk_latent = (
+        t_latent if t_pixel <= frames_per_chunk
+        else (frames_per_chunk - 1) // 4 + 1
+    )
+    current_chunk_count = max(1, math.ceil(t_latent / current_chunk_latent))
+    seen = {frames_per_chunk}
+
+    for target_chunks in range(max(2, current_chunk_count + 1), t_latent + 1):
+        chunk_latent = max(1, math.ceil(t_latent / target_chunks))
+        candidate = 4 * (chunk_latent - 1) + 1
+        if candidate in seen:
+            continue
+        if candidate >= attempts[-1]:
+            continue
+        attempts.append(candidate)
+        seen.add(candidate)
+
+    return attempts
 
 
 def _resolve_seedvr2_diffusion_model(model):
@@ -208,51 +240,111 @@ def side_resize(image, size):
     resized = TVF.resize(image, size, InterpolationMode.BICUBIC, antialias=antialias)
     return resized
 
-class SeedVR2InputProcessing(io.ComfyNode):
+
+def _seedvr2_input_shorter_edge(images, node_name):
+    if images.dim() == 4:
+        return min(images.shape[1], images.shape[2])
+    if images.dim() == 5:
+        return min(images.shape[2], images.shape[3])
+    raise ValueError(
+        f"{node_name}: expected 4-D or 5-D IMAGE tensor, "
+        f"got shape {tuple(images.shape)}"
+    )
+
+
+def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
+    if upscaled_shorter_edge < 2:
+        raise ValueError(
+            f"{node_name}: resolved upscaled_shorter_edge must be at least 2 pixels; "
+            f"got {upscaled_shorter_edge}."
+        )
+    original_image = images
+    if images.dim() == 4:
+        # Comfy video components arrive as a 4-D IMAGE frame sequence:
+        # (frames, H, W, C). SeedVR2 consumes that as one video.
+        images = images.unsqueeze(0)
+    elif images.dim() != 5:
+        raise ValueError(
+            f"{node_name}: expected 4-D or 5-D IMAGE tensor, "
+            f"got shape {tuple(images.shape)}"
+        )
+    images = images.permute(0, 1, 4, 2, 3)
+
+    b, t, c, h, w = images.shape
+    images = images.reshape(b * t, c, h, w)
+
+    clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
+    images = side_resize(images, upscaled_shorter_edge)
+
+    images = clip(images)
+    images = div_pad(images, (16, 16))
+    _, _, new_h, new_w = images.shape
+
+    images = images.reshape(b, t, c, new_h, new_w)
+    images = cut_videos(images)
+    images_bthwc = rearrange(images, "b t c h w -> b t h w c")
+
+    return io.NodeOutput(images_bthwc, original_image, upscaled_shorter_edge)
+
+
+class SeedVR2Resize(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id = "SeedVR2InputProcessing",
+            node_id="SeedVR2Resize",
             category="image/video",
-            inputs = [
+            inputs=[
                 io.Image.Input("images"),
-                io.Vae.Input("vae"),
-                io.Int.Input("resolution", default = 1280, min = 120), # just non-zero value
+                io.Float.Input("multiplier", default=4.0, min=0.01),
             ],
-            outputs = [
-                io.Image.Output("processed"),
-                io.Vae.Output("vae"),
+            outputs=[
+                io.Image.Output("input_pixels"),
+                io.Image.Output("original_image"),
+                io.Int.Output("upscaled_shorter_edge"),
             ]
         )
 
     @classmethod
-    def execute(cls, images, vae, resolution):
-        if images.dim() == 4:
-            # Comfy video components arrive as a 4-D IMAGE frame sequence:
-            # (frames, H, W, C). SeedVR2 consumes that as one video.
-            images = images.unsqueeze(0)
-        elif images.dim() != 5:
+    def execute(cls, images, multiplier=4.0):
+        if multiplier <= 0:
             raise ValueError(
-                "SeedVR2InputProcessing: expected 4-D or 5-D IMAGE tensor, "
-                f"got shape {tuple(images.shape)}"
+                f"SeedVR2Resize: multiplier must be > 0; got {multiplier}."
             )
-        images = images.permute(0, 1, 4, 2, 3)
+        shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Resize")
+        upscaled_shorter_edge = int(round(shorter_edge * multiplier))
+        if upscaled_shorter_edge < 2:
+            raise ValueError(
+                "SeedVR2Resize: multiplier resolved upscaled_shorter_edge "
+                f"to {upscaled_shorter_edge}; use a multiplier that resolves "
+                "to at least 2 pixels."
+            )
+        return _seedvr2_resize_and_pad(
+            images, upscaled_shorter_edge, "SeedVR2Resize",
+        )
 
-        b, t, c, h, w = images.shape
-        images = images.reshape(b * t, c, h, w)
 
-        clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        images = side_resize(images, resolution)
+class SeedVR2ResizeAdvanced(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SeedVR2ResizeAdvanced",
+            category="image/video",
+            inputs=[
+                io.Image.Input("images"),
+                io.Int.Input("shorter_edge", default=1280, min=2),
+            ],
+            outputs=[
+                io.Image.Output("input_pixels"),
+                io.Image.Output("original_image"),
+                io.Int.Output("upscaled_shorter_edge"),
+            ]
+        )
 
-        images = clip(images)
-        images = div_pad(images, (16, 16))
-        _, _, new_h, new_w = images.shape
-
-        images = images.reshape(b, t, c, new_h, new_w)
-        images = cut_videos(images)
-        images_bthwc = rearrange(images, "b t c h w -> b t h w c")
-
-        return io.NodeOutput(images_bthwc, vae)
+    @classmethod
+    def execute(cls, images, shorter_edge):
+        return _seedvr2_resize_and_pad(
+            images, shorter_edge, "SeedVR2ResizeAdvanced",
+        )
 
 
 class SeedVR2PostProcessing(io.ComfyNode):
@@ -263,40 +355,48 @@ class SeedVR2PostProcessing(io.ComfyNode):
             category="image/video",
             inputs=[
                 io.Image.Input("decoded"),
-                io.Image.Input("reference"),
-                io.Combo.Input("method", options=["lab", "none"], default="lab"),
+                io.Image.Input("original_image"),
+                io.Int.Input("upscaled_shorter_edge", min=2, force_input=True),
+                io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, decoded, reference, method):
+    def execute(cls, decoded, original_image, upscaled_shorter_edge, color_correction_method):
+        cls._validate_upscaled_shorter_edge(upscaled_shorter_edge)
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        reference_5d, _ = cls._as_bthwc(reference)
-        decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
+        original_5d, _ = cls._as_bthwc(original_image)
+        decoded_5d = cls._restore_reference_batch_time(decoded_5d, original_5d)
 
-        b = min(decoded_5d.shape[0], reference_5d.shape[0])
-        t = min(decoded_5d.shape[1], reference_5d.shape[1])
+        b = min(decoded_5d.shape[0], original_5d.shape[0])
+        t = min(decoded_5d.shape[1], original_5d.shape[1])
+        reference_h, reference_w = cls._resized_shorter_edge_dims(
+            original_5d.shape[2], original_5d.shape[3], upscaled_shorter_edge,
+        )
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
-        reference_5d = reference_5d[:b, :t, :, :, :]
-        target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
-        target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
+        target_h = min(decoded_5d.shape[2], reference_h)
+        target_w = min(decoded_5d.shape[3], reference_w)
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
-        if method == "lab":
+        if color_correction_method in ("lab", "wavelet", "adain"):
+            reference_5d = cls._resize_original_reference(original_image, upscaled_shorter_edge)
+            reference_5d = reference_5d[:b, :t, :, :, :]
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
-            reference_5d = reference_5d.to(device=decoded_5d.device)
+            output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
             reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
-            output = lab_color_transfer(decoded_flat, reference_flat)
+            output = cls._color_transfer_chunked(
+                decoded_flat, reference_flat, output_device, color_correction_method,
+            )
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
-        elif method == "none":
+        elif color_correction_method == "none":
             output = decoded_5d
         else:
-            raise ValueError(f"SeedVR2PostProcessing: unknown method {method!r}")
+            raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
 
         h2 = output.shape[-3] - (output.shape[-3] % 2)
         w2 = output.shape[-2] - (output.shape[-2] % 2)
@@ -332,6 +432,128 @@ class SeedVR2PostProcessing(io.ComfyNode):
         return images.mul(2.0).sub(1.0)
 
     @staticmethod
+    def _validate_upscaled_shorter_edge(upscaled_shorter_edge):
+        if not isinstance(upscaled_shorter_edge, int) or upscaled_shorter_edge < 2:
+            raise ValueError(
+                "SeedVR2PostProcessing: upscaled_shorter_edge must be an integer "
+                f"of at least 2 pixels; got {upscaled_shorter_edge!r}."
+            )
+
+    @staticmethod
+    def _resized_shorter_edge_dims(height, width, upscaled_shorter_edge):
+        if height <= width:
+            return upscaled_shorter_edge, int(upscaled_shorter_edge * width / height)
+        return int(upscaled_shorter_edge * height / width), upscaled_shorter_edge
+
+    @classmethod
+    def _resize_original_reference(cls, original, upscaled_shorter_edge):
+        original_5d, _ = cls._as_bthwc(original)
+        b, t = original_5d.shape[:2]
+        original_flat = rearrange(original_5d, "b t h w c -> (b t) c h w")
+        resized_flat = side_resize(original_flat, upscaled_shorter_edge).clamp(0.0, 1.0)
+        return rearrange(resized_flat, "(b t) c h w -> b t h w c", b=b, t=t)
+
+    @staticmethod
+    def _color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, transfer_fn):
+        color_device = comfy.model_management.vae_device()
+        decoded_flat = decoded_flat.to(device=color_device)
+        reference_flat = reference_flat.to(device=color_device)
+        output = transfer_fn(decoded_flat, reference_flat)
+        return output.to(device=output_device)
+
+    @staticmethod
+    def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):
+        color_device = comfy.model_management.vae_device()
+        result = None
+        for start in range(decoded_flat.shape[0]):
+            decoded_frame = decoded_flat[start:start + 1].to(device=color_device).clone()
+            reference_frame = reference_flat[start:start + 1].to(device=color_device).clone()
+            output = lab_color_transfer(decoded_frame, reference_frame).to(device=output_device)
+            if result is None:
+                result = torch.empty(
+                    (decoded_flat.shape[0],) + tuple(output.shape[1:]),
+                    device=output_device,
+                    dtype=output.dtype,
+                )
+            result[start:start + 1].copy_(output)
+        if result is None:
+            raise ValueError("SeedVR2PostProcessing: LAB color correction requires at least one frame.")
+        return result
+
+    @classmethod
+    def _color_transfer_chunked(cls, decoded_flat, reference_flat, output_device, color_correction_method):
+        chunk_size = cls._estimate_color_correction_chunk_size(decoded_flat, color_correction_method)
+        while True:
+            next_chunk_size = None
+            try:
+                return cls._run_color_transfer_chunks(
+                    decoded_flat, reference_flat, output_device, color_correction_method, chunk_size,
+                )
+            except Exception as e:
+                comfy.model_management.raise_non_oom(e)
+                if chunk_size <= 1:
+                    raise RuntimeError(
+                        "SeedVR2PostProcessing: color correction OOM at one frame; "
+                        f"color_correction_method={color_correction_method}, shape={tuple(decoded_flat.shape)}."
+                    ) from e
+                next_chunk_size = max(1, chunk_size // 2)
+
+            comfy.model_management.soft_empty_cache()
+            chunk_size = next_chunk_size
+
+    @classmethod
+    def _run_color_transfer_chunks(cls, decoded_flat, reference_flat, output_device, color_correction_method, chunk_size):
+        result = None
+        for start in range(0, decoded_flat.shape[0], chunk_size):
+            end = min(start + chunk_size, decoded_flat.shape[0])
+            decoded_chunk = decoded_flat[start:end]
+            reference_chunk = reference_flat[start:end]
+            if color_correction_method == "lab":
+                output = cls._lab_color_transfer_on_vae_device(decoded_chunk, reference_chunk, output_device)
+            elif color_correction_method == "wavelet":
+                output = cls._color_transfer_on_vae_device(
+                    decoded_chunk, reference_chunk, output_device, wavelet_color_transfer,
+                )
+            else:
+                output = cls._color_transfer_on_vae_device(
+                    decoded_chunk, reference_chunk, output_device, adain_color_transfer,
+                )
+            if result is None:
+                result = torch.empty(
+                    (decoded_flat.shape[0],) + tuple(output.shape[1:]),
+                    device=output_device,
+                    dtype=output.dtype,
+                )
+            result[start:end].copy_(output)
+        if result is None:
+            raise ValueError("SeedVR2PostProcessing: color correction requires at least one frame.")
+        return result
+
+    @classmethod
+    def _estimate_color_correction_chunk_size(cls, decoded_flat, color_correction_method):
+        multiplier = cls._color_correction_memory_multiplier(color_correction_method)
+        frames = decoded_flat.shape[0]
+        _, channels, height, width = decoded_flat.shape
+        dtype_bytes = max(decoded_flat.element_size(), 4)
+        bytes_per_frame = height * width * channels * dtype_bytes * multiplier
+        if bytes_per_frame <= 0:
+            return frames
+        color_device = comfy.model_management.vae_device()
+        free_memory = comfy.model_management.get_free_memory(color_device)
+        chunk_size = int((free_memory * COLOR_CORRECTION_MEMORY_HEADROOM) // bytes_per_frame)
+        return max(1, min(frames, chunk_size))
+
+    @staticmethod
+    def _color_correction_memory_multiplier(color_correction_method):
+        if color_correction_method == "lab":
+            return LAB_SCALE_MULTIPLIER
+        if color_correction_method == "wavelet":
+            return WAVELET_SCALE_MULTIPLIER
+        if color_correction_method == "adain":
+            return ADAIN_SCALE_MULTIPLIER
+        raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
+
+    @staticmethod
     def _resize_reference(reference, height, width):
         if reference.shape[2] == height and reference.shape[3] == width:
             return reference
@@ -353,18 +575,19 @@ class SeedVR2Conditioning(io.ComfyNode):
             node_id="SeedVR2Conditioning",
             category="image/video",
             inputs=[
-                io.Latent.Input("vae_conditioning"),
                 io.Model.Input("model"),
-                io.Float.Input("latent_noise_scale", default=0.0, step=0.001)
+                io.Latent.Input("vae_conditioning", display_name="LATENT"),
             ],
-            outputs=[io.Conditioning.Output(display_name = "positive"),
-                     io.Conditioning.Output(display_name = "negative"),
-                     io.Latent.Output(display_name = "latent"),
-                     io.Model.Output(display_name = "model")],
+            outputs=[
+                io.Model.Output(display_name = "model"),
+                io.Conditioning.Output(display_name = "positive"),
+                io.Conditioning.Output(display_name = "negative"),
+                io.Latent.Output(display_name = "latent"),
+            ],
         )
 
     @classmethod
-    def execute(cls, vae_conditioning, model, latent_noise_scale) -> io.NodeOutput:
+    def execute(cls, model, vae_conditioning) -> io.NodeOutput:
 
         vae_conditioning = vae_conditioning["samples"]
         if vae_conditioning.ndim != 5:
@@ -419,7 +642,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises = noises * 0.1 + aug_noises * 0.05
-        cond_noise_scale = latent_noise_scale
+        cond_noise_scale = 0.0
         t = (
             torch.tensor([1000.0])
             * cond_noise_scale
@@ -445,7 +668,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        return io.NodeOutput(positive, negative, {"samples": noises}, model_patcher)
+        return io.NodeOutput(model_patcher, positive, negative, {"samples": noises})
 
 # SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
 # stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent
@@ -780,10 +1003,17 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                      "adjacent chunks; blended with a "
                                      "Hann window (linear for overlap "
                                      "< 3). 0 = no blend, pure concat. "
-                                     "Must be < chunk_latent derived "
-                                     "from frames_per_chunk; 1 latent "
-                                     "frame corresponds to ~4 pixel "
-                                     "frames."),
+                                     "Values >= the chunk's latent-frame "
+                                     "length use the maximum valid "
+                                     "overlap; 1 latent frame corresponds "
+                                     "to ~4 pixel frames."),
+                io.Combo.Input("chunking_mode",
+                               options=["manual", "auto"],
+                               default="manual",
+                               tooltip="manual = use frames_per_chunk "
+                                       "exactly; auto = retry only real OOM "
+                                       "failures with progressively smaller "
+                                       "temporal chunks."),
             ],
             outputs=[io.Latent.Output()],
         )
@@ -791,7 +1021,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
     @classmethod
     def execute(cls, model, seed, steps, cfg, sampler_name, scheduler,
                 positive, negative, latent_image, denoise,
-                frames_per_chunk, temporal_overlap) -> io.NodeOutput:
+                frames_per_chunk, temporal_overlap,
+                chunking_mode="manual") -> io.NodeOutput:
         # 4n+1 validation in pixel-frame domain. The SeedVR2 native pipeline
         # requires pixel-frame counts of the form 4n+1 (1, 5, 9, 13, ...),
         # imposed at ``cut_videos`` upstream and propagated through the VAE's
@@ -826,6 +1057,47 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         T_latent = CT // _SEEDVR2_LATENT_CHANNELS
         T_pixel = 4 * (T_latent - 1) + 1
 
+        if chunking_mode not in ("manual", "auto"):
+            raise ValueError(
+                f"SeedVR2ProgressiveSampler: chunking_mode must be "
+                f"'manual' or 'auto'; got {chunking_mode!r}."
+            )
+
+        if chunking_mode == "auto":
+            attempts = _seedvr2_auto_chunk_attempts(
+                T_latent, T_pixel, frames_per_chunk,
+            )
+            for i, attempt_frames_per_chunk in enumerate(attempts):
+                retry = False
+                try:
+                    return cls.execute(
+                        model=model, seed=seed, steps=steps, cfg=cfg,
+                        sampler_name=sampler_name, scheduler=scheduler,
+                        positive=positive, negative=negative,
+                        latent_image=latent_image, denoise=denoise,
+                        frames_per_chunk=attempt_frames_per_chunk,
+                        temporal_overlap=temporal_overlap,
+                        chunking_mode="manual",
+                    )
+                except Exception as e:
+                    comfy.model_management.raise_non_oom(e)
+                    if i == len(attempts) - 1:
+                        raise RuntimeError(
+                            "SeedVR2ProgressiveSampler: exhausted auto "
+                            "chunking attempts after OOM. Tried "
+                            f"frames_per_chunk values {attempts}."
+                        ) from e
+                    retry = True
+
+                if retry:
+                    logging.warning(
+                        "SeedVR2ProgressiveSampler auto chunking OOM at "
+                        "frames_per_chunk=%s; retrying with "
+                        "frames_per_chunk=%s.",
+                        attempt_frames_per_chunk, attempts[i + 1],
+                    )
+                    comfy.model_management.soft_empty_cache()
+
         # Short-circuit: total fits in one chunk -> standard path with no
         # chunking overhead. Output of this branch is byte-identical to the
         # built-in KSampler given the same (model, seed, steps, cfg,
@@ -844,17 +1116,16 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # T_latent corresponds to a valid 4n+1 pixel count).
         chunk_latent = (frames_per_chunk - 1) // 4 + 1
 
-        # ``temporal_overlap`` is exposed in latent-frame units. The
-        # validation here keeps the chunk loop's stride strictly
-        # positive; without it a config like overlap >= chunk would
-        # produce zero or negative stride and an infinite loop.
-        if temporal_overlap < 0 or temporal_overlap >= chunk_latent:
+        # ``temporal_overlap`` is exposed in latent-frame units, but users
+        # do not know the derived latent chunk length. Treat oversized
+        # values as "maximum valid overlap" while preserving a strictly
+        # positive chunk-loop stride.
+        if temporal_overlap < 0:
             raise ValueError(
-                f"SeedVR2ProgressiveSampler: temporal_overlap must be in "
-                f"[0, chunk_latent) latent frames where chunk_latent="
-                f"{chunk_latent} (derived from frames_per_chunk="
-                f"{frames_per_chunk}); got {temporal_overlap}."
+                f"SeedVR2ProgressiveSampler: temporal_overlap must be >= 0; "
+                f"got {temporal_overlap}."
             )
+        temporal_overlap = min(temporal_overlap, chunk_latent - 1)
         step_latent = chunk_latent - temporal_overlap
 
         # Generate full noise once from the user seed, then slice along T
@@ -1055,6 +1326,8 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
 
             if first_error is not None:
                 err_dev, err = first_error
+                if comfy.model_management.is_oom(err):
+                    raise err
                 raise RuntimeError(
                     f"SeedVR2ProgressiveSampler: worksplit worker on "
                     f"{err_dev} raised an exception during chunk "
@@ -1090,7 +1363,8 @@ class SeedVRExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SeedVR2Conditioning,
-            SeedVR2InputProcessing,
+            SeedVR2Resize,
+            SeedVR2ResizeAdvanced,
             SeedVR2PostProcessing,
             SeedVR2ProgressiveSampler,
         ]

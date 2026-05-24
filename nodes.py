@@ -386,8 +386,8 @@ class VAEEncodeTiled:
         return {"required": {"pixels": ("IMAGE", ), "vae": ("VAE", ),
                              "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64, "advanced": True}),
                              "overlap": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 32, "advanced": True}),
-                             "temporal_size": ("INT", {"default": 64, "min": 8, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to encode at a time.", "advanced": True}),
-                             "temporal_overlap": ("INT", {"default": 8, "min": 4, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to overlap.", "advanced": True}),
+                             "temporal_size": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to encode at a time. SeedVR2 allows 0 to disable temporal slicing.", "advanced": True}),
+                             "temporal_overlap": ("INT", {"default": 8, "min": 0, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to overlap.", "advanced": True}),
                             }}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "encode"
@@ -395,6 +395,9 @@ class VAEEncodeTiled:
     CATEGORY = "_for_testing"
 
     def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8):
+        if temporal_size <= 0:
+            temporal_size = 0
+            temporal_overlap = 0
         t = vae.encode_tiled(pixels, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
         return ({"samples": t}, )
 

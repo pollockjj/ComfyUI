@@ -28,8 +28,8 @@ def test_t_padded_matches_cut_videos(t_in):
 @pytest.mark.parametrize("t_in", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_post_processing_trims_decoded_video_to_explicit_reference_frames(t_in):
     decoded = torch.zeros(1, _t_padded(t_in), 32, 32, 3)
-    reference = torch.zeros(1, t_in, 32, 32, 3)
+    original = torch.zeros(1, t_in, 32, 32, 3)
 
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, reference, "none").result[0]
+    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 32, "none").result[0]
 
     assert tuple(output.shape) == (1, t_in, 32, 32, 3)

@@ -16,10 +16,13 @@ def test_seedvr2_windows_static_contract_tokens():
     vae = _read("comfy/ldm/seedvr/vae.py")
 
     required = [
+        "SeedVR2Resize",
+        "SeedVR2ResizeAdvanced",
         "SeedVR2PostProcessing",
         'io.Image.Input("decoded")',
-        'io.Image.Input("reference")',
-        'io.Combo.Input("method", options=["lab", "none"], default="lab")',
+        'io.Image.Input("original_image")',
+        'io.Int.Input("upscaled_shorter_edge", min=2, force_input=True)',
+        'io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab")',
         "def _format_seedvr2_encoded_samples",
         "def decode(self, z, seedvr2_tiling=None)",
     ]

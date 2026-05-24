@@ -19,6 +19,7 @@ from enum import Enum
 from comfy.ops import NVIDIA_MEMORY_CONV_BUG_WORKAROUND
 
 import logging
+import comfy.model_management
 import comfy.ops
 ops = comfy.ops.disable_weight_init
 
@@ -63,7 +64,7 @@ def tiled_vae(
     **kwargs,
 ):
     gc.collect()
-    torch.cuda.empty_cache()
+    comfy.model_management.soft_empty_cache()
 
     x = x.to(next(vae_model.parameters()).dtype)
     if x.ndim != 5:
@@ -79,22 +80,6 @@ def tiled_vae(
     else:
         slicing_attr = "slicing_latent_min_size"
         slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
-    logging.warning(
-        "!!! SEEDVR2 VAE TILING ACTIVE !!! phase=%s input_shape=%s "
-        "tile_size=%s tile_overlap=%s temporal_size=%s temporal_overlap=%s "
-        "slicing_attr=%s effective_slicing_min_size=%s dtype=%s device=%s",
-        "encode" if encode else "decode",
-        tuple(x.shape),
-        tile_size,
-        tile_overlap,
-        temporal_size,
-        temporal_overlap,
-        slicing_attr,
-        slicing_min_size,
-        x.dtype,
-        x.device,
-    )
-
     if encode:
         ti_h, ti_w = tile_size
         ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0], ti_h)
@@ -2126,6 +2111,45 @@ def lab_color_transfer(
     result = result.to(original_dtype)
 
     return result
+
+
+def wavelet_color_transfer(content_feat: Tensor, style_feat: Tensor) -> Tensor:
+    return wavelet_reconstruction(content_feat, style_feat)
+
+
+def adain_color_transfer(content_feat: Tensor, style_feat: Tensor, eps: float = 1e-5) -> Tensor:
+    if content_feat.shape != style_feat.shape:
+        style_feat = safe_interpolate_operation(
+            style_feat,
+            size=content_feat.shape[-2:],
+            mode='bilinear',
+            align_corners=False,
+        )
+
+    original_dtype = content_feat.dtype
+    content_feat = content_feat.float()
+    style_feat = style_feat.float()
+
+    b, c = content_feat.shape[:2]
+    content_flat = content_feat.reshape(b, c, -1)
+    style_flat = style_feat.reshape(b, c, -1)
+
+    content_mean = content_flat.mean(dim=2).reshape(b, c, 1, 1)
+    content_std = (content_flat.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
+    style_mean = style_flat.mean(dim=2).reshape(b, c, 1, 1)
+    style_std = (style_flat.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
+    del content_flat, style_flat
+
+    normalized = (content_feat - content_mean) / content_std
+    del content_mean, content_std
+    result = normalized * style_std + style_mean
+    del normalized, style_mean, style_std
+
+    result = result.clamp_(-1.0, 1.0)
+    if result.dtype != original_dtype:
+        result = result.to(original_dtype)
+    return result
+
 
 class VideoAutoencoderKL(nn.Module):
     def __init__(
