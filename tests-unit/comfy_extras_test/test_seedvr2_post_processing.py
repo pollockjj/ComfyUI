@@ -182,6 +182,30 @@ def test_seedvr2_post_processing_raw_conversion_does_not_probe_full_tensor_range
     assert ".item" not in source
 
 
+def test_seedvr2_post_processing_none_does_not_resize_reference_pixels():
+    decoded = torch.full((1, 2, 10, 12, 3), 0.25)
+    original = torch.full((1, 2, 16, 20, 3), 0.75)
+
+    with patch.object(nodes_seedvr, "side_resize") as resize:
+        output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 8, "none").result[0]
+
+    resize.assert_not_called()
+    assert tuple(output.shape) == (1, 2, 8, 10, 3)
+
+
+def test_seedvr2_post_processing_rejects_invalid_upscaled_shorter_edge():
+    decoded = torch.full((1, 2, 10, 12, 3), 0.25)
+    original = torch.full((1, 2, 16, 20, 3), 0.75)
+
+    for edge in (None, 1, 1.5):
+        try:
+            nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, edge, "none")
+        except ValueError as exc:
+            assert "upscaled_shorter_edge" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for upscaled_shorter_edge={edge!r}")
+
+
 def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
     decoded = torch.full((1, 2, 4, 5, 3), 0.25)
     original = torch.full((1, 2, 16, 20, 3), 0.75)

@@ -364,19 +364,24 @@ class SeedVR2PostProcessing(io.ComfyNode):
 
     @classmethod
     def execute(cls, decoded, original_image, upscaled_shorter_edge, color_correction_method):
+        cls._validate_upscaled_shorter_edge(upscaled_shorter_edge)
         decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        reference_5d = cls._resize_original_reference(original_image, upscaled_shorter_edge)
-        decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_5d)
+        original_5d, _ = cls._as_bthwc(original_image)
+        decoded_5d = cls._restore_reference_batch_time(decoded_5d, original_5d)
 
-        b = min(decoded_5d.shape[0], reference_5d.shape[0])
-        t = min(decoded_5d.shape[1], reference_5d.shape[1])
+        b = min(decoded_5d.shape[0], original_5d.shape[0])
+        t = min(decoded_5d.shape[1], original_5d.shape[1])
+        reference_h, reference_w = cls._resized_shorter_edge_dims(
+            original_5d.shape[2], original_5d.shape[3], upscaled_shorter_edge,
+        )
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
-        reference_5d = reference_5d[:b, :t, :, :, :]
-        target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
-        target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
+        target_h = min(decoded_5d.shape[2], reference_h)
+        target_w = min(decoded_5d.shape[3], reference_w)
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
         if color_correction_method in ("lab", "wavelet", "adain"):
+            reference_5d = cls._resize_original_reference(original_image, upscaled_shorter_edge)
+            reference_5d = reference_5d[:b, :t, :, :, :]
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
             output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
@@ -425,6 +430,20 @@ class SeedVR2PostProcessing(io.ComfyNode):
     @staticmethod
     def _to_seedvr2_raw(images):
         return images.mul(2.0).sub(1.0)
+
+    @staticmethod
+    def _validate_upscaled_shorter_edge(upscaled_shorter_edge):
+        if not isinstance(upscaled_shorter_edge, int) or upscaled_shorter_edge < 2:
+            raise ValueError(
+                "SeedVR2PostProcessing: upscaled_shorter_edge must be an integer "
+                f"of at least 2 pixels; got {upscaled_shorter_edge!r}."
+            )
+
+    @staticmethod
+    def _resized_shorter_edge_dims(height, width, upscaled_shorter_edge):
+        if height <= width:
+            return upscaled_shorter_edge, int(upscaled_shorter_edge * width / height)
+        return int(upscaled_shorter_edge * height / width), upscaled_shorter_edge
 
     @classmethod
     def _resize_original_reference(cls, original, upscaled_shorter_edge):
