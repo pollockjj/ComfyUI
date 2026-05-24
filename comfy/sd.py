@@ -1041,28 +1041,10 @@ class VAE:
             "temporal_size": tile_t,
             "temporal_overlap": overlap_t,
         }
-        # SeedVR2 VAE decode worker dispatch is gated until the decode worker
-        # path is byte-identical to the primary-model path. Encode workers stay
-        # enabled in encode_tiled_seedvr2.
-        multigpu_clones = None
-        clone_models = {}
-        try:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_decode(samples.shape, c.vae_dtype), dev)
-                    c.first_stage_model.to(dev)
-                    c.first_stage_model.device = dev
-                    clone_models[dev] = c.first_stage_model
-                if clone_models:
-                    args["multigpu_vae_models"] = clone_models
-            output = self.first_stage_model.decode(
-                samples.to(self.vae_dtype).to(self.device),
-                seedvr2_tiling=args,
-            )
-        finally:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    c.first_stage_model.to("cpu")
+        output = self.first_stage_model.decode(
+            samples.to(self.vae_dtype).to(self.device),
+            seedvr2_tiling=args,
+        )
         return self.process_output(output.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
 
     def _format_seedvr2_encoded_samples(self, samples):
@@ -1126,34 +1108,17 @@ class VAE:
             overlap_t = 0
         overlap_y = min(overlap_y, max(0, tile_y - 8))
         overlap_x = min(overlap_x, max(0, tile_x - 8))
-        multigpu_clones = getattr(self, 'multigpu_clones', None)
-        clone_previous_devices = {}
-        clone_models = {}
-        try:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    model_management.free_memory(c.memory_used_encode(pixel_samples.shape, c.vae_dtype), dev)
-                    c.first_stage_model.to(dev)
-                    clone_previous_devices[dev] = getattr(c.first_stage_model, "device", torch.device("cpu"))
-                    c.first_stage_model.device = dev
-                    clone_models[dev] = c.first_stage_model
-            self.first_stage_model.device = self.device
-            x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
-            output = comfy.ldm.seedvr.vae.tiled_vae(
-                x,
-                self.first_stage_model,
-                tile_size=(tile_y, tile_x),
-                tile_overlap=(overlap_y, overlap_x),
-                temporal_size=tile_t,
-                temporal_overlap=overlap_t,
-                encode=True,
-                multigpu_vae_models=clone_models or None,
-            )
-        finally:
-            if multigpu_clones:
-                for dev, c in multigpu_clones.items():
-                    c.first_stage_model.to("cpu")
-                    c.first_stage_model.device = clone_previous_devices.get(dev, torch.device("cpu"))
+        self.first_stage_model.device = self.device
+        x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
+        output = comfy.ldm.seedvr.vae.tiled_vae(
+            x,
+            self.first_stage_model,
+            tile_size=(tile_y, tile_x),
+            tile_overlap=(overlap_y, overlap_x),
+            temporal_size=tile_t,
+            temporal_overlap=overlap_t,
+            encode=True,
+        )
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 
     def decode(self, samples_in, vae_options={}):

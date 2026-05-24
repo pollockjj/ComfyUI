@@ -1,4 +1,6 @@
 import inspect
+import logging
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,10 +190,22 @@ def test_seedvr2_split_var_attention_matches_nested_var_attention():
     cu_q = torch.tensor([0, 2, 5], dtype=torch.int32)
     cu_k = torch.tensor([0, 3, 7], dtype=torch.int32)
 
-    nested = attention.var_attention_pytorch(
-        q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
-        skip_reshape=True, skip_output_reshape=True,
-    )
+    torch_fx_logger = logging.getLogger("torch.fx._symbolic_trace")
+    old_torch_fx_level = torch_fx_logger.level
+    torch_fx_logger.setLevel(logging.ERROR)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The PyTorch API of nested tensors is in prototype stage.*",
+                category=UserWarning,
+            )
+            nested = attention.var_attention_pytorch(
+                q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
+                skip_reshape=True, skip_output_reshape=True,
+            )
+    finally:
+        torch_fx_logger.setLevel(old_torch_fx_level)
     split = attention.var_attention_pytorch_split(
         q, k, v, heads=2, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
         skip_reshape=True, skip_output_reshape=True,

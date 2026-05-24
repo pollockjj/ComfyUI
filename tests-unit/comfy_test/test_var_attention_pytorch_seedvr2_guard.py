@@ -34,7 +34,9 @@ if not torch.cuda.is_available():
 
 import ast  # noqa: E402
 import inspect  # noqa: E402
+import logging  # noqa: E402
 import textwrap  # noqa: E402
+import warnings  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -124,7 +126,19 @@ def test_missing_namespace_raises_seedvr2_runtime_error(monkeypatch):
 def test_present_api_returns_expected_shape():
     q, k, v, heads, cu_q, cu_k, total_tokens, embed_dim = _inputs()
 
-    out = var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
+    torch_fx_logger = logging.getLogger("torch.fx._symbolic_trace")
+    old_torch_fx_level = torch_fx_logger.level
+    torch_fx_logger.setLevel(logging.ERROR)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The PyTorch API of nested tensors is in prototype stage.*",
+                category=UserWarning,
+            )
+            out = var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
+    finally:
+        torch_fx_logger.setLevel(old_torch_fx_level)
 
     assert tuple(out.shape) == (total_tokens, embed_dim), (
         f"expected ({total_tokens}, {embed_dim}); got {tuple(out.shape)}"

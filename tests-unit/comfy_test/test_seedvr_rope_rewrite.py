@@ -100,7 +100,7 @@ def _legacy_get_freqs(rope: NaMMRotaryEmbedding3d, vid_shape, txt_shape):
         max_height = max(max_height, h)
         max_width = max(max_width, w)
         max_txt_len = max(max_txt_len, l)
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast(device_type="cuda", enabled=False):
         vid_freqs_full = rope.get_axial_freqs(
             min(max_temporal + 16, 1024),
             min(max_height + 4, 128),
