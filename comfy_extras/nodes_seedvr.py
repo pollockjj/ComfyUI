@@ -346,7 +346,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
             inputs=[
                 io.Image.Input("decoded"),
                 io.Image.Input("original_image"),
-                io.Int.Input("upscaled_shorter_edge", default=1280, min=1),
+                io.Int.Input("upscaled_shorter_edge", min=1, force_input=True),
                 io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
