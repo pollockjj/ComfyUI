@@ -107,6 +107,36 @@ def test_vae_decode_tiled_allows_zero_temporal_controls_and_passes_them_through(
     ]
 
 
+def test_vae_decode_tiled_preserves_positive_overlap_after_temporal_compression():
+    class _DecodeRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def temporal_compression_decode(self):
+            return 8
+
+        def spacial_compression_decode(self):
+            return 8
+
+        def decode_tiled(self, samples, **kwargs):
+            self.calls.append(kwargs)
+            return torch.zeros(1, 8, 8, 3)
+
+    recorder = _DecodeRecorder()
+
+    nodes_mod.VAEDecodeTiled().decode(
+        recorder,
+        {"samples": torch.zeros(1, 16, 3, 32, 32)},
+        tile_size=256,
+        overlap=64,
+        temporal_size=64,
+        temporal_overlap=4,
+    )
+
+    assert recorder.calls[0]["tile_t"] == 8
+    assert recorder.calls[0]["overlap_t"] == 1
+
+
 def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch):
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = _SeedVR2DecodeStub()
