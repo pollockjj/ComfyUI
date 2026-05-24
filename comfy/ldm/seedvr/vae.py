@@ -80,22 +80,6 @@ def tiled_vae(
     else:
         slicing_attr = "slicing_latent_min_size"
         slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap, sf_t)
-    logging.warning(
-        "!!! SEEDVR2 VAE TILING ACTIVE !!! phase=%s input_shape=%s "
-        "tile_size=%s tile_overlap=%s temporal_size=%s temporal_overlap=%s "
-        "slicing_attr=%s effective_slicing_min_size=%s dtype=%s device=%s",
-        "encode" if encode else "decode",
-        tuple(x.shape),
-        tile_size,
-        tile_overlap,
-        temporal_size,
-        temporal_overlap,
-        slicing_attr,
-        slicing_min_size,
-        x.dtype,
-        x.device,
-    )
-
     if encode:
         ti_h, ti_w = tile_size
         ov_h = _seedvr2_clamped_spatial_overlap(tile_overlap[0], ti_h)
