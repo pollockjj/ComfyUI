@@ -167,3 +167,18 @@ def test_oom_fallback_dispatcher_breakdown():
         f"Expected encode_tiled_3d called once across SeedVR2 + non-SeedVR2 "
         f"OOM fallbacks; got {generic_call.call_count}."
     )
+
+
+def test_non_seedvr2_encode_tiled_3d_default_overlap_is_concrete():
+    vae = _make_non_seedvr2_vae()
+    vae.downscale_ratio = (lambda a: max(1, a // 4), 8, 8)
+    vae.upscale_ratio = (lambda a: a * 4, 8, 8)
+    generic_call = MagicMock(return_value=torch.zeros(1, 16, 2, 8, 8))
+    pixel_samples = torch.zeros((1, 8, 64, 64, 3))
+
+    with patch.object(sd_mod.model_management, "load_models_gpu",
+                      lambda *a, **k: None), \
+         patch.object(sd_mod.VAE, "encode_tiled_3d", generic_call):
+        vae.encode_tiled(pixel_samples)
+
+    assert generic_call.call_args.kwargs["overlap"] == (1, 64, 64)

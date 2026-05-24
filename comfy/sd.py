@@ -1366,10 +1366,11 @@ class VAE:
                     tile_t_latent = 9999
                 args["tile_t"] = self.upscale_ratio[0](tile_t_latent)
 
+                spatial_overlap = overlap if overlap is not None else 64
                 if overlap_t is None:
-                    args["overlap"] = (1, overlap, overlap)
+                    args["overlap"] = (1, spatial_overlap, spatial_overlap)
                 else:
-                    args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), overlap, overlap)
+                    args["overlap"] = (self.upscale_ratio[0](max(1, min(tile_t_latent // 2, self.downscale_ratio[0](overlap_t)))), spatial_overlap, spatial_overlap)
                 maximum = pixel_samples.shape[2]
                 maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
 
