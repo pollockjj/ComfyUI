@@ -423,6 +423,24 @@ def test_var_attention_split_uses_cu_seqlens_contract(monkeypatch):
     assert captured["skip_reshape"] is True
 
 
+def test_var_attention_pytorch_split_normalizes_split_indices_to_cpu(monkeypatch):
+    q, k, v, heads, cu = _inputs()
+    captured_devices = []
+    real_tensor_split = torch.tensor_split
+
+    def capture_tensor_split(input, indices_or_sections, dim=0):
+        if isinstance(indices_or_sections, torch.Tensor):
+            captured_devices.append(indices_or_sections.device.type)
+        return real_tensor_split(input, indices_or_sections, dim=dim)
+
+    monkeypatch.setattr(torch, "tensor_split", capture_tensor_split)
+
+    out = attention.var_attention_pytorch_split(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert tuple(out.shape) == tuple(q.shape)
+    assert captured_devices == ["cpu", "cpu", "cpu"]
+
+
 def test_missing_sage_package_guard_message_preserved():
     code = textwrap.dedent(
         """

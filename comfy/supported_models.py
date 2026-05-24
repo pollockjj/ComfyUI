@@ -1558,9 +1558,10 @@ class SeedVR2(supported_models_base.BASE):
             manual_cast_dtype = torch.bfloat16
         super().set_inference_dtype(dtype, manual_cast_dtype, device=device)
 
-    def get_model(self, state_dict, prefix = "", device=None):
+    def get_model(self, state_dict, prefix="", device=None):
         out = model_base.SeedVR2(self, device=device)
         return out
+
     def clip_target(self, state_dict={}):
         return None
 

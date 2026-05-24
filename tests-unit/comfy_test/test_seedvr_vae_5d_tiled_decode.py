@@ -133,8 +133,8 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
                 "enable_tiling": True,
                 "tile_size": (16, 16),
                 "tile_overlap": (8, 8),
-                "temporal_size": 16,
-                "temporal_overlap": 4,
+                "temporal_size": 64,
+                "temporal_overlap": 16,
             },
         }
     ]
@@ -280,7 +280,7 @@ def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypa
     vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
 
     assert vae.first_stage_model.calls[0]["shape"] == (1, 48, 2, 2)
-    assert vae.first_stage_model.calls[0]["seedvr2_tiling"]["temporal_overlap"] == 4
+    assert vae.first_stage_model.calls[0]["seedvr2_tiling"]["temporal_overlap"] == 16
 
 
 class _TemporalChunkRecorder(nn.Module):
