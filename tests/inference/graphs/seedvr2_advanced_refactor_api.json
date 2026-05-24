@@ -29,14 +29,13 @@
   },
   "4": {
     "inputs": {
-      "shorter_edge": 128,
-      "multiplier": 1.0,
+      "shorter_edge": 120,
       "images": [
         "11",
         0
       ]
     },
-    "class_type": "SeedVR2ResizeAndPad"
+    "class_type": "SeedVR2ResizeAdvanced"
   },
   "5": {
     "inputs": {

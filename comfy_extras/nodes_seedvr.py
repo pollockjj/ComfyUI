@@ -11,7 +11,11 @@ import importlib
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
-from comfy.ldm.seedvr.vae import lab_color_transfer
+from comfy.ldm.seedvr.vae import (
+    adain_color_transfer,
+    lab_color_transfer,
+    wavelet_color_transfer,
+)
 
 import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
@@ -232,18 +236,64 @@ def side_resize(image, size):
     resized = TVF.resize(image, size, InterpolationMode.BICUBIC, antialias=antialias)
     return resized
 
-class SeedVR2ResizeAndPad(io.ComfyNode):
+
+def _seedvr2_input_shorter_edge(images, node_name):
+    if images.dim() == 4:
+        return min(images.shape[1], images.shape[2])
+    if images.dim() == 5:
+        return min(images.shape[2], images.shape[3])
+    raise ValueError(
+        f"{node_name}: expected 4-D or 5-D IMAGE tensor, "
+        f"got shape {tuple(images.shape)}"
+    )
+
+
+def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
+    if upscaled_shorter_edge < 1:
+        raise ValueError(
+            f"{node_name}: resolved shorter edge must be at least 1 pixel; "
+            f"got {upscaled_shorter_edge}."
+        )
+    original_image = images
+    if images.dim() == 4:
+        # Comfy video components arrive as a 4-D IMAGE frame sequence:
+        # (frames, H, W, C). SeedVR2 consumes that as one video.
+        images = images.unsqueeze(0)
+    elif images.dim() != 5:
+        raise ValueError(
+            f"{node_name}: expected 4-D or 5-D IMAGE tensor, "
+            f"got shape {tuple(images.shape)}"
+        )
+    images = images.permute(0, 1, 4, 2, 3)
+
+    b, t, c, h, w = images.shape
+    images = images.reshape(b * t, c, h, w)
+
+    clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
+    images = side_resize(images, upscaled_shorter_edge)
+
+    images = clip(images)
+    images = div_pad(images, (16, 16))
+    _, _, new_h, new_w = images.shape
+
+    images = images.reshape(b, t, c, new_h, new_w)
+    images = cut_videos(images)
+    images_bthwc = rearrange(images, "b t c h w -> b t h w c")
+
+    return io.NodeOutput(images_bthwc, original_image, upscaled_shorter_edge)
+
+
+class SeedVR2Resize(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id = "SeedVR2ResizeAndPad",
+            node_id="SeedVR2Resize",
             category="image/video",
-            inputs = [
+            inputs=[
                 io.Image.Input("images"),
-                io.Int.Input("shorter_edge", default = 1280, min = 128, step=16),
-                io.Float.Input("multiplier", default=1.0, min=0.01),
+                io.Float.Input("multiplier", default=4.0, min=0.01),
             ],
-            outputs = [
+            outputs=[
                 io.Image.Output("input_pixels"),
                 io.Image.Output("original_image"),
                 io.Int.Output("upscaled_shorter_edge"),
@@ -251,51 +301,40 @@ class SeedVR2ResizeAndPad(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, shorter_edge, multiplier=1.0):
+    def execute(cls, images, multiplier=4.0):
         if multiplier <= 0:
             raise ValueError(
-                f"SeedVR2ResizeAndPad: multiplier must be > 0; got {multiplier}."
+                f"SeedVR2Resize: multiplier must be > 0; got {multiplier}."
             )
+        shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Resize")
         upscaled_shorter_edge = int(round(shorter_edge * multiplier))
-        if upscaled_shorter_edge < 1:
-            raise ValueError(
-                "SeedVR2ResizeAndPad: shorter_edge * multiplier must resolve "
-                f"to at least 1 pixel; got {upscaled_shorter_edge}."
-            )
-        if upscaled_shorter_edge % 16 != 0:
-            raise ValueError(
-                "SeedVR2ResizeAndPad: shorter_edge * multiplier must resolve "
-                "to a size divisible by 16; "
-                f"got {upscaled_shorter_edge} from shorter_edge={shorter_edge} "
-                f"and multiplier={multiplier}."
-            )
-        original_image = images
-        if images.dim() == 4:
-            # Comfy video components arrive as a 4-D IMAGE frame sequence:
-            # (frames, H, W, C). SeedVR2 consumes that as one video.
-            images = images.unsqueeze(0)
-        elif images.dim() != 5:
-            raise ValueError(
-                "SeedVR2ResizeAndPad: expected 4-D or 5-D IMAGE tensor, "
-                f"got shape {tuple(images.shape)}"
-            )
-        images = images.permute(0, 1, 4, 2, 3)
+        return _seedvr2_resize_and_pad(
+            images, upscaled_shorter_edge, "SeedVR2Resize",
+        )
 
-        b, t, c, h, w = images.shape
-        images = images.reshape(b * t, c, h, w)
 
-        clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-        images = side_resize(images, upscaled_shorter_edge)
+class SeedVR2ResizeAdvanced(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SeedVR2ResizeAdvanced",
+            category="image/video",
+            inputs=[
+                io.Image.Input("images"),
+                io.Int.Input("shorter_edge", default=1280, min=1),
+            ],
+            outputs=[
+                io.Image.Output("input_pixels"),
+                io.Image.Output("original_image"),
+                io.Int.Output("upscaled_shorter_edge"),
+            ]
+        )
 
-        images = clip(images)
-        images = div_pad(images, (16, 16))
-        _, _, new_h, new_w = images.shape
-
-        images = images.reshape(b, t, c, new_h, new_w)
-        images = cut_videos(images)
-        images_bthwc = rearrange(images, "b t c h w -> b t h w c")
-
-        return io.NodeOutput(images_bthwc, original_image, upscaled_shorter_edge)
+    @classmethod
+    def execute(cls, images, shorter_edge):
+        return _seedvr2_resize_and_pad(
+            images, shorter_edge, "SeedVR2ResizeAdvanced",
+        )
 
 
 class SeedVR2PostProcessing(io.ComfyNode):
@@ -307,8 +346,8 @@ class SeedVR2PostProcessing(io.ComfyNode):
             inputs=[
                 io.Image.Input("decoded"),
                 io.Image.Input("original_image"),
-                io.Int.Input("upscaled_shorter_edge", default=1280, min=1),
-                io.Combo.Input("color_correction_method", options=["lab", "none"], default="lab"),
+                io.Int.Input("upscaled_shorter_edge", min=1, force_input=True),
+                io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
             ],
             outputs=[io.Image.Output()],
         )
@@ -327,14 +366,19 @@ class SeedVR2PostProcessing(io.ComfyNode):
         target_h = min(decoded_5d.shape[2], reference_5d.shape[2])
         target_w = min(decoded_5d.shape[3], reference_5d.shape[3])
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
-        if color_correction_method == "lab":
+        if color_correction_method in ("lab", "wavelet", "adain"):
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
             output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
             reference_raw = cls._to_seedvr2_raw(reference_5d)
             decoded_flat = rearrange(decoded_raw, "b t h w c -> (b t) c h w")
             reference_flat = rearrange(reference_raw, "b t h w c -> (b t) c h w")
-            output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
+            if color_correction_method == "lab":
+                output = cls._lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device)
+            elif color_correction_method == "wavelet":
+                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, wavelet_color_transfer)
+            else:
+                output = cls._color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, adain_color_transfer)
             output = rearrange(output, "(b t) c h w -> b t h w c", b=b, t=t)
             output = output.add(1.0).div(2.0).clamp(0.0, 1.0)
         elif color_correction_method == "none":
@@ -382,6 +426,14 @@ class SeedVR2PostProcessing(io.ComfyNode):
         original_flat = rearrange(original_5d, "b t h w c -> (b t) c h w")
         resized_flat = side_resize(original_flat, upscaled_shorter_edge).clamp(0.0, 1.0)
         return rearrange(resized_flat, "(b t) c h w -> b t h w c", b=b, t=t)
+
+    @staticmethod
+    def _color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, transfer_fn):
+        color_device = comfy.model_management.vae_device()
+        decoded_flat = decoded_flat.to(device=color_device)
+        reference_flat = reference_flat.to(device=color_device)
+        output = transfer_fn(decoded_flat, reference_flat)
+        return output.to(device=output_device)
 
     @staticmethod
     def _lab_color_transfer_on_vae_device(decoded_flat, reference_flat, output_device):
@@ -1201,7 +1253,8 @@ class SeedVRExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SeedVR2Conditioning,
-            SeedVR2ResizeAndPad,
+            SeedVR2Resize,
+            SeedVR2ResizeAdvanced,
             SeedVR2PostProcessing,
             SeedVR2ProgressiveSampler,
         ]

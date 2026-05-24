@@ -2112,6 +2112,42 @@ def lab_color_transfer(
 
     return result
 
+def wavelet_color_transfer(content_feat: Tensor, style_feat: Tensor) -> Tensor:
+    return wavelet_reconstruction(content_feat, style_feat)
+
+def adain_color_transfer(content_feat: Tensor, style_feat: Tensor, eps: float = 1e-5) -> Tensor:
+    if content_feat.shape != style_feat.shape:
+        style_feat = safe_interpolate_operation(
+            style_feat,
+            size=content_feat.shape[-2:],
+            mode='bilinear',
+            align_corners=False,
+        )
+
+    original_dtype = content_feat.dtype
+    content_feat = content_feat.float()
+    style_feat = style_feat.float()
+
+    b, c = content_feat.shape[:2]
+    content_flat = content_feat.reshape(b, c, -1)
+    style_flat = style_feat.reshape(b, c, -1)
+
+    content_mean = content_flat.mean(dim=2).reshape(b, c, 1, 1)
+    content_std = (content_flat.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    style_mean = style_flat.mean(dim=2).reshape(b, c, 1, 1)
+    style_std = (style_flat.var(dim=2) + eps).sqrt().reshape(b, c, 1, 1)
+    del content_flat, style_flat
+
+    normalized = (content_feat - content_mean) / content_std
+    del content_mean, content_std
+    result = normalized * style_std + style_mean
+    del normalized, style_mean, style_std
+
+    result = result.clamp_(-1.0, 1.0)
+    if result.dtype != original_dtype:
+        result = result.to(original_dtype)
+    return result
+
 class VideoAutoencoderKL(nn.Module):
     def __init__(
         self,
