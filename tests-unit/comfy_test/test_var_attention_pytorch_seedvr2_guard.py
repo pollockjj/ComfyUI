@@ -45,7 +45,7 @@ from comfy.ldm.modules.attention import var_attention_pytorch  # noqa: E402
 
 def _inputs():
     """Canonical 2-D ``(q, k, v, heads, cu_seqlens_q, cu_seqlens_k,
-    total_tokens, embed_dim)`` matching the live shape from GTP-3:
+    total_tokens, embed_dim)`` matching the live shape from GPT-3:
     two segments of 3 tokens each, ``embed_dim = heads * head_dim =
     2 * 8 = 16``.
     """

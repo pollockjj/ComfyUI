@@ -450,6 +450,13 @@ def test_seedvr2_vae_decode_memory_accepts_channel_last_tiled_latents():
     assert channel_last == channel_first
 
 
+def test_seedvr2_vae_decode_memory_rounds_malformed_collapsed_channels_up():
+    malformed = comfy.sd._seedvr2_vae_decode_memory_used((1, 17, 120, 160))
+    expected = comfy.sd._seedvr2_vae_decode_output_pixels(2, 120, 160) * comfy.sd.SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
+
+    assert malformed == expected
+
+
 def test_seedvr2_vae_decode_memory_uses_conservative_ambiguous_5d_layout():
     ambiguous = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 120, 160, 16))
     channel_first = comfy.sd._seedvr2_vae_decode_output_pixels(120, 160, 16) * comfy.sd.SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
