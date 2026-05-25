@@ -17,6 +17,44 @@ import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
 
 
+def test_set_model_config_inference_dtype_preserves_legacy_signature():
+    calls = []
+
+    class LegacyConfig:
+        def set_inference_dtype(self, dtype, manual_cast_dtype):
+            calls.append((dtype, manual_cast_dtype))
+
+    comfy.sd._set_model_config_inference_dtype(LegacyConfig(), torch.float16, None, object())
+
+    assert calls == [(torch.float16, None)]
+
+
+def test_set_model_config_inference_dtype_passes_device_when_supported():
+    calls = []
+    device = object()
+
+    class DeviceAwareConfig:
+        def set_inference_dtype(self, dtype, manual_cast_dtype, device=None):
+            calls.append((dtype, manual_cast_dtype, device))
+
+    comfy.sd._set_model_config_inference_dtype(DeviceAwareConfig(), torch.float16, None, device)
+
+    assert calls == [(torch.float16, None, device)]
+
+
+def test_set_model_config_inference_dtype_passes_device_to_kwargs_override():
+    calls = []
+    device = object()
+
+    class KwargsConfig:
+        def set_inference_dtype(self, dtype, manual_cast_dtype, **kwargs):
+            calls.append((dtype, manual_cast_dtype, kwargs))
+
+    comfy.sd._set_model_config_inference_dtype(KwargsConfig(), torch.float16, None, device)
+
+    assert calls == [(torch.float16, None, {"device": device})]
+
+
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
     bf16_device = object()
     fp16_device = object()

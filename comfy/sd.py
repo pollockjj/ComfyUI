@@ -1,4 +1,5 @@
 from __future__ import annotations
+import inspect
 import json
 import torch
 from enum import Enum
@@ -1884,6 +1885,17 @@ def load_checkpoint(config_path=None, ckpt_path=None, output_vae=True, output_cl
 
     return (model, clip, vae)
 
+
+def _set_model_config_inference_dtype(model_config, dtype, manual_cast_dtype, device):
+    set_dtype = model_config.set_inference_dtype
+    parameters = inspect.signature(set_dtype).parameters
+    supports_device = "device" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    if supports_device:
+        set_dtype(dtype, manual_cast_dtype, device=device)
+    else:
+        set_dtype(dtype, manual_cast_dtype)
+
+
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True, model_options={}, te_model_options={}, disable_dynamic=False):
     sd, metadata = comfy.utils.load_torch_file(ckpt_path, return_metadata=True)
     out = load_state_dict_guess_config(sd, output_vae, output_clip, output_clipvision, embedding_directory, output_model, model_options, te_model_options=te_model_options, metadata=metadata, disable_dynamic=disable_dynamic)
@@ -1951,7 +1963,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
     else:
         manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
+    _set_model_config_inference_dtype(model_config, unet_dtype, manual_cast_dtype, load_device)
 
     if model_config.clip_vision_prefix is not None:
         if output_clipvision:
@@ -2090,7 +2102,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
     else:
         manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
+    _set_model_config_inference_dtype(model_config, unet_dtype, manual_cast_dtype, load_device)
 
     if custom_operations is not None:
         model_config.custom_operations = custom_operations
