@@ -639,18 +639,8 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         _apply_rope_freqs_float32_cast(model)
 
-        noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
-        aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
-        aug_noises = noises * 0.1 + aug_noises * 0.05
-        cond_noise_scale = 0.0
-        t = (
-            torch.tensor([1000.0])
-            * cond_noise_scale
-        ).to(device)
-        shape = torch.tensor(vae_conditioning.shape[1:]).to(device)[None] # avoid batch dim
-        t = timestep_transform(t, shape)
-        cond = inter(vae_conditioning, aug_noises, t)
-        condition = torch.stack([get_conditions(noise, c) for noise, c in zip(noises, cond)])
+        noises = torch.zeros_like(vae_conditioning, dtype=vae_conditioning.dtype, device=device)
+        condition = torch.stack([get_conditions(noise, c) for noise, c in zip(noises, vae_conditioning)])
         condition = condition.movedim(-1, 1)
         noises = noises.movedim(-1, 1)
 
