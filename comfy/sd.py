@@ -1052,7 +1052,6 @@ class VAE:
             "tile_overlap": (overlap * sf_s, overlap * sf_s),
             "temporal_size": temporal_size,
             "temporal_overlap": temporal_overlap,
-            "output_device": self.output_device,
         }
         output = self.first_stage_model.decode(
             samples.to(self.vae_dtype).to(self.device),
@@ -1131,7 +1130,6 @@ class VAE:
             temporal_size=tile_t,
             temporal_overlap=overlap_t,
             encode=True,
-            output_device=self.output_device,
         )
         return output.to(device=self.output_device, dtype=self.vae_output_dtype())
 

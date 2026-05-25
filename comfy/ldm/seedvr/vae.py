@@ -59,7 +59,6 @@ def tiled_vae(
     temporal_size=16,
     temporal_overlap=0,
     encode=True,
-    output_device=None,
     **kwargs,
 ):
     gc.collect()
@@ -103,11 +102,10 @@ def tiled_vae(
     stride_h = max(1, ti_h - ov_h)
     stride_w = max(1, ti_w - ov_w)
 
-    execution_device = vae_model.device
-    storage_device = torch.device(output_device) if output_device is not None else x.device
+    storage_device = vae_model.device
     result = None
     count = None
-    def run_temporal_chunks(spatial_tile, model=vae_model, device=execution_device):
+    def run_temporal_chunks(spatial_tile, model=vae_model, device=storage_device):
         device = torch.device(device)
         _seedvr2_clear_temporal_memory(model)
         t_chunk = spatial_tile.to(device=device, dtype=next(model.parameters()).dtype, non_blocking=True).contiguous()
@@ -174,8 +172,8 @@ def tiled_vae(
 
         if single_spatial_tile:
             result = tile_out[:, :, :target_d, :target_h, :target_w]
-            if result.dtype != x.dtype:
-                result = result.to(x.dtype)
+            if result.device != x.device:
+                result = result.to(x.device).to(x.dtype)
             if x.shape[2] == 1 and sf_t == 1:
                 result = result.squeeze(2)
             bar.update(1)
@@ -230,8 +228,8 @@ def tiled_vae(
     result.div_(count.clamp(min=1e-6))
     _seedvr2_clear_temporal_memory(vae_model)
 
-    if result.dtype != x.dtype:
-        result = result.to(x.dtype)
+    if result.device != x.device:
+        result = result.to(x.device).to(x.dtype)
 
     if x.shape[2] == 1 and sf_t == 1:
         result = result.squeeze(2)
