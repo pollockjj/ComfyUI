@@ -735,11 +735,11 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
         autocast_device = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.amp.autocast(autocast_device, enabled=False):
             vid_freqs = self.get_axial_freqs(
-                min(max_temporal + 16, 1024),  # Cap at 1024, add small buffer
-                min(max_height + 4, 128),      # Cap at 128, add small buffer
-                min(max_width + 4, 128)        # Cap at 128, add small buffer
+                max_temporal + 16,
+                max_height + 4,
+                max_width + 4,
             ).float()
-            txt_freqs = self.get_axial_freqs(min(max_txt_len + 16, 1024))
+            txt_freqs = self.get_axial_freqs(max_txt_len + 16)
 
         # Now slice as before
         vid_freq_list, txt_freq_list = [], []

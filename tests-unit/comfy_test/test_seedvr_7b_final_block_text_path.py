@@ -148,6 +148,27 @@ def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
 
 
+def test_seedvr2_mmrope_handles_large_spatial_grid_without_truncation():
+    rope = seedvr_model.NaMMRotaryEmbedding3d(dim=12)
+    vid_shape = torch.tensor([[1, 129, 130]], dtype=torch.long)
+    txt_shape = torch.tensor([[2]], dtype=torch.long)
+    vid_tokens = int(vid_shape.prod().item())
+    txt_tokens = int(txt_shape.prod().item())
+    vid_q = torch.zeros(vid_tokens, 1, 12)
+    vid_k = torch.zeros_like(vid_q)
+    txt_q = torch.zeros(txt_tokens, 1, 12)
+    txt_k = torch.zeros_like(txt_q)
+
+    out = rope(vid_q, vid_k, vid_shape, txt_q, txt_k, txt_shape, seedvr_model.Cache(disable=True))
+
+    assert [tuple(t.shape) for t in out] == [
+        tuple(vid_q.shape),
+        tuple(vid_k.shape),
+        tuple(txt_q.shape),
+        tuple(txt_k.shape),
+    ]
+
+
 def test_adasingle_init_preserves_supported_dtype():
     ada = seedvr_model.AdaSingle(
         dim=4,

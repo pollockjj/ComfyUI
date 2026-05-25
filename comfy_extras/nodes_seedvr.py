@@ -93,27 +93,6 @@ def _resolve_seedvr2_diffusion_model(model):
     return diffusion_model
 
 
-def _describe_seedvr2_model_source(model_patcher) -> str:
-    """Best-effort extraction of the source ``.safetensors`` path for a
-    SeedVR2 model patcher. ``comfy.sd.load_diffusion_model`` stores
-    ``cached_patcher_init = (function, (path, ...))`` on the returned
-    patcher; surface that path in the fail-loud message when the
-    conditioning buffers are unpopulated. Returns an empty string when
-    the path is unavailable so the caller can choose a fallback message.
-    """
-    cached = getattr(model_patcher, "cached_patcher_init", None)
-    if cached is None:
-        return ""
-    try:
-        args = cached[1]
-        for arg in args:
-            if isinstance(arg, str) and arg.endswith(".safetensors"):
-                return arg
-    except (TypeError, IndexError):
-        return ""
-    return ""
-
-
 def _apply_rope_freqs_float32_cast(diffusion_model):
     """Cast every nested module's ``rope.freqs`` parameter data to ``float32``
     when it is not already in float32. Idempotency is per-tensor by dtype
@@ -618,15 +597,11 @@ class SeedVR2Conditioning(io.ComfyNode):
             pos_cond.float().abs().sum().item() == 0
             and neg_cond.float().abs().sum().item() == 0
         ):
-            source_path = _describe_seedvr2_model_source(model_patcher)
-            file_clause = (
-                f"Source file: {source_path}. " if source_path else ""
-            )
             raise RuntimeError(
                 f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: positive_conditioning "
                 f"and negative_conditioning buffers are zero-valued — model "
                 f"file appears to be a numz-format DiT-only export missing "
-                f"the SeedVR2 conditioning tensors. {file_clause}"
+                f"the SeedVR2 conditioning tensors. "
                 f"Re-bake the file with ``positive_conditioning`` (58, 5120) "
                 f"and ``negative_conditioning`` (64, 5120) keys at top level, "
                 f"or load via CheckpointLoaderSimple from a bundled "
