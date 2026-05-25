@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read(relative):
-    return (ROOT / relative).read_text()
+    return (ROOT / relative).read_text(encoding="utf-8")
 
 
 def test_seedvr2_windows_static_contract_tokens():

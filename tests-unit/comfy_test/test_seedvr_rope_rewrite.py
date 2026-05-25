@@ -303,7 +303,7 @@ def test_namm_forward_partial_rope_passthrough_matches_wrapper_oracle():
 
 def test_namm_forward_ast_has_no_apply_rotary_emb_calls():
     source_path = Path(inspect.getsourcefile(NaMMRotaryEmbedding3d))
-    tree = ast.parse(source_path.read_text())
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
 
     namm_class = None
     for node in ast.walk(tree):

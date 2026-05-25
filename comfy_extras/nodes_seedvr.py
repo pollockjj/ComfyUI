@@ -15,7 +15,6 @@ from comfy.ldm.seedvr.vae import (
     wavelet_color_transfer,
 )
 
-import torch.nn.functional as F
 from torchvision.transforms import functional as TVF
 from torchvision.transforms import Lambda
 from torchvision.transforms.functional import InterpolationMode
@@ -637,28 +636,10 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         _apply_rope_freqs_float32_cast(model)
 
-        noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
-        aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
-        aug_noises = noises * 0.1 + aug_noises * 0.05
-        cond_noise_scale = 0.0
-        t = (
-            torch.tensor([1000.0])
-            * cond_noise_scale
-        ).to(device)
-        shape = torch.tensor(vae_conditioning.shape[1:]).to(device)[None] # avoid batch dim
-        t = timestep_transform(t, shape)
-        cond = inter(vae_conditioning, aug_noises, t)
-        condition = torch.stack([get_conditions(noise, c) for noise, c in zip(noises, cond)])
+        noises = torch.zeros_like(vae_conditioning, dtype=vae_conditioning.dtype, device=device)
+        condition = torch.stack([get_conditions(noise, c) for noise, c in zip(noises, vae_conditioning)])
         condition = condition.movedim(-1, 1)
         noises = noises.movedim(-1, 1)
-
-        pos_shape = pos_cond.shape[0]
-        neg_shape = neg_cond.shape[0]
-        diff = abs(pos_shape - neg_shape)
-        if pos_shape > neg_shape:
-            neg_cond = F.pad(neg_cond, (0, 0, 0, diff))
-        else:
-            pos_cond = F.pad(pos_cond, (0, 0, 0, diff))
 
         noises = rearrange(noises, "b c t h w -> b (c t) h w")
         condition = rearrange(condition, "b c t h w -> b (c t) h w")
