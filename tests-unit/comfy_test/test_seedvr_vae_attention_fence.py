@@ -1,15 +1,9 @@
 from unittest.mock import patch
 
 import torch
+from torch import nn
 
 import comfy.ldm.seedvr.vae as seedvr_vae
-
-
-def _identity_linear(linear):
-    with torch.no_grad():
-        linear.weight.copy_(torch.eye(linear.weight.shape[0], linear.weight.shape[1]))
-        if linear.bias is not None:
-            linear.bias.zero_()
 
 
 def test_seedvr_vae_4d_self_attention_uses_vae_attention_with_channel_first_layout():
@@ -27,10 +21,10 @@ def test_seedvr_vae_4d_self_attention_uses_vae_attention_with_channel_first_layo
     with patch.object(seedvr_vae, "vae_attention", return_value=vae_attention_spy):
         attention = seedvr_vae.Attention(query_dim=4, heads=1, dim_head=4)
 
-    _identity_linear(attention.to_q)
-    _identity_linear(attention.to_k)
-    _identity_linear(attention.to_v)
-    _identity_linear(attention.to_out[0])
+    attention.to_q = nn.Identity()
+    attention.to_k = nn.Identity()
+    attention.to_v = nn.Identity()
+    attention.to_out[0] = nn.Identity()
 
     hidden_states = torch.arange(24, dtype=torch.float32).reshape(1, 4, 2, 3)
 
