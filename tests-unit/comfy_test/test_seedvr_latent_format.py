@@ -27,3 +27,14 @@ def test_seedvr2_latent_format_uses_16_channels_without_3d_empty_latent_expansio
     assert latent_format.latent_channels == 16
     assert latent_format.latent_dimensions == 2
     assert fixed.shape == (1, 16, 4, 5)
+
+
+def test_seedvr2_empty_collapsed_latent_preserves_temporal_channel_multiples():
+    latent_format = comfy.latent_formats.SeedVR2()
+    latent_image = torch.zeros(1, 48, 4, 5)
+
+    fixed = comfy.sample.fix_empty_latent_channels(_Model(latent_format), latent_image)
+
+    assert latent_format.preserve_empty_channel_multiples is True
+    assert fixed.shape == latent_image.shape
+    assert fixed.data_ptr() == latent_image.data_ptr()
