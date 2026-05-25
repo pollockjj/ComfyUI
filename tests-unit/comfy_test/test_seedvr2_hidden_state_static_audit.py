@@ -22,7 +22,7 @@ FORBIDDEN_GETSET_KEYS = {"original_image_video", "img_dims", "tiled_args"}
 
 def test_seedvr2_decode_paths_do_not_use_hidden_vae_object_state():
     for path in FILES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRS:
                 pytest.fail(f"{path}: forbidden VAE object state attr {node.attr}")

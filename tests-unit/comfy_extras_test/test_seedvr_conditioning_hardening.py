@@ -262,9 +262,10 @@ def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
         )
 
         assert patcher.disable_cfg1_optimization_calls == 0
-        assert positive[0][0].shape == (1, 3, 4)
+        assert positive[0][0].shape == (1, 2, 4)
         assert negative[0][0].shape == (1, 3, 4)
         assert latent["samples"].shape == (1, 2, 1, 1)
+        assert torch.count_nonzero(latent["samples"]) == 0
         assert passthrough_model is patcher
     finally:
         restore()
@@ -507,8 +508,9 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
                 patcher, vae_conditioning,
             )
         )
-        assert positive[0][0].shape == (1, 3, 4)
+        assert positive[0][0].shape == (1, 2, 4)
         assert negative[0][0].shape == (1, 3, 4)
+        assert torch.count_nonzero(latent["samples"]) == 0
         assert passthrough_model is patcher
     finally:
         restore()
