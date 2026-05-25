@@ -168,7 +168,7 @@ class TestModelDetection:
         assert unet_config["heads"] == 24
         assert unet_config["num_layers"] == 36
         assert unet_config["mm_layers"] == 10
-        assert unet_config["mlp_type"] == "normal"
+        assert unet_config["mlp_type"] == "swiglu"
         assert unet_config["qk_rope"] is True
 
     def test_seedvr2_3b_shared_mm_detection_config(self):
