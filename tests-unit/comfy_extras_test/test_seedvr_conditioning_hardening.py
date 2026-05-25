@@ -516,11 +516,11 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         restore()
 
 
-def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available():
-    """When the model patcher carries ``cached_patcher_init`` with a
-    ``.safetensors`` path (set by ``comfy.sd.load_diffusion_model`` at
-    sd.py:1970), the fail-loud message must surface that path so the
-    user can see exactly which file is missing the conditioning keys.
+def test_seedvr2_conditioning_fail_loud_never_exposes_safetensors_path():
+    """The fail-loud message must not expose local model paths from
+    ``cached_patcher_init``. Public runtime errors should describe the
+    invalid SeedVR2 contract without making filesystem paths part of the
+    public behavior contract.
     """
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
@@ -538,10 +538,12 @@ def test_seedvr2_conditioning_fail_loud_includes_safetensors_path_when_available
                 patcher, vae_conditioning,
             )
 
-        assert (
-            "/some/models/diffusion_models/seedvr2_ema_7b_fp16.safetensors"
-            in str(excinfo.value)
-        )
+        message = str(excinfo.value)
+        assert "/some/models/diffusion_models" not in message
+        assert "seedvr2_ema_7b_fp16.safetensors" not in message
+        assert "Source file:" not in message
+        assert "positive_conditioning" in message
+        assert "negative_conditioning" in message
     finally:
         restore()
 
