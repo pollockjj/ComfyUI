@@ -61,6 +61,51 @@ def test_seedvr2_3b_keeps_final_block_vid_only_path(monkeypatch):
     ]
 
 
+def _capture_block_attention_rope_type(monkeypatch, qk_rope):
+    rope_types = []
+
+    class _Attention(_StubModule):
+        def __init__(self, *args, **kwargs):
+            rope_types.append(kwargs["rope_type"])
+            super().__init__()
+
+    monkeypatch.setattr(seedvr_model, "MMModule", _StubModule)
+    monkeypatch.setattr(seedvr_model, "NaSwinAttention", _Attention)
+
+    seedvr_model.NaMMSRTransformerBlock(
+        vid_dim=4,
+        txt_dim=4,
+        emb_dim=4,
+        heads=1,
+        head_dim=4,
+        expand_ratio=1,
+        norm=_StubModule,
+        norm_eps=1e-5,
+        ada=_StubModule,
+        qk_bias=False,
+        qk_rope=qk_rope,
+        qk_norm=_StubModule,
+        mlp_type="normal",
+        shared_weights=False,
+        rope_type="mmrope3d",
+        rope_dim=4,
+        is_last_layer=False,
+        device="cpu",
+        dtype=torch.float32,
+        operations=seedvr_model.comfy.ops.disable_weight_init,
+    )
+
+    return rope_types
+
+
+def test_seedvr2_3b_qk_rope_none_disables_attention_rope(monkeypatch):
+    assert _capture_block_attention_rope_type(monkeypatch, qk_rope=None) == [None]
+
+
+def test_seedvr2_7b_qk_rope_true_preserves_attention_rope(monkeypatch):
+    assert _capture_block_attention_rope_type(monkeypatch, qk_rope=True) == ["mmrope3d"]
+
+
 def test_seedvr2_7b_rope3d_matches_checkpoint_buffer_shape():
     rope = seedvr_model.get_na_rope("rope3d", dim=64)
 
