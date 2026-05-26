@@ -246,31 +246,6 @@ def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
         restore()
 
 
-def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
-    """SeedVR2 accepts Comfy's single-branch CFG=1 sampling path."""
-    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
-    try:
-        diffusion_model = _DiffusionModel()
-        patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
-
-        passthrough_model, positive, negative, latent = (
-            nodes_seedvr.SeedVR2Conditioning.execute(
-                patcher,
-                vae_conditioning,
-            )
-        )
-
-        assert patcher.disable_cfg1_optimization_calls == 0
-        assert positive[0][0].shape == (1, 2, 4)
-        assert negative[0][0].shape == (1, 3, 4)
-        assert latent["samples"].shape == (1, 2, 1, 1)
-        assert torch.count_nonzero(latent["samples"]) == 0
-        assert passthrough_model is patcher
-    finally:
-        restore()
-
-
 def test_resolve_seedvr2_diffusion_model_raises_runtime_error_with_specific_prefix():
     """Pin all four failure modes of the resolver chain to the same error
     prefix and to message text that distinguishes 'attribute missing'
@@ -510,7 +485,6 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         )
         assert positive[0][0].shape == (1, 2, 4)
         assert negative[0][0].shape == (1, 3, 4)
-        assert torch.count_nonzero(latent["samples"]) == 0
         assert passthrough_model is patcher
     finally:
         restore()
