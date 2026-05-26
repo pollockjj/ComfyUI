@@ -101,6 +101,11 @@ def _import_nodes_seedvr_isolated():
     mock_mm.pytorch_attention_enabled_vae.return_value = False
     mock_mm.sage_attention_enabled.return_value = False
     mock_mm.flash_attention_enabled.return_value = False
+    torch_version_parts = torch.version.__version__.split(".")
+    mock_mm.torch_version_numeric = (
+        int(torch_version_parts[0]),
+        int(torch_version_parts[1]),
+    )
     mock_mm.WINDOWS = False
     mock_mm.is_intel_xpu.return_value = False
     sys.modules["comfy.model_management"] = mock_mm
@@ -210,10 +215,6 @@ class _ModelInner:
 class _ModelPatcher:
     def __init__(self, diffusion_model):
         self.model = _ModelInner(diffusion_model)
-        self.disable_cfg1_optimization_calls = 0
-
-    def disable_model_cfg1_optimization(self):
-        self.disable_cfg1_optimization_calls += 1
 
 
 def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
@@ -246,27 +247,55 @@ def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
         restore()
 
 
-def test_seedvr2_conditioning_keeps_cfg1_optimization_enabled():
-    """SeedVR2 accepts Comfy's single-branch CFG=1 sampling path."""
+def test_seedvr2_conditioning_returns_packed_input_latent_deterministically():
     nodes_seedvr, restore = _import_nodes_seedvr_isolated()
     try:
         diffusion_model = _DiffusionModel()
         patcher = _ModelPatcher(diffusion_model)
-        vae_conditioning = {"samples": torch.zeros((1, 2, 1, 1, 1))}
+        samples = torch.arange(1, 25, dtype=torch.float32).reshape(1, 2, 3, 2, 2)
+        vae_conditioning = {"samples": samples}
 
-        passthrough_model, positive, negative, latent = (
+        _, first_positive, first_negative, first_latent = (
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                patcher,
+                vae_conditioning,
+            )
+        )
+        _, second_positive, second_negative, second_latent = (
             nodes_seedvr.SeedVR2Conditioning.execute(
                 patcher,
                 vae_conditioning,
             )
         )
 
-        assert patcher.disable_cfg1_optimization_calls == 0
-        assert positive[0][0].shape == (1, 2, 4)
-        assert negative[0][0].shape == (1, 3, 4)
-        assert latent["samples"].shape == (1, 2, 1, 1)
-        assert torch.count_nonzero(latent["samples"]) == 0
-        assert passthrough_model is patcher
+        expected_latent = samples.reshape(1, 6, 2, 2)
+        channel_last = samples.movedim(1, -1).contiguous()
+        expected_condition = torch.cat(
+            [
+                channel_last,
+                torch.ones((*channel_last.shape[:-1], 1)),
+            ],
+            dim=-1,
+        ).movedim(-1, 1).reshape(1, 9, 2, 2)
+
+        assert torch.equal(first_latent["samples"], expected_latent)
+        assert torch.equal(second_latent["samples"], expected_latent)
+        assert torch.equal(
+            first_positive[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            second_positive[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            first_negative[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            second_negative[0][1]["condition"],
+            expected_condition,
+        )
     finally:
         restore()
 
@@ -510,7 +539,6 @@ def test_seedvr2_conditioning_does_not_fire_on_partial_zero_buffers():
         )
         assert positive[0][0].shape == (1, 2, 4)
         assert negative[0][0].shape == (1, 3, 4)
-        assert torch.count_nonzero(latent["samples"]) == 0
         assert passthrough_model is patcher
     finally:
         restore()

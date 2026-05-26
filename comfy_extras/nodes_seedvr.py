@@ -578,7 +578,6 @@ class SeedVR2Conditioning(io.ComfyNode):
                 f"got channel-last shape {tuple(vae_conditioning.shape)}."
             )
         vae_conditioning = vae_conditioning.movedim(1, -1).contiguous()
-        device = vae_conditioning.device
         model_patcher = model
         model = _resolve_seedvr2_diffusion_model(model_patcher)
         pos_cond = model.positive_conditioning
@@ -611,18 +610,17 @@ class SeedVR2Conditioning(io.ComfyNode):
 
         _apply_rope_freqs_float32_cast(model)
 
-        noises = torch.zeros_like(vae_conditioning, dtype=vae_conditioning.dtype, device=device)
-        condition = torch.stack([get_conditions(noise, c) for noise, c in zip(noises, vae_conditioning)])
+        condition = torch.stack([get_conditions(c, c) for c in vae_conditioning])
         condition = condition.movedim(-1, 1)
-        noises = noises.movedim(-1, 1)
+        latent = vae_conditioning.movedim(-1, 1)
 
-        noises = rearrange(noises, "b c t h w -> b (c t) h w")
+        latent = rearrange(latent, "b c t h w -> b (c t) h w")
         condition = rearrange(condition, "b c t h w -> b (c t) h w")
 
         negative = [[neg_cond.unsqueeze(0), {"condition": condition}]]
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
-        return io.NodeOutput(model_patcher, positive, negative, {"samples": noises})
+        return io.NodeOutput(model_patcher, positive, negative, {"samples": latent})
 
 # SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
 # stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent
