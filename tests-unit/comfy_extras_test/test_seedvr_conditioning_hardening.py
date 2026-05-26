@@ -101,7 +101,11 @@ def _import_nodes_seedvr_isolated():
     mock_mm.pytorch_attention_enabled_vae.return_value = False
     mock_mm.sage_attention_enabled.return_value = False
     mock_mm.flash_attention_enabled.return_value = False
-    mock_mm.torch_version_numeric = (2, 12)
+    torch_version_parts = torch.version.__version__.split(".")
+    mock_mm.torch_version_numeric = (
+        int(torch_version_parts[0]),
+        int(torch_version_parts[1]),
+    )
     mock_mm.WINDOWS = False
     mock_mm.is_intel_xpu.return_value = False
     sys.modules["comfy.model_management"] = mock_mm
@@ -251,13 +255,13 @@ def test_seedvr2_conditioning_returns_packed_input_latent_deterministically():
         samples = torch.arange(1, 25, dtype=torch.float32).reshape(1, 2, 3, 2, 2)
         vae_conditioning = {"samples": samples}
 
-        _, first_positive, _, first_latent = (
+        _, first_positive, first_negative, first_latent = (
             nodes_seedvr.SeedVR2Conditioning.execute(
                 patcher,
                 vae_conditioning,
             )
         )
-        _, second_positive, _, second_latent = (
+        _, second_positive, second_negative, second_latent = (
             nodes_seedvr.SeedVR2Conditioning.execute(
                 patcher,
                 vae_conditioning,
@@ -282,6 +286,14 @@ def test_seedvr2_conditioning_returns_packed_input_latent_deterministically():
         )
         assert torch.equal(
             second_positive[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            first_negative[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            second_negative[0][1]["condition"],
             expected_condition,
         )
     finally:
