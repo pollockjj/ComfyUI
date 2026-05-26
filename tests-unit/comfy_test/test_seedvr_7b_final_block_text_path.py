@@ -98,8 +98,8 @@ def _capture_block_attention_rope_type(monkeypatch, qk_rope):
     return rope_types
 
 
-def test_seedvr2_3b_qk_rope_none_disables_attention_rope(monkeypatch):
-    assert _capture_block_attention_rope_type(monkeypatch, qk_rope=None) == [None]
+def test_seedvr2_3b_qk_rope_none_preserves_checkpoint_rope_buffers(monkeypatch):
+    assert _capture_block_attention_rope_type(monkeypatch, qk_rope=None) == ["mmrope3d"]
 
 
 def test_seedvr2_7b_qk_rope_true_preserves_attention_rope(monkeypatch):
