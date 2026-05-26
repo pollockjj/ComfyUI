@@ -101,6 +101,7 @@ def _import_nodes_seedvr_isolated():
     mock_mm.pytorch_attention_enabled_vae.return_value = False
     mock_mm.sage_attention_enabled.return_value = False
     mock_mm.flash_attention_enabled.return_value = False
+    mock_mm.torch_version_numeric = (2, 12)
     mock_mm.WINDOWS = False
     mock_mm.is_intel_xpu.return_value = False
     sys.modules["comfy.model_management"] = mock_mm
@@ -210,10 +211,6 @@ class _ModelInner:
 class _ModelPatcher:
     def __init__(self, diffusion_model):
         self.model = _ModelInner(diffusion_model)
-        self.disable_cfg1_optimization_calls = 0
-
-    def disable_model_cfg1_optimization(self):
-        self.disable_cfg1_optimization_calls += 1
 
 
 def test_resolve_seedvr2_diffusion_model_returns_inner_when_valid():
@@ -242,6 +239,51 @@ def test_seedvr2_conditioning_schema_exposes_model_passthrough_output():
             "negative",
             "latent",
         ]
+    finally:
+        restore()
+
+
+def test_seedvr2_conditioning_returns_packed_input_latent_deterministically():
+    nodes_seedvr, restore = _import_nodes_seedvr_isolated()
+    try:
+        diffusion_model = _DiffusionModel()
+        patcher = _ModelPatcher(diffusion_model)
+        samples = torch.arange(1, 25, dtype=torch.float32).reshape(1, 2, 3, 2, 2)
+        vae_conditioning = {"samples": samples}
+
+        _, first_positive, _, first_latent = (
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                patcher,
+                vae_conditioning,
+            )
+        )
+        _, second_positive, _, second_latent = (
+            nodes_seedvr.SeedVR2Conditioning.execute(
+                patcher,
+                vae_conditioning,
+            )
+        )
+
+        expected_latent = samples.reshape(1, 6, 2, 2)
+        channel_last = samples.movedim(1, -1).contiguous()
+        expected_condition = torch.cat(
+            [
+                channel_last,
+                torch.ones((*channel_last.shape[:-1], 1)),
+            ],
+            dim=-1,
+        ).movedim(-1, 1).reshape(1, 9, 2, 2)
+
+        assert torch.equal(first_latent["samples"], expected_latent)
+        assert torch.equal(second_latent["samples"], expected_latent)
+        assert torch.equal(
+            first_positive[0][1]["condition"],
+            expected_condition,
+        )
+        assert torch.equal(
+            second_positive[0][1]["condition"],
+            expected_condition,
+        )
     finally:
         restore()
 
