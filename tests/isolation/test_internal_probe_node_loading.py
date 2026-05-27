@@ -59,6 +59,9 @@ print(
 
 def _run_client_process(env: dict[str, str]) -> dict:
     pythonpath_parts = [str(COMFYUI_ROOT)]
+    pyisolate_root = COMFYUI_ROOT.parent / "pyisolate"
+    if pyisolate_root.exists():
+        pythonpath_parts.append(str(pyisolate_root))
     existing = env.get("PYTHONPATH", "")
     if existing:
         pythonpath_parts.append(existing)
