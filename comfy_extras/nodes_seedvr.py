@@ -901,6 +901,14 @@ def _run_standard_sample(model, seed: int, steps: int, cfg: float,
     return out
 
 
+def _invalidate_dynamic_vbar_signatures(model):
+    if not getattr(model, "is_dynamic", lambda: False)():
+        return
+    for module in model.model.modules():
+        if hasattr(module, "_v_signature"):
+            module._v_signature = None
+
+
 class SeedVR2ProgressiveSampler(io.ComfyNode):
     """Sequential temporal chunking sampler for SeedVR2 native.
 
@@ -1135,7 +1143,9 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         chunk_specs = []
-        for chunk_start, chunk_end in chunk_ranges:
+        for i, (chunk_start, chunk_end) in enumerate(chunk_ranges):
+            if i > 0:
+                _invalidate_dynamic_vbar_signatures(model)
             chunk_samples = _sample_one_chunk(chunk_start, chunk_end)
             chunk_specs.append((chunk_start, chunk_end, chunk_samples))
 
