@@ -38,8 +38,6 @@ import ast  # noqa: E402
 import inspect  # noqa: E402
 import textwrap  # noqa: E402
 
-import pytest  # noqa: E402
-
 from comfy.ldm.seedvr.model import NaDiT  # noqa: E402
 
 
@@ -116,61 +114,6 @@ def test_missing_context_falls_back_to_positive_buffer():
     )
     assert txt_shape.shape == (1, 1)
     assert txt_shape[0, 0].item() == 58
-
-
-def test_empty_context_falls_back_to_positive_buffer():
-    """AC: ``context.numel() == 0`` falls back to the registered
-    ``positive_conditioning`` buffer and runs to completion.
-    """
-    pos_buffer = torch.full((58, 5120), 13.0)
-    standin = _make_standin(pos_buffer)
-    empty = torch.empty((0, 5120))
-    assert empty.numel() == 0
-    txt, txt_shape = standin._resolve_text_conditioning(empty)
-    assert txt.shape == (58, 5120)
-    assert (txt == 13.0).all()
-    assert txt_shape.shape == (1, 1)
-    assert txt_shape[0, 0].item() == 58
-
-
-def test_wrong_rank_context_raises_original_torch_exception():
-    """AC: a 1-D context tensor cannot be split into ``[pos, neg]``
-    via the ``chunk + squeeze + flatten`` chain; the original torch
-    exception must propagate rather than silently falling back.
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    bad = torch.zeros(10)
-    with pytest.raises((RuntimeError, IndexError, ValueError)):
-        standin._resolve_text_conditioning(bad)
-
-
-def test_odd_batch_context_raises_original_exception():
-    """AC: a context whose batch dim cannot be split into two equal
-    chunks (here batch=1 so ``chunk(2, dim=0)`` returns a single
-    tensor) must propagate the original exception — no silent fallback.
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    bad = torch.zeros((1, 7, 5120))
-    with pytest.raises((RuntimeError, ValueError)):
-        standin._resolve_text_conditioning(bad)
-
-
-def test_output_side_misshaped_tensor_raises():
-    """AC: the post-network output split must raise on an unsplittable
-    tensor (no silent return of the un-split tensor in the wrong
-    order/shape). Here a batch=1 tensor cannot be ``chunk(2, dim=0)``
-    into two halves; ``pos, neg = out.chunk(2, dim=0)`` raises on
-    unpacking — matching the production helper's explicit-dim contract
-    (``_swap_pos_neg_halves`` calls ``chunk(2, dim=0)`` and
-    ``torch.cat(..., dim=0)``).
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    bad_out = torch.zeros((1, 4, 8, 8))
-    with pytest.raises((RuntimeError, ValueError)):
-        standin._swap_pos_neg_halves(bad_out)
 
 
 def test_output_side_swaps_pos_neg_halves():

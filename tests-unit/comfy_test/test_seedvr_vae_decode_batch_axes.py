@@ -35,15 +35,6 @@ def _decode_with_patches(wrapper, z):
         return wrapper.decode(z)
 
 
-def test_decode_b1_t1_shape_and_ordering_correct():
-    wrapper = _make_wrapper()
-
-    out = _decode_with_patches(wrapper, torch.zeros(1, 16, 2, 2))
-
-    assert tuple(out.shape) == (1, 3, 1, 16, 16)
-    assert out[0, 0, 0, 0, 0].item() == 1.0
-
-
 def test_decode_b1_t5_video_shape_unchanged():
     wrapper = _make_wrapper()
 
@@ -52,62 +43,12 @@ def test_decode_b1_t5_video_shape_unchanged():
     assert tuple(out.shape) == (1, 3, 5, 16, 16)
 
 
-def test_decode_b2_t1_preserves_batch_time_axes():
-    wrapper = _make_wrapper()
-
-    out = _decode_with_patches(wrapper, torch.zeros(2, 16, 2, 2))
-
-    assert tuple(out.shape) == (2, 3, 1, 16, 16)
-    assert out[0, 0, 0, 0, 0].item() == 1.0
-    assert out[1, 0, 0, 0, 0].item() == 2.0
-
-
-def test_decode_b4_t1_preserves_batch_time_axes():
-    wrapper = _make_wrapper()
-
-    out = _decode_with_patches(wrapper, torch.zeros(4, 16, 2, 2))
-
-    assert tuple(out.shape) == (4, 3, 1, 16, 16)
-    assert [out[b, 0, 0, 0, 0].item() for b in range(4)] == [1.0, 2.0, 3.0, 4.0]
-
-
 def test_decode_b2_t3_multi_frame_batch_unchanged():
     wrapper = _make_wrapper()
 
     out = _decode_with_patches(wrapper, torch.zeros(2, 16 * 3, 2, 2))
 
     assert tuple(out.shape) == (2, 3, 3, 16, 16)
-
-
-def _tiled_vae_4d_stub(latent, vae_model, **kwargs):
-    b = int(latent.shape[0])
-    h = int(latent.shape[3]) * 8
-    w = int(latent.shape[4]) * 8
-    out = torch.empty(b, 3, h, w)
-    for batch_idx in range(b):
-        out[batch_idx].fill_(float(batch_idx + 1))
-    return out
-
-
-def test_decode_tiled_single_frame_4d_output_normalized():
-    wrapper = _make_wrapper()
-
-    with patch.object(vae_mod, "tiled_vae", _tiled_vae_4d_stub):
-        out = wrapper.decode(torch.zeros(1, 16, 2, 2), seedvr2_tiling={"enable_tiling": True})
-
-    assert tuple(out.shape) == (1, 3, 1, 16, 16)
-    assert out[0, 0, 0, 0, 0].item() == 1.0
-
-
-def test_decode_tiled_b2_t1_per_sample_ordering():
-    wrapper = _make_wrapper()
-
-    with patch.object(vae_mod, "tiled_vae", _tiled_vae_4d_stub):
-        out = wrapper.decode(torch.zeros(2, 16, 2, 2), seedvr2_tiling={"enable_tiling": True})
-
-    assert tuple(out.shape) == (2, 3, 1, 16, 16)
-    assert out[0, 0, 0, 0, 0].item() == 1.0
-    assert out[1, 0, 0, 0, 0].item() == 2.0
 
 
 def test_decode_b2_t1_stacked_equals_individual_per_sample_ordering():

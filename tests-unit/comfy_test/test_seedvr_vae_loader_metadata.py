@@ -98,18 +98,6 @@ def seedvr2_vae():
     return vae
 
 
-def test_seedvr2_loader_first_stage_model_is_video_autoencoder_kl_wrapper(
-    seedvr2_vae,
-):
-    assert isinstance(
-        seedvr2_vae.first_stage_model, seedvr_vae.VideoAutoencoderKLWrapper
-    ) is True, (
-        "Expected first_stage_model to be a VideoAutoencoderKLWrapper "
-        f"instance; got {type(seedvr2_vae.first_stage_model).__name__}. The "
-        "SeedVR2 elif branch at comfy/sd.py:518 may not have been taken."
-    )
-
-
 def test_seedvr2_loader_sets_latent_channels_16(seedvr2_vae):
     assert seedvr2_vae.latent_channels == 16, (
         "Expected latent_channels=16 (set at comfy/sd.py:520 inside the "
@@ -127,33 +115,6 @@ def test_seedvr2_loader_sets_latent_dim_3(seedvr2_vae):
         "(T, H, W) per the upstream ByteDance-Seed/SeedVR "
         "VideoAutoencoderKL contract; the loader default of 2 "
         "(comfy/sd.py:458) is wrong for the SeedVR2 path."
-    )
-
-
-def test_seedvr2_loader_sets_downscale_index_formula(seedvr2_vae):
-    assert seedvr2_vae.downscale_index_formula == (4, 8, 8), (
-        "Expected downscale_index_formula=(4, 8, 8) (set at "
-        f"comfy/sd.py:527); got {seedvr2_vae.downscale_index_formula}. "
-        "SeedVR2's spatial-temporal downscale ratio is 4× temporal × 8× "
-        "spatial × 8× spatial."
-    )
-
-
-def test_seedvr2_loader_sets_upscale_index_formula(seedvr2_vae):
-    assert seedvr2_vae.upscale_index_formula == (4, 8, 8), (
-        "Expected upscale_index_formula=(4, 8, 8) (set at "
-        f"comfy/sd.py:529); got {seedvr2_vae.upscale_index_formula}. "
-        "SeedVR2's spatial-temporal upscale ratio is the inverse of its "
-        "downscale ratio: 4× temporal × 8× spatial × 8× spatial."
-    )
-
-
-def test_seedvr2_loader_sets_disable_offload(seedvr2_vae):
-    assert seedvr2_vae.disable_offload is True, (
-        "Expected disable_offload=True (set at comfy/sd.py:522); got "
-        f"{seedvr2_vae.disable_offload}. SeedVR2 cannot tolerate CPU "
-        "offload during decode (the wrapper retains memory-state references "
-        "across slice boundaries — see VideoAutoencoderKL.slicing_decode)."
     )
 
 

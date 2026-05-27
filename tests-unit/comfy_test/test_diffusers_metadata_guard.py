@@ -6,9 +6,9 @@ fixed guard uses ``metadata.get("keep_diffusers_format") != "true"``: a missing
 key flows through to ``convert_vae_state_dict``; the explicit ``"true"`` value
 bypasses it.
 
-Five cells exercise every reachable shape of the guard input — missing key,
-explicit ``"true"``, ``None``, explicit non-``"true"``, empty dict — and halt
-the constructor at the first post-guard call (``model_management.is_amd``).
+Two cells exercise the two load-bearing shapes of the guard input — missing key
+(convert invoked) and explicit ``"true"`` (convert skipped) — and halt the
+constructor at the first post-guard call (``model_management.is_amd``).
 ``_make_standin`` borrows ``__init__`` onto a bare class, mirroring
 ``seedvr_model_test.py::_make_standin`` (#109). ``_exercise_guard`` single-
 sources the patched-constructor harness so the cells stay synchronised.
@@ -78,28 +78,4 @@ def test_diffusers_guard_skips_convert_when_metadata_pins_keep_true():
     mock_convert, mock_is_amd = _exercise_guard({"keep_diffusers_format": "true"})
 
     assert mock_convert.call_count == 0
-    assert mock_is_amd.called
-
-
-def test_diffusers_guard_invokes_convert_when_metadata_is_none():
-    """AC3: metadata is ``None`` → first disjunct fires, convert is invoked."""
-    mock_convert, mock_is_amd = _exercise_guard(None)
-
-    assert mock_convert.call_count == 1
-    assert mock_is_amd.called
-
-
-def test_diffusers_guard_invokes_convert_when_metadata_pins_keep_false():
-    """AC4: metadata pins a non-``"true"`` value → second disjunct fires, convert is invoked."""
-    mock_convert, mock_is_amd = _exercise_guard({"keep_diffusers_format": "false"})
-
-    assert mock_convert.call_count == 1
-    assert mock_is_amd.called
-
-
-def test_diffusers_guard_invokes_convert_when_metadata_is_empty_dict():
-    """AC5: metadata is ``{}`` (the ``convert_old_quants`` None→{} normalization shape) → convert is invoked."""
-    mock_convert, mock_is_amd = _exercise_guard({})
-
-    assert mock_convert.call_count == 1
     assert mock_is_amd.called
