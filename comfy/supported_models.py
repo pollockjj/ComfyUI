@@ -1540,7 +1540,7 @@ class SeedVR2(supported_models_base.BASE):
     unet_config = {
         "image_model": "seedvr2"
     }
-    disable_dynamic = True
+    dynamic_load_assign = False
     latent_format = comfy.latent_formats.SeedVR2
 
     vae_key_prefix = ["vae."]
