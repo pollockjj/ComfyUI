@@ -871,6 +871,9 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             self._get_instance(instance_id).get_additional_models_with_key(key)
         )
 
+    async def match_multigpu_clones(self, instance_id: str) -> None:
+        self._get_instance(instance_id).match_multigpu_clones()
+
     async def model_patches_models(self, instance_id: str) -> Any:
         return self._sanitize_rpc_result(
             self._get_instance(instance_id).model_patches_models()
