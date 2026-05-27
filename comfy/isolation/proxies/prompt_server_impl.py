@@ -16,9 +16,53 @@ import logging
 # IMPORTS
 from pyisolate import ProxiedSingleton
 from .base import call_singleton_rpc
+from .singleton_contract import (
+    SingletonProxyContract,
+    fail_unsupported_singleton_symbol,
+    make_unsupported_singleton_wrapper,
+)
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[Isolation:C<->H]"
+
+PROMPT_SERVER_PUBLIC_CALLABLES = (
+    "setup",
+    "add_routes",
+    "get_queue_info",
+    "send",
+    "encode_bytes",
+    "send_image",
+    "send_image_with_metadata",
+    "send_bytes",
+    "send_json",
+    "send_sync",
+    "queue_updated",
+    "publish_loop",
+    "start",
+    "start_multi_address",
+    "add_on_prompt_handler",
+    "trigger_on_prompt",
+    "send_progress_text",
+)
+
+PROMPT_SERVER_CUSTOM_SYMBOLS = (
+    "send",
+    "send_sync",
+    "send_progress_text",
+)
+
+PROMPT_SERVER_UNSUPPORTED_SYMBOLS = tuple(
+    name for name in PROMPT_SERVER_PUBLIC_CALLABLES
+    if name not in PROMPT_SERVER_CUSTOM_SYMBOLS
+)
+
+PROMPT_SERVER_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="PromptServerStub",
+    target_name="server.PromptServer.instance",
+    target_public_symbols=PROMPT_SERVER_PUBLIC_CALLABLES,
+    custom_symbols=PROMPT_SERVER_CUSTOM_SYMBOLS,
+    unsupported_symbols=PROMPT_SERVER_UNSUPPORTED_SYMBOLS,
+)
 
 # ...
 
@@ -106,6 +150,11 @@ class PromptServerStub:
         raise RuntimeError(
             "PromptServer.prompt_queue is not accessible in isolated nodes."
         )
+
+    def __getattr__(self, name: str):
+        if name in PROMPT_SERVER_UNSUPPORTED_SYMBOLS:
+            return make_unsupported_singleton_wrapper("PromptServerStub", name)
+        fail_unsupported_singleton_symbol("PromptServerStub", name)
 
     # --- UI Communication (RPC Delegates) ---
     async def send_sync(

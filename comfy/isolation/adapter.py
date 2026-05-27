@@ -808,9 +808,12 @@ class ComfyUIAdapter(IsolationAdapter):
             # This is aggressive but necessary for transparent proxying
             # Handle both instance and class cases
             instance = api() if isinstance(api, type) else api
-            for name in dir(instance):
-                if not name.startswith("_"):
-                    setattr(folder_paths, name, getattr(instance, name))
+            if hasattr(instance, "install_into"):
+                instance.install_into(folder_paths)
+            else:
+                for name in dir(instance):
+                    if not name.startswith("_"):
+                        setattr(folder_paths, name, getattr(instance, name))
 
             # Fence: isolated children get writable temp inside sandbox
             if os.environ.get("PYISOLATE_CHILD") == "1":
@@ -826,10 +829,7 @@ class ComfyUIAdapter(IsolationAdapter):
                 import comfy.model_management
 
                 instance = api() if isinstance(api, type) else api
-                # Replace module-level functions with proxy methods
-                for name in dir(instance):
-                    if not name.startswith("_"):
-                        setattr(comfy.model_management, name, getattr(instance, name))
+                instance.install_into(comfy.model_management)
             return
 
         if api_name == "UtilsProxy":

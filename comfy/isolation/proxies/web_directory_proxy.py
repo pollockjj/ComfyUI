@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
 from pyisolate import ProxiedSingleton
+from .singleton_contract import SingletonProxyContract
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,19 @@ MIME_TYPES = {
     ".html": "text/html",
     ".css": "text/css",
 }
+
+WEB_DIRECTORY_PUBLIC_CALLABLES = (
+    "register_web_dir",
+    "list_web_files",
+    "get_web_file",
+)
+
+WEB_DIRECTORY_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="WebDirectoryProxy",
+    target_name="isolated web asset registry and host route surface",
+    target_public_symbols=WEB_DIRECTORY_PUBLIC_CALLABLES,
+    custom_symbols=WEB_DIRECTORY_PUBLIC_CALLABLES,
+)
 
 
 class WebDirectoryProxy(ProxiedSingleton):
