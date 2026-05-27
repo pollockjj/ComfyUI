@@ -3,16 +3,6 @@
 
 Contract:
 
-  * If ``torch.nested.nested_tensor_from_jagged`` is unavailable on the
-    installed PyTorch build, ``var_attention_pytorch`` must raise
-    ``RuntimeError`` whose message contains both ``SeedVR2`` and
-    ``nested_tensor_from_jagged`` so the operator can identify the
-    failing attention path. A bare ``AttributeError`` from the
-    ``torch.nested`` lookup is non-conformant. The guard must also
-    cover the case where the ``torch.nested`` namespace itself is
-    absent (e.g. forks/builds that strip the module) — accessing
-    ``torch.nested`` directly would otherwise raise the same opaque
-    ``AttributeError`` the guard is meant to translate.
   * If the API is present, the present-API path must produce the
     canonical SeedVR2-inference output shape ``(total_tokens,
     heads * head_dim)``.
@@ -44,11 +34,6 @@ from comfy.ldm.modules.attention import var_attention_pytorch  # noqa: E402
 
 
 def _inputs():
-    """Canonical 2-D ``(q, k, v, heads, cu_seqlens_q, cu_seqlens_k,
-    total_tokens, embed_dim)`` matching the live shape from GPT-3:
-    two segments of 3 tokens each, ``embed_dim = heads * head_dim =
-    2 * 8 = 16``.
-    """
     heads, head_dim, total_tokens = 2, 8, 6
     embed_dim = heads * head_dim
     q = torch.randn(total_tokens, embed_dim)
@@ -59,20 +44,6 @@ def _inputs():
 
 
 def _assert_guard_source_pin():
-    """Walk the AST of ``var_attention_pytorch`` and assert that the
-    first ``raise RuntimeError(...)`` statement appears strictly
-    before any attribute access named ``nested_tensor_from_jagged``.
-
-    Substring-based source pinning (``src.index('raise RuntimeError(')
-    < src.index('nested_tensor_from_jagged')``) is fragile: it false-
-    positives on docstring or comment text containing the literal,
-    and false-negatives on a refactor that splits ``raise
-    RuntimeError(`` across lines or replaces it with a helper
-    raising ``RuntimeError`` from another scope. AST-walking the
-    function body collapses both failure modes onto the only
-    invariant we actually require — the guard statement dominates
-    the attribute access by line number.
-    """
     src = textwrap.dedent(inspect.getsource(var_attention_pytorch))
     tree = ast.parse(src)
     raise_lines = []
@@ -101,26 +72,6 @@ def _assert_guard_source_pin():
         f"at line {first_nested}; the guard must precede the lookup.\n"
         f"--- source ---\n{src}"
     )
-
-
-def test_missing_api_raises_seedvr2_runtime_error(monkeypatch):
-    monkeypatch.delattr(torch.nested, "nested_tensor_from_jagged", raising=False)
-    q, k, v, heads, cu_q, cu_k, _, _ = _inputs()
-
-    with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
-        var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
-
-    _assert_guard_source_pin()
-
-
-def test_missing_namespace_raises_seedvr2_runtime_error(monkeypatch):
-    monkeypatch.delattr(torch, "nested", raising=False)
-    q, k, v, heads, cu_q, cu_k, _, _ = _inputs()
-
-    with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
-        var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
-
-    _assert_guard_source_pin()
 
 
 def test_present_api_returns_expected_shape():

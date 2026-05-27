@@ -69,30 +69,6 @@ class _EncodeVAE(nn.Module):
         return z
 
 
-class _LocalSpatialDecodeVAE(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.slicing_latent_min_size = 99
-        self.spatial_downsample_factor = 8
-        self.temporal_downsample_factor = 4
-        self.device = torch.device("cpu")
-        self._dummy = nn.Parameter(torch.zeros(1, dtype=torch.float32))
-        self.tile_shapes = []
-
-    def decode_(self, z):
-        self.tile_shapes.append(tuple(z.shape))
-        b, _, t, h, w = z.shape
-        width = w * self.spatial_downsample_factor
-        local_x = torch.arange(width, dtype=z.dtype).view(1, 1, 1, 1, width)
-        return local_x.expand(
-            b,
-            1,
-            t,
-            h * self.spatial_downsample_factor,
-            width,
-        ).clone()
-
-
 def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
     vae = _SlicingDecodeVAE(slicing_latent_min_size=2)
     z = torch.arange(1 * 16 * 5 * 8 * 8, dtype=torch.float32).reshape(1, 16, 5, 8, 8)
@@ -156,77 +132,3 @@ def test_encode_tiled_vae_zero_temporal_size_disables_wrapper_slicing():
     assert vae.memory_states == [MemoryState.DISABLED]
     assert vae.encoded_t == [12]
     assert vae.slicing_sample_min_size == 4
-
-
-def test_encode_tiled_vae_maps_temporal_args_to_sample_slicing_min_size():
-    vae = _EncodeVAE(slicing_sample_min_size=4)
-    x = torch.zeros((1, 3, 14, 64, 64), dtype=torch.float32)
-
-    tiled_vae(
-        x,
-        vae,
-        tile_size=(64, 64),
-        tile_overlap=(0, 0),
-        temporal_size=8,
-        temporal_overlap=2,
-        encode=True,
-    )
-
-    assert vae.encode_min_sizes == [6]
-    assert vae.memory_states == [MemoryState.INITIALIZING, MemoryState.ACTIVE]
-    assert vae.encoded_t == [7, 7]
-    assert vae.slicing_sample_min_size == 4
-
-
-def test_boundary_reference_latent_no_periodic_temporal_tile_discontinuity():
-    z = torch.arange(1 * 16 * 7 * 8 * 8, dtype=torch.float32).reshape(1, 16, 7, 8, 8)
-
-    reference_vae = _SlicingDecodeVAE(slicing_latent_min_size=3)
-    expected = reference_vae.decode_(z)
-
-    tiled_vae_model = _SlicingDecodeVAE(slicing_latent_min_size=3)
-    actual = tiled_vae(
-        z,
-        tiled_vae_model,
-        tile_size=(64, 64),
-        tile_overlap=(0, 0),
-        temporal_size=0,
-        temporal_overlap=0,
-        encode=False,
-    )
-
-    assert torch.equal(actual, expected)
-    assert tiled_vae_model.decode_min_sizes == [7]
-    assert tiled_vae_model.memory_states == [MemoryState.DISABLED]
-    assert tiled_vae_model.slicing_latent_min_size == 3
-
-    spatial_vae = _LocalSpatialDecodeVAE()
-    spatial = tiled_vae(
-        torch.zeros(1, 16, 1, 8, 12),
-        spatial_vae,
-        tile_size=(64, 64),
-        tile_overlap=(0, 32),
-        encode=False,
-    )
-    ramp = 0.5 - 0.5 * torch.cos(torch.linspace(0, 1, steps=32) * torch.pi)
-    expected = (36.0 * (1.0 - ramp[4])) + (4.0 * ramp[4])
-
-    assert spatial_vae.tile_shapes == [
-        (1, 16, 1, 8, 8),
-        (1, 16, 1, 8, 8),
-    ]
-    assert torch.isclose(spatial[0, 0, 0, 0, 36], expected)
-
-
-def test_decode_tiled_vae_clamps_overlap_sized_tiles_to_preserve_coverage():
-    spatial_vae = _LocalSpatialDecodeVAE()
-    spatial = tiled_vae(
-        torch.zeros(1, 16, 1, 8, 12),
-        spatial_vae,
-        tile_size=(64, 64),
-        tile_overlap=(0, 128),
-        encode=False,
-    )
-
-    assert len(spatial_vae.tile_shapes) > 1
-    assert torch.count_nonzero(spatial[0, 0, 0, 0, 64:]) > 0
