@@ -99,9 +99,8 @@ async def test_staged_probe_node_discovered(staged_probe_module: tuple[Path, Pat
         )
 
         assert loaded is True
-        assert nodes.LOADED_MODULE_DIRS["InternalIsolationProbeNode"] == str(
-            module_path.resolve()
-        )
+        loaded_module_path = Path(nodes.LOADED_MODULE_DIRS["InternalIsolationProbeNode"])
+        assert loaded_module_path.samefile(module_path)
 
         for node_id in EXPECTED_NODE_IDS:
             assert node_id in nodes.NODE_CLASS_MAPPINGS
