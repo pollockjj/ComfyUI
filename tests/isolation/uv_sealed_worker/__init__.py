@@ -229,17 +229,12 @@ class ProxyTestSealedWorkerNode:
         return {"required": {}}
 
     def probe(self) -> dict[str, Any]:
-        import folder_paths
-
-        temp_dir = folder_paths.get_temp_directory()
-        input_dir = folder_paths.get_input_directory()
-        custom_node_paths = folder_paths.get_folder_paths("custom_nodes")
+        artifact_dir = _artifact_dir()
         report = "\n".join(
             [
-                "UV sealed singleton proxy probe",
-                f"temp_dir={temp_dir}",
-                f"input_dir={input_dir}",
-                f"custom_nodes={len(custom_node_paths)}",
+                "UV sealed proxy registration probe",
+                f"artifact_dir={artifact_dir}",
+                f"module={__name__}",
             ]
         )
         _write_artifact("uv_singleton_proxy_probe.txt", report)
