@@ -807,7 +807,8 @@ class ComfyUIAdapter(IsolationAdapter):
             if rpc is not None:
                 FolderPathsProxy.set_rpc(rpc)
 
-            FolderPathsProxy().install_into(folder_paths)
+            folder_paths_proxy = object.__new__(FolderPathsProxy)
+            FolderPathsProxy.install_into(folder_paths_proxy, folder_paths)
 
             # Fence: isolated children get writable temp inside sandbox
             if os.environ.get("PYISOLATE_CHILD") == "1":
@@ -824,7 +825,11 @@ class ComfyUIAdapter(IsolationAdapter):
 
                 if rpc is not None:
                     ModelManagementProxy.set_rpc(rpc)
-                ModelManagementProxy().install_into(comfy.model_management)
+                model_management_proxy = object.__new__(ModelManagementProxy)
+                ModelManagementProxy.install_into(
+                    model_management_proxy,
+                    comfy.model_management,
+                )
             return
 
         if api_name == "UtilsProxy":
