@@ -10,7 +10,7 @@ Five cells exercise every reachable shape of the guard input — missing key,
 explicit ``"true"``, ``None``, explicit non-``"true"``, empty dict — and halt
 the constructor at the first post-guard call (``model_management.is_amd``).
 ``_make_standin`` borrows ``__init__`` onto a bare class, mirroring
-``seedvr_model_test.py::_make_standin`` (#109). ``_exercise_guard`` single-
+``seedvr_model_test.py::_make_standin``. ``_exercise_guard`` single-
 sources the patched-constructor harness so the cells stay synchronised.
 """
 

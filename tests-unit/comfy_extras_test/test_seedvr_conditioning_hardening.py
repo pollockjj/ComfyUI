@@ -77,8 +77,8 @@ def _import_nodes_seedvr_isolated():
             comfy_extras_pkg, "nodes_seedvr", _SENTINEL,
         )
 
-    # ``comfy_extras.nodes_seedvr`` imports ``comfy.sample`` (added in PR
-    # #59) which pulls in the full samplers/k_diffusion/model_patcher
+    # ``comfy_extras.nodes_seedvr`` imports ``comfy.sample``, which pulls
+    # in the full samplers/k_diffusion/model_patcher
     # transitive chain. That chain re-imports ``comfy.model_management``
     # and calls feature-detection predicates like ``xformers_enabled()``
     # in module-init code (``comfy/ldm/modules/attention.py:18``); a bare

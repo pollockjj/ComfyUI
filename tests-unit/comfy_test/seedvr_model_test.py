@@ -21,7 +21,7 @@ The fix:
      network output is a contract: an unsplittable result is a bug,
      not a recoverable condition.
 
-The two blocks were extracted into named private methods on
+The two blocks were extracted into named helper methods on
 ``NaDiT`` (``_resolve_text_conditioning`` and ``_swap_pos_neg_halves``)
 so the regression evidence drives the actual production code paths
 without standing up a full transformer. The methods are called from

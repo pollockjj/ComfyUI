@@ -806,7 +806,7 @@ def test_hann_weights_overlap_lt_3_uses_linear_ramp():
 def test_hann_weights_monotone_non_increasing():
     """The previous-chunk weight is a crossfade ramp; it must be
     non-increasing along the overlap axis (any reversal would produce
-    audible/visible boundary artifacts).
+    audible/visible boundary defects).
     """
     for n in [3, 4, 5, 7, 8, 11, 16]:
         w = _hann_blend_weights_1d(n, torch.device("cpu"), torch.float32)
