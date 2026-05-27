@@ -2166,13 +2166,13 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     if model_options.get("fp8_optimizations", False):
         model_config.optimizations["fp8"] = True
 
-    disable_dynamic = disable_dynamic or getattr(model_config, "disable_dynamic", False)
+    disable_dynamic = disable_dynamic or getattr(type(model_config), "disable_dynamic", False)
     model = model_config.get_model(new_sd, "")
     ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
     model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
-    assign_load = model_patcher.is_dynamic() and getattr(model_config, "dynamic_load_assign", True)
+    assign_load = model_patcher.is_dynamic() and getattr(type(model_config), "dynamic_load_assign", True)
     model.load_model_weights(new_sd, "", assign=assign_load)
     left_over = sd.keys()
     if len(left_over) > 0:
