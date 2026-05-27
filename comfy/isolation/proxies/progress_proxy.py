@@ -12,6 +12,18 @@ except ImportError:
         pass
 
 from .base import call_singleton_rpc
+from .singleton_contract import SingletonProxyContract
+
+PROGRESS_PUBLIC_CALLABLES = (
+    "set_progress",
+)
+
+PROGRESS_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="ProgressProxy",
+    target_name="comfy_api.latest.Execution progress path",
+    target_public_symbols=PROGRESS_PUBLIC_CALLABLES,
+    custom_symbols=PROGRESS_PUBLIC_CALLABLES,
+)
 
 
 def _get_progress_state():
