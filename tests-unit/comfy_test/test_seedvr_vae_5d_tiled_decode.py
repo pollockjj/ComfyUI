@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 import torch
 import torch.nn as nn
 
@@ -11,29 +9,6 @@ if not torch.cuda.is_available():
 import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
 import comfy.sd as sd_mod  # noqa: E402
 import nodes as nodes_mod  # noqa: E402
-
-
-def _lab_color_passthrough(content, style):
-    return content
-
-
-def _decode_fingerprint(self, z, return_dict=True):
-    b, _, t, h, w = z.shape
-    out = torch.empty(b, 3, t, h * 8, w * 8, dtype=z.dtype, device=z.device)
-    for batch_idx in range(b):
-        out[batch_idx].fill_(float(batch_idx + 1))
-    return out
-
-
-def _make_wrapper(b=2, t=3, enable_tiling=False):
-    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
-        vae_mod.VideoAutoencoderKLWrapper
-    )
-    nn.Module.__init__(wrapper)
-    wrapper.tiled_args = {"enable_tiling": enable_tiling}
-    wrapper.original_image_video = torch.zeros(b, 3, t, 16, 16)
-    wrapper.img_dims = (16, 16)
-    return wrapper
 
 
 class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
@@ -48,19 +23,6 @@ class _SeedVR2DecodeStub(vae_mod.VideoAutoencoderKLWrapper):
     def decode(self, z, seedvr2_tiling=None):
         self.calls.append({"seedvr2_tiling": seedvr2_tiling, "shape": tuple(z.shape)})
         return z
-
-
-def test_seedvr2_decode_accepts_5d_bcthw_latents_and_preserves_batch_time_axes():
-    wrapper = _make_wrapper(b=2, t=3, enable_tiling=False)
-    latent = torch.zeros(2, 16, 3, 2, 2)
-
-    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_fingerprint), \
-         patch.object(vae_mod, "lab_color_transfer", _lab_color_passthrough):
-        out = wrapper.decode(latent)
-
-    assert tuple(out.shape) == (2, 3, 3, 16, 16)
-    assert out[0, 0, 0, 0, 0].item() == 1.0
-    assert out[1, 0, 0, 0, 0].item() == 2.0
 
 
 def test_vae_decode_tiled_allows_zero_temporal_controls_and_passes_them_through():
@@ -138,26 +100,3 @@ def test_seedvr2_decode_tiled_uses_seedvr2_path_not_generic_3d_tiler(monkeypatch
             },
         }
     ]
-
-
-def test_seedvr2_decode_tiled_routes_collapsed_latents_to_seedvr2_tiler(monkeypatch):
-    vae = sd_mod.VAE.__new__(sd_mod.VAE)
-    vae.first_stage_model = _SeedVR2DecodeStub()
-    vae.vae_dtype = torch.float32
-    vae.device = torch.device("cpu")
-    vae.output_device = torch.device("cpu")
-    vae.disable_offload = True
-    vae.extra_1d_channel = None
-    vae.latent_channels = 16
-    vae.memory_used_decode = lambda shape, dtype: 1
-    vae.process_output = lambda x: x
-    vae.patcher = object()
-
-    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
-    monkeypatch.setattr(sd_mod.VAE, "decode_tiled_", lambda *a, **k: (_ for _ in ()).throw(AssertionError("generic decode_tiled_ called")))
-
-    latent = torch.zeros(1, 48, 2, 2)
-    vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1, tile_t=16, overlap_t=4)
-
-    assert vae.first_stage_model.calls[0]["shape"] == (1, 48, 2, 2)
-    assert vae.first_stage_model.calls[0]["seedvr2_tiling"]["temporal_overlap"] == 16

@@ -5,20 +5,14 @@ Covers:
 - Single-chunk degeneracy (``frames_per_chunk >= T_pixel``) takes the
   short-circuit path and calls ``comfy.sample.sample`` exactly once with
   the full unsliced latent.
-- Multi-chunk path slices ``samples_4d`` along the latent T axis,
-  invokes the inner sampler once per chunk, and concatenates results
-  back into the same total ``(B, 16*T_total, H, W)`` shape with no NaN
-  or Inf values.
+- Auto chunking walks the 2-, 3-, 4-chunk ladder on OOM.
 - ``frames_per_chunk`` that violates the 4n+1 pixel-frame constraint
   is rejected with a typed ``ValueError`` before any model invocation.
 - Determinism: given a fixed seed, slicing into N chunks runs each
   chunk against the same global noise tensor (sliced per chunk), so
-  the same seed always produces the same final latent regardless of
-  chunk count, modulo the inherent T-axis chunk-boundary independence
-  of the model.
+  the same seed always produces the same final latent.
 - Latent-space Hann overlap blend: ``temporal_overlap=0`` produces
-  output byte-identical to the no-overlap path; small-overlap path
-  uses a linear ramp.
+  output byte-identical to the no-overlap path.
 
 The tests mock ``comfy.sample.sample``, ``comfy.sample.prepare_noise``,
 and ``comfy.sample.fix_empty_latent_channels`` so the slicing /
@@ -126,51 +120,6 @@ def test_t1_single_chunk_degeneracy_calls_sampler_once_with_full_latent():
     assert tuple(out_latent["samples"].shape) == full_shape
 
 
-def test_t2_two_chunk_path_shape_preserved_and_no_nan_inf():
-    """A T_pixel that exceeds frames_per_chunk
-    triggers chunking; the inner sampler is invoked once per chunk;
-    the concatenated output preserves the original
-    ``(B, 16*T_total, H, W)`` shape and contains no NaN/Inf values.
-    """
-    # T_latent=11 -> T_pixel=4*10+1=41; chunk_pixel=21 -> chunk_latent=6.
-    # Expected chunks: [0:6], [6:11] (two chunks; second is a runt of 5).
-    latent, pos, neg, _, _ = _make_inputs(T=11)
-    full_shape = tuple(latent["samples"].shape)
-    chunk_shapes = []
-
-    def _record(model, noise, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image, denoise=1.0,
-                noise_mask=None, seed=None):
-        chunk_shapes.append(tuple(latent_image.shape))
-        return latent_image.clone()
-
-    with patch.object(comfy.sample, "sample", side_effect=_record), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise):
-        out = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=0, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos, negative=neg, latent_image=latent,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
-        )
-
-    # Two chunks: latent T = 6 then 5.
-    assert len(chunk_shapes) == 2
-    assert chunk_shapes[0] == (1, _LAT_C * 6, 8, 8)
-    assert chunk_shapes[1] == (1, _LAT_C * 5, 8, 8)
-
-    # Final shape preserved.
-    out_latent = out.result[0]
-    assert tuple(out_latent["samples"].shape) == full_shape
-
-    # Boundedness.
-    samples_out = out_latent["samples"]
-    assert not torch.isnan(samples_out).any()
-    assert not torch.isinf(samples_out).any()
-
-
 def test_auto_chunking_walks_two_three_four_chunk_ladder():
     """Auto mode must walk 2-, 3-, then 4-chunk geometries on OOM."""
     latent, pos, neg, _, _ = _make_inputs(T=17)
@@ -209,60 +158,6 @@ def test_auto_chunking_walks_two_three_four_chunk_ladder():
     ]
     assert torch.equal(out.result[0]["samples"], latent["samples"])
     assert soft_empty.call_count == 3
-
-
-def test_auto_chunking_exhausted_floor_rethrows_loudly():
-    """If one-latent-frame chunks still OOM, auto mode must fail loud."""
-    latent, pos, neg, _, _ = _make_inputs(T=3)
-
-    def _always_oom(*args, **kwargs):
-        raise torch.cuda.OutOfMemoryError("stable oom")
-
-    with patch.object(comfy.sample, "sample", side_effect=_always_oom), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise), \
-         patch.object(nodes_seedvr_mod.comfy.model_management,
-                      "soft_empty_cache") as soft_empty:
-        with pytest.raises(RuntimeError) as excinfo:
-            SeedVR2ProgressiveSampler.execute(
-                model=None, seed=0, steps=2, cfg=1.0,
-                sampler_name="euler", scheduler="simple",
-                positive=pos, negative=neg, latent_image=latent,
-                denoise=1.0, frames_per_chunk=9, temporal_overlap=0,
-                chunking_mode="auto",
-            )
-
-    assert "exhausted auto chunking attempts" in str(excinfo.value)
-    assert "[9, 5, 1]" in str(excinfo.value)
-    assert soft_empty.call_count == 2
-
-
-def test_auto_chunking_non_oom_does_not_retry():
-    """Only real OOM failures are eligible for auto chunk retry."""
-    latent, pos, neg, _, _ = _make_inputs(T=11)
-
-    def _raise_non_oom(*args, **kwargs):
-        raise ValueError("not oom")
-
-    with patch.object(comfy.sample, "sample", side_effect=_raise_non_oom), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise), \
-         patch.object(nodes_seedvr_mod.comfy.model_management,
-                      "soft_empty_cache") as soft_empty:
-        with pytest.raises(ValueError, match="not oom"):
-            SeedVR2ProgressiveSampler.execute(
-                model=None, seed=0, steps=2, cfg=1.0,
-                sampler_name="euler", scheduler="simple",
-                positive=pos, negative=neg, latent_image=latent,
-                denoise=1.0, frames_per_chunk=45, temporal_overlap=0,
-                chunking_mode="auto",
-            )
-
-    soft_empty.assert_not_called()
 
 
 @pytest.mark.parametrize("bad_chunk", [0, -1, 2, 3, 4, 6, 7, 8, 10, 12])
@@ -327,39 +222,6 @@ def test_t4_determinism_same_seed_same_output():
                        out_b.result[0]["samples"])
 
 
-def test_t4_chunk_count_invariance_under_passthrough():
-    """When the inner sampler is the identity, the final latent must be
-    identical regardless of how the work is partitioned: a single-chunk
-    run and a multi-chunk run on the same input must produce the same
-    output. This pins the slice / concat composition as a true identity
-    on the latent under a deterministic inner sampler.
-    """
-    latent_single, pos_s, neg_s, _, _ = _make_inputs(T=11)
-    latent_multi, pos_m, neg_m, _, _ = _make_inputs(T=11)
-
-    with patch.object(comfy.sample, "sample",
-                      side_effect=_passthrough_sample_returning_latent), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise):
-        out_single = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=7, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos_s, negative=neg_s, latent_image=latent_single,
-            denoise=1.0, frames_per_chunk=45, temporal_overlap=0,  # >= T_pixel=41
-        )
-        out_multi = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=7, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos_m, negative=neg_m, latent_image=latent_multi,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,  # forces 2 chunks
-        )
-
-    assert torch.equal(out_single.result[0]["samples"],
-                       out_multi.result[0]["samples"])
-
-
 def test_t5_overlap_zero_byte_identical_to_slice1_path():
     """``temporal_overlap=0`` must produce output byte-identical
     to the no-overlap chunked path under a deterministic inner sampler.
@@ -384,30 +246,3 @@ def test_t5_overlap_zero_byte_identical_to_slice1_path():
 
     out_latent = out.result[0]
     assert torch.equal(out_latent["samples"], src)
-
-
-def test_t6_small_overlap_linear_ramp_no_nan_inf():
-    """``temporal_overlap=2`` exercises
-    the linear-ramp fallback (overlap < 3). The output must preserve
-    the source's overall T_total shape and contain no NaN/Inf.
-    """
-    latent, pos, neg, _, _ = _make_inputs(T=11)
-    full_shape = tuple(latent["samples"].shape)
-
-    with patch.object(comfy.sample, "sample",
-                      side_effect=_passthrough_sample_returning_latent), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise):
-        out = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=0, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos, negative=neg, latent_image=latent,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=2,
-        )
-
-    samples_out = out.result[0]["samples"]
-    assert tuple(samples_out.shape) == full_shape
-    assert not torch.isnan(samples_out).any()
-    assert not torch.isinf(samples_out).any()

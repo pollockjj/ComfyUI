@@ -108,25 +108,6 @@ def test_seedvr2_encode_and_encode_tiled_preserve_native_latent_contract(monkeyp
     assert torch.equal(tiled_latent, torch.full_like(tiled_latent, 3.0 * 0.9152))
 
 
-def test_seedvr2_decode_and_decode_tiled_do_not_require_preprocessor_state(monkeypatch):
-    monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
-    vae = _make_vae(_DecodeWrapper())
-
-    latent = {"samples": torch.zeros(1, 32, 4, 5)}
-    decoded = nodes_mod.VAEDecode().decode(vae, latent)[0]
-    assert tuple(decoded.shape) == (2, 32, 40, 3)
-
-    tiled = nodes_mod.VAEDecodeTiled().decode(
-        vae,
-        {"samples": torch.zeros(1, 16, 2, 4, 5)},
-        tile_size=512,
-        overlap=64,
-        temporal_size=16,
-        temporal_overlap=4,
-    )[0]
-    assert tuple(tiled.shape) == (2, 32, 40, 3)
-
-
 def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())

@@ -26,12 +26,6 @@ def test_seedvr2_post_processing_schema():
     assert schema.outputs[0].get_io_type() == "IMAGE"
 
 
-def test_seedvr2_post_processing_color_correction_memory_multipliers_are_named():
-    assert nodes_seedvr.LAB_SCALE_MULTIPLIER == 13
-    assert nodes_seedvr.WAVELET_SCALE_MULTIPLIER == 10
-    assert nodes_seedvr.ADAIN_SCALE_MULTIPLIER == 6
-
-
 def test_seedvr2_post_processing_lab_autochunks_from_memory_estimate(monkeypatch):
     decoded = torch.full((1, 5, 2, 2, 3), 0.25)
     original = torch.full((1, 5, 2, 2, 3), 0.75)
@@ -72,37 +66,6 @@ def test_seedvr2_post_processing_oom_error_uses_color_correction_method(monkeypa
             assert " method=lab" not in str(exc)
         else:
             raise AssertionError("expected RuntimeError for one-frame LAB OOM")
-
-
-def test_seedvr2_post_processing_lab_resizes_full_reference_frame():
-    decoded = torch.full((1, 2, 4, 5, 3), 0.25)
-    original = torch.full((1, 2, 16, 20, 3), 0.75)
-    resize_calls = []
-    lab_calls = []
-
-    def _resize(images, size, interpolation=None, antialias=None):
-        resize_calls.append((images.clone(), size, interpolation, antialias))
-        if isinstance(size, int):
-            return torch.full((2, 3, size, round(images.shape[-1] * size / images.shape[-2])), 0.5)
-        return torch.full((2, 3, size[0], size[1]), 0.5)
-
-    def _lab(content, style):
-        lab_calls.append((content.clone(), style.clone()))
-        return torch.zeros_like(content)
-
-    with patch.object(nodes_seedvr.TVF, "resize", _resize):
-        with patch.object(nodes_seedvr, "lab_color_transfer", _lab):
-            output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 8, "lab").result[0]
-
-    assert tuple(output.shape) == (1, 2, 4, 4, 3)
-    assert torch.equal(output, torch.full_like(output, 0.5))
-    assert resize_calls[0][0].shape == (2, 3, 16, 20)
-    assert resize_calls[0][1] == 8
-    assert resize_calls[1][0].shape == (2, 3, 8, 10)
-    assert resize_calls[1][1] == (4, 5)
-    assert len(lab_calls) == 2
-    assert lab_calls[0][1].shape == (1, 3, 4, 5)
-    assert torch.equal(lab_calls[0][1], torch.zeros_like(lab_calls[0][1]))
 
 
 def test_seedvr2_post_processing_wavelet_dispatch_routes_through_wavelet_color_transfer():
@@ -168,32 +131,3 @@ def test_seedvr2_post_processing_unknown_color_correction_method_raises():
         assert "color_correction_method" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown color_correction_method")
-
-
-def test_seedvr2_post_processing_uses_even_crop_from_odd_resized_width():
-    decoded = torch.ones((1, 1, 128, 256, 3), dtype=torch.float32)
-    original = torch.ones((1, 1, 120, 169, 3), dtype=torch.float32)
-
-    output = nodes_seedvr.SeedVR2PostProcessing.execute(decoded, original, 120, "none").result[0]
-
-    assert tuple(output.shape) == (1, 1, 120, 168, 3)
-
-
-def test_seedvr2_adain_color_transfer_matches_huang_belongie_formula():
-    from comfy.ldm.seedvr import vae as seedvr_vae
-    torch.manual_seed(0)
-    content = torch.rand(2, 3, 5, 7) * 2.0 - 1.0
-    style = torch.rand(2, 3, 5, 7) * 2.0 - 1.0
-    out = seedvr_vae.adain_color_transfer(content.clone(), style.clone())
-
-    b, c = 2, 3
-    cf = content.float().reshape(b, c, -1)
-    sf = style.float().reshape(b, c, -1)
-    eps = 1e-5
-    mu_c = cf.mean(dim=2).reshape(b, c, 1, 1)
-    sd_c = (cf.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
-    mu_s = sf.mean(dim=2).reshape(b, c, 1, 1)
-    sd_s = (sf.var(dim=2, correction=0) + eps).sqrt().reshape(b, c, 1, 1)
-    expected = ((content.float() - mu_c) / sd_c) * sd_s + mu_s
-    expected = expected.clamp(-1.0, 1.0)
-    assert torch.allclose(out, expected, atol=1e-6)

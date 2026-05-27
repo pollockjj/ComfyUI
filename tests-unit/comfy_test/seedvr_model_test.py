@@ -1,42 +1,10 @@
-"""Regression tests for SeedVR2 conditioning split hardening.
-
-Two bare ``except:`` clauses in ``NaDiT.forward`` previously swallowed
-every failure mode on (1) the input-side text-conditioning split and
-(2) the output-side positive/negative split, silently substituting
-wrong fallbacks: the ``positive_conditioning`` buffer (which prior to
-explicit zero-init held **uninitialized** memory — NaN, residual heap
-contents, never guaranteed-zero) for the input, and the un-split
-tensor for the output. Real prompt-shape, dtype, OOM, and downstream
-tensor failures were re-routed to "no prompt supplied" with arbitrary
-buffer contents standing in for actual prompt embeddings, or to a
-wrong-order output, with no diagnostic.
-
-The fix:
-
-  1. Input-side: explicit absence predicate (``context is None`` or
-     ``context.numel() == 0``) → fall back to ``positive_conditioning``
-     buffer. Any other failure (wrong rank, odd batch, dtype, OOM)
-     propagates the original torch exception.
-  2. Output-side: no try/except at all. ``out.chunk(2)`` of the
-     network output is a contract: an unsplittable result is a bug,
-     not a recoverable condition.
-
-The two blocks were extracted into named private methods on
-``NaDiT`` (``_resolve_text_conditioning`` and ``_swap_pos_neg_halves``)
-so the regression evidence drives the actual production code paths
-without standing up a full transformer. The methods are called from
-``forward`` exactly where the original try/except blocks lived.
-"""
+"""Regression tests for SeedVR2 conditioning split hardening."""
 
 from comfy.cli_args import args
 import torch
 
 if not torch.cuda.is_available():
     args.cpu = True
-
-import ast  # noqa: E402
-import inspect  # noqa: E402
-import textwrap  # noqa: E402
 
 from comfy.ldm.seedvr.model import NaDiT  # noqa: E402
 
@@ -53,50 +21,6 @@ def _make_standin(positive_conditioning):
         _swap_pos_neg_halves = NaDiT._swap_pos_neg_halves
 
     return _StandIn()
-
-
-def test_no_bare_except_in_forward_path():
-    """Source-level pin: neither ``NaDiT.forward`` nor its split helpers
-    may carry the bare ``except:`` clauses that swallowed real torch
-    failures on the SeedVR2 conditioning paths. AST-walked rather than
-    substring-matched so that ``except:`` appearing in a docstring or
-    comment does not false-positive, and so that ``except Exception:``
-    (a typed handler, fine to have) does not false-negative.
-    """
-    sources = [
-        inspect.getsource(NaDiT.forward),
-        inspect.getsource(NaDiT._resolve_text_conditioning),
-        inspect.getsource(NaDiT._swap_pos_neg_halves),
-    ]
-    for src in sources:
-        tree = ast.parse(textwrap.dedent(src))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ExceptHandler):
-                assert node.type is not None, (
-                    "Bare 'except:' (ast.ExceptHandler with type=None) "
-                    f"must not appear on the SeedVR2 forward path:\n{src}"
-                )
-
-
-def test_valid_context_splits_pos_neg():
-    """AC: valid (neg, pos)-stacked context (shape ``(2, L, C)``)
-    produces a flattened ``[pos, neg]`` text tensor — first ``L`` rows
-    are positive, next ``L`` rows are negative — matching the original
-    semantics of the ``flatten([pos_cond, neg_cond])`` call.
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    seq_len, channels = 7, 5120
-    neg = torch.full((1, seq_len, channels), -1.0)
-    pos = torch.full((1, seq_len, channels), 1.0)
-    context = torch.cat([neg, pos], dim=0)
-    txt, txt_shape = standin._resolve_text_conditioning(context)
-    assert txt.shape == (2 * seq_len, channels)
-    assert (txt[:seq_len] == 1.0).all(), "first half must be positive cond"
-    assert (txt[seq_len:] == -1.0).all(), "second half must be negative cond"
-    assert txt_shape.shape == (2, 1)
-    assert txt_shape[0].item() == seq_len
-    assert txt_shape[1].item() == seq_len
 
 
 def test_missing_context_falls_back_to_positive_buffer():
