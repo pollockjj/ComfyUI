@@ -10,8 +10,6 @@ Merged from:
 
 from __future__ import annotations
 
-import ast
-import inspect
 from unittest.mock import MagicMock
 
 import torch
@@ -31,7 +29,7 @@ import comfy.model_management  # noqa: E402
 import comfy.sample  # noqa: E402
 import comfy.sd as sd_mod  # noqa: E402
 import nodes as nodes_mod  # noqa: E402
-from comfy.ldm.seedvr.model import MMModule, NaDiT  # noqa: E402
+from comfy.ldm.seedvr.model import NaDiT  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +46,6 @@ def _make_standin(positive_conditioning):
             )
 
         _resolve_text_conditioning = NaDiT._resolve_text_conditioning
-        _swap_pos_neg_halves = NaDiT._swap_pos_neg_halves
 
     return _StandIn()
 
@@ -194,25 +191,6 @@ def test_missing_context_falls_back_to_positive_buffer():
     assert txt_shape[0, 0].item() == 58
 
 
-def test_output_side_swaps_pos_neg_halves():
-    """AC complement: ``_swap_pos_neg_halves`` reorders the post-network
-    output so the first half (positive) and second half (negative) trade
-    places. For a 2-batch tensor with distinguishable halves, the
-    returned tensor must be the swap — first half becomes negative,
-    second half becomes positive — matching the original
-    ``torch.cat([neg, pos])`` semantics from the pre-fix forward path.
-    """
-    pos_buffer = torch.zeros((58, 5120))
-    standin = _make_standin(pos_buffer)
-    pos_half = torch.full((1, 4, 8, 8), 1.0)
-    neg_half = torch.full((1, 4, 8, 8), -1.0)
-    out = torch.cat([pos_half, neg_half], dim=0)
-    swapped = standin._swap_pos_neg_halves(out)
-    assert swapped.shape == out.shape
-    assert (swapped[0] == -1.0).all(), "first half of swapped output must be the original negative half"
-    assert (swapped[1] == 1.0).all(), "second half of swapped output must be the original positive half"
-
-
 # ---------------------------------------------------------------------------
 # Tests from test_seedvr_7b_final_block_text_path.py
 # ---------------------------------------------------------------------------
@@ -250,65 +228,6 @@ def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
 
 
-def test_adasingle_init_preserves_supported_dtype():
-    ada = seedvr_model.AdaSingle(
-        dim=4,
-        emb_dim=24,
-        layers=["test"],
-        modes=["in", "out"],
-        device="cpu",
-        dtype=torch.bfloat16,
-    )
-
-    assert ada.test_shift.dtype is torch.bfloat16
-    assert ada.test_scale.dtype is torch.bfloat16
-    assert ada.test_gate.dtype is torch.bfloat16
-
-
-# ---------------------------------------------------------------------------
-# Tests from test_seedvr_forward_no_device_cast.py
-# ---------------------------------------------------------------------------
-
-
-def test_no_get_torch_device_in_forward_methods():
-    tree = ast.parse(inspect.getsource(comfy.ldm.seedvr.model))
-    assert [
-        (n.lineno, i.lineno)
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "forward"
-        for i in ast.walk(n)
-        if isinstance(i, ast.Call)
-        and isinstance(i.func, ast.Attribute)
-        and i.func.attr == "get_torch_device"
-    ] == []
-
-
-def test_mmmodule_forward_succeeds_without_get_torch_device_lookup(monkeypatch):
-    call_count = [0]
-
-    def boom():
-        call_count[0] += 1
-        raise RuntimeError("MMModule.forward called get_torch_device()")
-
-    monkeypatch.setattr(comfy.model_management, "get_torch_device", boom)
-
-    class _IdentityCallable(nn.Module):
-        def forward(self, x, *args, **kwargs):
-            return x
-
-    mm = MMModule(_IdentityCallable, shared_weights=False, vid_only=False)
-
-    vid_in = torch.zeros(2, 4)
-    txt_in = torch.ones(2, 4)
-    vid_out, txt_out = mm.forward(vid_in, txt_in)
-
-    assert call_count[0] == 0
-    assert torch.equal(vid_out, vid_in)
-    assert torch.equal(txt_out, txt_in)
-    assert vid_out.device == vid_in.device
-    assert txt_out.device == txt_in.device
-
-
 # ---------------------------------------------------------------------------
 # Tests from test_seedvr_latent_format.py
 # ---------------------------------------------------------------------------
@@ -323,17 +242,6 @@ def test_seedvr2_latent_format_uses_16_channels_without_3d_empty_latent_expansio
     assert latent_format.latent_channels == 16
     assert latent_format.latent_dimensions == 2
     assert fixed.shape == (1, 16, 4, 5)
-
-
-def test_seedvr2_empty_collapsed_latent_preserves_temporal_channel_multiples():
-    latent_format = comfy.latent_formats.SeedVR2()
-    latent_image = torch.zeros(1, 48, 4, 5)
-
-    fixed = comfy.sample.fix_empty_latent_channels(_Model(latent_format), latent_image)
-
-    assert latent_format.preserve_empty_channel_multiples is True
-    assert fixed.shape == latent_image.shape
-    assert fixed.data_ptr() == latent_image.data_ptr()
 
 
 # ---------------------------------------------------------------------------

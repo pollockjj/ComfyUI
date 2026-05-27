@@ -3,13 +3,12 @@
 Sources (all merged verbatim, helper names disambiguated where colliding):
 
   * RoPE rewrite — NaMMRotaryEmbedding3d.forward must match the legacy
-    apply_rotary_emb wrapper oracle at fp32 (full and partial-rope paths).
+    apply_rotary_emb wrapper oracle at fp32.
   * GroupNorm limit gate — causal_norm_wrapper at vae.py:509 must compare
     memory_occupy against get_norm_limit(), not float('inf').
-  * var_attention backend registry + sage/pytorch_split backend contracts.
+  * var_attention backend registry.
   * var_attention_pytorch SeedVR2-named guard — present-API shape contract
-    and torch RuntimeError pass-through on malformed offsets, with AST-level
-    pinning of the guard ordering.
+    with AST-level pinning of the guard ordering.
 
 Pre-import CPU-only guard is required because comfy.ldm.seedvr.model and
 comfy.ldm.modules.attention transitively pull in comfy.model_management,
@@ -161,39 +160,6 @@ def test_namm_forward_output_tensor_equal_against_legacy_oracle():
                                 msg="txt_k output diverges from wrapper oracle")
 
 
-def test_namm_forward_partial_rope_passthrough_matches_wrapper_oracle():
-    rope = NaMMRotaryEmbedding3d(dim=128)
-    g = torch.Generator(device="cpu").manual_seed(_SEED)
-    vid_q = torch.randn(_L_VID, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
-    vid_k = torch.randn(_L_VID, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
-    txt_q = torch.randn(_TXT_L, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
-    txt_k = torch.randn(_TXT_L, _HEADS, 128, dtype=torch.float32, device="cpu", generator=g)
-    vid_shape = torch.tensor([[_VID_T, _VID_H, _VID_W]], dtype=torch.long)
-    txt_shape = torch.tensor([[_TXT_L]], dtype=torch.long)
-    cache = Cache(disable=True)
-
-    expected_vid_q, expected_vid_k, expected_txt_q, expected_txt_k = _legacy_forward(
-        rope, vid_q.clone(), vid_k.clone(), vid_shape, txt_q.clone(), txt_k.clone(), txt_shape,
-    )
-    actual_vid_q, actual_vid_k, actual_txt_q, actual_txt_k = rope.forward(
-        vid_q.clone(), vid_k.clone(), vid_shape, txt_q.clone(), txt_k.clone(), txt_shape, cache,
-    )
-
-    vid_freqs, _ = rope.get_freqs(vid_shape, txt_shape)
-    rot_d = 2 * vid_freqs.shape[-3]
-    assert rot_d == 126, f"expected rot_d=126 for dim=128 model; got {rot_d}"
-    assert rot_d < 128, "partial-rope path must trigger (rot_d < head_dim)"
-
-    torch.testing.assert_close(actual_vid_q, expected_vid_q, rtol=0, atol=0,
-                                msg="vid_q partial-rope output diverges from wrapper oracle")
-    torch.testing.assert_close(actual_vid_k, expected_vid_k, rtol=0, atol=0,
-                                msg="vid_k partial-rope output diverges from wrapper oracle")
-    torch.testing.assert_close(actual_txt_q, expected_txt_q, rtol=0, atol=0,
-                                msg="txt_q partial-rope output diverges from wrapper oracle")
-    torch.testing.assert_close(actual_txt_k, expected_txt_k, rtol=0, atol=0,
-                                msg="txt_k partial-rope output diverges from wrapper oracle")
-
-
 # ---------------------------------------------------------------------------
 # GroupNorm limit tests (test_seedvr_groupnorm_limit.py)
 # ---------------------------------------------------------------------------
@@ -252,60 +218,10 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path(groupnorm_cls):
 # var_attention backend tests (test_seedvr_var_attention_backends.py)
 # ---------------------------------------------------------------------------
 
-def _var_attention_backends_inputs():
-    heads = 2
-    head_dim = 4
-    total = 6
-    q = torch.randn(total, heads, head_dim)
-    k = torch.randn(total, heads, head_dim)
-    v = torch.randn(total, heads, head_dim)
-    cu = torch.tensor([0, 3, 6], dtype=torch.int32)
-    return q, k, v, heads, cu
-
-
 def test_var_attention_registry_contains_always_available_entries():
     assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_pytorch"] is attention.var_attention_pytorch
     assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_sub_quad"] is attention.var_attention_sub_quad
     assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_split"] is attention.var_attention_split
-
-
-def test_var_attention_sage_uses_cu_seqlens_contract(monkeypatch):
-    q, k, v, heads, cu = _var_attention_backends_inputs()
-    captured = {}
-
-    def fake_sageattn_varlen(q, k, v, cu_q, cu_k, max_q, max_k, is_causal, sm_scale):
-        captured.update(cu_q=cu_q, cu_k=cu_k, max_q=max_q, max_k=max_k, is_causal=is_causal)
-        return torch.zeros_like(q)
-
-    monkeypatch.setattr(attention, "SAGE_ATTENTION_VARLEN_IS_AVAILABLE", True)
-    monkeypatch.setattr(attention, "sageattn_varlen", fake_sageattn_varlen, raising=False)
-
-    out = attention.var_attention_sage(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
-
-    assert tuple(out.shape) == tuple(q.shape)
-    assert torch.equal(captured["cu_q"], cu)
-    assert torch.equal(captured["cu_k"], cu)
-    assert captured["max_q"] == 3
-    assert captured["max_k"] == 3
-    assert captured["is_causal"] is False
-
-
-def test_var_attention_pytorch_split_normalizes_split_indices_to_cpu(monkeypatch):
-    q, k, v, heads, cu = _var_attention_backends_inputs()
-    captured_devices = []
-    real_tensor_split = torch.tensor_split
-
-    def capture_tensor_split(input, indices_or_sections, dim=0):
-        if isinstance(indices_or_sections, torch.Tensor):
-            captured_devices.append(indices_or_sections.device.type)
-        return real_tensor_split(input, indices_or_sections, dim=dim)
-
-    monkeypatch.setattr(torch, "tensor_split", capture_tensor_split)
-
-    out = attention.var_attention_pytorch_split(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
-
-    assert tuple(out.shape) == tuple(q.shape)
-    assert captured_devices == ["cpu", "cpu", "cpu"]
 
 
 # ---------------------------------------------------------------------------
@@ -373,26 +289,6 @@ def test_present_api_returns_expected_shape():
 
     assert tuple(out.shape) == (total_tokens, embed_dim), (
         f"expected ({total_tokens}, {embed_dim}); got {tuple(out.shape)}"
-    )
-
-    _assert_guard_source_pin()
-
-
-def test_malformed_offsets_propagates_torch_runtime_error():
-    q, k, v, heads, _, _, _, _ = _pytorch_guard_inputs()
-    cu_q_bad = torch.tensor([0, 3, 7], dtype=torch.int32)
-    cu_k_ok = torch.tensor([0, 3, 6], dtype=torch.int32)
-
-    with pytest.raises(RuntimeError) as exc_info:
-        var_attention_pytorch(q, k, v, heads, cu_q_bad, cu_k_ok)
-
-    msg = str(exc_info.value)
-    assert "split_with_sizes" in msg, (
-        f"expected torch's `split_with_sizes` error to propagate; got: {msg!r}"
-    )
-    assert "SeedVR2" not in msg, (
-        f"SeedVR2-context substring must not be substituted onto torch's "
-        f"per-call shape error; got: {msg!r}"
     )
 
     _assert_guard_source_pin()

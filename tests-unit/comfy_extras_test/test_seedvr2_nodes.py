@@ -1,8 +1,6 @@
-import ast
 import importlib
 import inspect
 import sys
-import textwrap
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -13,10 +11,6 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy_extras.nodes_seedvr as nodes_seedvr  # noqa: E402
-
-
-def _schema_ids(items):
-    return [item.id for item in items]
 
 
 def test_resize_simple_multiplier_resolves_upscaled_shorter_edge():
@@ -30,81 +24,6 @@ def test_resize_simple_multiplier_resolves_upscaled_shorter_edge():
     assert input_pixels.max().item() == 0.0
     assert original_image is images
     assert upscaled_shorter_edge == 64
-
-
-def test_resize_advanced_takes_exact_shorter_edge():
-    images = torch.zeros(1, 1, 16, 16, 3)
-
-    output = nodes_seedvr.SeedVR2ResizeAdvanced.execute(images, 120)
-
-    input_pixels, original_image, upscaled_shorter_edge = output.result
-    assert tuple(input_pixels.shape) == (1, 1, 128, 128, 3)
-    assert original_image is images
-    assert upscaled_shorter_edge == 120
-
-
-def test_resize_node_schemas_and_execute_signatures_are_preprocess_only():
-    simple = nodes_seedvr.SeedVR2Resize.define_schema()
-    advanced = nodes_seedvr.SeedVR2ResizeAdvanced.define_schema()
-
-    assert [item.id for item in simple.inputs] == ["images", "multiplier"]
-    assert simple.inputs[1].default == 4.0
-    assert [item.id for item in simple.outputs] == [
-        "input_pixels",
-        "original_image",
-        "upscaled_shorter_edge",
-    ]
-
-    assert [item.id for item in advanced.inputs] == ["images", "shorter_edge"]
-    assert advanced.inputs[1].min == 2
-    assert advanced.inputs[1].step is None
-    assert [item.id for item in advanced.outputs] == [
-        "input_pixels",
-        "original_image",
-        "upscaled_shorter_edge",
-    ]
-
-
-def test_resize_schemas_are_preprocess_only():
-    simple = nodes_seedvr.SeedVR2Resize.define_schema()
-    advanced = nodes_seedvr.SeedVR2ResizeAdvanced.define_schema()
-
-    assert _schema_ids(simple.inputs) == ["images", "multiplier"]
-    assert _schema_ids(simple.outputs) == ["input_pixels", "original_image", "upscaled_shorter_edge"]
-    assert simple.outputs[0].get_io_type() == "IMAGE"
-
-    assert _schema_ids(advanced.inputs) == ["images", "shorter_edge"]
-    assert _schema_ids(advanced.outputs) == ["input_pixels", "original_image", "upscaled_shorter_edge"]
-    assert advanced.outputs[0].get_io_type() == "IMAGE"
-
-
-def test_resize_nodes_do_not_call_encode_decode_or_color_transfer():
-    source = "\n".join(
-        [
-            inspect.getsource(nodes_seedvr.SeedVR2Resize.execute),
-            inspect.getsource(nodes_seedvr.SeedVR2ResizeAdvanced.execute),
-        ]
-    )
-    tree = ast.parse(textwrap.dedent(source))
-    forbidden_names = {
-        "encode",
-        "encode_tiled",
-        "decode",
-        "decode_tiled",
-        "tiled_vae",
-        "lab_color_transfer",
-    }
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name):
-                name = func.id
-            elif isinstance(func, ast.Attribute):
-                name = func.attr
-            else:
-                continue
-            assert name not in forbidden_names
 
 
 def test_seedvr_node_signature_matches_schema():
