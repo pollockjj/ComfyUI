@@ -926,8 +926,6 @@ class HunyuanDiT(BaseModel):
         return out
 
 class SeedVR2(BaseModel):
-    dynamic_vbar_keep_pinned = True
-
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device, comfy.ldm.seedvr.model.NaDiT)
     def extra_conds(self, **kwargs):

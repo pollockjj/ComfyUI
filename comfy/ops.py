@@ -432,8 +432,7 @@ def uncast_bias_weight(s, weight, bias, offload_stream):
     device=None
     #FIXME: This is really bad RTTI
     if weight_a is not None and not isinstance(weight_a, torch.Tensor):
-        if not getattr(s, "_vbar_keep_pinned", False):
-            comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        comfy_aimdo.model_vbar.vbar_unpin(s._v)
         device = weight_a
     if os is None:
         return

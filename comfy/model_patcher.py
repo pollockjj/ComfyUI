@@ -1862,7 +1862,6 @@ class ModelPatcherDynamic(ModelPatcher):
                     m.comfy_cast_weights = True
                     m.seed_key = n
                     m._pin_state = pin_state
-                    m._vbar_keep_pinned = getattr(self.model, "dynamic_vbar_keep_pinned", False)
                     set_dirty(m, dirty)
 
                     #Models that mix tiny and giant weights can causing lopsided stream buffer
