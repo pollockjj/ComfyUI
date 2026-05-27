@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import os
 import inspect
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
@@ -853,12 +855,18 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "PromptServerService":
             if not _IMPORT_TORCH:
                 return
-            import server
             from comfy.isolation.proxies.prompt_server_impl import PromptServerStub
 
             stub = PromptServerStub()
-            if (
-                hasattr(server, "PromptServer")
-                and getattr(server.PromptServer, "instance", None) is not stub
-            ):
-                server.PromptServer.instance = stub
+            server_module = sys.modules.get("server")
+            if server_module is None:
+                server_module = types.ModuleType("server")
+                sys.modules["server"] = server_module
+
+            prompt_server = getattr(server_module, "PromptServer", None)
+            if prompt_server is None:
+                prompt_server = type("PromptServer", (), {})
+                server_module.PromptServer = prompt_server
+
+            if getattr(prompt_server, "instance", None) is not stub:
+                prompt_server.instance = stub
