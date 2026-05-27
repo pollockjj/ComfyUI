@@ -804,16 +804,10 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "FolderPathsProxy":
             import folder_paths
 
-            # Replace module-level functions with proxy methods
-            # This is aggressive but necessary for transparent proxying
-            # Handle both instance and class cases
-            instance = api() if isinstance(api, type) else api
-            if hasattr(instance, "install_into"):
-                instance.install_into(folder_paths)
-            else:
-                for name in dir(instance):
-                    if not name.startswith("_"):
-                        setattr(folder_paths, name, getattr(instance, name))
+            if rpc is not None:
+                FolderPathsProxy.set_rpc(rpc)
+
+            FolderPathsProxy().install_into(folder_paths)
 
             # Fence: isolated children get writable temp inside sandbox
             if os.environ.get("PYISOLATE_CHILD") == "1":
@@ -828,8 +822,9 @@ class ComfyUIAdapter(IsolationAdapter):
             if _IMPORT_TORCH:
                 import comfy.model_management
 
-                instance = api() if isinstance(api, type) else api
-                instance.install_into(comfy.model_management)
+                if rpc is not None:
+                    ModelManagementProxy.set_rpc(rpc)
+                ModelManagementProxy().install_into(comfy.model_management)
             return
 
         if api_name == "UtilsProxy":
