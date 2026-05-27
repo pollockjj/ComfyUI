@@ -198,13 +198,45 @@ class EchoLatentNode:
         return latent, saw_json_tensor
 
 
+class ProxyTestCondaSealedWorkerNode:
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "probe"
+    OUTPUT_NODE = True
+    CATEGORY = "PyIsolated/SealedWorker"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, Any]:  # noqa: N802
+        return {"required": {}}
+
+    def probe(self) -> dict[str, Any]:
+        import folder_paths
+
+        temp_dir = folder_paths.get_temp_directory()
+        input_dir = folder_paths.get_input_directory()
+        custom_node_paths = folder_paths.get_folder_paths("custom_nodes")
+        report = "\n".join(
+            [
+                "Conda sealed singleton proxy probe",
+                f"temp_dir={temp_dir}",
+                f"input_dir={input_dir}",
+                f"custom_nodes={len(custom_node_paths)}",
+            ]
+        )
+        _write_artifact("conda_singleton_proxy_probe.txt", report)
+        logger.warning("][ Conda singleton proxy probe executed")
+        return {"ui": {"text": [report]}, "result": (report,)}
+
+
 NODE_CLASS_MAPPINGS = {
+    "ProxyTestCondaSealedWorker": ProxyTestCondaSealedWorkerNode,
     "CondaSealedRuntimeProbe": InspectRuntimeNode,
     "CondaSealedOpenWeatherDataset": OpenWeatherDatasetNode,
     "CondaSealedLatentEcho": EchoLatentNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "ProxyTestCondaSealedWorker": "Proxy Test Conda Sealed Worker",
     "CondaSealedRuntimeProbe": "Conda Sealed Runtime Probe",
     "CondaSealedOpenWeatherDataset": "Conda Sealed Open Weather Dataset",
     "CondaSealedLatentEcho": "Conda Sealed Latent Echo",
