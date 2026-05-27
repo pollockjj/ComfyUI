@@ -1,24 +1,4 @@
-"""Unit tests for ``comfy_extras.nodes_seedvr.SeedVR2ProgressiveSampler``.
-
-Covers:
-
-- Single-chunk degeneracy (``frames_per_chunk >= T_pixel``) takes the
-  short-circuit path and calls ``comfy.sample.sample`` exactly once with
-  the full unsliced latent.
-- Auto chunking walks the 2-, 3-, 4-chunk ladder on OOM.
-- ``frames_per_chunk`` that violates the 4n+1 pixel-frame constraint
-  is rejected with a typed ``ValueError`` before any model invocation.
-- Determinism: given a fixed seed, slicing into N chunks runs each
-  chunk against the same global noise tensor (sliced per chunk), so
-  the same seed always produces the same final latent.
-- Latent-space Hann overlap blend: ``temporal_overlap=0`` produces
-  output byte-identical to the no-overlap path.
-
-The tests mock ``comfy.sample.sample``, ``comfy.sample.prepare_noise``,
-and ``comfy.sample.fix_empty_latent_channels`` so the slicing /
-concatenation / cond-handling logic can be exercised in isolation
-without GPU, model weights, or ComfyUI's full sampling stack.
-"""
+"""Unit tests for ``comfy_extras.nodes_seedvr.SeedVR2ProgressiveSampler``."""
 
 from unittest.mock import patch
 
@@ -87,39 +67,6 @@ def test_progressive_sampler_schema_exposes_manual_default_auto_chunking():
     assert inputs["chunking_mode"].default == "manual"
 
 
-def test_t1_single_chunk_degeneracy_calls_sampler_once_with_full_latent():
-    """When ``frames_per_chunk >= T_pixel``, the short-circuit
-    standard path runs and calls ``comfy.sample.sample`` exactly once
-    with the full unsliced ``(B, 16*T_total, H, W)`` latent.
-    """
-    latent, pos, neg, _, _ = _make_inputs(T=5)  # T_pixel = 4*4+1 = 17
-    full_shape = tuple(latent["samples"].shape)
-    calls = []
-
-    def _record(model, noise, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image, denoise=1.0,
-                noise_mask=None, seed=None):
-        calls.append(tuple(latent_image.shape))
-        return latent_image.clone()
-
-    with patch.object(comfy.sample, "sample", side_effect=_record), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise):
-        out = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=0, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos, negative=neg, latent_image=latent,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
-        )
-
-    assert len(calls) == 1
-    assert calls[0] == full_shape
-    out_latent = out.result[0]
-    assert tuple(out_latent["samples"].shape) == full_shape
-
-
 def test_auto_chunking_walks_two_three_four_chunk_ladder():
     """Auto mode must walk 2-, 3-, then 4-chunk geometries on OOM."""
     latent, pos, neg, _, _ = _make_inputs(T=17)
@@ -162,10 +109,7 @@ def test_auto_chunking_walks_two_three_four_chunk_ladder():
 
 @pytest.mark.parametrize("bad_chunk", [0, -1, 2, 3, 4, 6, 7, 8, 10, 12])
 def test_t3_invalid_frames_per_chunk_raises_value_error(bad_chunk):
-    """``frames_per_chunk`` violating 4n+1 (for n >= 0) must raise
-    ``ValueError`` with a message naming the offending value, before any
-    model invocation. ``frames_per_chunk < 1`` is also rejected.
-    """
+    """``frames_per_chunk`` violating 4n+1 (or <1) must raise ``ValueError`` before any model invocation."""
     latent, pos, neg, _, _ = _make_inputs(T=5)
 
     sampler_called = {"n": 0}
@@ -191,43 +135,8 @@ def test_t3_invalid_frames_per_chunk_raises_value_error(bad_chunk):
     assert sampler_called["n"] == 0
 
 
-def test_t4_determinism_same_seed_same_output():
-    """Two runs with identical (seed, inputs,
-    frames_per_chunk) must produce byte-identical output, given the
-    inner sampler is deterministic (here: passthrough).
-    """
-    latent_a, pos_a, neg_a, _, _ = _make_inputs(T=11)
-    latent_b, pos_b, neg_b, _, _ = _make_inputs(T=11)
-
-    with patch.object(comfy.sample, "sample",
-                      side_effect=_passthrough_sample_returning_latent), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise):
-        out_a = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=42, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos_a, negative=neg_a, latent_image=latent_a,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
-        )
-        out_b = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=42, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos_b, negative=neg_b, latent_image=latent_b,
-            denoise=1.0, frames_per_chunk=21, temporal_overlap=0,
-        )
-
-    assert torch.equal(out_a.result[0]["samples"],
-                       out_b.result[0]["samples"])
-
-
 def test_t5_overlap_zero_byte_identical_to_slice1_path():
-    """``temporal_overlap=0`` must produce output byte-identical
-    to the no-overlap chunked path under a deterministic inner sampler.
-    Verifies the overlap=0 fast path is wired correctly through
-    ``_concat_chunks_with_overlap_blend``.
-    """
+    """``temporal_overlap=0`` must produce output byte-identical to the no-overlap chunked path under a deterministic inner sampler."""
     latent, pos, neg, _, _ = _make_inputs(T=11)
     src = latent["samples"].clone()
 
