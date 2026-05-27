@@ -25,3 +25,4 @@ filtered-openapi.yaml
 uv.lock
 .comfy_environment
 .pyisolate_venvs/
+**/scratch/
