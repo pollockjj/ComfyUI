@@ -146,10 +146,11 @@ def test_model_management_install_materializes_concrete_relay_wrappers():
     ]
 
 
-def test_folder_paths_install_materializes_custom_and_relay_wrappers():
+def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch):
     caller = RecordingCaller(result="mapped")
     FolderPathsProxy._rpc = caller
     target = SimpleNamespace()
+    monkeypatch.setenv("PYISOLATE_CHILD", "1")
 
     try:
         FolderPathsProxy().install_into(target)
