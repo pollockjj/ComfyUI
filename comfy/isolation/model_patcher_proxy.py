@@ -81,6 +81,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def get_additional_models_with_key(self, key: str) -> Any:
         return self._call_rpc("get_additional_models_with_key", key)
 
+    def match_multigpu_clones(self) -> None:
+        self._call_rpc("match_multigpu_clones")
+
     @property
     def object_patches(self) -> Any:
         return self._call_rpc("get_object_patches")
