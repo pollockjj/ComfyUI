@@ -564,6 +564,7 @@ class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
             dim=dim // rope_dim,
             freqs_for="lang",
             theta=10000,
+            cache_if_possible=False,
         )
         freqs = self.rope.freqs
         del self.rope.freqs
