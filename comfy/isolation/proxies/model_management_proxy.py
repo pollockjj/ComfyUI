@@ -182,7 +182,11 @@ def _serialize_value(value: Any) -> Any:
 def _deserialize_value(value: Any) -> Any:
     if isinstance(value, dict):
         if "__pyisolate_torch_device__" in value:
-            return TorchDeviceProxy(value["__pyisolate_torch_device__"])
+            try:
+                import torch
+            except ImportError:
+                return TorchDeviceProxy(value["__pyisolate_torch_device__"])
+            return torch.device(value["__pyisolate_torch_device__"])
         if "__pyisolate_tuple__" in value:
             return tuple(_deserialize_value(item) for item in value["__pyisolate_tuple__"])
         return {key: _deserialize_value(inner) for key, inner in value.items()}

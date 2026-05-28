@@ -146,6 +146,23 @@ def test_model_management_install_materializes_concrete_relay_wrappers():
     ]
 
 
+def test_model_management_device_relay_deserializes_to_child_torch_device():
+    import torch
+
+    caller = RecordingCaller(result={"__pyisolate_torch_device__": "cpu"})
+    ModelManagementProxy._rpc = caller
+    target = SimpleNamespace()
+
+    try:
+        ModelManagementProxy().install_into(target)
+        result = target.get_torch_device()
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert result == torch.device("cpu")
+    assert torch.empty((1,), device=result).device == torch.device("cpu")
+
+
 def test_model_management_archive_model_dtypes_stays_child_local():
     class FakeTensor:
         dtype = "fake-dtype"
