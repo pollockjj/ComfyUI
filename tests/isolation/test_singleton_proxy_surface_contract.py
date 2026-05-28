@@ -146,6 +146,47 @@ def test_model_management_install_materializes_concrete_relay_wrappers():
     ]
 
 
+def test_model_management_archive_model_dtypes_stays_child_local():
+    class FakeTensor:
+        dtype = "fake-dtype"
+
+    class FakeModule:
+        def __init__(self):
+            self.weight = FakeTensor()
+            self.running = FakeTensor()
+
+        def named_parameters(self, recurse=False):
+            assert recurse is False
+            return (("weight", self.weight),)
+
+        def named_buffers(self, recurse=False):
+            assert recurse is False
+            return (("running", self.running),)
+
+    class FakeModel:
+        def __init__(self):
+            self.module = FakeModule()
+
+        def named_modules(self):
+            return (("module", self.module),)
+
+    caller = RecordingCaller(result="should-not-be-used")
+    ModelManagementProxy._rpc = caller
+    target = SimpleNamespace()
+    model = FakeModel()
+
+    try:
+        ModelManagementProxy().install_into(target)
+        result = target.archive_model_dtypes(model)
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert result is None
+    assert model.module.weight_comfy_model_dtype == "fake-dtype"
+    assert model.module.running_comfy_model_dtype == "fake-dtype"
+    assert caller.calls == []
+
+
 def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch):
     caller = RecordingCaller(result="mapped")
     FolderPathsProxy._rpc = caller
