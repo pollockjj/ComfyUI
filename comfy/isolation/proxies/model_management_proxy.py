@@ -118,22 +118,20 @@ MODEL_MANAGEMENT_PUBLIC_CALLABLES = (
     "throw_exception_if_processing_interrupted",
 )
 
-MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS = (
-    "cuda_device_context",
-    "load_models_gpu",
-    "load_model_gpu",
+MODEL_MANAGEMENT_EXPLICIT_SYMBOLS = (
+    "module_size",
+    "archive_model_dtypes",
 )
 
 MODEL_MANAGEMENT_CUSTOM_SYMBOLS = (
-    "module_size",
-    "archive_model_dtypes",
-    *MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS,
+    *MODEL_MANAGEMENT_EXPLICIT_SYMBOLS,
+    *(
+        name for name in MODEL_MANAGEMENT_PUBLIC_CALLABLES
+        if name not in MODEL_MANAGEMENT_EXPLICIT_SYMBOLS
+    ),
 )
 
-MODEL_MANAGEMENT_RELAY_SYMBOLS = tuple(
-    name for name in MODEL_MANAGEMENT_PUBLIC_CALLABLES
-    if name not in MODEL_MANAGEMENT_CUSTOM_SYMBOLS
-)
+MODEL_MANAGEMENT_RELAY_SYMBOLS: tuple[str, ...] = ()
 
 MODEL_MANAGEMENT_SINGLETON_CONTRACT = SingletonProxyContract(
     proxy_name="ModelManagementProxy",
@@ -347,9 +345,10 @@ def _make_child_local_model_management_method(method_name: str):
     return child_local_method
 
 
-for _method_name in MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS:
-    setattr(
-        ModelManagementProxy,
-        _method_name,
-        _make_child_local_model_management_method(_method_name),
-    )
+for _method_name in MODEL_MANAGEMENT_CUSTOM_SYMBOLS:
+    if _method_name not in ModelManagementProxy.__dict__:
+        setattr(
+            ModelManagementProxy,
+            _method_name,
+            _make_child_local_model_management_method(_method_name),
+        )
