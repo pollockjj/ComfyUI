@@ -166,6 +166,12 @@ class FolderPathsProxy(ProxiedSingleton):
 
     def get_temp_directory(self) -> str:
         if _is_child_process():
+            if os.environ.get("PYISOLATE_SANDBOX_MODE") == "required":
+                import tempfile
+
+                child_temp = os.path.join(tempfile.gettempdir(), "comfyui_temp")
+                os.makedirs(child_temp, exist_ok=True)
+                return child_temp
             return call_singleton_rpc(self._get_caller(), "rpc_get_temp_directory")
         return _folder_paths().get_temp_directory()
 
