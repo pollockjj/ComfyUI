@@ -508,12 +508,12 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def detach(self, instance_id: str, unpatch_all: bool = True) -> None:
         self._get_instance(instance_id).detach(unpatch_all)
 
-    async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
+    async def prepare_state(self, instance_id: str, timestep: Any, model_options: Any) -> Any:
         instance = self._get_instance(instance_id)
         cp = getattr(instance.model, "current_patcher", instance)
         if cp is None:
             cp = instance
-        return cp.prepare_state(timestep)
+        return cp.prepare_state(timestep, model_options)
 
     async def pre_run(self, instance_id: str) -> None:
         self._get_instance(instance_id).pre_run()

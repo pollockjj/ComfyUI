@@ -223,8 +223,8 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def apply_hooks(self, hooks: Any) -> Any:
         return self._call_rpc("apply_hooks", hooks)
 
-    def prepare_state(self, timestep: Any) -> Any:
-        return self._call_rpc("prepare_state", timestep)
+    def prepare_state(self, timestep: Any, model_options: Any) -> Any:
+        return self._call_rpc("prepare_state", timestep, model_options)
 
     def restore_hook_patches(self) -> None:
         self._call_rpc("restore_hook_patches")
