@@ -187,6 +187,29 @@ def test_model_management_archive_model_dtypes_stays_child_local():
     assert caller.calls == []
 
 
+def test_model_management_module_size_stays_child_local():
+    class FakeTensor:
+        def __init__(self, nbytes):
+            self.nbytes = nbytes
+
+    class FakeModule:
+        def state_dict(self):
+            return {"weight": FakeTensor(24), "bias": FakeTensor(8)}
+
+    caller = RecordingCaller(result="should-not-be-used")
+    ModelManagementProxy._rpc = caller
+    target = SimpleNamespace()
+
+    try:
+        ModelManagementProxy().install_into(target)
+        result = target.module_size(FakeModule())
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert result == 32
+    assert caller.calls == []
+
+
 def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch):
     caller = RecordingCaller(result="mapped")
     FolderPathsProxy._rpc = caller

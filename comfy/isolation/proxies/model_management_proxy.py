@@ -118,6 +118,7 @@ MODEL_MANAGEMENT_PUBLIC_CALLABLES = (
 )
 
 MODEL_MANAGEMENT_CUSTOM_SYMBOLS = (
+    "module_size",
     "archive_model_dtypes",
 )
 
@@ -254,6 +255,13 @@ class ModelManagementProxy(ProxiedSingleton):
                 setattr(module, f"{param_name}_comfy_model_dtype", param.dtype)
             for buf_name, buf in module.named_buffers(recurse=False):
                 setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
+
+    def module_size(self, module: Any) -> int:
+        module_mem = 0
+        state_dict = module.state_dict()
+        for key in state_dict:
+            module_mem += state_dict[key].nbytes
+        return module_mem
 
     @property
     def VRAMState(self):
