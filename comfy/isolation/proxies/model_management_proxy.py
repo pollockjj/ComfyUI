@@ -119,6 +119,7 @@ MODEL_MANAGEMENT_PUBLIC_CALLABLES = (
 )
 
 MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS = (
+    "cuda_device_context",
     "load_models_gpu",
     "load_model_gpu",
 )
