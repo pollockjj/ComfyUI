@@ -122,10 +122,18 @@ def test_drift_error_names_proxy_target_symbol_and_required_action():
     assert "relay, custom serialization, or unsupported classification" in message
 
 
-def test_model_management_install_materializes_concrete_relay_wrappers():
-    caller = RecordingCaller(result={"__pyisolate_torch_device__": "cpu"})
+def test_model_management_install_materializes_concrete_child_local_wrappers():
+    import torch
+
+    caller = RecordingCaller(result="should-not-be-used")
+
+    def get_torch_device(*args, **kwargs):
+        assert args == ("arg",)
+        assert kwargs == {"flag": True}
+        return torch.device("cpu")
+
+    target = SimpleNamespace(get_torch_device=get_torch_device)
     ModelManagementProxy._rpc = caller
-    target = SimpleNamespace()
 
     try:
         ModelManagementProxy().install_into(target)
@@ -136,22 +144,15 @@ def test_model_management_install_materializes_concrete_relay_wrappers():
     assert str(result) == "cpu"
     assert "get_torch_device" in vars(target)
     assert vars(target)["get_torch_device"].__name__ == "get_torch_device"
-    assert caller.calls == [
-        (
-            "rpc_call",
-            "get_torch_device",
-            {"__pyisolate_tuple__": ["arg"]},
-            {"flag": True},
-        )
-    ]
+    assert caller.calls == []
 
 
-def test_model_management_device_relay_deserializes_to_child_torch_device():
+def test_model_management_child_local_device_is_usable_by_torch_allocations():
     import torch
 
-    caller = RecordingCaller(result={"__pyisolate_torch_device__": "cpu"})
+    caller = RecordingCaller(result="should-not-be-used")
+    target = SimpleNamespace(get_torch_device=lambda: torch.device("cpu"))
     ModelManagementProxy._rpc = caller
-    target = SimpleNamespace()
 
     try:
         ModelManagementProxy().install_into(target)
@@ -161,6 +162,7 @@ def test_model_management_device_relay_deserializes_to_child_torch_device():
 
     assert result == torch.device("cpu")
     assert torch.empty((1,), device=result).device == torch.device("cpu")
+    assert caller.calls == []
 
 
 def test_model_management_archive_model_dtypes_stays_child_local():
@@ -274,6 +276,26 @@ def test_model_management_cuda_device_context_stays_child_local():
     finally:
         ModelManagementProxy.clear_rpc()
 
+    assert caller.calls == []
+
+
+def test_model_management_attention_capability_queries_stay_child_local():
+    caller = RecordingCaller(result="remote-result")
+    target = SimpleNamespace(
+        xformers_enabled=lambda: False,
+        pytorch_attention_flash_attention=lambda: True,
+    )
+    ModelManagementProxy._rpc = caller
+
+    try:
+        ModelManagementProxy().install_into(target)
+        xformers = target.xformers_enabled()
+        flash_attention = target.pytorch_attention_flash_attention()
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert xformers is False
+    assert flash_attention is True
     assert caller.calls == []
 
 
