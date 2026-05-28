@@ -43,3 +43,17 @@ def test_inner_model_proxy_state_dict_callable():
 
     inner = proxy.model
     assert callable(inner.state_dict)
+
+
+def test_model_patcher_proxy_prepare_state_matches_comfy_signature():
+    proxy = object.__new__(ModelPatcherProxy)
+    proxy._model_id = "test_model"
+    proxy._rpc = MagicMock()
+    proxy._call_rpc = MagicMock(return_value=None)
+
+    timestep = object()
+    model_options = {"transformer_options": {}}
+
+    proxy.prepare_state(timestep, model_options)
+
+    proxy._call_rpc.assert_called_once_with("prepare_state", timestep, model_options)
