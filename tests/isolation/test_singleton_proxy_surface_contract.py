@@ -250,6 +250,33 @@ def test_model_management_load_models_gpu_stays_child_local_for_child_patchers()
     assert caller.calls == []
 
 
+def test_model_management_cuda_device_context_stays_child_local():
+    class FakeContext:
+        def __enter__(self):
+            return "entered"
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    caller = RecordingCaller(result="remote-result")
+
+    def cuda_device_context(device):
+        assert device == "cuda:0"
+        return FakeContext()
+
+    target = SimpleNamespace(cuda_device_context=cuda_device_context)
+    ModelManagementProxy._rpc = caller
+
+    try:
+        ModelManagementProxy().install_into(target)
+        with target.cuda_device_context("cuda:0") as result:
+            assert result == "entered"
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert caller.calls == []
+
+
 def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch):
     caller = RecordingCaller(result="mapped")
     FolderPathsProxy._rpc = caller
