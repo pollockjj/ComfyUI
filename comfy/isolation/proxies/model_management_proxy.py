@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Any, Optional
 
 from pyisolate import ProxiedSingleton
@@ -117,9 +118,15 @@ MODEL_MANAGEMENT_PUBLIC_CALLABLES = (
     "throw_exception_if_processing_interrupted",
 )
 
+MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS = (
+    "load_models_gpu",
+    "load_model_gpu",
+)
+
 MODEL_MANAGEMENT_CUSTOM_SYMBOLS = (
     "module_size",
     "archive_model_dtypes",
+    *MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS,
 )
 
 MODEL_MANAGEMENT_RELAY_SYMBOLS = tuple(
@@ -246,7 +253,42 @@ class ModelManagementProxy(ProxiedSingleton):
         )
         return _deserialize_value(payload)
 
+    @contextmanager
+    def _restore_original_target_symbols(self):
+        target_module = getattr(self, "_target_module", None)
+        original_symbols = getattr(self, "_original_symbols", None)
+        if target_module is None or original_symbols is None:
+            raise RuntimeError("ModelManagementProxy child-local symbols are not installed")
+
+        installed_symbols = {
+            name: getattr(target_module, name)
+            for name in original_symbols
+            if hasattr(target_module, name)
+        }
+        try:
+            for name, original in original_symbols.items():
+                setattr(target_module, name, original)
+            yield
+        finally:
+            for name, installed in installed_symbols.items():
+                setattr(target_module, name, installed)
+
+    def _local_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        original_symbols = getattr(self, "_original_symbols", None)
+        if original_symbols is None or method_name not in original_symbols:
+            raise RuntimeError(
+                f"ModelManagementProxy.{method_name} has no child-local target symbol"
+            )
+        with self._restore_original_target_symbols():
+            return original_symbols[method_name](*args, **kwargs)
+
     def install_into(self, target_module: Any) -> dict[str, tuple[str, ...]]:
+        self._target_module = target_module
+        self._original_symbols = {
+            name: getattr(target_module, name)
+            for name in MODEL_MANAGEMENT_PUBLIC_CALLABLES
+            if hasattr(target_module, name)
+        }
         return install_singleton_module_proxy(
             target_module,
             self,
@@ -293,3 +335,20 @@ class ModelManagementProxy(ProxiedSingleton):
         method = getattr(_mm(), method_name)
         result = method(*normalized_args, **normalized_kwargs)
         return _serialize_value(result)
+
+
+def _make_child_local_model_management_method(method_name: str):
+    def child_local_method(self: ModelManagementProxy, *args: Any, **kwargs: Any) -> Any:
+        return self._local_call(method_name, *args, **kwargs)
+
+    child_local_method.__name__ = method_name
+    child_local_method.__qualname__ = f"ModelManagementProxy.{method_name}"
+    return child_local_method
+
+
+for _method_name in MODEL_MANAGEMENT_CHILD_LOCAL_SYMBOLS:
+    setattr(
+        ModelManagementProxy,
+        _method_name,
+        _make_child_local_model_management_method(_method_name),
+    )

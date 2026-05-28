@@ -227,6 +227,29 @@ def test_model_management_module_size_stays_child_local():
     assert caller.calls == []
 
 
+def test_model_management_load_models_gpu_stays_child_local_for_child_patchers():
+    calls = []
+    caller = RecordingCaller(result="remote-result")
+
+    def load_models_gpu(models, **kwargs):
+        calls.append((models, kwargs))
+        return "local-result"
+
+    target = SimpleNamespace(load_models_gpu=load_models_gpu)
+    ModelManagementProxy._rpc = caller
+
+    try:
+        ModelManagementProxy().install_into(target)
+        patcher = object()
+        result = target.load_models_gpu([patcher], memory_required=32)
+    finally:
+        ModelManagementProxy.clear_rpc()
+
+    assert result == "local-result"
+    assert calls == [([patcher], {"memory_required": 32})]
+    assert caller.calls == []
+
+
 def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch):
     caller = RecordingCaller(result="mapped")
     FolderPathsProxy._rpc = caller
