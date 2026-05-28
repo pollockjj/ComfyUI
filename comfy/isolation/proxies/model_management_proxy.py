@@ -117,11 +117,21 @@ MODEL_MANAGEMENT_PUBLIC_CALLABLES = (
     "throw_exception_if_processing_interrupted",
 )
 
+MODEL_MANAGEMENT_CUSTOM_SYMBOLS = (
+    "archive_model_dtypes",
+)
+
+MODEL_MANAGEMENT_RELAY_SYMBOLS = tuple(
+    name for name in MODEL_MANAGEMENT_PUBLIC_CALLABLES
+    if name not in MODEL_MANAGEMENT_CUSTOM_SYMBOLS
+)
+
 MODEL_MANAGEMENT_SINGLETON_CONTRACT = SingletonProxyContract(
     proxy_name="ModelManagementProxy",
     target_name="comfy.model_management",
     target_public_symbols=MODEL_MANAGEMENT_PUBLIC_CALLABLES,
-    relay_symbols=MODEL_MANAGEMENT_PUBLIC_CALLABLES,
+    relay_symbols=MODEL_MANAGEMENT_RELAY_SYMBOLS,
+    custom_symbols=MODEL_MANAGEMENT_CUSTOM_SYMBOLS,
 )
 
 
@@ -237,6 +247,13 @@ class ModelManagementProxy(ProxiedSingleton):
             self,
             MODEL_MANAGEMENT_SINGLETON_CONTRACT,
         )
+
+    def archive_model_dtypes(self, model: Any) -> None:
+        for _name, module in model.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                setattr(module, f"{param_name}_comfy_model_dtype", param.dtype)
+            for buf_name, buf in module.named_buffers(recurse=False):
+                setattr(module, f"{buf_name}_comfy_model_dtype", buf.dtype)
 
     @property
     def VRAMState(self):
