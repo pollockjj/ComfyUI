@@ -323,6 +323,31 @@ def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch
     ]
 
 
+def test_folder_paths_sandbox_child_temp_directory_stays_child_local(monkeypatch):
+    import tempfile
+
+    caller = RecordingCaller(result="should-not-be-used")
+    FolderPathsProxy._rpc = caller
+    target = SimpleNamespace()
+    temp_root = REPO_ROOT / "scratch" / "pytest-temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PYISOLATE_CHILD", "1")
+    monkeypatch.setenv("PYISOLATE_SANDBOX_MODE", "required")
+    monkeypatch.setenv("TMPDIR", str(temp_root))
+    tempfile.tempdir = None
+
+    try:
+        FolderPathsProxy().install_into(target)
+        result = target.get_temp_directory()
+    finally:
+        FolderPathsProxy.clear_rpc()
+        tempfile.tempdir = None
+
+    assert result == str(temp_root / "comfyui_temp")
+    assert Path(result).is_dir()
+    assert caller.calls == []
+
+
 def test_prompt_server_unsupported_methods_fail_loudly():
     stub = PromptServerStub()
 
