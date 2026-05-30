@@ -175,7 +175,6 @@ class MMArg:
 
 def safe_pad_operation(x, padding, mode='constant', value=0.0):
     """Safe padding operation that handles Half precision only for problematic modes"""
-    # Modes qui nécessitent le fix Half precision
     problematic_modes = ['replicate', 'reflect', 'circular']
 
     if mode in problematic_modes:
@@ -188,7 +187,6 @@ def safe_pad_operation(x, padding, mode='constant', value=0.0):
             else:
                 raise e
     else:
-        # Pour 'constant' et autres modes compatibles, pas de fix nécessaire
         return F.pad(x, padding, mode=mode, value=value)
 
 
@@ -557,14 +555,7 @@ def apply_rotary_emb(
     return out.type(dtype)
 
 def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
-    """Convert lucidrains-interleaved freqs `[..., d]` (`[θ0, θ0, θ1, θ1, ...]`
-    from `RotaryEmbedding.forward`'s `repeat(freqs, '... n -> ... (n r)', r=2)`)
-    into flux-canonical `freqs_cis` of shape `[..., d/2, 2, 2]` with the
-    `cos/-sin/sin/cos` rotation matrix baked in. Output dtype is fp32 to
-    match `comfy/ldm/flux/math.py:rope` precision; `apply_rope1` consumes
-    the matrix layout via `freqs_cis[..., 0]` (column 0) and
-    `freqs_cis[..., 1]` (column 1) of the 2x2 rotation matrix.
-    """
+    """Convert lucidrains-interleaved freqs to flux-canonical freqs_cis `[..., d/2, 2, 2]` (fp32 per comfy/ldm/flux/math.py:rope)."""
     angles = freqs_interleaved[..., ::2].float()
     cos = torch.cos(angles)
     sin = torch.sin(angles)
@@ -573,17 +564,7 @@ def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
-    components of ``t``'s last dim, passing through the remaining dims
-    untouched in-place for inference tensors. Training tensors are cloned
-    before slice assignment to preserve autograd correctness. Mirrors the partial-rope contract of the legacy
-    ``apply_rotary_emb`` wrapper at line 470 (``t_left``/``t_middle``/``t_right``
-    split). For SeedVR2-3B this matters because ``rope_dim=128`` integer-
-    divides into 3 axes as ``128 // 3 = 42`` per-axis, total ``42 * 3 = 126``;
-    head_dim is 128, so the trailing 2 dims are unrotated. The fast path
-    triggers when ``rot_d == t.shape[-1]`` (e.g. test rigs where dim is
-    chosen divisible by 6) and avoids the cat entirely.
-    """
+    """Apply apply_rope1 to the leading rot_d=2*freqs_cis.shape[-3] dims of t, passing through the rest."""
     out = t.clone() if t.requires_grad or comfy.model_management.in_training else t
     rot_d = 2 * freqs_cis.shape[-3]
     seq_len = out.shape[-2]
@@ -681,13 +662,6 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
         vid_freqs_interleaved = torch.cat(vid_freq_list, dim=0)
         txt_freqs_interleaved = torch.cat(txt_freq_list, dim=0)
 
-        # Convert from lucidrains-interleaved layout `[θ0, θ0, θ1, θ1, ...]`
-        # (produced by `repeat(freqs, '... n -> ... (n r)', r=2)` in the
-        # upstream `RotaryEmbedding.forward`) to flux-canonical `freqs_cis`
-        # in shape `[..., d/2, 2, 2]` with `cos/-sin/sin/cos` baked in.
-        # Mirrors `comfy/ldm/flux/math.py:rope` (line 27) so the trailing
-        # 2x2 is the per-frequency rotation matrix that
-        # `comfy.ldm.flux.math.apply_rope1` expects.
         return _to_flux_freqs_cis(vid_freqs_interleaved), _to_flux_freqs_cis(txt_freqs_interleaved)
 
 class MMModule(nn.Module):
@@ -1221,8 +1195,7 @@ class AdaSingle(nn.Module):
 
         for l in layers:
             if "in" in modes:
-                # Passing fp8 ``dtype=`` here would break CPU weight
-                # loads: CPU has no ``normal_kernel_cpu`` for fp8.
+                # fp8 dtype= here breaks CPU loads: no normal_kernel_cpu for fp8
                 self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
                 self.register_parameter(
                     f"{l}_scale", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5 + 1)
@@ -1407,18 +1380,7 @@ class NaDiT(nn.Module):
         elif len(block_type) != num_layers:
             raise ValueError("The ``block_type`` list should equal to ``num_layers``.")
         super().__init__()
-        # ``torch.empty`` returns uninitialized memory, not zeros. The
-        # SeedVR2Conditioning fail-loud guard at
-        # ``comfy_extras/nodes_seedvr.py`` distinguishes "buffer was loaded"
-        # from "buffer was never populated by the file" by checking
-        # ``positive_conditioning.abs().sum() == 0``. That sentinel is only
-        # reliable if the post-construction buffer state is deterministically
-        # zero, so explicitly zero-fill here rather than relying on the
-        # allocator's zero-on-alloc behavior (allocator-dependent and not
-        # contractual). When ``load_state_dict`` populates these buffers
-        # from a properly-baked SeedVR2 .safetensors, the in-place copy
-        # overwrites the zeros with the universal SeedVR2 conditioning
-        # tensors (shape (58, 5120) and (64, 5120) bf16).
+        # fail-loud: zero-fill so the SeedVR2Conditioning abs().sum()==0 "never-loaded" sentinel is deterministic
         self.register_buffer("positive_conditioning", torch.zeros((58, 5120), device=device, dtype=dtype))
         self.register_buffer("negative_conditioning", torch.zeros((64, 5120), device=device, dtype=dtype))
         self.vid_in = NaPatchIn(
@@ -1541,10 +1503,6 @@ class NaDiT(nn.Module):
     def _swap_pos_neg_halves(self, out, cond_or_uncond=None):
         if NaDiT._seedvr2_is_single_conditioning_branch(cond_or_uncond):
             return out
-        # ``dim=0`` is explicit on both calls. The contract is "split
-        # the batch axis into two halves and swap them"; making the
-        # axis load-bearing in source guards against silent drift if a
-        # future refactor reorders tensor axes.
         pos, neg = out.chunk(2, dim=0)
         return torch.cat([neg, pos], dim=0)
 
