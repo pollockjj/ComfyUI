@@ -9,7 +9,7 @@ import gc
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
-from comfy.ldm.seedvr.vae import (
+from comfy.ldm.seedvr.color_fix import (
     adain_color_transfer,
     lab_color_transfer,
     wavelet_color_transfer,
