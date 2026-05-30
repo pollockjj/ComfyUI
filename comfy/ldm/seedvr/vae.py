@@ -10,6 +10,27 @@ from contextlib import contextmanager
 from comfy.utils import ProgressBar
 
 from comfy.ldm.seedvr.model import safe_pad_operation
+from comfy.ldm.seedvr.constants import (
+    BYTEDANCE_BLOCK_OUT_CHANNELS,
+    BYTEDANCE_CONTIGUOUS_BATCH_THRESHOLD,
+    BYTEDANCE_GN_CHUNKS_FP16,
+    BYTEDANCE_GN_CHUNKS_FP32,
+    BYTEDANCE_LOGVAR_CLAMP_MAX,
+    BYTEDANCE_LOGVAR_CLAMP_MIN,
+    BYTEDANCE_SLICING_SAMPLE_MIN,
+    BYTEDANCE_VAE_CONV_MEM_GIB,
+    BYTEDANCE_VAE_NORM_MEM_GIB,
+    BYTEDANCE_VAE_SCALING_FACTOR,
+    BYTEDANCE_VAE_SHIFTING_FACTOR,
+    BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE,
+    BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE,
+    CIELAB_DELTA,
+    CIELAB_KAPPA,
+    D65_WHITE_X,
+    D65_WHITE_Z,
+    SEEDVR2_LATENT_CHANNELS,
+    WAVELET_DECOMP_LEVELS,
+)
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.modules.diffusionmodules.model import vae_attention
 
@@ -70,8 +91,8 @@ def tiled_vae(
 
     _, _, d, h, w = x.shape
 
-    sf_s = getattr(vae_model, "spatial_downsample_factor", 8)
-    sf_t = getattr(vae_model, "temporal_downsample_factor", 4)
+    sf_s = getattr(vae_model, "spatial_downsample_factor", BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE)
+    sf_t = getattr(vae_model, "temporal_downsample_factor", BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE)
     if encode:
         slicing_attr = "slicing_sample_min_size"
         slicing_min_size = _seedvr2_temporal_slicing_min_size(temporal_size, temporal_overlap)
@@ -278,7 +299,7 @@ class DiagonalGaussianDistribution(object):
     def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
         self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.logvar = torch.clamp(self.logvar, BYTEDANCE_LOGVAR_CLAMP_MIN, BYTEDANCE_LOGVAR_CLAMP_MAX)
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
@@ -569,7 +590,7 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
             x = rearrange(x, "b c t h w -> (b t) c h w")
             memory_occupy = x.numel() * x.element_size() / 1024**3
             if isinstance(norm_layer, ops.GroupNorm) and memory_occupy > get_norm_limit():
-                num_chunks = min(4 if x.element_size() == 2 else 2, norm_layer.num_groups)
+                num_chunks = min(BYTEDANCE_GN_CHUNKS_FP16 if x.element_size() == 2 else BYTEDANCE_GN_CHUNKS_FP32, norm_layer.num_groups)
                 assert norm_layer.num_groups % num_chunks == 0
                 num_groups_per_chunk = norm_layer.num_groups // num_chunks
 
@@ -1189,7 +1210,7 @@ class ResnetBlock3D(nn.Module):
         hidden_states = self.nonlinearity(hidden_states)
 
         if self.upsample is not None:
-            if hidden_states.shape[0] >= 64:
+            if hidden_states.shape[0] >= BYTEDANCE_CONTIGUOUS_BATCH_THRESHOLD:
                 input_tensor = input_tensor.contiguous()
                 hidden_states = hidden_states.contiguous()
             input_tensor = self.upsample(input_tensor, memory_state=memory_state)
@@ -1800,7 +1821,7 @@ def wavelet_blur(image: Tensor, radius):
 
     return output
 
-def wavelet_decomposition(image: Tensor, levels: int = 5):
+def wavelet_decomposition(image: Tensor, levels: int = WAVELET_DECOMP_LEVELS):
     high_freq = torch.zeros_like(image)
 
     for i in range(levels):
@@ -1908,9 +1929,9 @@ def _lab_to_rgb_batch(lab: Tensor, device: torch.device, matrix_inv: Tensor, eps
     del fx, fy, fz
 
     # Apply D65 white point (in-place)
-    x.mul_(0.95047)
+    x.mul_(D65_WHITE_X)
     # y *= 1.00000  # (no-op, skip)
-    z.mul_(1.08883)
+    z.mul_(D65_WHITE_Z)
 
     xyz = torch.stack([x, y, z], dim=1)
     del x, y, z
@@ -1964,9 +1985,9 @@ def _rgb_to_lab_batch(rgb: Tensor, device: torch.device, matrix: Tensor, epsilon
     del xyz_flat
 
     # Normalize by D65 white point (in-place)
-    xyz[:, 0].div_(0.95047)  # X
+    xyz[:, 0].div_(D65_WHITE_X)  # X
     # xyz[:, 1] /= 1.00000  # Y (no-op, skip)
-    xyz[:, 2].div_(1.08883)  # Z
+    xyz[:, 2].div_(D65_WHITE_Z)  # Z
 
     # XYZ to LAB transformation
     epsilon_cubed = epsilon ** 3
@@ -2022,8 +2043,8 @@ def lab_color_transfer(
         [ 0.0556434, -0.2040259,  1.0572252]
     ], dtype=torch.float32, device=device)
 
-    epsilon = 6.0 / 29.0
-    kappa = (29.0 / 3.0) ** 3
+    epsilon = CIELAB_DELTA
+    kappa = CIELAB_KAPPA
 
     content_feat.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
     style_feat.add_(1.0).mul_(0.5).clamp_(0.0, 1.0)
@@ -2114,7 +2135,7 @@ class VideoAutoencoderKL(nn.Module):
         out_channels: int = 3,
         layers_per_block: int = 2,
         act_fn: str = "silu",
-        latent_channels: int = 16,
+        latent_channels: int = SEEDVR2_LATENT_CHANNELS,
         norm_num_groups: int = 32,
         attention: bool = True,
         temporal_scale_num: int = 2,
@@ -2124,14 +2145,14 @@ class VideoAutoencoderKL(nn.Module):
         time_receptive_field: _receptive_field_t = "full",
         use_quant_conv: bool = False,
         use_post_quant_conv: bool = False,
-        slicing_sample_min_size = 4,
+        slicing_sample_min_size = BYTEDANCE_SLICING_SAMPLE_MIN,
         *args,
         **kwargs,
     ):
         self.slicing_sample_min_size = slicing_sample_min_size
         self.slicing_latent_min_size = slicing_sample_min_size // (2**temporal_scale_num)
         extra_cond_dim = kwargs.pop("extra_cond_dim") if "extra_cond_dim" in kwargs else None
-        block_out_channels = (128, 256, 512, 512)
+        block_out_channels = BYTEDANCE_BLOCK_OUT_CHANNELS
         down_block_types = ("DownEncoderBlock3D",) * 4
         up_block_types = ("UpDecoderBlock3D",) * 4
         super().__init__()
@@ -2329,7 +2350,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.freeze_encoder = freeze_encoder
         self.enable_tiling = False
         super().__init__(*args, **kwargs)
-        self.set_memory_limit(0.5, 0.5)
+        self.set_memory_limit(BYTEDANCE_VAE_CONV_MEM_GIB, BYTEDANCE_VAE_NORM_MEM_GIB)
 
     def forward(self, x: torch.FloatTensor):
         with torch.no_grad() if self.freeze_encoder else nullcontext():
@@ -2377,8 +2398,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 "4-D collapsed (B, 16*T, H, W) or 5-D (B, 16, T, H, W); "
                 f"got shape {tuple(z.shape)}."
             )
-        scale = 0.9152
-        shift = 0
+        scale = BYTEDANCE_VAE_SCALING_FACTOR
+        shift = BYTEDANCE_VAE_SHIFTING_FACTOR
         latent = latent / scale + shift
 
         self.device = latent.device
