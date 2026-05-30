@@ -14,6 +14,19 @@ from comfy.ldm.seedvr.vae import (
     lab_color_transfer,
     wavelet_color_transfer,
 )
+from comfy.ldm.seedvr.constants import (
+    BYTEDANCE_IMG_SHIFT_FIT,
+    BYTEDANCE_SCHEDULE_T,
+    BYTEDANCE_VID_SHIFT_FIT,
+    SEEDVR2_ADAIN_SCALE_MULTIPLIER,
+    SEEDVR2_COLOR_MEM_HEADROOM,
+    SEEDVR2_COND_CHANNELS,
+    SEEDVR2_DTYPE_BYTES_FLOOR,
+    SEEDVR2_LAB_SCALE_MULTIPLIER,
+    SEEDVR2_LATENT_CHANNELS,
+    SEEDVR2_OOM_BACKOFF_DIVISOR,
+    SEEDVR2_WAVELET_SCALE_MULTIPLIER,
+)
 
 from torchvision.transforms import functional as TVF
 from torchvision.transforms import Lambda
@@ -23,10 +36,6 @@ from torchvision.transforms.functional import InterpolationMode
 _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
     "SeedVR2Conditioning: model object does not match expected SeedVR2 structure"
 )
-LAB_SCALE_MULTIPLIER = 13
-WAVELET_SCALE_MULTIPLIER = 10
-ADAIN_SCALE_MULTIPLIER = 6
-COLOR_CORRECTION_MEMORY_HEADROOM = 0.75
 
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
@@ -140,8 +149,8 @@ def timestep_transform(timesteps, latents_shapes):
         b = y1 - m * x1
         return lambda x: m * x + b
 
-    img_shift_fn = get_lin_function(x1=256 * 256, y1=1.0, x2=1024 * 1024, y2=3.2)
-    vid_shift_fn = get_lin_function(x1=256 * 256 * 37, y1=1.0, x2=1280 * 720 * 145, y2=5.0)
+    img_shift_fn = get_lin_function(*BYTEDANCE_IMG_SHIFT_FIT)
+    vid_shift_fn = get_lin_function(*BYTEDANCE_VID_SHIFT_FIT)
     shift = torch.where(
         frames > 1,
         vid_shift_fn(heights * widths * frames),
@@ -149,7 +158,7 @@ def timestep_transform(timesteps, latents_shapes):
     ).to(timesteps.device)
 
     # Shift timesteps.
-    T = 1000.0
+    T = BYTEDANCE_SCHEDULE_T
     timesteps = timesteps / T
     timesteps = shift * timesteps / (1 + (shift - 1) * timesteps)
     timesteps = timesteps * T
@@ -157,7 +166,7 @@ def timestep_transform(timesteps, latents_shapes):
 
 def inter(x_0, x_T, t):
     t = expand_dims(t, x_0.ndim)
-    T = 1000.0
+    T = BYTEDANCE_SCHEDULE_T
     B = lambda t: t / T
     A = lambda t: 1 - (t / T)
     return A(t) * x_0 + B(t) * x_T
@@ -472,7 +481,7 @@ class SeedVR2PostProcessing(io.ComfyNode):
                         "SeedVR2PostProcessing: color correction OOM at one frame; "
                         f"color_correction_method={color_correction_method}, shape={tuple(decoded_flat.shape)}."
                     ) from e
-                next_chunk_size = max(1, chunk_size // 2)
+                next_chunk_size = max(1, chunk_size // SEEDVR2_OOM_BACKOFF_DIVISOR)
 
             comfy.model_management.soft_empty_cache()
             chunk_size = next_chunk_size
@@ -510,23 +519,23 @@ class SeedVR2PostProcessing(io.ComfyNode):
         multiplier = cls._color_correction_memory_multiplier(color_correction_method)
         frames = decoded_flat.shape[0]
         _, channels, height, width = decoded_flat.shape
-        dtype_bytes = max(decoded_flat.element_size(), 4)
+        dtype_bytes = max(decoded_flat.element_size(), SEEDVR2_DTYPE_BYTES_FLOOR)
         bytes_per_frame = height * width * channels * dtype_bytes * multiplier
         if bytes_per_frame <= 0:
             return frames
         color_device = comfy.model_management.vae_device()
         free_memory = comfy.model_management.get_free_memory(color_device)
-        chunk_size = int((free_memory * COLOR_CORRECTION_MEMORY_HEADROOM) // bytes_per_frame)
+        chunk_size = int((free_memory * SEEDVR2_COLOR_MEM_HEADROOM) // bytes_per_frame)
         return max(1, min(frames, chunk_size))
 
     @staticmethod
     def _color_correction_memory_multiplier(color_correction_method):
         if color_correction_method == "lab":
-            return LAB_SCALE_MULTIPLIER
+            return SEEDVR2_LAB_SCALE_MULTIPLIER
         if color_correction_method == "wavelet":
-            return WAVELET_SCALE_MULTIPLIER
+            return SEEDVR2_WAVELET_SCALE_MULTIPLIER
         if color_correction_method == "adain":
-            return ADAIN_SCALE_MULTIPLIER
+            return SEEDVR2_ADAIN_SCALE_MULTIPLIER
         raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
 
     @staticmethod
@@ -571,10 +580,10 @@ class SeedVR2Conditioning(io.ComfyNode):
                 "SeedVR2Conditioning expects a 5-D VAE latent in Comfy "
                 f"channel-first layout; got shape {tuple(vae_conditioning.shape)}."
             )
-        if vae_conditioning.shape[-1] == _SEEDVR2_LATENT_CHANNELS and vae_conditioning.shape[1] != _SEEDVR2_LATENT_CHANNELS:
+        if vae_conditioning.shape[-1] == SEEDVR2_LATENT_CHANNELS and vae_conditioning.shape[1] != SEEDVR2_LATENT_CHANNELS:
             raise ValueError(
                 "SeedVR2Conditioning expects SeedVR2 VAE latents in Comfy "
-                f"channel-first layout (B, {_SEEDVR2_LATENT_CHANNELS}, T, H, W); "
+                f"channel-first layout (B, {SEEDVR2_LATENT_CHANNELS}, T, H, W); "
                 f"got channel-last shape {tuple(vae_conditioning.shape)}."
             )
         vae_conditioning = vae_conditioning.movedim(1, -1).contiguous()
@@ -621,15 +630,6 @@ class SeedVR2Conditioning(io.ComfyNode):
         positive = [[pos_cond.unsqueeze(0), {"condition": condition}]]
 
         return io.NodeOutput(model_patcher, positive, negative, {"samples": latent})
-
-# SeedVR2 latent / conditioning channel constants. The SeedVR2 conditioning
-# stage collapses ``(B, C, T, H, W) -> (B, C*T, H, W)`` for both the latent
-# (C=16) and the per-frame condition tensor (C=17 = 16 latent + 1 mask), as
-# required by ``NaDiT.forward`` which un-collapses via
-# ``view(B, 16, -1, H, W)`` and ``view(B, 17, -1, H, W)`` respectively.
-_SEEDVR2_LATENT_CHANNELS = 16
-_SEEDVR2_CONDITION_CHANNELS = 17
-
 
 def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
                                  t_end: int, channels: int) -> torch.Tensor:
@@ -683,7 +683,7 @@ def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
         new_options = options.copy()
         new_options["condition"] = _slice_collapsed_4d_along_t(
             new_options["condition"], t_start, t_end,
-            _SEEDVR2_CONDITION_CHANNELS,
+            SEEDVR2_COND_CHANNELS,
         )
         new_list.append([text_cond, new_options])
     return new_list
@@ -701,7 +701,7 @@ def _slice_seedvr2_noise_mask_along_t(noise_mask: torch.Tensor,
     """
     if noise_mask.ndim == samples_4d.ndim and noise_mask.shape[1] == samples_4d.shape[1]:
         return _slice_collapsed_4d_along_t(
-            noise_mask, t_start, t_end, _SEEDVR2_LATENT_CHANNELS,
+            noise_mask, t_start, t_end, SEEDVR2_LATENT_CHANNELS,
         )
     return noise_mask
 
@@ -999,14 +999,14 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 f"(B, 16*T, H, W); got shape {tuple(samples_4d.shape)}."
             )
         B, CT, H, W = samples_4d.shape
-        if CT % _SEEDVR2_LATENT_CHANNELS != 0:
+        if CT % SEEDVR2_LATENT_CHANNELS != 0:
             raise ValueError(
                 f"SeedVR2ProgressiveSampler: collapsed channel dim {CT} is "
                 f"not divisible by SeedVR2 latent channels "
-                f"{_SEEDVR2_LATENT_CHANNELS}; latent does not appear to be "
+                f"{SEEDVR2_LATENT_CHANNELS}; latent does not appear to be "
                 f"SeedVR2-shaped."
             )
-        T_latent = CT // _SEEDVR2_LATENT_CHANNELS
+        T_latent = CT // SEEDVR2_LATENT_CHANNELS
         T_pixel = 4 * (T_latent - 1) + 1
 
         if chunking_mode not in ("manual", "auto"):
@@ -1106,11 +1106,11 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         def _sample_one_chunk(chunk_start, chunk_end):
             samples_chunk = _slice_collapsed_4d_along_t(
                 samples_4d, chunk_start, chunk_end,
-                _SEEDVR2_LATENT_CHANNELS,
+                SEEDVR2_LATENT_CHANNELS,
             )
             noise_chunk = _slice_collapsed_4d_along_t(
                 noise_full, chunk_start, chunk_end,
-                _SEEDVR2_LATENT_CHANNELS,
+                SEEDVR2_LATENT_CHANNELS,
             )
             positive_chunk = _slice_seedvr2_cond_along_t(
                 positive, chunk_start, chunk_end,
@@ -1140,7 +1140,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             chunk_specs.append((chunk_start, chunk_end, chunk_samples))
 
         final = _concat_chunks_with_overlap_blend(
-            chunk_specs, _SEEDVR2_LATENT_CHANNELS, temporal_overlap,
+            chunk_specs, SEEDVR2_LATENT_CHANNELS, temporal_overlap,
         )
 
         out = latent_image.copy()

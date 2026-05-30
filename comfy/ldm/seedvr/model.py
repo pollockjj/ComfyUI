@@ -12,6 +12,16 @@ from torch.nn.modules.utils import _triple
 from torch import nn
 import math
 from comfy.ldm.flux.math import apply_rope1
+from comfy.ldm.seedvr.constants import (
+    BYTEDANCE_720P_REF_AREA,
+    BYTEDANCE_MAX_TEMPORAL_WINDOW,
+    BYTEDANCE_ROPE_MAX_FREQ,
+    BYTEDANCE_SINUSOIDAL_DIM,
+    ROPE_THETA,
+    SEEDVR2_7B_MLP_CHUNK,
+    SEEDVR2_7B_VID_DIM,
+    SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS,
+)
 import comfy.model_management
 import numbers
 
@@ -203,10 +213,10 @@ def make_720Pwindows_bysize(size: Tuple[int, int, int], num_windows: Tuple[int, 
     t, h, w = size
     resized_nt, resized_nh, resized_nw = num_windows
     #cal windows under 720p
-    scale = math.sqrt((45 * 80) / (h * w))
+    scale = math.sqrt(BYTEDANCE_720P_REF_AREA / (h * w))
     resized_h, resized_w = round(h * scale), round(w * scale)
     wh, ww = ceil(resized_h / resized_nh), ceil(resized_w / resized_nw)  # window size.
-    wt = ceil(min(t, 30) / resized_nt)  # window size.
+    wt = ceil(min(t, BYTEDANCE_MAX_TEMPORAL_WINDOW) / resized_nt)  # window size.
     nt, nh, nw = ceil(t / wt), ceil(h / wh), ceil(w / ww)  # window size.
     return [
         (
@@ -226,10 +236,10 @@ def make_shifted_720Pwindows_bysize(size: Tuple[int, int, int], num_windows: Tup
     t, h, w = size
     resized_nt, resized_nh, resized_nw = num_windows
     #cal windows under 720p
-    scale = math.sqrt((45 * 80) / (h * w))
+    scale = math.sqrt(BYTEDANCE_720P_REF_AREA / (h * w))
     resized_h, resized_w = round(h * scale), round(w * scale)
     wh, ww = ceil(resized_h / resized_nh), ceil(resized_w / resized_nw)  # window size.
-    wt = ceil(min(t, 30) / resized_nt)  # window size.
+    wt = ceil(min(t, BYTEDANCE_MAX_TEMPORAL_WINDOW) / resized_nt)  # window size.
 
     st, sh, sw = (  # shift size.
         0.5 if wt < t else 0,
@@ -412,7 +422,7 @@ class RotaryEmbeddingBase(nn.Module):
         self.rope = RotaryEmbedding(
             dim=dim // rope_dim,
             freqs_for="pixel",
-            max_freq=256,
+            max_freq=BYTEDANCE_ROPE_MAX_FREQ,
         )
         freqs = self.rope.freqs
         del self.rope.freqs
@@ -486,7 +496,7 @@ class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
         self.rope = RotaryEmbedding(
             dim=dim // rope_dim,
             freqs_for="lang",
-            theta=10000,
+            theta=ROPE_THETA,
             cache_if_possible=False,
         )
         freqs = self.rope.freqs
@@ -562,10 +572,6 @@ def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
     return rearrange(out, "... d (i j) -> ... d i j", i=2, j=2)
 
 
-_ROPE1_PARTIAL_CHUNK_TOKENS = 4096
-SEEDVR2_7B_MLP_CHUNK = 8192
-
-
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
     components of ``t``'s last dim, passing through the remaining dims
@@ -581,8 +587,8 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     out = t.clone() if t.requires_grad or comfy.model_management.in_training else t
     rot_d = 2 * freqs_cis.shape[-3]
     seq_len = out.shape[-2]
-    for start in range(0, seq_len, _ROPE1_PARTIAL_CHUNK_TOKENS):
-        end = min(start + _ROPE1_PARTIAL_CHUNK_TOKENS, seq_len)
+    for start in range(0, seq_len, SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS):
+        end = min(start + SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS, seq_len)
         freqs_chunk = freqs_cis[start:end]
         if rot_d == out.shape[-1]:
             out[..., start:end, :] = apply_rope1(out[..., start:end, :], freqs_chunk).to(out.dtype)
@@ -1385,7 +1391,7 @@ class NaDiT(nn.Module):
         operations = None,
         **kwargs,
     ):
-        self._7b_version = vid_dim == 3072
+        self._7b_version = vid_dim == SEEDVR2_7B_VID_DIM
         self.dtype = dtype
         factory_kwargs = {"device": device, "dtype": dtype}
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
@@ -1427,7 +1433,7 @@ class NaDiT(nn.Module):
             else nn.Identity()
         )
         self.emb_in = TimeEmbedding(
-            sinusoidal_dim=256,
+            sinusoidal_dim=BYTEDANCE_SINUSOIDAL_DIM,
             hidden_dim=max(vid_dim, txt_dim),
             output_dim=emb_dim,
             device=device, dtype=dtype, operations=operations
