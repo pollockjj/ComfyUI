@@ -225,6 +225,8 @@ def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
             f"{node_name}: resolved upscaled_shorter_edge must be at least 2 pixels; "
             f"got {upscaled_shorter_edge}."
         )
+    if images.shape[-1] > 3:
+        images = images[..., :3]
     original_image = images
     if images.dim() == 4:
         # Comfy video components arrive as a 4-D IMAGE frame sequence:
