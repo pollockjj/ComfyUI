@@ -557,14 +557,7 @@ def apply_rotary_emb(
     return out.type(dtype)
 
 def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
-    """Convert lucidrains-interleaved freqs `[..., d]` (`[θ0, θ0, θ1, θ1, ...]`
-    from `RotaryEmbedding.forward`'s `repeat(freqs, '... n -> ... (n r)', r=2)`)
-    into flux-canonical `freqs_cis` of shape `[..., d/2, 2, 2]` with the
-    `cos/-sin/sin/cos` rotation matrix baked in. Output dtype is fp32 to
-    match `comfy/ldm/flux/math.py:rope` precision; `apply_rope1` consumes
-    the matrix layout via `freqs_cis[..., 0]` (column 0) and
-    `freqs_cis[..., 1]` (column 1) of the 2x2 rotation matrix.
-    """
+    """Convert lucidrains-interleaved freqs to flux-canonical fp32 freqs_cis `[..., d/2, 2, 2]` (cos/-sin/sin/cos), per `comfy/ldm/flux/math.py:rope`."""
     angles = freqs_interleaved[..., ::2].float()
     cos = torch.cos(angles)
     sin = torch.sin(angles)
@@ -573,16 +566,11 @@ def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """Apply ``apply_rope1`` to the leading ``rot_d = 2 * freqs_cis.shape[-3]``
-    components of ``t``'s last dim, passing through the remaining dims
-    untouched in-place for inference tensors. Training tensors are cloned
-    before slice assignment to preserve autograd correctness. Mirrors the partial-rope contract of the legacy
-    ``apply_rotary_emb`` wrapper at line 470 (``t_left``/``t_middle``/``t_right``
-    split). For SeedVR2-3B this matters because ``rope_dim=128`` integer-
-    divides into 3 axes as ``128 // 3 = 42`` per-axis, total ``42 * 3 = 126``;
-    head_dim is 128, so the trailing 2 dims are unrotated. The fast path
-    triggers when ``rot_d == t.shape[-1]`` (e.g. test rigs where dim is
-    chosen divisible by 6) and avoids the cat entirely.
+    """Rotate the leading ``rot_d = 2 * freqs_cis.shape[-3]`` dims of ``t`` and pass the rest
+    through; in-place for inference, cloned for training (autograd). Mirrors the legacy
+    ``apply_rotary_emb`` ``t_left``/``t_middle``/``t_right`` split: 3B ``rope_dim=128`` gives
+    ``42*3 = 126`` rotated of head_dim 128 (trailing 2 unrotated). Fast path skips the cat when
+    ``rot_d == t.shape[-1]``.
     """
     out = t.clone() if t.requires_grad or comfy.model_management.in_training else t
     rot_d = 2 * freqs_cis.shape[-3]

@@ -66,17 +66,7 @@ def _seedvr2_auto_chunk_attempts(t_latent, t_pixel, frames_per_chunk):
 
 
 def _resolve_seedvr2_diffusion_model(model):
-    """Resolve the inner SeedVR2 diffusion-model module from a ComfyUI model
-    patcher object. Fails loud with a ``RuntimeError`` whose message begins
-    with ``_SEEDVR2_INVALID_MODEL_MSG_PREFIX`` when the expected wrapper
-    shape (``model.model.diffusion_model``) is absent.
-
-    Distinguishes four failure modes via the ``_ATTR_MISSING`` sentinel:
-    ``model.model`` missing, ``model.model is None``,
-    ``model.model.diffusion_model`` missing, ``model.model.diffusion_model
-    is None``. Each mode produces an accurate error message rather than
-    conflating "attribute missing" with "attribute is None".
-    """
+    """Resolve ``model.model.diffusion_model``, failing loud via the ``_ATTR_MISSING`` sentinel so each of the four modes (model/diffusion_model missing vs None) gives an accurate message."""
     inner = getattr(model, "model", _ATTR_MISSING)
     if inner is _ATTR_MISSING:
         raise RuntimeError(
@@ -103,15 +93,7 @@ def _resolve_seedvr2_diffusion_model(model):
 
 
 def _apply_rope_freqs_float32_cast(diffusion_model):
-    """Cast every nested module's ``rope.freqs`` parameter data to ``float32``
-    when it is not already in float32. Idempotency is per-tensor by dtype
-    check, NOT a per-instance sentinel attribute — a sentinel would survive
-    Comfy's dynamic model unload/reload cycle while ``rope.freqs`` itself
-    is restored from the archived dtype, leaving RoPE running in fp16/bf16
-    on subsequent calls. The dtype check makes the cast self-correcting
-    against weight-restore lifecycle events. Iteration cost is one walk of
-    the diffusion-model module tree per ``execute()`` call (microseconds).
-    """
+    """Cast every module's ``rope.freqs`` to float32; the per-tensor dtype check (not a sentinel attr) self-corrects across Comfy's unload/reload, which would otherwise restore the archived fp16/bf16 dtype."""
     for module in diffusion_model.modules():
         if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
             if module.rope.freqs.data.dtype != torch.float32:
@@ -277,10 +259,12 @@ class SeedVR2Resize(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2Resize",
-            category="image/video",
+            display_name="Resize Image for SeedVR2",
+            category="image/upscaling",
+            description="Resize an image to a SeedVR2-compatible size by a multiplier.",
             inputs=[
-                io.Image.Input("images"),
-                io.Float.Input("multiplier", default=4.0, min=0.01),
+                io.Image.Input("images", tooltip="The image(s) to resize."),
+                io.Float.Input("multiplier", default=4.0, min=0.01, tooltip="Upscale factor applied to the shorter edge."),
             ],
             outputs=[
                 io.Image.Output("input_pixels"),
@@ -313,10 +297,12 @@ class SeedVR2ResizeAdvanced(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2ResizeAdvanced",
-            category="image/video",
+            display_name="Resize Image for SeedVR2 (Advanced)",
+            category="image/upscaling",
+            description="Resize an image to an exact shorter-edge size for SeedVR2.",
             inputs=[
-                io.Image.Input("images"),
-                io.Int.Input("shorter_edge", default=1280, min=2),
+                io.Image.Input("images", tooltip="The image(s) to resize."),
+                io.Int.Input("shorter_edge", default=1280, min=2, tooltip="Target length of the shorter edge, in pixels."),
             ],
             outputs=[
                 io.Image.Output("input_pixels"),
@@ -337,12 +323,14 @@ class SeedVR2PostProcessing(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2PostProcessing",
-            category="image/video",
+            display_name="Post-Process SeedVR2 Output",
+            category="image/upscaling",
+            description="Align the upscaled output to the original's geometry and optionally color-correct it against the original.",
             inputs=[
-                io.Image.Input("decoded"),
-                io.Image.Input("original_image"),
-                io.Int.Input("upscaled_shorter_edge", min=2, force_input=True),
-                io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab"),
+                io.Image.Input("decoded", tooltip="The decoded upscaled image to color-correct."),
+                io.Image.Input("original_image", tooltip="The original image used as the color reference."),
+                io.Int.Input("upscaled_shorter_edge", min=2, force_input=True, tooltip="Shorter-edge size from the resize node."),
+                io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab", tooltip="How to match the output's color to the original. lab: transfer color in CIELAB space, preserving detail (most faithful). wavelet: transfer low-frequency color, keeping upscaled high-frequency detail. adain: match per-channel mean/std (fastest, global tint). none: skip color transfer (geometry alignment only)."),
             ],
             outputs=[io.Image.Output()],
         )
@@ -558,10 +546,12 @@ class SeedVR2Conditioning(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2Conditioning",
-            category="image/video",
+            display_name="Apply SeedVR2 Conditioning",
+            category="conditioning",
+            description="Build SeedVR2 positive/negative conditioning from a VAE latent.",
             inputs=[
-                io.Model.Input("model"),
-                io.Latent.Input("vae_conditioning", display_name="LATENT"),
+                io.Model.Input("model", tooltip="The SeedVR2 model."),
+                io.Latent.Input("vae_conditioning", tooltip="The VAE-encoded latent to condition on."),
             ],
             outputs=[
                 io.Model.Output(display_name = "model"),
@@ -633,16 +623,7 @@ class SeedVR2Conditioning(io.ComfyNode):
 
 def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
                                  t_end: int, channels: int) -> torch.Tensor:
-    """Slice a SeedVR2-style collapsed 4D tensor ``(B, channels*T, H, W)``
-    along the latent T axis, returning ``(B, channels*(t_end - t_start), H, W)``.
-
-    Reshape -> slice -> ``.contiguous()`` -> re-collapse. ``reshape`` is
-    used for the un-collapse so non-contiguous incoming tensors from
-    cropping or slicing nodes are accepted. The
-    ``.contiguous()`` is mandatory: T-axis slicing of a 5D tensor produces a
-    non-contiguous view, and the subsequent re-collapse requires contiguous
-    storage.
-    """
+    """Slice collapsed ``(B, channels*T, H, W)`` along latent T: reshape (accepts non-contiguous inputs), slice, ``.contiguous()`` (T-slice of 5D is a non-contiguous view; re-collapse needs contiguous), re-collapse."""
     B, CT, H, W = tensor_4d.shape
     if CT % channels != 0:
         raise ValueError(
@@ -661,19 +642,7 @@ def _slice_collapsed_4d_along_t(tensor_4d: torch.Tensor, t_start: int,
 
 
 def _slice_seedvr2_cond_along_t(cond_list, t_start: int, t_end: int):
-    """Build a new SeedVR2 conditioning list with the per-frame ``condition``
-    tensor sliced along the latent T axis.
-
-    SeedVR2 conditioning entries have the shape
-    ``[text_cond_tensor, options_dict]`` where ``options_dict["condition"]``
-    is a 4D collapsed ``(B, 17*T, H, W)`` tensor; the text tensor itself has
-    no temporal axis and is passed through unchanged. Other keys in the
-    options dict (controlnets, etc.) are also passed through unchanged. If
-    an entry has no ``"condition"`` key, the entry is forwarded verbatim.
-
-    A new list of ``[text_cond, new_options_dict]`` pairs is returned; the
-    original ``cond_list`` and its options dicts are not mutated.
-    """
+    """Return a new conditioning list with each entry's ``options["condition"]`` (collapsed ``(B, 17*T, H, W)``) sliced along latent T; text tensors, other option keys, and condition-less entries pass through unchanged and inputs are not mutated."""
     new_list = []
     for entry in cond_list:
         text_cond, options = entry[0], entry[1]
@@ -693,12 +662,7 @@ def _slice_seedvr2_noise_mask_along_t(noise_mask: torch.Tensor,
                                       samples_4d: torch.Tensor,
                                       t_start: int,
                                       t_end: int):
-    """Slice collapsed SeedVR2 masks and preserve standard masks.
-
-    ``SetLatentNoiseMask`` produces ``(B, 1, H, W)`` masks that KSampler
-    expands to the latent shape. Only masks already expanded to the full
-    collapsed ``(B, 16*T, H, W)`` shape need temporal slicing here.
-    """
+    """Slice only masks already expanded to collapsed ``(B, 16*T, H, W)``; pass standard ``(B, 1, H, W)`` ``SetLatentNoiseMask`` outputs through for KSampler to expand."""
     if noise_mask.ndim == samples_4d.ndim and noise_mask.shape[1] == samples_4d.shape[1]:
         return _slice_collapsed_4d_along_t(
             noise_mask, t_start, t_end, SEEDVR2_LATENT_CHANNELS,
@@ -707,10 +671,7 @@ def _slice_seedvr2_noise_mask_along_t(noise_mask: torch.Tensor,
 
 
 def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
-    """Concatenate a list of SeedVR2-style collapsed 4D tensors
-    ``(B, channels*T_i, H, W)`` along the latent T axis. Each chunk is
-    un-collapsed to 5D, concatenated on ``dim=2``, then re-collapsed to 4D.
-    """
+    """Concatenate collapsed ``(B, channels*T_i, H, W)`` chunks along latent T: un-collapse to 5D, cat on ``dim=2``, re-collapse to 4D."""
     if len(chunks_4d) == 0:
         raise ValueError("_concat_chunks_along_t: empty chunk list.")
     fives = []
@@ -729,19 +690,10 @@ def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
 
 
 def _hann_blend_weights_1d(overlap: int, device, dtype) -> torch.Tensor:
-    """Build a 1D crossfade weight tensor of length ``overlap`` for the
-    *previous* chunk's contribution; the current chunk's weight is
-    ``1 - w_prev``.
-
-    Mirrors the numz ``blend_overlapping_frames`` shape
-    (AInVFX/numz fork ``src/core/generation_utils.py``,
-    ``blend_overlapping_frames``): a Hann window with a ``[1/3, 2/3]``
-    dead-band when ``overlap >= 3``, and a plain linear ramp when
-    ``overlap < 3`` (the dead-band would collapse the transition for
-    very small overlap counts). The numz reference operates on
-    pixel-space tensors ``[overlap, H, W, C]``; this 1D form is
-    reshaped by the caller to broadcast across the latent's
-    ``(B, C, T_overlap, H, W)`` axes.
+    """1D length-``overlap`` crossfade weights for the previous chunk (current = ``1 - w_prev``):
+    Hann window with a ``[1/3, 2/3]`` dead-band for ``overlap >= 3``, linear ramp for ``overlap < 3``
+    (dead-band would collapse a tiny transition). Window shape matched to numz ``blend_overlapping_frames``
+    for parity (reference, not source); caller broadcasts across ``(B, C, T_overlap, H, W)``.
     """
     if overlap < 1:
         raise ValueError(
@@ -758,14 +710,7 @@ def _hann_blend_weights_1d(overlap: int, device, dtype) -> torch.Tensor:
 
 def _blend_overlap_region(prev_tail_5d: torch.Tensor,
                           cur_head_5d: torch.Tensor) -> torch.Tensor:
-    """Blend two 5D ``(B, C, T_overlap, H, W)`` tensors of equal shape
-    using a 1D Hann/linear ramp along the T axis. ``prev_tail_5d``
-    receives the descending weight; ``cur_head_5d`` receives
-    ``1 - w_prev``.
-
-    The caller is responsible for ensuring both inputs have identical
-    shape and dtype/device.
-    """
+    """Blend two equal-shape 5D ``(B, C, T_overlap, H, W)`` tensors with a 1D Hann/linear T-ramp: ``prev_tail_5d`` takes the descending weight, ``cur_head_5d`` takes ``1 - w_prev`` (caller ensures matching shape/dtype/device)."""
     if prev_tail_5d.shape != cur_head_5d.shape:
         raise ValueError(
             f"_blend_overlap_region: shape mismatch "
@@ -784,20 +729,7 @@ def _blend_overlap_region(prev_tail_5d: torch.Tensor,
 
 def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
                                       overlap_latent: int) -> torch.Tensor:
-    """Concatenate temporally-overlapping chunks back into a single
-    collapsed 4D tensor, blending overlap regions with a Hann/linear
-    crossfade.
-
-    ``chunk_specs`` is a list of ``(t_start, t_end, chunk_4d)`` tuples
-    in source-latent T coordinates. ``overlap_latent == 0`` is a fast
-    path that delegates to plain concatenation (and produces output
-    bit-identical to ``_concat_chunks_along_t`` of the same chunks).
-
-    The blend at each pair of adjacent chunks acts on the actual
-    overlap region width ``min(prev_end - cur_start, current chunk
-    length)``, which may be smaller than ``overlap_latent`` when the
-    final chunk is a runt shorter than the configured overlap.
-    """
+    """Concatenate overlapping ``(t_start, t_end, chunk_4d)`` specs (source-latent T coords) into one collapsed 4D tensor, Hann/linear-blending overlaps; ``overlap_latent == 0`` fast-paths to plain concat (bit-identical to ``_concat_chunks_along_t``). Each blend uses the actual width ``min(prev_end - cur_start, chunk length)``, smaller than ``overlap_latent`` for a runt final chunk."""
     if len(chunk_specs) == 0:
         raise ValueError("_concat_chunks_with_overlap_blend: empty chunk list.")
     if overlap_latent < 0:
@@ -877,12 +809,7 @@ def _run_standard_sample(model, seed: int, steps: int, cfg: float,
                          sampler_name: str, scheduler: str,
                          positive, negative, latent_image: dict,
                          denoise: float) -> dict:
-    """Single-shot delegation that mirrors the standard ``common_ksampler``
-    flow (``nodes.py:common_ksampler``): generate noise from seed, run
-    ``comfy.sample.sample``, return a latent dict. Used by the
-    ProgressiveSampler short-circuit when the full sequence fits in one
-    chunk so chunking introduces no overhead for small videos.
-    """
+    """Single-shot mirror of ``nodes.py:common_ksampler`` (seed -> noise, ``comfy.sample.sample``, latent dict); used by the ProgressiveSampler short-circuit when the whole sequence fits one chunk."""
     samples_in = latent_image["samples"]
     samples_in = comfy.sample.fix_empty_latent_channels(
         model, samples_in, latent_image.get("downscale_ratio_spacial", None),
@@ -929,43 +856,45 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2ProgressiveSampler",
+            display_name="Sample SeedVR2 (Progressive)",
             category="sampling",
+            description="Sample a SeedVR2 latent in sequential temporal chunks to allow longer videos to fit into VRAM via frame blending the resulting upscaled latents.",
             inputs=[
-                io.Model.Input("model"),
+                io.Model.Input("model", tooltip="The model used for denoising the input latent."),
                 io.Int.Input("seed", default=0, min=0,
                              max=0xffffffffffffffff,
-                             control_after_generate=True),
-                io.Int.Input("steps", default=20, min=1, max=10000),
+                             control_after_generate=True,
+                             tooltip="The random seed used for creating the noise."),
+                io.Int.Input("steps", default=20, min=1, max=10000,
+                             tooltip="The number of steps used in the denoising process."),
                 io.Float.Input("cfg", default=1.0, min=0.0, max=100.0,
-                               step=0.1, round=0.01),
+                               step=0.1, round=0.01,
+                               tooltip="The Classifier-Free Guidance scale balances creativity and adherence to the prompt. Higher values result in images more closely matching the prompt however too high values will negatively impact quality."),
                 io.Combo.Input("sampler_name",
-                               options=comfy.samplers.SAMPLER_NAMES),
+                               options=comfy.samplers.SAMPLER_NAMES,
+                               tooltip="The algorithm used when sampling, this can affect the quality, speed, and style of the generated output."),
                 io.Combo.Input("scheduler",
-                               options=comfy.samplers.SCHEDULER_NAMES),
-                io.Conditioning.Input("positive"),
-                io.Conditioning.Input("negative"),
-                io.Latent.Input("latent_image"),
+                               options=comfy.samplers.SCHEDULER_NAMES,
+                               tooltip="The scheduler controls how noise is gradually removed to form the image."),
+                io.Conditioning.Input("positive",
+                               tooltip="The conditioning describing the attributes you want to include in the image."),
+                io.Conditioning.Input("negative",
+                               tooltip="The conditioning describing the attributes you want to exclude from the image."),
+                io.Latent.Input("latent_image",
+                               tooltip="The latent image to denoise."),
                 io.Float.Input("denoise", default=1.0, min=0.0, max=1.0,
-                               step=0.01),
+                               step=0.01,
+                               tooltip="The amount of denoising applied, lower values will maintain the structure of the initial image allowing for image to image sampling."),
                 io.Int.Input("frames_per_chunk", default=21, min=1,
-                             max=16384, step=4),
+                             max=16384, step=4,
+                             tooltip="Pixel frames per temporal chunk (4n+1: 1, 5, 9, 13, ...)."),
                 io.Int.Input("temporal_overlap", default=0, min=0,
                              max=16384,
-                             tooltip="Latent-frame overlap between "
-                                     "adjacent chunks; blended with a "
-                                     "Hann window (linear for overlap "
-                                     "< 3). 0 = no blend, pure concat. "
-                                     "Values >= the chunk's latent-frame "
-                                     "length use the maximum valid "
-                                     "overlap; 1 latent frame corresponds "
-                                     "to ~4 pixel frames."),
+                             tooltip="Latent frames blended between adjacent chunks to hide the seam; 0 = no blend."),
                 io.Combo.Input("chunking_mode",
                                options=["manual", "auto"],
                                default="manual",
-                               tooltip="manual = use frames_per_chunk "
-                                       "exactly; auto = retry only real OOM "
-                                       "failures with progressively smaller "
-                                       "temporal chunks."),
+                               tooltip="manual = use frames_per_chunk exactly; auto = shrink the chunk until it fits in VRAM."),
             ],
             outputs=[io.Latent.Output()],
         )
