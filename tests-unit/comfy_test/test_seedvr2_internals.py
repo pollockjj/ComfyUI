@@ -6,9 +6,7 @@ Sources (all merged verbatim, helper names disambiguated where colliding):
     apply_rotary_emb wrapper oracle at fp32.
   * GroupNorm limit gate — causal_norm_wrapper at vae.py:509 must compare
     memory_occupy against get_norm_limit(), not float('inf').
-  * var_attention backend registry.
-  * var_attention_pytorch SeedVR2-named guard — present-API shape contract
-    with AST-level pinning of the guard ordering.
+  * var_attention registry — optimized_attention split-loop binding contract.
 
 Pre-import CPU-only guard is required because comfy.ldm.seedvr.model and
 comfy.ldm.modules.attention transitively pull in comfy.model_management,
@@ -18,11 +16,6 @@ set first.
 
 from __future__ import annotations
 
-import ast
-import inspect
-import logging
-import textwrap
-import warnings
 from unittest.mock import patch
 
 import pytest
@@ -45,7 +38,6 @@ from comfy.ldm.seedvr.vae import (  # noqa: E402
     causal_norm_wrapper,
     set_norm_limit,
 )
-from comfy.ldm.modules.attention import var_attention_pytorch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +210,9 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path(groupnorm_cls):
 # var_attention backend tests (test_seedvr_var_attention_backends.py)
 # ---------------------------------------------------------------------------
 
-def test_var_attention_registry_contains_always_available_entries():
-    assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_pytorch"] is attention.var_attention_pytorch
-    assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_sub_quad"] is attention.var_attention_sub_quad
-    assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_split"] is attention.var_attention_split
+def test_var_attention_registry_binds_optimized_split():
+    assert attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_optimized_split"] is attention.var_attention_optimized_split
+    assert attention.optimized_var_attention is attention.var_attention_optimized_split
 
 
 def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypatch):
@@ -283,107 +274,3 @@ def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypa
         rtol=0,
         atol=0,
     )
-
-
-# ---------------------------------------------------------------------------
-# var_attention_pytorch SeedVR2 guard tests
-# (test_var_attention_pytorch_seedvr2_guard.py)
-# ---------------------------------------------------------------------------
-
-def _pytorch_guard_inputs():
-    heads, head_dim, total_tokens = 2, 8, 6
-    embed_dim = heads * head_dim
-    q = torch.randn(total_tokens, embed_dim)
-    k = torch.randn(total_tokens, embed_dim)
-    v = torch.randn(total_tokens, embed_dim)
-    cu = torch.tensor([0, 3, 6], dtype=torch.int32)
-    return q, k, v, heads, cu, cu, total_tokens, embed_dim
-
-
-def _assert_guard_source_pin():
-    src = textwrap.dedent(inspect.getsource(var_attention_pytorch))
-    tree = ast.parse(src)
-    raise_lines = []
-    nested_lines = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
-            func = node.exc.func
-            if isinstance(func, ast.Name) and func.id == "RuntimeError":
-                raise_lines.append(node.lineno)
-        if isinstance(node, ast.Attribute) and node.attr == "nested_tensor_from_jagged":
-            nested_lines.append(node.lineno)
-    assert raise_lines, (
-        "var_attention_pytorch has no `raise RuntimeError(...)` AST node; "
-        f"the SeedVR2-named guard is missing.\n--- source ---\n{src}"
-    )
-    assert nested_lines, (
-        "var_attention_pytorch source has no `nested_tensor_from_jagged` "
-        f"attribute access; cannot pin guard ordering.\n"
-        f"--- source ---\n{src}"
-    )
-    first_raise = min(raise_lines)
-    first_nested = min(nested_lines)
-    assert first_raise < first_nested, (
-        f"`raise RuntimeError(...)` first appears at line {first_raise}, "
-        f"but `torch.nested.nested_tensor_from_jagged` is referenced first "
-        f"at line {first_nested}; the guard must precede the lookup.\n"
-        f"--- source ---\n{src}"
-    )
-
-
-def test_missing_api_raises_seedvr2_runtime_error(monkeypatch):
-    monkeypatch.delattr(torch.nested, "nested_tensor_from_jagged", raising=False)
-    q, k, v, heads, cu_q, cu_k, _, _ = _pytorch_guard_inputs()
-
-    with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
-        var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
-
-    _assert_guard_source_pin()
-
-
-def test_missing_namespace_raises_seedvr2_runtime_error(monkeypatch):
-    monkeypatch.delattr(torch, "nested", raising=False)
-    q, k, v, heads, cu_q, cu_k, _, _ = _pytorch_guard_inputs()
-
-    with pytest.raises(RuntimeError, match=r"SeedVR2.*nested_tensor_from_jagged"):
-        var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
-
-    _assert_guard_source_pin()
-
-
-def test_present_api_returns_expected_shape():
-    q, k, v, heads, cu_q, cu_k, total_tokens, embed_dim = _pytorch_guard_inputs()
-
-    torch_fx_logger = logging.getLogger("torch.fx._symbolic_trace")
-    old_torch_fx_level = torch_fx_logger.level
-    torch_fx_logger.setLevel(logging.ERROR)
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="The PyTorch API of nested tensors is in prototype stage.*",
-                category=UserWarning,
-            )
-            out = var_attention_pytorch(q, k, v, heads, cu_q, cu_k)
-    finally:
-        torch_fx_logger.setLevel(old_torch_fx_level)
-
-    assert tuple(out.shape) == (total_tokens, embed_dim), (
-        f"expected ({total_tokens}, {embed_dim}); got {tuple(out.shape)}"
-    )
-
-    _assert_guard_source_pin()
-
-
-def test_malformed_offsets_propagates_torch_runtime_error():
-    q, k, v, heads, _, _, _, _ = _pytorch_guard_inputs()
-    cu_q_bad = torch.tensor([0, 3, 7], dtype=torch.int32)
-    cu_k_ok = torch.tensor([0, 3, 6], dtype=torch.int32)
-
-    with pytest.raises(RuntimeError) as exc_info:
-        var_attention_pytorch(q, k, v, heads, cu_q_bad, cu_k_ok)
-
-    msg = str(exc_info.value)
-    assert "SeedVR2" not in msg
-
-    _assert_guard_source_pin()
