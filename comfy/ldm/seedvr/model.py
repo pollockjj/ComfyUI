@@ -57,15 +57,17 @@ class CustomRMSNorm(nn.Module):
     def forward(self, input):
 
         dims = tuple(range(-len(self.normalized_shape), 0))
+        input_dtype = input.dtype
 
-        variance = input.pow(2).mean(dim=dims, keepdim=True)
+        normalized = input.float()
+        variance = normalized.pow(2).mean(dim=dims, keepdim=True)
         rms = torch.sqrt(variance + self.eps)
 
-        normalized = input / rms
+        normalized = normalized / rms
 
         if self.elementwise_affine:
-            return normalized * self.weight.to(input.dtype)
-        return normalized
+            normalized = normalized * self.weight.float()
+        return normalized.to(input_dtype)
 
 class Cache:
     def __init__(self, disable=False, prefix="", cache=None):
@@ -472,8 +474,8 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         freqs = freqs.to(device=q.device)
         q = rearrange(q, "L h d -> h L d")
         k = rearrange(k, "L h d -> h L d")
-        q = _apply_rope1_partial(q, freqs)
-        k = _apply_rope1_partial(k, freqs)
+        q = apply_lucidrains_rotary_emb(freqs, q.float()).to(q.dtype)
+        k = apply_lucidrains_rotary_emb(freqs, k.float()).to(k.dtype)
         q = rearrange(q, "h L d -> L h d")
         k = rearrange(k, "h L d -> L h d")
         return q, k
@@ -483,11 +485,14 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         self,
         shape: torch.LongTensor,
     ) -> torch.Tensor:
+        # Primary provenance: ByteDance-Seed/SeedVR models/dit/rope.py applies
+        # pixel RoPE's native interleaved-angle convention, not Comfy's Flux
+        # freqs_cis matrix.
         freq_list = []
         for f, h, w in shape.tolist():
             freqs = self.get_axial_freqs(f, h, w)
             freq_list.append(freqs.view(-1, freqs.size(-1)))
-        return _to_flux_freqs_cis(torch.cat(freq_list, dim=0))
+        return torch.cat(freq_list, dim=0)
 
 
 class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
@@ -555,6 +560,37 @@ def apply_rotary_emb(
     t_middle_out = apply_rope1(t_middle, freqs_mat)
     out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
     return out.type(dtype)
+
+def apply_lucidrains_rotary_emb(
+    freqs,
+    t,
+    start_index = 0,
+    scale = 1.,
+    seq_dim = -2,
+    freqs_seq_dim = None,
+):
+    dtype = t.dtype
+    if not exists(freqs_seq_dim):
+        if freqs.ndim == 2 or t.ndim == 3:
+            freqs_seq_dim = 0
+
+    if t.ndim == 3 or exists(freqs_seq_dim):
+        seq_len = t.shape[seq_dim]
+        freqs = slice_at_dim(freqs, slice(-seq_len, None), dim=freqs_seq_dim)
+
+    rot_dim = freqs.shape[-1]
+    end_index = start_index + rot_dim
+    if rot_dim > t.shape[-1]:
+        raise ValueError(
+            f"feature dimension {t.shape[-1]} is not sufficient for rotary dimension {rot_dim}"
+        )
+
+    t_left = t[..., :start_index]
+    t_middle = t[..., start_index:end_index]
+    t_right = t[..., end_index:]
+    freqs = freqs.to(t_middle.device)
+    t_middle = (t_middle * freqs.cos() * scale) + (rotate_half(t_middle) * freqs.sin() * scale)
+    return torch.cat((t_left, t_middle, t_right), dim=-1).type(dtype)
 
 def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
     """Convert lucidrains-interleaved freqs to flux-canonical fp32 freqs_cis `[..., d/2, 2, 2]` (cos/-sin/sin/cos), per `comfy/ldm/flux/math.py:rope`."""
@@ -1380,6 +1416,8 @@ class NaDiT(nn.Module):
         **kwargs,
     ):
         self._7b_version = vid_dim == SEEDVR2_7B_VID_DIM
+        if self._7b_version:
+            rope_type = "rope3d"
         self.dtype = dtype
         factory_kwargs = {"device": device, "dtype": dtype}
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
