@@ -59,10 +59,11 @@ class CustomRMSNorm(nn.Module):
 
         dims = tuple(range(-len(self.normalized_shape), 0))
 
-        variance = input.pow(2).mean(dim=dims, keepdim=True)
+        normalized = input.float()
+        variance = normalized.pow(2).mean(dim=dims, keepdim=True)
         rms = torch.sqrt(variance + self.eps)
 
-        normalized = input / rms
+        normalized = normalized / rms
 
         if self.elementwise_affine:
             return normalized * self.weight.to(input.dtype)
