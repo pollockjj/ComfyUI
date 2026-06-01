@@ -484,9 +484,15 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         self,
         shape: torch.LongTensor,
     ) -> torch.Tensor:
+        plain_rope = RotaryEmbedding(
+            dim=self.rope.freqs.numel() * 2,
+            freqs_for="pixel",
+            max_freq=BYTEDANCE_ROPE_MAX_FREQ,
+        )
+        plain_rope = plain_rope.to(self.rope.dummy.device)
         freq_list = []
         for f, h, w in shape.tolist():
-            freqs = self.get_axial_freqs(f, h, w)
+            freqs = plain_rope.get_axial_freqs(f, h, w)
             freq_list.append(freqs.view(-1, freqs.size(-1)))
         return torch.cat(freq_list, dim=0)
 
