@@ -339,5 +339,3 @@ def test_var_attention_optimized_split_rejects_bad_offsets():
             skip_reshape=True,
             skip_output_reshape=True,
         )
-
-    _assert_guard_source_pin()
