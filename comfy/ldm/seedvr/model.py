@@ -1380,6 +1380,8 @@ class NaDiT(nn.Module):
         **kwargs,
     ):
         self._7b_version = vid_dim == SEEDVR2_7B_VID_DIM
+        if self._7b_version:
+            rope_type = "rope3d"
         self.dtype = dtype
         factory_kwargs = {"device": device, "dtype": dtype}
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
