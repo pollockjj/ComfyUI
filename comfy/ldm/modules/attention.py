@@ -887,9 +887,36 @@ def var_attention_optimized_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *a
     if len(q_splits) != len(k_splits) or len(q_splits) != len(v_splits):
         raise ValueError("cu_seqlens_q and cu_seqlens_k must describe the same sequence count")
 
-    attention_fn = optimized_attention
     if optimized_attention is attention_sage and SAGE_ATTENTION3_IS_AVAILABLE and _use_blackwell_attention():
-        attention_fn = attention3_sage
+        seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        uniform_q = bool((seq_lens_q == seq_lens_q[0]).all().item())
+        uniform_k = bool((seq_lens_k == seq_lens_k[0]).all().item())
+        if uniform_q and uniform_k and seq_lens_q[0] == seq_lens_k[0]:
+            out_dtype = q.dtype
+            if not (q.dtype == k.dtype == v.dtype):
+                k = k.to(q.dtype)
+                v = v.to(q.dtype)
+            if q.dtype not in (torch.float16, torch.bfloat16):
+                q = q.to(torch.bfloat16)
+                k = k.to(torch.bfloat16)
+                v = v.to(torch.bfloat16)
+            batch_size = len(cu_seqlens_q) - 1
+            seq_len = int(seq_lens_q[0].item())
+            q_s = q.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+            k_s = k.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+            v_s = v.view(batch_size, seq_len, heads, head_dim).transpose(1, 2)
+            try:
+                out = sageattn3_blackwell(q_s, k_s, v_s, is_causal=kwargs.get("causal", False))
+            except Exception as e:
+                logging.error("Error running SageAttention3 split-loop attention: %s, using split optimized attention instead.", e)
+            else:
+                out = out.transpose(1, 2).reshape(-1, heads, head_dim).contiguous()
+                if out.dtype != out_dtype:
+                    out = out.to(out_dtype)
+                return _var_attention_output(out, heads, head_dim, skip_output_reshape)
+
+    attention_fn = optimized_attention
 
     out = []
     for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
