@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
+import types
+
+
+sys.modules.setdefault("comfy_aimdo.vram_buffer", types.ModuleType("vram_buffer"))
 
 
 def pytest_pyfunc_call(pyfuncitem):

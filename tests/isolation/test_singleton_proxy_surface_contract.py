@@ -304,6 +304,7 @@ def test_folder_paths_install_materializes_custom_and_relay_wrappers(monkeypatch
     FolderPathsProxy._rpc = caller
     target = SimpleNamespace()
     monkeypatch.setenv("PYISOLATE_CHILD", "1")
+    monkeypatch.delenv("PYISOLATE_SANDBOX_MODE", raising=False)
 
     try:
         FolderPathsProxy().install_into(target)
