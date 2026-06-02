@@ -1,5 +1,7 @@
 """Unit tests for ModelManagementProxy."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -15,7 +17,13 @@ class TestModelManagementProxy:
         """Create a ModelManagementProxy instance for testing."""
         if not torch.cuda.is_available():
             args.cpu = True
-        return ModelManagementProxy()
+        proxy = object.__new__(ModelManagementProxy)
+        target = SimpleNamespace(
+            get_torch_device=lambda: torch.device("cpu"),
+            get_torch_device_name=lambda device: str(device),
+        )
+        proxy.install_into(target)
+        return proxy
 
     def test_get_torch_device_returns_device(self, proxy):
         """Verify get_torch_device returns a torch.device object."""
