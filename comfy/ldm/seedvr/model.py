@@ -10,7 +10,6 @@ from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
 from comfy.ldm.modules.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
-from rotary_embedding_torch import apply_rotary_emb as legacy_apply_rotary_emb
 import math
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.seedvr.constants import (
@@ -474,8 +473,8 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         freqs = freqs.to(device=q.device, dtype=q.dtype)
         q = rearrange(q, "L h d -> h L d")
         k = rearrange(k, "L h d -> h L d")
-        q = legacy_apply_rotary_emb(freqs, q.float()).to(q.dtype)
-        k = legacy_apply_rotary_emb(freqs, k.float()).to(k.dtype)
+        q = _apply_seedvr2_rotary_emb(freqs, q.float()).to(q.dtype)
+        k = _apply_seedvr2_rotary_emb(freqs, k.float()).to(k.dtype)
         q = rearrange(q, "h L d -> L h d")
         k = rearrange(k, "h L d -> L h d")
         return q, k
@@ -486,8 +485,8 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         shape: torch.LongTensor,
     ) -> torch.Tensor:
         # Primary provenance: ByteDance-Seed/SeedVR models/dit/rope.py builds
-        # 7B pixel RoPE with rotary_embedding_torch and applies its native
-        # interleaved-angle convention, not Comfy's Flux freqs_cis matrix.
+        # 7B pixel RoPE with the interleaved-angle convention, not Comfy's
+        # Flux freqs_cis matrix.
         plain_rope = RotaryEmbedding(
             dim=self.rope.freqs.numel() * 2,
             freqs_for="pixel",
@@ -566,6 +565,36 @@ def apply_rotary_emb(
     t_middle_out = apply_rope1(t_middle, freqs_mat)
     out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
     return out.type(dtype)
+
+
+def _apply_seedvr2_rotary_emb(
+    freqs: torch.Tensor,
+    t: torch.Tensor,
+    start_index: int = 0,
+    scale: float = 1.0,
+    seq_dim: int = -2,
+    freqs_seq_dim: int | None = None,
+) -> torch.Tensor:
+    dtype = t.dtype
+    if freqs_seq_dim is None and (freqs.ndim == 2 or t.ndim == 3):
+        freqs_seq_dim = 0
+
+    if t.ndim == 3 or freqs_seq_dim is not None:
+        seq_len = t.shape[seq_dim]
+        freqs = slice_at_dim(freqs, slice(-seq_len, None), dim=freqs_seq_dim)
+
+    rot_feats = freqs.shape[-1]
+    end_index = start_index + rot_feats
+
+    t_left = t[..., :start_index]
+    t_middle = t[..., start_index:end_index]
+    t_right = t[..., end_index:]
+
+    freqs = freqs.to(device=t_middle.device, dtype=t_middle.dtype)
+    cos = freqs.cos() * scale
+    sin = freqs.sin() * scale
+    t_middle = (t_middle * cos) + (rotate_half(t_middle) * sin)
+    return torch.cat((t_left, t_middle, t_right), dim=-1).to(dtype)
 
 def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
     """Convert lucidrains-interleaved freqs to flux-canonical fp32 freqs_cis `[..., d/2, 2, 2]` (cos/-sin/sin/cos), per `comfy/ldm/flux/math.py:rope`."""
