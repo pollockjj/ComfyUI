@@ -10,6 +10,7 @@ from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
 from comfy.ldm.modules.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
+from rotary_embedding_torch import apply_rotary_emb as legacy_apply_rotary_emb
 import math
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.seedvr.constants import (
@@ -58,10 +59,11 @@ class CustomRMSNorm(nn.Module):
 
         dims = tuple(range(-len(self.normalized_shape), 0))
 
-        variance = input.pow(2).mean(dim=dims, keepdim=True)
+        normalized = input.float()
+        variance = normalized.pow(2).mean(dim=dims, keepdim=True)
         rms = torch.sqrt(variance + self.eps)
 
-        normalized = input / rms
+        normalized = normalized / rms
 
         if self.elementwise_affine:
             return normalized * self.weight.to(input.dtype)
@@ -469,11 +471,11 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         torch.FloatTensor,
     ]:
         freqs = cache("rope_freqs_3d", lambda: self.get_freqs(shape))
-        freqs = freqs.to(device=q.device)
+        freqs = freqs.to(device=q.device, dtype=q.dtype)
         q = rearrange(q, "L h d -> h L d")
         k = rearrange(k, "L h d -> h L d")
-        q = _apply_rope1_partial(q, freqs)
-        k = _apply_rope1_partial(k, freqs)
+        q = legacy_apply_rotary_emb(freqs, q.float()).to(q.dtype)
+        k = legacy_apply_rotary_emb(freqs, k.float()).to(k.dtype)
         q = rearrange(q, "h L d -> L h d")
         k = rearrange(k, "h L d -> L h d")
         return q, k
@@ -483,11 +485,20 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         self,
         shape: torch.LongTensor,
     ) -> torch.Tensor:
+        # Primary provenance: ByteDance-Seed/SeedVR models/dit/rope.py builds
+        # 7B pixel RoPE with rotary_embedding_torch and applies its native
+        # interleaved-angle convention, not Comfy's Flux freqs_cis matrix.
+        plain_rope = RotaryEmbedding(
+            dim=self.rope.freqs.numel() * 2,
+            freqs_for="pixel",
+            max_freq=BYTEDANCE_ROPE_MAX_FREQ,
+        )
+        plain_rope = plain_rope.to(self.rope.dummy.device)
         freq_list = []
         for f, h, w in shape.tolist():
-            freqs = self.get_axial_freqs(f, h, w)
+            freqs = plain_rope.get_axial_freqs(f, h, w)
             freq_list.append(freqs.view(-1, freqs.size(-1)))
-        return _to_flux_freqs_cis(torch.cat(freq_list, dim=0))
+        return torch.cat(freq_list, dim=0)
 
 
 class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
@@ -1380,6 +1391,8 @@ class NaDiT(nn.Module):
         **kwargs,
     ):
         self._7b_version = vid_dim == SEEDVR2_7B_VID_DIM
+        if self._7b_version:
+            rope_type = "rope3d"
         self.dtype = dtype
         factory_kwargs = {"device": device, "dtype": dtype}
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
