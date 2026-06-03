@@ -7,8 +7,65 @@ from typing import Any, Dict, Optional
 from pyisolate import ProxiedSingleton
 
 from .base import call_singleton_rpc
+from .singleton_contract import SingletonProxyContract, install_singleton_module_proxy
 
 _fp_logger = logging.getLogger(__name__)
+
+FOLDER_PATHS_PUBLIC_CALLABLES = (
+    "map_legacy",
+    "set_output_directory",
+    "set_temp_directory",
+    "set_input_directory",
+    "get_output_directory",
+    "get_temp_directory",
+    "get_input_directory",
+    "get_user_directory",
+    "set_user_directory",
+    "get_system_user_directory",
+    "get_public_user_directory",
+    "get_directory_by_type",
+    "filter_files_content_types",
+    "annotated_filepath",
+    "get_annotated_filepath",
+    "exists_annotated_filepath",
+    "add_model_folder_path",
+    "get_folder_paths",
+    "recursive_search",
+    "filter_files_extensions",
+    "get_full_path",
+    "get_full_path_or_raise",
+    "get_filename_list_",
+    "cached_filename_list_",
+    "get_filename_list",
+    "get_save_image_path",
+    "get_input_subfolders",
+)
+
+FOLDER_PATHS_CUSTOM_SYMBOLS = (
+    "get_output_directory",
+    "get_temp_directory",
+    "get_input_directory",
+    "get_user_directory",
+    "get_annotated_filepath",
+    "exists_annotated_filepath",
+    "add_model_folder_path",
+    "get_folder_paths",
+    "get_full_path",
+    "get_filename_list",
+)
+
+FOLDER_PATHS_RELAY_SYMBOLS = tuple(
+    name for name in FOLDER_PATHS_PUBLIC_CALLABLES
+    if name not in FOLDER_PATHS_CUSTOM_SYMBOLS
+)
+
+FOLDER_PATHS_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="FolderPathsProxy",
+    target_name="folder_paths",
+    target_public_symbols=FOLDER_PATHS_PUBLIC_CALLABLES,
+    relay_symbols=FOLDER_PATHS_RELAY_SYMBOLS,
+    custom_symbols=FOLDER_PATHS_CUSTOM_SYMBOLS,
+)
 
 
 def _folder_paths():
@@ -72,6 +129,16 @@ class FolderPathsProxy(ProxiedSingleton):
             raise AttributeError(name)
         return getattr(_folder_paths(), name)
 
+    def _relay_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        return call_singleton_rpc(self._get_caller(), "rpc_call", method_name, args, kwargs)
+
+    def install_into(self, target_module: Any) -> dict[str, tuple[str, ...]]:
+        return install_singleton_module_proxy(
+            target_module,
+            self,
+            FOLDER_PATHS_SINGLETON_CONTRACT,
+        )
+
     @property
     def folder_names_and_paths(self) -> Dict:
         if _is_child_process():
@@ -99,6 +166,12 @@ class FolderPathsProxy(ProxiedSingleton):
 
     def get_temp_directory(self) -> str:
         if _is_child_process():
+            if os.environ.get("PYISOLATE_SANDBOX_MODE") == "required":
+                import tempfile
+
+                child_temp = os.path.join(tempfile.gettempdir(), "comfyui_temp")
+                os.makedirs(child_temp, exist_ok=True)
+                return child_temp
             return call_singleton_rpc(self._get_caller(), "rpc_get_temp_directory")
         return _folder_paths().get_temp_directory()
 
@@ -204,3 +277,7 @@ class FolderPathsProxy(ProxiedSingleton):
 
     async def rpc_get_full_path(self, folder_name: str, filename: str) -> str | None:
         return _folder_paths().get_full_path(folder_name, filename)
+
+    async def rpc_call(self, method_name: str, args: Any, kwargs: Any) -> Any:
+        method = getattr(_folder_paths(), method_name)
+        return method(*args, **kwargs)

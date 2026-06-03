@@ -81,6 +81,18 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def get_additional_models_with_key(self, key: str) -> Any:
         return self._call_rpc("get_additional_models_with_key", key)
 
+    def match_multigpu_clones(self) -> None:
+        self._call_rpc("match_multigpu_clones")
+
+    def get_clone_model_override(self) -> Any:
+        return self._call_rpc("get_clone_model_override")
+
+    def deepclone_multigpu(
+        self, new_load_device: Any = None, models_cache: dict[Any, Any] | None = None
+    ) -> ModelPatcherProxy:
+        new_id = self._call_rpc("deepclone_multigpu", new_load_device, models_cache)
+        return self._spawn_related_proxy(new_id)
+
     @property
     def object_patches(self) -> Any:
         return self._call_rpc("get_object_patches")
@@ -220,8 +232,8 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def apply_hooks(self, hooks: Any) -> Any:
         return self._call_rpc("apply_hooks", hooks)
 
-    def prepare_state(self, timestep: Any) -> Any:
-        return self._call_rpc("prepare_state", timestep)
+    def prepare_state(self, timestep: Any, model_options: Any) -> Any:
+        return self._call_rpc("prepare_state", timestep, model_options)
 
     def restore_hook_patches(self) -> None:
         self._call_rpc("restore_hook_patches")
@@ -492,10 +504,14 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
             "model_lowvram",
             "model_loaded_weight_memory",
             "backup",
+            "backup_buffers",
+            "cached_patcher_init",
+            "clone_base_uuid",
             "object_patches_backup",
             "weight_wrapper_patches",
             "weight_inplace_update",
             "force_cast_weights",
+            "is_multigpu_base_clone",
         }
         if name in _whitelisted_attrs:
             return self._call_rpc("get_patcher_attr", name)
@@ -708,6 +724,12 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def set_model_post_input_patch(self, patch: Any) -> None:
         self.set_model_patch(patch, "post_input")
 
+    def set_model_noise_refiner_patch(self, patch: Any) -> None:
+        self.set_model_patch(patch, "noise_refiner")
+
+    def set_model_middle_block_after_patch(self, patch: Any) -> None:
+        self.set_model_patch(patch, "middle_block_after_patch")
+
     def set_model_rope_options(
         self,
         scale_x=1.0,
@@ -751,6 +773,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def wrappers(self) -> Any:
         return self._call_rpc("get_wrappers")
 
+    def get_wrappers(self, wrapper_type: str, key: str) -> Any:
+        return self._call_rpc("get_wrappers", wrapper_type, key)
+
     def add_callback_with_key(self, call_type: str, key: str, callback: Any) -> None:
         self._call_rpc("add_callback_with_key", call_type, key, callback)
 
@@ -763,6 +788,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     @property
     def callbacks(self) -> Any:
         return self._call_rpc("get_callbacks")
+
+    def get_callbacks(self, call_type: str, key: str) -> Any:
+        return self._call_rpc("get_callbacks", call_type, key)
 
     def set_attachments(self, key: str, attachment: Any) -> None:
         self._call_rpc("set_attachments", key, attachment)
@@ -799,6 +827,11 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def model_patches_models(self) -> Any:
         return self._call_rpc("model_patches_models")
 
+    def model_patches_call_function(
+        self, function_name: str = "cleanup", arguments: dict[str, Any] | None = None
+    ) -> None:
+        self._call_rpc("model_patches_call_function", function_name, arguments or {})
+
     @property
     def parent(self) -> Any:
         return self._call_rpc("get_parent")
@@ -812,6 +845,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def pinned_memory_size(self) -> int:
         return self._call_rpc("pinned_memory_size")
 
+    def loaded_ram_size(self) -> Any:
+        return self._call_rpc("loaded_ram_size")
+
     def get_non_dynamic_delegate(self) -> ModelPatcherProxy:
         new_id = self._call_rpc("get_non_dynamic_delegate")
         return self._spawn_related_proxy(new_id)
@@ -819,8 +855,48 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def disable_model_cfg1_optimization(self) -> None:
         self._call_rpc("disable_model_cfg1_optimization")
 
-    def set_model_noise_refiner_patch(self, patch: Any) -> None:
-        self.set_model_patch(patch, "noise_refiner")
+    def patch_hooks(self, hooks: Any) -> None:
+        self._call_rpc("patch_hooks", hooks)
+
+    def patch_cached_hook_weights(
+        self, cached_weights: dict[Any, Any], key: str, memory_counter: Any
+    ) -> None:
+        self._call_rpc("patch_cached_hook_weights", cached_weights, key, memory_counter)
+
+    def patch_hook_weight_to_device(
+        self,
+        hooks: Any,
+        combined_patches: dict[Any, Any],
+        key: str,
+        original_weights: dict[Any, Any],
+        memory_counter: Any,
+    ) -> None:
+        self._call_rpc(
+            "patch_hook_weight_to_device",
+            hooks,
+            combined_patches,
+            key,
+            original_weights,
+            memory_counter,
+        )
+
+    def model_state_dict_for_saving(
+        self, model: Any = None, prefix: str = ""
+    ) -> Any:
+        return self._call_rpc("model_state_dict_for_saving", model, prefix)
+
+    def state_dict_for_saving(
+        self,
+        clip_state_dict: Any = None,
+        vae_state_dict: Any = None,
+        clip_vision_state_dict: Any = None,
+    ) -> Any:
+        return self._call_rpc(
+            "state_dict_for_saving",
+            clip_state_dict,
+            vae_state_dict,
+            clip_vision_state_dict,
+        )
 
 
 class _InnerModelProxy:

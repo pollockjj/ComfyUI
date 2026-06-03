@@ -148,9 +148,21 @@ class ModelSamplingRegistry(BaseRegistry[Any]):
         sampling = self._get_instance(instance_id)
         return detach_if_grad(sampling.sigmas)
 
+    async def get_property(self, instance_id: str, name: str) -> Any:
+        sampling = self._get_instance(instance_id)
+        return detach_if_grad(getattr(sampling, name))
+
     async def set_sigmas(self, instance_id: str, sigmas: Any) -> None:
         sampling = self._get_instance(instance_id)
         sampling.set_sigmas(sigmas)
+
+    async def set_parameters(self, instance_id: str, *args: Any, **kwargs: Any) -> None:
+        sampling = self._get_instance(instance_id)
+        sampling.set_parameters(*args, **kwargs)
+
+    async def set_noise_scale(self, instance_id: str, noise_scale: Any) -> None:
+        sampling = self._get_instance(instance_id)
+        sampling.set_noise_scale(noise_scale)
 
 
 class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
@@ -226,8 +238,21 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
                     def get_sigmas(self, instance_id: str) -> Any:
                         return registry.get_sigmas(instance_id)
 
+                    def get_property(self, instance_id: str, name: str) -> Any:
+                        return registry.get_property(instance_id, name)
+
                     def set_sigmas(self, instance_id: str, sigmas: Any) -> None:
                         return registry.set_sigmas(instance_id, sigmas)
+
+                    def set_parameters(
+                        self, instance_id: str, *args: Any, **kwargs: Any
+                    ) -> None:
+                        return registry.set_parameters(instance_id, *args, **kwargs)
+
+                    def set_noise_scale(
+                        self, instance_id: str, noise_scale: Any
+                    ) -> None:
+                        return registry.set_noise_scale(instance_id, noise_scale)
 
                 self._rpc_caller = _LocalCaller()
         return self._rpc_caller
@@ -317,6 +342,42 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
     def sigmas(self) -> Any:
         return self._call("get_sigmas")
 
+    @property
+    def log_sigmas(self) -> Any:
+        return self._call("get_property", "log_sigmas")
+
+    @property
+    def cosine_s(self) -> Any:
+        return self._call("get_property", "cosine_s")
+
+    @property
+    def linear_end(self) -> Any:
+        return self._call("get_property", "linear_end")
+
+    @property
+    def linear_start(self) -> Any:
+        return self._call("get_property", "linear_start")
+
+    @property
+    def multiplier(self) -> Any:
+        return self._call("get_property", "multiplier")
+
+    @property
+    def noise_scale(self) -> Any:
+        return self._call("get_property", "noise_scale")
+
+    @property
+    def num_timesteps(self) -> Any:
+        return self._call("get_property", "num_timesteps")
+
+    @property
+    def shift(self) -> Any:
+        return self._call("get_property", "shift")
+
+    @property
+    def zsnr(self) -> Any:
+        return self._call("get_property", "zsnr")
+
     def calculate_input(self, sigma: Any, noise: Any) -> Any:
         return self._call("calculate_input", sigma, noise)
 
@@ -358,3 +419,9 @@ class ModelSamplingProxy(BaseProxy[ModelSamplingRegistry]):
 
     def set_sigmas(self, sigmas: Any) -> None:
         return self._call("set_sigmas", sigmas)
+
+    def set_parameters(self, *args: Any, **kwargs: Any) -> None:
+        return self._call("set_parameters", *args, **kwargs)
+
+    def set_noise_scale(self, noise_scale: Any) -> None:
+        return self._call("set_noise_scale", noise_scale)

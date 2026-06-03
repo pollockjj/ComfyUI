@@ -217,7 +217,33 @@ class EchoLatentNode:
         return latent, saw_json_tensor
 
 
+class ProxyTestSealedWorkerNode:
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "probe"
+    OUTPUT_NODE = True
+    CATEGORY = "PyIsolated/SealedWorker"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, Any]:  # noqa: N802
+        return {"required": {}}
+
+    def probe(self) -> dict[str, Any]:
+        artifact_dir = _artifact_dir()
+        report = "\n".join(
+            [
+                "UV sealed proxy registration probe",
+                f"artifact_dir={artifact_dir}",
+                f"module={__name__}",
+            ]
+        )
+        _write_artifact("uv_singleton_proxy_probe.txt", report)
+        logger.warning("][ UV singleton proxy probe executed")
+        return {"ui": {"text": [report]}, "result": (report,)}
+
+
 NODE_CLASS_MAPPINGS = {
+    "ProxyTestSealedWorker": ProxyTestSealedWorkerNode,
     "UVSealedRuntimeProbe": InspectRuntimeNode,
     "UVSealedBoltonsSlugify": BoltonsSlugifyNode,
     "UVSealedFilesystemBarrier": FilesystemBarrierNode,
@@ -226,6 +252,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "ProxyTestSealedWorker": "Proxy Test Sealed Worker",
     "UVSealedRuntimeProbe": "UV Sealed Runtime Probe",
     "UVSealedBoltonsSlugify": "UV Sealed Boltons Slugify",
     "UVSealedFilesystemBarrier": "UV Sealed Filesystem Barrier",

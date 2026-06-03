@@ -59,12 +59,31 @@ def test_register_serializers():
     registry.clear()
 
 
+def test_prompt_server_registration_uses_lightweight_child_stub():
+    adapter = ComfyUIAdapter()
+    original_server = sys.modules.pop("server", None)
+
+    class PromptServerService:
+        pass
+
+    try:
+        adapter.handle_api_registration(PromptServerService, rpc=None)
+        from comfy.isolation.proxies.prompt_server_impl import PromptServerStub
+
+        server_module = sys.modules["server"]
+        assert isinstance(server_module.PromptServer.instance, PromptServerStub)
+    finally:
+        if original_server is not None:
+            sys.modules["server"] = original_server
+        else:
+            sys.modules.pop("server", None)
+
+
 def test_child_temp_directory_fence_uses_private_tmp(tmp_path):
     if sys.platform != "linux" or shutil.which("bwrap") is None:
         pytest.skip("bubblewrap sandbox test requires Linux with bwrap")
-    module_path = repo_root / "custom_nodes" / "ComfyUI-IsolationToolkit"
-    if not module_path.exists():
-        pytest.skip("bubblewrap sandbox test requires ComfyUI-IsolationToolkit fixture")
+    module_path = tmp_path / "ComfyUI-IsolationToolkit"
+    module_path.mkdir()
 
     adapter = ComfyUIAdapter()
     child_script = textwrap.dedent(

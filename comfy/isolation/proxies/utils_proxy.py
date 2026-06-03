@@ -3,8 +3,20 @@ from __future__ import annotations
 
 from typing import Optional, Any
 from pyisolate import ProxiedSingleton
+from .singleton_contract import SingletonProxyContract
 
 import os
+
+UTILS_PUBLIC_CALLABLES = (
+    "set_progress_bar_global_hook",
+)
+
+UTILS_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="UtilsProxy",
+    target_name="comfy.utils progress hook path",
+    target_public_symbols=UTILS_PUBLIC_CALLABLES,
+    custom_symbols=UTILS_PUBLIC_CALLABLES,
+)
 
 
 def _comfy_utils():

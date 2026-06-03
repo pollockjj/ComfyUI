@@ -1,4 +1,3 @@
-from __future__ import annotations
 from av.container import InputContainer
 from av.subtitles.stream import SubtitleStream
 from fractions import Fraction
@@ -75,6 +74,12 @@ class VideoFromFile(VideoInput):
         if isinstance(self.__file, io.BytesIO):
             self.__file.seek(0)
         return self.__file
+
+    def get_active_trim_window(self) -> tuple[float, float]:
+        start_time = self.__start_time
+        if start_time < 0:
+            start_time = max(self._get_raw_duration() + start_time, 0.0)
+        return float(start_time), float(self.__duration)
 
     def get_dimensions(self) -> tuple[int, int]:
         """
@@ -290,7 +295,7 @@ class VideoFromFile(VideoInput):
                                     alphas = []
                                     alpha_channel = True
                                     break
-                            if frame.format.name in ("yuvj420p", "rgb24", "rgba", "pal8"):
+                            if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
                                 process_image_format = lambda a: a.float() / 255.0
                                 if alpha_channel:
                                     image_format = 'rgba'

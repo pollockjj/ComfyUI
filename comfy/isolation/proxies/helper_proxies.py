@@ -6,6 +6,18 @@ from typing import Any, Dict, Optional
 from pyisolate import ProxiedSingleton
 
 from .base import call_singleton_rpc
+from .singleton_contract import SingletonProxyContract
+
+HELPER_PROXIES_PUBLIC_CALLABLES = (
+    "restore_input_types",
+)
+
+HELPER_PROXIES_SINGLETON_CONTRACT = SingletonProxyContract(
+    proxy_name="HelperProxiesService",
+    target_name="helper singleton restoration services",
+    target_public_symbols=HELPER_PROXIES_PUBLIC_CALLABLES,
+    custom_symbols=HELPER_PROXIES_PUBLIC_CALLABLES,
+)
 
 
 class AnyTypeProxy(str):

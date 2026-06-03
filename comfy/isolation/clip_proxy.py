@@ -149,6 +149,9 @@ class CLIPRegistry(BaseRegistry[Any]):
             )
         )
 
+    async def add_hooks_to_dict(self, instance_id: str, pooled_dict: dict[str, Any]) -> Any:
+        return self._get_instance(instance_id).add_hooks_to_dict(pooled_dict)
+
     async def add_patches(
         self,
         instance_id: str,
@@ -170,6 +173,45 @@ class CLIPRegistry(BaseRegistry[Any]):
 
     async def get_sd(self, instance_id: str) -> Any:
         return self._get_instance(instance_id).get_sd()
+
+    async def state_dict_for_saving(self, instance_id: str) -> Any:
+        return detach_if_grad(self._get_instance(instance_id).state_dict_for_saving())
+
+    async def generate(
+        self,
+        instance_id: str,
+        tokens: Any,
+        do_sample: bool = True,
+        max_length: int = 256,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        seed: Any = None,
+        presence_penalty: float = 0.0,
+    ) -> Any:
+        return detach_if_grad(
+            self._get_instance(instance_id).generate(
+                tokens,
+                do_sample=do_sample,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+                seed=seed,
+                presence_penalty=presence_penalty,
+            )
+        )
+
+    async def decode(
+        self, instance_id: str, token_ids: Any, skip_special_tokens: bool = True
+    ) -> Any:
+        return self._get_instance(instance_id).decode(
+            token_ids, skip_special_tokens=skip_special_tokens
+        )
 
     async def clone(self, instance_id: str) -> str:
         return self.register(self._get_instance(instance_id).clone())
@@ -297,6 +339,9 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
             show_pbar=show_pbar,
         )
 
+    def add_hooks_to_dict(self, pooled_dict: dict[str, Any]) -> Any:
+        return self._call_rpc("add_hooks_to_dict", pooled_dict)
+
     def add_patches(
         self, patches: Any, strength_patch: float = 1.0, strength_model: float = 1.0
     ) -> Any:
@@ -315,6 +360,41 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
 
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")
+
+    def state_dict_for_saving(self) -> Any:
+        return self._call_rpc("state_dict_for_saving")
+
+    def generate(
+        self,
+        tokens: Any,
+        do_sample: bool = True,
+        max_length: int = 256,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        seed: Any = None,
+        presence_penalty: float = 0.0,
+    ) -> Any:
+        return self._call_rpc(
+            "generate",
+            tokens,
+            do_sample=do_sample,
+            max_length=max_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+            presence_penalty=presence_penalty,
+        )
+
+    def decode(self, token_ids: Any, skip_special_tokens: bool = True) -> Any:
+        return self._call_rpc(
+            "decode", token_ids, skip_special_tokens=skip_special_tokens
+        )
 
     def clone(self) -> CLIPProxy:
         new_id = self._call_rpc("clone")

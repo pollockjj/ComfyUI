@@ -311,6 +311,28 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         sd_keys = instance.model.state_dict().keys()
         return dict.fromkeys(sd_keys, None)
 
+    async def model_state_dict_for_saving(
+        self, instance_id: str, model: Any = None, prefix: str = ""
+    ) -> Any:
+        return detach_if_grad(
+            self._get_instance(instance_id).model_state_dict_for_saving(model, prefix)
+        )
+
+    async def state_dict_for_saving(
+        self,
+        instance_id: str,
+        clip_state_dict: Any = None,
+        vae_state_dict: Any = None,
+        clip_vision_state_dict: Any = None,
+    ) -> Any:
+        return detach_if_grad(
+            self._get_instance(instance_id).state_dict_for_saving(
+                clip_state_dict=clip_state_dict,
+                vae_state_dict=vae_state_dict,
+                clip_vision_state_dict=clip_vision_state_dict,
+            )
+        )
+
     def _sanitize_rpc_result(self, obj, seen=None):
         if seen is None:
             seen = set()
@@ -378,6 +400,9 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def pinned_memory_size(self, instance_id: str) -> int:
         return self._get_instance(instance_id).pinned_memory_size()
+
+    async def loaded_ram_size(self, instance_id: str) -> Any:
+        return self._get_instance(instance_id).loaded_ram_size()
 
     async def get_non_dynamic_delegate(self, instance_id: str) -> str:
         instance = self._get_instance(instance_id)
@@ -508,12 +533,12 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def detach(self, instance_id: str, unpatch_all: bool = True) -> None:
         self._get_instance(instance_id).detach(unpatch_all)
 
-    async def prepare_state(self, instance_id: str, timestep: Any) -> Any:
+    async def prepare_state(self, instance_id: str, timestep: Any, model_options: Any) -> Any:
         instance = self._get_instance(instance_id)
         cp = getattr(instance.model, "current_patcher", instance)
         if cp is None:
             cp = instance
-        return cp.prepare_state(timestep)
+        return cp.prepare_state(timestep, model_options)
 
     async def pre_run(self, instance_id: str) -> None:
         self._get_instance(instance_id).pre_run()
@@ -576,6 +601,33 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def clean_hooks(self, instance_id: str) -> None:
         self._get_instance(instance_id).clean_hooks()
+
+    async def patch_hooks(self, instance_id: str, hooks: Any) -> None:
+        self._get_instance(instance_id).patch_hooks(hooks)
+
+    async def patch_cached_hook_weights(
+        self,
+        instance_id: str,
+        cached_weights: dict,
+        key: str,
+        memory_counter: Any,
+    ) -> None:
+        self._get_instance(instance_id).patch_cached_hook_weights(
+            cached_weights, key, memory_counter
+        )
+
+    async def patch_hook_weight_to_device(
+        self,
+        instance_id: str,
+        hooks: Any,
+        combined_patches: dict,
+        key: str,
+        original_weights: dict,
+        memory_counter: Any,
+    ) -> None:
+        self._get_instance(instance_id).patch_hook_weight_to_device(
+            hooks, combined_patches, key, original_weights, memory_counter
+        )
 
     async def restore_hook_patches(self, instance_id: str) -> None:
         self._get_instance(instance_id).restore_hook_patches()
@@ -736,6 +788,16 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
     async def set_model_post_input_patch(self, instance_id: str, patch: Any) -> None:
         self._get_instance(instance_id).set_model_post_input_patch(patch)
 
+    async def set_model_noise_refiner_patch(
+        self, instance_id: str, patch: Any
+    ) -> None:
+        self._get_instance(instance_id).set_model_noise_refiner_patch(patch)
+
+    async def set_model_middle_block_after_patch(
+        self, instance_id: str, patch: Any
+    ) -> None:
+        self._get_instance(instance_id).set_model_middle_block_after_patch(patch)
+
     async def set_model_rope_options(self, instance_id: str, options: dict) -> None:
         self._get_instance(instance_id).set_model_rope_options(**options)
 
@@ -871,9 +933,38 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
             self._get_instance(instance_id).get_additional_models_with_key(key)
         )
 
+    async def match_multigpu_clones(self, instance_id: str) -> None:
+        self._get_instance(instance_id).match_multigpu_clones()
+
+    async def get_clone_model_override(self, instance_id: str) -> Any:
+        return self._sanitize_rpc_result(
+            self._get_instance(instance_id).get_clone_model_override()
+        )
+
+    async def deepclone_multigpu(
+        self,
+        instance_id: str,
+        new_load_device: Any = None,
+        models_cache: dict | None = None,
+    ) -> str:
+        new_model = self._get_instance(instance_id).deepclone_multigpu(
+            new_load_device, models_cache
+        )
+        return self.register(new_model)
+
     async def model_patches_models(self, instance_id: str) -> Any:
         return self._sanitize_rpc_result(
             self._get_instance(instance_id).model_patches_models()
+        )
+
+    async def model_patches_call_function(
+        self,
+        instance_id: str,
+        function_name: str = "cleanup",
+        arguments: dict | None = None,
+    ) -> None:
+        self._get_instance(instance_id).model_patches_call_function(
+            function_name, arguments or {}
         )
 
     async def get_patches(self, instance_id: str) -> Any:

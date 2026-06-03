@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import os
 import inspect
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
@@ -804,13 +806,11 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "FolderPathsProxy":
             import folder_paths
 
-            # Replace module-level functions with proxy methods
-            # This is aggressive but necessary for transparent proxying
-            # Handle both instance and class cases
-            instance = api() if isinstance(api, type) else api
-            for name in dir(instance):
-                if not name.startswith("_"):
-                    setattr(folder_paths, name, getattr(instance, name))
+            if rpc is not None:
+                FolderPathsProxy.set_rpc(rpc)
+
+            folder_paths_proxy = object.__new__(FolderPathsProxy)
+            FolderPathsProxy.install_into(folder_paths_proxy, folder_paths)
 
             # Fence: isolated children get writable temp inside sandbox
             if os.environ.get("PYISOLATE_CHILD") == "1":
@@ -825,11 +825,13 @@ class ComfyUIAdapter(IsolationAdapter):
             if _IMPORT_TORCH:
                 import comfy.model_management
 
-                instance = api() if isinstance(api, type) else api
-                # Replace module-level functions with proxy methods
-                for name in dir(instance):
-                    if not name.startswith("_"):
-                        setattr(comfy.model_management, name, getattr(instance, name))
+                if rpc is not None:
+                    ModelManagementProxy.set_rpc(rpc)
+                model_management_proxy = object.__new__(ModelManagementProxy)
+                ModelManagementProxy.install_into(
+                    model_management_proxy,
+                    comfy.model_management,
+                )
             return
 
         if api_name == "UtilsProxy":
@@ -853,12 +855,18 @@ class ComfyUIAdapter(IsolationAdapter):
         if api_name == "PromptServerService":
             if not _IMPORT_TORCH:
                 return
-            import server
             from comfy.isolation.proxies.prompt_server_impl import PromptServerStub
 
             stub = PromptServerStub()
-            if (
-                hasattr(server, "PromptServer")
-                and getattr(server.PromptServer, "instance", None) is not stub
-            ):
-                server.PromptServer.instance = stub
+            server_module = sys.modules.get("server")
+            if server_module is None:
+                server_module = types.ModuleType("server")
+                sys.modules["server"] = server_module
+
+            prompt_server = getattr(server_module, "PromptServer", None)
+            if prompt_server is None:
+                prompt_server = type("PromptServer", (), {})
+                server_module.PromptServer = prompt_server
+
+            if getattr(prompt_server, "instance", None) is not stub:
+                prompt_server.instance = stub
