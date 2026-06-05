@@ -904,6 +904,14 @@ class VAELoader:
         resolved = comfy.model_management.resolve_gpu_device_option(device)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=resolved)
         vae.throw_exception_if_invalid()
+        # Register reload factory so vae.patcher.deepclone_multigpu can re-load weights
+        # from disk for multigpu clones (mirrors UNETLoader / CLIPLoader pattern).
+        if vae_name not in self.image_taes and vae_name != "pixel_space":
+            try:
+                vae_path = folder_paths.get_full_path_or_raise("vae_approx" if os.path.splitext(vae_name)[0] in self.video_taes else "vae", vae_name)
+                vae.patcher.cached_patcher_init = (comfy.sd.load_vae_patcher, (vae_path, metadata, resolved))
+            except Exception:
+                pass
         return (vae,)
 
 class ControlNetLoader:
@@ -1643,6 +1651,11 @@ class SetLatentNoiseMask:
         return (s,)
 
 def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
+    import time as _ksample_time
+    import logging as _ksample_log
+    import torch as _ksample_torch
+    _ksample_ws = bool(model.get_additional_models_with_key("multigpu")) if hasattr(model, "get_additional_models_with_key") else False
+    _ksample_t0 = _ksample_time.perf_counter()
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(model, latent_image, latent.get("downscale_ratio_spacial", None))
 
@@ -1664,6 +1677,11 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
     out = latent.copy()
     out.pop("downscale_ratio_spacial", None)
     out["samples"] = samples
+    try: _ksample_torch.cuda.synchronize()
+    except Exception: pass
+    _ksample_dt_ms = (_ksample_time.perf_counter() - _ksample_t0) * 1000.0
+    _ksample_path = "worksplit" if _ksample_ws else "standard"
+    _ksample_log.warning(f"INSTRUMENT_SAMPLER_TIME path={_ksample_path} steps={steps} cfg={cfg} sampler={sampler_name} duration_ms={_ksample_dt_ms:.3f}")
     return (out, )
 
 class KSampler:

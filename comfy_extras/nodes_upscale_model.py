@@ -1,4 +1,5 @@
 import logging
+import time
 from spandrel import ModelLoader, ImageModelDescriptor
 from comfy import model_management
 import torch
@@ -81,13 +82,51 @@ class ImageUpscaleWithModel(io.ComfyNode):
 
         output_device = comfy.model_management.intermediate_device()
 
+        # MultiGPU dispatch: if MultiGPU_WorkUnits attached per-device deepclones, route tiles
+        # through tiled_scale_multidim_multigpu instead of the single-device tiled_scale.
+        multigpu_clones = getattr(upscale_model, 'multigpu_clones', None)
+        if multigpu_clones:
+            for dev, desc in multigpu_clones.items():
+                desc.to(dev)
+
         oom = True
         try:
             while oom:
                 try:
                     steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
                     pbar = comfy.utils.ProgressBar(steps)
-                    s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
+                    if multigpu_clones:
+                        functions = {device: lambda a: upscale_model(a.float())}
+                        for dev, desc in multigpu_clones.items():
+                            functions[dev] = lambda a, d=desc: d(a.float())
+                        sync_devices = [device] + list(multigpu_clones.keys())
+                        for sd in sync_devices:
+                            try: torch.cuda.synchronize(sd)
+                            except Exception: pass
+                        _t0 = time.perf_counter()
+                        s = comfy.utils.tiled_scale_multidim_multigpu(
+                            in_img,
+                            functions,
+                            tile=(tile, tile),
+                            overlap=overlap,
+                            upscale_amount=upscale_model.scale,
+                            pbar=pbar,
+                            output_device=output_device,
+                        )
+                        for sd in sync_devices:
+                            try: torch.cuda.synchronize(sd)
+                            except Exception: pass
+                        _dt_ms = (time.perf_counter() - _t0) * 1000.0
+                        logging.warning(f"INSTRUMENT_UPSCALE_TIME path=worksplit tile={tile} overlap={overlap} devices={[str(d) for d in sync_devices]} duration_ms={_dt_ms:.3f}")
+                    else:
+                        try: torch.cuda.synchronize(device)
+                        except Exception: pass
+                        _t0 = time.perf_counter()
+                        s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
+                        try: torch.cuda.synchronize(device)
+                        except Exception: pass
+                        _dt_ms = (time.perf_counter() - _t0) * 1000.0
+                        logging.warning(f"INSTRUMENT_UPSCALE_TIME path=standard tile={tile} overlap={overlap} device={str(device)} duration_ms={_dt_ms:.3f}")
                     oom = False
                 except Exception as e:
                     model_management.raise_non_oom(e)
@@ -96,6 +135,9 @@ class ImageUpscaleWithModel(io.ComfyNode):
                         raise e
         finally:
             upscale_model.to("cpu")
+            if multigpu_clones:
+                for desc in multigpu_clones.values():
+                    desc.to("cpu")
 
         s = torch.clamp(s.movedim(-3,-1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
         return io.NodeOutput(s)
