@@ -266,7 +266,7 @@ class SeedVR2Preprocess(io.ComfyNode):
                 io.Image.Input("images", tooltip="The already-resized (SeedVR2-sized) image(s) with fused alpha, padded here to model alignment."),
             ],
             outputs=[
-                io.Image.Output("input_pixels"),
+                io.Image.Output("processed_images"),
                 io.Image.Output("original_image"),
                 io.Int.Output("upscaled_shorter_edge"),
             ]
