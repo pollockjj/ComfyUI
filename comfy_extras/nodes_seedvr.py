@@ -505,7 +505,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
-        # Fail-loud guard against silently-wrong output when a numz-format
+        # Fail-loud guard against silently-wrong output when a
         # DiT-only ``.safetensors`` (no ``positive_conditioning`` /
         # ``negative_conditioning`` keys) is loaded via ``UNETLoader``.
         # ``NaDiT.__init__`` zero-fills the buffers via ``torch.zeros`` (see
@@ -522,7 +522,7 @@ class SeedVR2Conditioning(io.ComfyNode):
             raise RuntimeError(
                 f"{_SEEDVR2_INVALID_MODEL_MSG_PREFIX}: positive_conditioning "
                 f"and negative_conditioning buffers are zero-valued — model "
-                f"file appears to be a numz-format DiT-only export missing "
+                f"file appears to be a DiT-only export missing "
                 f"the SeedVR2 conditioning tensors. "
                 f"Re-bake the file with ``positive_conditioning`` (58, 5120) "
                 f"and ``negative_conditioning`` (64, 5120) keys at top level, "
@@ -615,8 +615,8 @@ def _concat_chunks_along_t(chunks_4d, channels: int) -> torch.Tensor:
 def _hann_blend_weights_1d(overlap: int, device, dtype) -> torch.Tensor:
     """1D length-``overlap`` crossfade weights for the previous chunk (current = ``1 - w_prev``):
     Hann window with a ``[1/3, 2/3]`` dead-band for ``overlap >= 3``, linear ramp for ``overlap < 3``
-    (dead-band would collapse a tiny transition). Window shape matched to numz ``blend_overlapping_frames``
-    for parity (reference, not source); caller broadcasts across ``(B, C, T_overlap, H, W)``.
+    (dead-band would collapse a tiny transition). Window shape matched to the reference
+    overlapping-frame blend for parity; caller broadcasts across ``(B, C, T_overlap, H, W)``.
     """
     if overlap < 1:
         raise ValueError(
