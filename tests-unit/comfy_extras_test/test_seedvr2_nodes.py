@@ -10,8 +10,6 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy_extras.nodes_seedvr as nodes_seedvr  # noqa: E402
-
 
 def test_seedvr_node_signature_matches_schema():
     mock_mm = MagicMock()
