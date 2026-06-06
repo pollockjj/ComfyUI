@@ -219,10 +219,10 @@ def _seedvr2_input_shorter_edge(images, node_name):
     )
 
 
-def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
+def _seedvr2_pad(images, upscaled_shorter_edge, node_name):
     if upscaled_shorter_edge < 2:
         raise ValueError(
-            f"{node_name}: resolved upscaled_shorter_edge must be at least 2 pixels; "
+            f"{node_name}: input shorter edge must be at least 2 pixels; "
             f"got {upscaled_shorter_edge}."
         )
     original_image = images
@@ -243,8 +243,6 @@ def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
     images = images.reshape(b * t, c, h, w)
 
     clip = Lambda(lambda x: torch.clamp(x, 0.0, 1.0))
-    images = side_resize(images, upscaled_shorter_edge)
-
     images = clip(images)
     images = div_pad(images, (16, 16))
     _, _, new_h, new_w = images.shape
@@ -263,10 +261,9 @@ class SeedVR2Preprocess(io.ComfyNode):
             node_id="SeedVR2Preprocess",
             display_name="Preprocess Images for SeedVR2",
             category="image/upscaling",
-            description="Preprocess image(s) into a SeedVR2-compatible input: resize the shorter edge by a multiplier and pad to model alignment.",
+            description="Preprocess an already-resized (alpha-fused) image into a SeedVR2-compatible input by padding it to model alignment. Resize upstream with Resize Image/Mask.",
             inputs=[
-                io.Image.Input("images", tooltip="The image(s) to resize."),
-                io.Float.Input("multiplier", default=4.0, min=0.01, tooltip="Upscale factor applied to the shorter edge."),
+                io.Image.Input("images", tooltip="The already-resized (SeedVR2-sized) image(s) with fused alpha, padded here to model alignment."),
             ],
             outputs=[
                 io.Image.Output("input_pixels"),
@@ -276,20 +273,9 @@ class SeedVR2Preprocess(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, multiplier=4.0):
-        if multiplier <= 0:
-            raise ValueError(
-                f"SeedVR2Preprocess: multiplier must be > 0; got {multiplier}."
-            )
-        shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Preprocess")
-        upscaled_shorter_edge = int(round(shorter_edge * multiplier))
-        if upscaled_shorter_edge < 2:
-            raise ValueError(
-                "SeedVR2Preprocess: multiplier resolved upscaled_shorter_edge "
-                f"to {upscaled_shorter_edge}; use a multiplier that resolves "
-                "to at least 2 pixels."
-            )
-        return _seedvr2_resize_and_pad(
+    def execute(cls, images):
+        upscaled_shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Preprocess")
+        return _seedvr2_pad(
             images, upscaled_shorter_edge, "SeedVR2Preprocess",
         )
 
