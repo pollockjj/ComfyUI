@@ -225,7 +225,6 @@ def _seedvr2_pad(images, upscaled_shorter_edge, node_name):
             f"{node_name}: input shorter edge must be at least 2 pixels; "
             f"got {upscaled_shorter_edge}."
         )
-    original_image = images
     if images.shape[-1] > 3:
         images = images[..., :3]
     if images.dim() == 4:
@@ -251,7 +250,7 @@ def _seedvr2_pad(images, upscaled_shorter_edge, node_name):
     images = cut_videos(images)
     images_bthwc = rearrange(images, "b t c h w -> b t h w c")
 
-    return io.NodeOutput(images_bthwc, original_image, upscaled_shorter_edge)
+    return io.NodeOutput(images_bthwc)
 
 
 class SeedVR2Preprocess(io.ComfyNode):
@@ -263,20 +262,18 @@ class SeedVR2Preprocess(io.ComfyNode):
             category="image/upscaling",
             description="Preprocess an already-resized (alpha-fused) image into a SeedVR2-compatible input by padding it to model alignment. Resize upstream with Resize Image/Mask.",
             inputs=[
-                io.Image.Input("images", tooltip="The already-resized (SeedVR2-sized) image(s) with fused alpha, padded here to model alignment."),
+                io.Image.Input("resized_images", tooltip="The already-resized (SeedVR2-sized) image(s) with fused alpha, padded here to model alignment."),
             ],
             outputs=[
                 io.Image.Output("processed_images"),
-                io.Image.Output("original_image"),
-                io.Int.Output("upscaled_shorter_edge"),
             ]
         )
 
     @classmethod
-    def execute(cls, images):
-        upscaled_shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Preprocess")
+    def execute(cls, resized_images):
+        upscaled_shorter_edge = _seedvr2_input_shorter_edge(resized_images, "SeedVR2Preprocess")
         return _seedvr2_pad(
-            images, upscaled_shorter_edge, "SeedVR2Preprocess",
+            resized_images, upscaled_shorter_edge, "SeedVR2Preprocess",
         )
 
 
