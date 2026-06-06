@@ -256,14 +256,14 @@ def _seedvr2_resize_and_pad(images, upscaled_shorter_edge, node_name):
     return io.NodeOutput(images_bthwc, original_image, upscaled_shorter_edge)
 
 
-class SeedVR2Resize(io.ComfyNode):
+class SeedVR2Preprocess(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="SeedVR2Resize",
-            display_name="Resize Image for SeedVR2",
+            node_id="SeedVR2Preprocess",
+            display_name="Preprocess Images for SeedVR2",
             category="image/upscaling",
-            description="Resize an image to a SeedVR2-compatible size by a multiplier.",
+            description="Preprocess image(s) into a SeedVR2-compatible input: resize the shorter edge by a multiplier and pad to model alignment.",
             inputs=[
                 io.Image.Input("images", tooltip="The image(s) to resize."),
                 io.Float.Input("multiplier", default=4.0, min=0.01, tooltip="Upscale factor applied to the shorter edge."),
@@ -279,44 +279,18 @@ class SeedVR2Resize(io.ComfyNode):
     def execute(cls, images, multiplier=4.0):
         if multiplier <= 0:
             raise ValueError(
-                f"SeedVR2Resize: multiplier must be > 0; got {multiplier}."
+                f"SeedVR2Preprocess: multiplier must be > 0; got {multiplier}."
             )
-        shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Resize")
+        shorter_edge = _seedvr2_input_shorter_edge(images, "SeedVR2Preprocess")
         upscaled_shorter_edge = int(round(shorter_edge * multiplier))
         if upscaled_shorter_edge < 2:
             raise ValueError(
-                "SeedVR2Resize: multiplier resolved upscaled_shorter_edge "
+                "SeedVR2Preprocess: multiplier resolved upscaled_shorter_edge "
                 f"to {upscaled_shorter_edge}; use a multiplier that resolves "
                 "to at least 2 pixels."
             )
         return _seedvr2_resize_and_pad(
-            images, upscaled_shorter_edge, "SeedVR2Resize",
-        )
-
-
-class SeedVR2ResizeAdvanced(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="SeedVR2ResizeAdvanced",
-            display_name="Resize Image for SeedVR2 (Advanced)",
-            category="image/upscaling",
-            description="Resize an image to an exact shorter-edge size for SeedVR2.",
-            inputs=[
-                io.Image.Input("images", tooltip="The image(s) to resize."),
-                io.Int.Input("shorter_edge", default=1280, min=2, tooltip="Target length of the shorter edge, in pixels."),
-            ],
-            outputs=[
-                io.Image.Output("input_pixels"),
-                io.Image.Output("original_image"),
-                io.Int.Output("upscaled_shorter_edge"),
-            ]
-        )
-
-    @classmethod
-    def execute(cls, images, shorter_edge):
-        return _seedvr2_resize_and_pad(
-            images, shorter_edge, "SeedVR2ResizeAdvanced",
+            images, upscaled_shorter_edge, "SeedVR2Preprocess",
         )
 
 
@@ -1107,8 +1081,7 @@ class SeedVRExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SeedVR2Conditioning,
-            SeedVR2Resize,
-            SeedVR2ResizeAdvanced,
+            SeedVR2Preprocess,
             SeedVR2PostProcessing,
             SeedVR2ProgressiveSampler,
         ]
