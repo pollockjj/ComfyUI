@@ -252,7 +252,7 @@ class SeedVR2Preprocess(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="SeedVR2Preprocess",
-            display_name="Preprocess Images for SeedVR2",
+            display_name="Pre-Process SeedVR2 Input",
             category="image/upscaling",
             description="Preprocess an already-resized (alpha-fused) image into a SeedVR2-compatible input by padding it to model alignment. Resize upstream with Resize Image/Mask.",
             inputs=[
