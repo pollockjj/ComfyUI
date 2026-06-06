@@ -486,7 +486,7 @@ class SeedVR2Conditioning(io.ComfyNode):
             description="Build SeedVR2 positive/negative conditioning from a VAE latent.",
             inputs=[
                 io.Model.Input("model", tooltip="The SeedVR2 model."),
-                io.Latent.Input("vae_conditioning", display_name="LATENT", tooltip="The VAE-encoded latent to condition on."),
+                io.Latent.Input("vae_conditioning", display_name="latent", tooltip="The VAE-encoded latent to condition on."),
             ],
             outputs=[
                 io.Model.Output(display_name = "model"),
@@ -742,22 +742,22 @@ def _concat_chunks_with_overlap_blend(chunk_specs, channels: int,
 
 def _run_standard_sample(model, seed: int, steps: int, cfg: float,
                          sampler_name: str, scheduler: str,
-                         positive, negative, latent_image: dict,
+                         positive, negative, latent: dict,
                          denoise: float) -> dict:
     """Single-shot mirror of ``nodes.py:common_ksampler`` (seed -> noise, ``comfy.sample.sample``, latent dict); used by the ProgressiveSampler short-circuit when the whole sequence fits one chunk."""
-    samples_in = latent_image["samples"]
+    samples_in = latent["samples"]
     samples_in = comfy.sample.fix_empty_latent_channels(
-        model, samples_in, latent_image.get("downscale_ratio_spacial", None),
+        model, samples_in, latent.get("downscale_ratio_spacial", None),
     )
-    batch_inds = latent_image.get("batch_index", None)
+    batch_inds = latent.get("batch_index", None)
     noise = comfy.sample.prepare_noise(samples_in, seed, batch_inds)
-    noise_mask = latent_image.get("noise_mask", None)
+    noise_mask = latent.get("noise_mask", None)
     samples = comfy.sample.sample(
         model, noise, steps, cfg, sampler_name, scheduler,
         positive, negative, samples_in,
         denoise=denoise, noise_mask=noise_mask, seed=seed,
     )
-    out = latent_image.copy()
+    out = latent.copy()
     out.pop("downscale_ratio_spacial", None)
     out["samples"] = samples
     return out
@@ -815,7 +815,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                tooltip="The conditioning describing the attributes you want to include in the image."),
                 io.Conditioning.Input("negative",
                                tooltip="The conditioning describing the attributes you want to exclude from the image."),
-                io.Latent.Input("latent_image",
+                io.Latent.Input("latent",
                                tooltip="The latent image to denoise."),
                 io.Float.Input("denoise", default=1.0, min=0.0, max=1.0,
                                step=0.01,
@@ -831,12 +831,12 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                                default="manual",
                                tooltip="manual = use frames_per_chunk exactly; auto = shrink the chunk until it fits in VRAM."),
             ],
-            outputs=[io.Latent.Output()],
+            outputs=[io.Latent.Output(display_name="latent")],
         )
 
     @classmethod
     def execute(cls, model, seed, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image, denoise,
+                positive, negative, latent, denoise,
                 frames_per_chunk, temporal_overlap,
                 chunking_mode="manual") -> io.NodeOutput:
         # 4n+1 validation in pixel-frame domain. The SeedVR2 native pipeline
@@ -852,10 +852,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                 f"got {frames_per_chunk}."
             )
 
-        samples_4d = latent_image["samples"]
+        samples_4d = latent["samples"]
         samples_4d = comfy.sample.fix_empty_latent_channels(
             model, samples_4d,
-            latent_image.get("downscale_ratio_spacial", None),
+            latent.get("downscale_ratio_spacial", None),
         )
         if samples_4d.ndim != 4:
             raise ValueError(
@@ -890,7 +890,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
                         model=model, seed=seed, steps=steps, cfg=cfg,
                         sampler_name=sampler_name, scheduler=scheduler,
                         positive=positive, negative=negative,
-                        latent_image=latent_image, denoise=denoise,
+                        latent=latent, denoise=denoise,
                         frames_per_chunk=attempt_frames_per_chunk,
                         temporal_overlap=temporal_overlap,
                         chunking_mode="manual",
@@ -917,12 +917,12 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # Short-circuit: total fits in one chunk -> standard path with no
         # chunking overhead. Output of this branch is byte-identical to the
         # built-in KSampler given the same (model, seed, steps, cfg,
-        # sampler_name, scheduler, positive, negative, latent_image,
+        # sampler_name, scheduler, positive, negative, latent,
         # denoise) tuple.
         if T_pixel <= frames_per_chunk:
             return io.NodeOutput(_run_standard_sample(
                 model, seed, steps, cfg, sampler_name, scheduler,
-                positive, negative, latent_image, denoise,
+                positive, negative, latent, denoise,
             ))
 
         # Map pixel chunk -> latent chunk. Each chunk's latent length is
@@ -949,10 +949,10 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
         # per chunk) preserves seed-determinism across chunk-count
         # variations: the same (seed, total T_latent) always produces the
         # same noise samples regardless of how the work is partitioned.
-        batch_inds = latent_image.get("batch_index", None)
+        batch_inds = latent.get("batch_index", None)
         noise_full = comfy.sample.prepare_noise(samples_4d, seed, batch_inds)
 
-        noise_mask = latent_image.get("noise_mask", None)
+        noise_mask = latent.get("noise_mask", None)
 
         # Build the flat list of chunk ranges first so the chunking
         # geometry is fully known before any sample call.
@@ -1007,7 +1007,7 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             chunk_specs, SEEDVR2_LATENT_CHANNELS, temporal_overlap,
         )
 
-        out = latent_image.copy()
+        out = latent.copy()
         out.pop("downscale_ratio_spacial", None)
         out["samples"] = final
         return io.NodeOutput(out)
