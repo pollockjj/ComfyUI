@@ -152,18 +152,6 @@ def inter(x_0, x_T, t):
     B = lambda t: t / T
     A = lambda t: 1 - (t / T)
     return A(t) * x_0 + B(t) * x_T
-def area_resize(image, max_area):
-
-    height, width = image.shape[-2:]
-    scale = math.sqrt(max_area / (height * width))
-
-    resized_height, resized_width = round(height * scale), round(width * scale)
-
-    return TVF.resize(
-        image,
-        size=(resized_height, resized_width),
-        interpolation=InterpolationMode.BICUBIC,
-    )
 
 def div_pad(image, factor):
 
@@ -254,9 +242,9 @@ class SeedVR2Preprocess(io.ComfyNode):
             node_id="SeedVR2Preprocess",
             display_name="Pre-Process SeedVR2 Input",
             category="image/upscaling",
-            description="Preprocess an already-resized (alpha-fused) image into a SeedVR2-compatible input by padding it to model alignment. Resize upstream with Resize Image/Mask.",
+            description="Pad an already-resized image to SeedVR2 model alignment (resize upstream with Resize Image/Mask). Any alpha is dropped for the model; Post-Process SeedVR2 Output re-applies it from the original resized image.",
             inputs=[
-                io.Image.Input("resized_images", tooltip="The already-resized (SeedVR2-sized) image(s) with fused alpha, padded here to model alignment."),
+                io.Image.Input("resized_images", tooltip="The already-resized (SeedVR2-sized) image(s). Any alpha is dropped before padding for the model and re-applied downstream by Post-Process SeedVR2 Output."),
             ],
             outputs=[
                 io.Image.Output("processed_images"),
