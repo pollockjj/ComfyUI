@@ -202,12 +202,6 @@ def cut_videos(videos):
         assert (videos.size(1) - 1) % (4) == 0
         return videos
 
-def side_resize(image, size):
-    antialias = not (isinstance(image, torch.Tensor) and image.device.type == 'mps')
-    resized = TVF.resize(image, size, InterpolationMode.BICUBIC, antialias=antialias)
-    return resized
-
-
 def _seedvr2_input_shorter_edge(images, node_name):
     if images.dim() == 4:
         return min(images.shape[1], images.shape[2])
@@ -277,17 +271,6 @@ class SeedVR2Preprocess(io.ComfyNode):
         )
 
 
-def _edge_guided_alpha_upscale(alpha, out_h, out_w):
-    a = alpha.float()
-    extreme_fraction = ((a < 0.1) | (a > 0.9)).float().mean()
-    if extreme_fraction > 0.9:
-        up = torch.nn.functional.interpolate(a, size=(out_h, out_w), mode="bilinear", align_corners=False, antialias=True)
-        up = torch.clamp((up - 0.5) * 4.0 + 0.5, 0.0, 1.0)
-    else:
-        up = torch.nn.functional.interpolate(a, size=(out_h, out_w), mode="bicubic", align_corners=False, antialias=True).clamp(0.0, 1.0)
-    return up
-
-
 class SeedVR2PostProcessing(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -295,40 +278,36 @@ class SeedVR2PostProcessing(io.ComfyNode):
             node_id="SeedVR2PostProcessing",
             display_name="Post-Process SeedVR2 Output",
             category="image/upscaling",
-            description="Align the upscaled output to the original's geometry and optionally color-correct it against the original.",
+            description="Align the upscaled output to the original resized image's geometry (de-pad) and optionally color-correct it against that image.",
             inputs=[
-                io.Image.Input("decoded", tooltip="The decoded upscaled image to color-correct."),
-                io.Image.Input("original_image", tooltip="The original image used as the color reference."),
-                io.Int.Input("upscaled_shorter_edge", min=2, force_input=True, tooltip="Shorter-edge size from the resize node."),
+                io.Image.Input("images", tooltip="The decoded upscaled image to color-correct."),
+                io.Image.Input("original_resized_images", tooltip="The original resized (pre-pad) image used as the geometry and color reference."),
                 io.Combo.Input("color_correction_method", options=["lab", "wavelet", "adain", "none"], default="lab", tooltip="How to match the output's color to the original. lab: transfer color in CIELAB space, preserving detail (most faithful). wavelet: transfer low-frequency color, keeping upscaled high-frequency detail. adain: match per-channel mean/std (fastest, global tint). none: skip color transfer (geometry alignment only)."),
             ],
-            outputs=[io.Image.Output()],
+            outputs=[io.Image.Output(display_name="images")],
         )
 
     @classmethod
-    def execute(cls, decoded, original_image, upscaled_shorter_edge, color_correction_method):
-        cls._validate_upscaled_shorter_edge(upscaled_shorter_edge)
+    def execute(cls, images, original_resized_images, color_correction_method):
         alpha_input = None
-        if original_image.shape[-1] == 4:
-            alpha_input = original_image[..., 3:4]
-            original_image = original_image[..., :3]
-        decoded_5d, decoded_was_4d = cls._as_bthwc(decoded)
-        original_5d, _ = cls._as_bthwc(original_image)
-        decoded_5d = cls._restore_reference_batch_time(decoded_5d, original_5d)
+        if original_resized_images.shape[-1] == 4:
+            alpha_input = original_resized_images[..., 3:4]
+            original_resized_images = original_resized_images[..., :3]
+        decoded_5d, decoded_was_4d = cls._as_bthwc(images)
+        reference_full, _ = cls._as_bthwc(original_resized_images)
+        decoded_5d = cls._restore_reference_batch_time(decoded_5d, reference_full)
 
-        b = min(decoded_5d.shape[0], original_5d.shape[0])
-        t = min(decoded_5d.shape[1], original_5d.shape[1])
-        reference_h, reference_w = cls._resized_shorter_edge_dims(
-            original_5d.shape[2], original_5d.shape[3], upscaled_shorter_edge,
-        )
+        b = min(decoded_5d.shape[0], reference_full.shape[0])
+        t = min(decoded_5d.shape[1], reference_full.shape[1])
+        reference_h = reference_full.shape[2]
+        reference_w = reference_full.shape[3]
 
         decoded_5d = decoded_5d[:b, :t, :, :, :]
         target_h = min(decoded_5d.shape[2], reference_h)
         target_w = min(decoded_5d.shape[3], reference_w)
         decoded_5d = decoded_5d[:, :, :target_h, :target_w, :]
         if color_correction_method in ("lab", "wavelet", "adain"):
-            reference_5d = cls._resize_original_reference(original_image, upscaled_shorter_edge)
-            reference_5d = reference_5d[:b, :t, :, :, :]
+            reference_5d = reference_full[:b, :t, :, :, :]
             reference_5d = cls._resize_reference(reference_5d, target_h, target_w)
             output_device = decoded_5d.device
             decoded_raw = cls._to_seedvr2_raw(decoded_5d)
@@ -346,12 +325,9 @@ class SeedVR2PostProcessing(io.ComfyNode):
             raise ValueError(f"SeedVR2PostProcessing: unknown color_correction_method {color_correction_method!r}")
 
         if alpha_input is not None:
-            ab, at = output.shape[0], output.shape[1]
             alpha_5d, _ = cls._as_bthwc(alpha_input)
-            alpha_flat = rearrange(alpha_5d[:ab, :at], "b t h w c -> (b t) c h w")
-            alpha_up = _edge_guided_alpha_upscale(alpha_flat, output.shape[2], output.shape[3])
-            alpha_up = rearrange(alpha_up, "(b t) c h w -> b t h w c", b=ab, t=at)
-            output = torch.cat([output, alpha_up.to(dtype=output.dtype, device=output.device)], dim=-1)
+            alpha_5d = alpha_5d[:output.shape[0], :output.shape[1], :output.shape[2], :output.shape[3], :]
+            output = torch.cat([output, alpha_5d.to(dtype=output.dtype, device=output.device)], dim=-1)
         h2 = output.shape[-3] - (output.shape[-3] % 2)
         w2 = output.shape[-2] - (output.shape[-2] % 2)
         output = output[:, :, :h2, :w2, :]
@@ -384,28 +360,6 @@ class SeedVR2PostProcessing(io.ComfyNode):
     @staticmethod
     def _to_seedvr2_raw(images):
         return images.mul(2.0).sub(1.0)
-
-    @staticmethod
-    def _validate_upscaled_shorter_edge(upscaled_shorter_edge):
-        if not isinstance(upscaled_shorter_edge, int) or upscaled_shorter_edge < 2:
-            raise ValueError(
-                "SeedVR2PostProcessing: upscaled_shorter_edge must be an integer "
-                f"of at least 2 pixels; got {upscaled_shorter_edge!r}."
-            )
-
-    @staticmethod
-    def _resized_shorter_edge_dims(height, width, upscaled_shorter_edge):
-        if height <= width:
-            return upscaled_shorter_edge, int(upscaled_shorter_edge * width / height)
-        return int(upscaled_shorter_edge * height / width), upscaled_shorter_edge
-
-    @classmethod
-    def _resize_original_reference(cls, original, upscaled_shorter_edge):
-        original_5d, _ = cls._as_bthwc(original)
-        b, t = original_5d.shape[:2]
-        original_flat = rearrange(original_5d, "b t h w c -> (b t) c h w")
-        resized_flat = side_resize(original_flat, upscaled_shorter_edge).clamp(0.0, 1.0)
-        return rearrange(resized_flat, "(b t) c h w -> b t h w c", b=b, t=t)
 
     @staticmethod
     def _color_transfer_on_vae_device(decoded_flat, reference_flat, output_device, transfer_fn):
