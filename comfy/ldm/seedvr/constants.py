@@ -9,6 +9,15 @@ Provenance prefixes:
 """
 
 # --------------------------------------------------------------------------------------
+# A. Progressive-sampler chunk-size law  (SEEDVR2 - this integration's VRAM experiment)
+#    n_max(frames/chunk) = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_GB - SEEDVR2_CHUNK_GB_MARGIN)
+#    rounded to the 4n+1 grid. Fit on 22 blocked-5090 cells, validated on a real RTX 4070
+#    (3b and 7b). Resolution-independent (the VAE tiling sets the wall, not the DiT).
+# --------------------------------------------------------------------------------------
+SEEDVR2_CHUNK_GB_MARGIN = 3        # fixed VRAM overhead before chunks scale (GiB)
+SEEDVR2_CHUNK_FRAMES_PER_GB = 4    # empirical slope: pixel frames admitted per free GiB
+
+# --------------------------------------------------------------------------------------
 # B. Fork heuristics  (SEEDVR2 - this integration)
 # --------------------------------------------------------------------------------------
 SEEDVR2_7B_VID_DIM = 3072          # runtime 3b-vs-7b sentinel; tested against vid_dim.

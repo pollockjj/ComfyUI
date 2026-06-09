@@ -16,6 +16,8 @@ from comfy.ldm.seedvr.color_fix import (
 )
 from comfy.ldm.seedvr.constants import (
     SEEDVR2_ADAIN_SCALE_MULTIPLIER,
+    SEEDVR2_CHUNK_FRAMES_PER_GB,
+    SEEDVR2_CHUNK_GB_MARGIN,
     SEEDVR2_COLOR_MEM_HEADROOM,
     SEEDVR2_COND_CHANNELS,
     SEEDVR2_DTYPE_BYTES_FLOOR,
@@ -37,6 +39,17 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
+
+
+def _seedvr2_vram_seed_frames_per_chunk(free_bytes, t_pixel):
+    """Predict the largest 4n+1 pixel-frame chunk that fits in free_bytes."""
+    free_gb = free_bytes / (1024 ** 3)
+    predicted = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_gb - SEEDVR2_CHUNK_GB_MARGIN)
+    # round (not floor) to 4n+1: the fit's central prediction lands on measured n_max
+    n = round((predicted - 1) / 4)
+    seed = 4 * int(n) + 1
+    seed = max(1, min(seed, t_pixel))
+    return seed
 
 
 def _seedvr2_auto_chunk_attempts(t_latent, t_pixel, frames_per_chunk):
@@ -819,8 +832,17 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         if chunking_mode == "auto":
+            free_memory = comfy.model_management.get_free_memory(model.load_device)
+            seed_frames_per_chunk = _seedvr2_vram_seed_frames_per_chunk(
+                free_memory, T_pixel,
+            )
+            logging.info(
+                "SeedVR2ProgressiveSampler auto: free=%.2fGB -> seeding "
+                "frames_per_chunk=%s (4n+1; T_pixel=%s).",
+                free_memory / (1024 ** 3), seed_frames_per_chunk, T_pixel,
+            )
             attempts = _seedvr2_auto_chunk_attempts(
-                T_latent, T_pixel, frames_per_chunk,
+                T_latent, T_pixel, seed_frames_per_chunk,
             )
             for i, attempt_frames_per_chunk in enumerate(attempts):
                 retry = False
