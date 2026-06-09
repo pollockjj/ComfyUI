@@ -2123,6 +2123,40 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         }
         return self.decode(samples, seedvr2_tiling=seedvr2_tiling)
 
+    def encode_tiled(self, x, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+        if tile_y is None:
+            tile_y = 512
+        if tile_x is None:
+            tile_x = 512
+        if overlap is None:
+            overlap_y = 64
+            overlap_x = 64
+        else:
+            overlap_y = overlap
+            overlap_x = overlap
+        if tile_t is None:
+            tile_t = 9999
+        if overlap_t is None:
+            overlap_t = 0
+        overlap_y = min(overlap_y, max(0, tile_y - 8))
+        overlap_x = min(overlap_x, max(0, tile_x - 8))
+        return tiled_vae(
+            x,
+            self,
+            tile_size=(tile_y, tile_x),
+            tile_overlap=(overlap_y, overlap_x),
+            temporal_size=tile_t,
+            temporal_overlap=overlap_t,
+            encode=True,
+        )
+
+    def comfy_format_encoded(self, samples):
+        if samples.ndim == 4:
+            samples = samples.unsqueeze(2)
+        samples = samples.contiguous()
+        samples = samples * 0.9152
+        return samples
+
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
         set_norm_limit(norm_max_mem)
         for m in self.modules():

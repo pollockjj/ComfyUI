@@ -295,6 +295,7 @@ def _make_seedvr2_vae_fallback():
 def _make_non_seedvr2_vae_fallback():
     vae = sd_mod.VAE.__new__(sd_mod.VAE)
     vae.first_stage_model = MagicMock()
+    vae.first_stage_model.comfy_handles_tiling = False
     _populate_common_vae_attrs_fallback(vae)
     return vae
 
@@ -303,7 +304,7 @@ def _force_regular_encode_oom(*args, **kwargs):
     raise torch.cuda.OutOfMemoryError("forced OOM for dispatcher test")
 
 
-def test_seedvr2_3d_routes_to_encode_tiled_seedvr2_on_oom():
+def test_seedvr2_3d_routes_to_model_encode_tiled_on_oom():
     vae = _make_seedvr2_vae_fallback()
     pixel_samples = torch.zeros((1, 8, 64, 64, 3))
 
@@ -318,13 +319,12 @@ def test_seedvr2_3d_routes_to_encode_tiled_seedvr2_on_oom():
                       lambda: None), \
          patch.object(seedvr_vae_mod.VideoAutoencoderKLWrapper, "encode",
                       side_effect=_force_regular_encode_oom), \
-         patch.object(sd_mod.VAE, "encode_tiled_seedvr2", seedvr2_call,
-                      create=True), \
+         patch.object(sd_mod.VAE, "_encode_tiled_model", seedvr2_call), \
          patch.object(sd_mod.VAE, "encode_tiled_3d", generic_call):
         vae.encode(pixel_samples)
 
     assert seedvr2_call.call_count == 1, (
-        f"Expected encode_tiled_seedvr2 to be called once for a SeedVR2 3D "
+        f"Expected _encode_tiled_model to be called once for a SeedVR2 3D "
         f"input under OOM fallback; got {seedvr2_call.call_count} calls."
     )
     assert generic_call.call_count == 0, (
