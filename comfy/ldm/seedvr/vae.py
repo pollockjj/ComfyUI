@@ -529,41 +529,6 @@ class Attention(nn.Module):
         return hidden_states
 
 
-def inflate_weight(weight_2d: torch.Tensor, weight_3d: torch.Tensor):
-    with torch.no_grad():
-        depth = weight_3d.size(2)
-        weight_3d.copy_(weight_2d.unsqueeze(2).repeat(1, 1, depth, 1, 1) / depth)
-    return weight_3d
-
-def inflate_bias(bias_2d: torch.Tensor, bias_3d: torch.Tensor):
-    with torch.no_grad():
-        bias_3d.copy_(bias_2d)
-    return bias_3d
-
-
-def modify_state_dict(layer, state_dict, prefix, inflate_weight_fn, inflate_bias_fn):
-    weight_name = prefix + "weight"
-    bias_name = prefix + "bias"
-    if weight_name in state_dict:
-        weight_2d = state_dict[weight_name]
-        if weight_2d.dim() == 4:
-            weight_3d = inflate_weight_fn(
-                weight_2d=weight_2d,
-                weight_3d=layer.weight,
-            )
-            state_dict[weight_name] = weight_3d
-        else:
-            return state_dict
-    if bias_name in state_dict:
-        bias_2d = state_dict[bias_name]
-        if bias_2d.dim() == 1:
-            bias_3d = inflate_bias_fn(
-                bias_2d=bias_2d,
-                bias_3d=layer.bias,
-            )
-            state_dict[bias_name] = bias_3d
-    return state_dict
-
 def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     input_dtype = x.dtype
     if isinstance(norm_layer, (ops.LayerNorm, ops.RMSNorm)):
@@ -1982,12 +1947,6 @@ class VideoAutoencoderKL(nn.Module):
             return out
         else:
             return self._decode(z)
-
-    def tiled_encode(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
-
-    def tiled_decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
 
     def forward(
         self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
