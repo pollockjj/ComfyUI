@@ -2157,6 +2157,29 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         samples = samples * 0.9152
         return samples
 
+    def comfy_memory_used_decode(self, shape):
+        bytes_per_output_pixel = 160
+
+        def output_pixels(latent_t, latent_h, latent_w):
+            output_t = max(1, (latent_t - 1) * 4 + 1)
+            return output_t * latent_h * 8 * latent_w * 8
+
+        if len(shape) == 5:
+            candidates = []
+            if shape[1] == 16:
+                candidates.append((shape[2], shape[3], shape[4]))
+            if shape[-1] == 16:
+                candidates.append((shape[1], shape[2], shape[3]))
+            if len(candidates) == 0:
+                candidates.append((shape[2], shape[3], shape[4]))
+            pixels = max(output_pixels(*candidate) for candidate in candidates)
+        elif len(shape) == 4:
+            latent_t = max(1, (shape[1] + 15) // 16)
+            pixels = output_pixels(latent_t, shape[2], shape[3])
+        else:
+            pixels = output_pixels(1, shape[-2], shape[-1])
+        return pixels * bytes_per_output_pixel
+
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
         set_norm_limit(norm_max_mem)
         for m in self.modules():

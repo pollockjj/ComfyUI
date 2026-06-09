@@ -86,35 +86,6 @@ import comfy.latent_formats
 
 import comfy.ldm.flux.redux
 
-SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL = 160
-
-
-def _seedvr2_vae_decode_output_pixels(latent_t, latent_h, latent_w):
-    output_t = max(1, (latent_t - 1) * 4 + 1)
-    return output_t * latent_h * 8 * latent_w * 8
-
-
-def _seedvr2_vae_decode_memory_used(shape):
-    if len(shape) == 5:
-        candidates = []
-        if shape[1] == 16:
-            candidates.append((shape[2], shape[3], shape[4]))
-        if shape[-1] == 16:
-            candidates.append((shape[1], shape[2], shape[3]))
-        if len(candidates) == 0:
-            candidates.append((shape[2], shape[3], shape[4]))
-        output_pixels = max(_seedvr2_vae_decode_output_pixels(*candidate) for candidate in candidates)
-    elif len(shape) == 4:
-        latent_t = max(1, (shape[1] + 15) // 16)
-        latent_h, latent_w = shape[2], shape[3]
-        output_pixels = _seedvr2_vae_decode_output_pixels(latent_t, latent_h, latent_w)
-    else:
-        latent_t, latent_h, latent_w = 1, shape[-2], shape[-1]
-        output_pixels = _seedvr2_vae_decode_output_pixels(latent_t, latent_h, latent_w)
-    # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
-    # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
-    return output_pixels * SEEDVR2_VAE_DECODE_BYTES_PER_OUTPUT_PIXEL
-
 
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_metadata=None):
     key_map = {}
@@ -579,7 +550,7 @@ class VAE:
                 self.latent_channels = 16
                 self.latent_dim = 3
                 self.disable_offload = True
-                self.memory_used_decode = lambda shape, dtype: _seedvr2_vae_decode_memory_used(shape)
+                self.memory_used_decode = lambda shape, dtype: self.first_stage_model.comfy_memory_used_decode(shape)
                 self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
