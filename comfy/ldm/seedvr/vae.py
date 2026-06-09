@@ -879,29 +879,10 @@ class Upsample3D(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.interpolate = interpolate
         self.channels = channels
         self.out_channels = out_channels or channels
-        self.use_conv_transpose = use_conv_transpose
         self.use_conv = use_conv
-        self.name = name
 
-        self.conv = None
-        if use_conv_transpose:
-            if kernel_size is None:
-                kernel_size = 4
-            self.conv = ops.ConvTranspose2d(
-                channels, self.out_channels, kernel_size=kernel_size, stride=2, padding=padding, bias=bias
-            )
-        elif use_conv:
-            if kernel_size is None:
-                kernel_size = 3
-            self.conv = ops.Conv2d(self.channels, self.out_channels, kernel_size=kernel_size, padding=padding, bias=bias)
-
-        conv = self.conv if self.name == "conv" else self.Conv2d_0
-
-        # Note: lora_layer is not passed into constructor in the original implementation.
-        # So we make a simplification.
         conv = InflatedCausalConv3d(
             self.channels,
             self.out_channels,
@@ -916,26 +897,19 @@ class Upsample3D(nn.Module):
         self.spatial_ratio = 2 if spatial_up else 1
         self.slicing = slicing
 
-        assert not self.interpolate
-        # [Override] MAGViT v2 implementation
-        if not self.interpolate:
-            upscale_ratio = (self.spatial_ratio**2) * self.temporal_ratio
-            self.upscale_conv = ops.Conv3d(
-                self.channels, self.channels * upscale_ratio, kernel_size=1, padding=0
-            )
-            identity = (
-                torch.eye(self.channels)
-                .repeat(upscale_ratio, 1)
-                .reshape_as(self.upscale_conv.weight)
-            )
-            self.upscale_conv.weight.data.copy_(identity)
+        # [Override] MAGViT v2 learnable upsample
+        upscale_ratio = (self.spatial_ratio**2) * self.temporal_ratio
+        self.upscale_conv = ops.Conv3d(
+            self.channels, self.channels * upscale_ratio, kernel_size=1, padding=0
+        )
+        identity = (
+            torch.eye(self.channels)
+            .repeat(upscale_ratio, 1)
+            .reshape_as(self.upscale_conv.weight)
+        )
+        self.upscale_conv.weight.data.copy_(identity)
 
-        if self.name == "conv":
-            self.conv = conv
-        else:
-            self.Conv2d_0 = conv
-
-        self.norm = None
+        self.conv = conv
 
     def forward(
         self,
@@ -944,13 +918,6 @@ class Upsample3D(nn.Module):
         **kwargs,
     ) -> torch.FloatTensor:
         assert hidden_states.shape[1] == self.channels
-
-        if hasattr(self, "norm") and self.norm is not None:
-            # [Overridden] change to causal norm.
-            hidden_states = causal_norm_wrapper(self.norm, hidden_states)
-
-        if self.use_conv_transpose:
-            return self.conv(hidden_states)
 
         if self.slicing:
             split_size = hidden_states.size(2) // 2
@@ -977,10 +944,7 @@ class Upsample3D(nn.Module):
             hidden_states = hidden_states[0]
 
         if self.use_conv:
-            if self.name == "conv":
-                hidden_states = self.conv(hidden_states, memory_state=memory_state)
-            else:
-                hidden_states = self.Conv2d_0(hidden_states, memory_state=memory_state)
+            hidden_states = self.conv(hidden_states, memory_state=memory_state)
 
         if not self.slicing:
             return hidden_states
