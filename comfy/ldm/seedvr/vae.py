@@ -291,27 +291,10 @@ def get_cache_size(conv_module, input_len, pad_len, dim=0):
     return cache_len
 
 class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
+    def __init__(self, parameters: torch.Tensor):
         self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
         self.logvar = torch.clamp(self.logvar, BYTEDANCE_LOGVAR_CLAMP_MIN, BYTEDANCE_LOGVAR_CLAMP_MAX)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(
-                self.mean, device=self.parameters.device, dtype=self.parameters.dtype
-            )
-
-    def sample(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-        sample = torch.randn(
-            self.mean.shape,
-            generator=generator,
-            device=self.parameters.device,
-            dtype=self.parameters.dtype,
-        )
-        x = self.mean + self.std * sample
-        return x
 
     def mode(self):
         return self.mean
@@ -421,17 +404,6 @@ class Attention(nn.Module):
             self.to_k = None
             self.to_v = None
 
-        self.added_proj_bias = added_proj_bias
-        if self.added_kv_proj_dim is not None:
-            self.add_k_proj = ops.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-            self.add_v_proj = ops.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-            if self.context_pre_only is not None:
-                self.add_q_proj = ops.Linear(added_kv_proj_dim, self.inner_dim, bias=added_proj_bias)
-        else:
-            self.add_q_proj = None
-            self.add_k_proj = None
-            self.add_v_proj = None
-
         if not self.pre_only:
             self.to_out = nn.ModuleList([])
             self.to_out.append(ops.Linear(self.inner_dim, self.out_dim, bias=out_bias))
@@ -439,13 +411,6 @@ class Attention(nn.Module):
         else:
             self.to_out = None
 
-        if self.context_pre_only is not None and not self.context_pre_only:
-            self.to_add_out = ops.Linear(self.inner_dim, self.out_context_dim, bias=out_bias)
-        else:
-            self.to_add_out = None
-
-        self.norm_added_q = None
-        self.norm_added_k = None
         self.optimized_vae_attention = vae_attention()
 
     def __call__(
@@ -472,10 +437,6 @@ class Attention(nn.Module):
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        if attention_mask is not None:
-            attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, self.heads, -1, attention_mask.shape[-1])
-
         if self.group_norm is not None:
             hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
@@ -483,8 +444,6 @@ class Attention(nn.Module):
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
-        elif self.norm_cross:
-            encoder_hidden_states = self.norm_encoder_hidden_states(encoder_hidden_states)
 
         key = self.to_k(encoder_hidden_states)
         value = self.to_v(encoder_hidden_states)
@@ -528,41 +487,6 @@ class Attention(nn.Module):
 
         return hidden_states
 
-
-def inflate_weight(weight_2d: torch.Tensor, weight_3d: torch.Tensor):
-    with torch.no_grad():
-        depth = weight_3d.size(2)
-        weight_3d.copy_(weight_2d.unsqueeze(2).repeat(1, 1, depth, 1, 1) / depth)
-    return weight_3d
-
-def inflate_bias(bias_2d: torch.Tensor, bias_3d: torch.Tensor):
-    with torch.no_grad():
-        bias_3d.copy_(bias_2d)
-    return bias_3d
-
-
-def modify_state_dict(layer, state_dict, prefix, inflate_weight_fn, inflate_bias_fn):
-    weight_name = prefix + "weight"
-    bias_name = prefix + "bias"
-    if weight_name in state_dict:
-        weight_2d = state_dict[weight_name]
-        if weight_2d.dim() == 4:
-            weight_3d = inflate_weight_fn(
-                weight_2d=weight_2d,
-                weight_3d=layer.weight,
-            )
-            state_dict[weight_name] = weight_3d
-        else:
-            return state_dict
-    if bias_name in state_dict:
-        bias_2d = state_dict[bias_name]
-        if bias_2d.dim() == 1:
-            bias_3d = inflate_bias_fn(
-                bias_2d=bias_2d,
-                bias_3d=layer.bias,
-            )
-            state_dict[bias_name] = bias_3d
-    return state_dict
 
 def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     input_dtype = x.dtype
@@ -824,7 +748,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         )
         if (
             memory_state != MemoryState.DISABLED
-            and not self.training
             and (self.memory_device is not None)
         ):
             self.memory = memory
@@ -850,7 +773,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         # Single GPU inference - simplified memory management
         if (
             memory_state in [MemoryState.INITIALIZING, MemoryState.ACTIVE]  # use_slicing
-            and not self.training
             and (self.memory_device is not None)
             and cache_size != 0
         ):
@@ -914,29 +836,10 @@ class Upsample3D(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.interpolate = interpolate
         self.channels = channels
         self.out_channels = out_channels or channels
-        self.use_conv_transpose = use_conv_transpose
         self.use_conv = use_conv
-        self.name = name
 
-        self.conv = None
-        if use_conv_transpose:
-            if kernel_size is None:
-                kernel_size = 4
-            self.conv = ops.ConvTranspose2d(
-                channels, self.out_channels, kernel_size=kernel_size, stride=2, padding=padding, bias=bias
-            )
-        elif use_conv:
-            if kernel_size is None:
-                kernel_size = 3
-            self.conv = ops.Conv2d(self.channels, self.out_channels, kernel_size=kernel_size, padding=padding, bias=bias)
-
-        conv = self.conv if self.name == "conv" else self.Conv2d_0
-
-        # Note: lora_layer is not passed into constructor in the original implementation.
-        # So we make a simplification.
         conv = InflatedCausalConv3d(
             self.channels,
             self.out_channels,
@@ -951,26 +854,19 @@ class Upsample3D(nn.Module):
         self.spatial_ratio = 2 if spatial_up else 1
         self.slicing = slicing
 
-        assert not self.interpolate
-        # [Override] MAGViT v2 implementation
-        if not self.interpolate:
-            upscale_ratio = (self.spatial_ratio**2) * self.temporal_ratio
-            self.upscale_conv = ops.Conv3d(
-                self.channels, self.channels * upscale_ratio, kernel_size=1, padding=0
-            )
-            identity = (
-                torch.eye(self.channels)
-                .repeat(upscale_ratio, 1)
-                .reshape_as(self.upscale_conv.weight)
-            )
-            self.upscale_conv.weight.data.copy_(identity)
+        # [Override] MAGViT v2 learnable upsample
+        upscale_ratio = (self.spatial_ratio**2) * self.temporal_ratio
+        self.upscale_conv = ops.Conv3d(
+            self.channels, self.channels * upscale_ratio, kernel_size=1, padding=0
+        )
+        identity = (
+            torch.eye(self.channels)
+            .repeat(upscale_ratio, 1)
+            .reshape_as(self.upscale_conv.weight)
+        )
+        self.upscale_conv.weight.data.copy_(identity)
 
-        if self.name == "conv":
-            self.conv = conv
-        else:
-            self.Conv2d_0 = conv
-
-        self.norm = None
+        self.conv = conv
 
     def forward(
         self,
@@ -979,13 +875,6 @@ class Upsample3D(nn.Module):
         **kwargs,
     ) -> torch.FloatTensor:
         assert hidden_states.shape[1] == self.channels
-
-        if hasattr(self, "norm") and self.norm is not None:
-            # [Overridden] change to causal norm.
-            hidden_states = causal_norm_wrapper(self.norm, hidden_states)
-
-        if self.use_conv_transpose:
-            return self.conv(hidden_states)
 
         if self.slicing:
             split_size = hidden_states.size(2) // 2
@@ -1012,10 +901,7 @@ class Upsample3D(nn.Module):
             hidden_states = hidden_states[0]
 
         if self.use_conv:
-            if self.name == "conv":
-                hidden_states = self.conv(hidden_states, memory_state=memory_state)
-            else:
-                hidden_states = self.Conv2d_0(hidden_states, memory_state=memory_state)
+            hidden_states = self.conv(hidden_states, memory_state=memory_state)
 
         if not self.slicing:
             return hidden_states
@@ -1632,36 +1518,15 @@ class Encoder3D(nn.Module):
         r"""The forward method of the `Encoder` class."""
         sample = sample.to(next(self.parameters()).device)
         sample = self.conv_in(sample, memory_state = memory_state)
-        if self.training and self.gradient_checkpointing:
+        # down
+        # [Override] add extra block and extra cond
+        for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
+            sample = down_block(sample, memory_state=memory_state)
+            if extra_block is not None:
+                sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
 
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
-            # down
-            # [Override] add extra block and extra cond
-            for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
-                sample = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(down_block), sample, use_reentrant=False
-                )
-                if extra_block is not None:
-                    sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
-
-            # middle
-            sample = self.mid_block(sample)
-
-        else:
-            # down
-            # [Override] add extra block and extra cond
-            for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
-                sample = down_block(sample, memory_state=memory_state)
-                if extra_block is not None:
-                    sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
-
-            # middle
-            sample = self.mid_block(sample, memory_state=memory_state)
+        # middle
+        sample = self.mid_block(sample, memory_state=memory_state)
 
         # post-process
         sample = causal_norm_wrapper(self.conv_norm_out, sample)
@@ -1983,12 +1848,6 @@ class VideoAutoencoderKL(nn.Module):
         else:
             return self._decode(z)
 
-    def tiled_encode(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
-
-    def tiled_decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
-        raise NotImplementedError
-
     def forward(
         self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
     ):
@@ -2005,6 +1864,10 @@ class VideoAutoencoderKL(nn.Module):
             return _unwrap(self.decode_(latent))
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
+    # Signals to comfy.sd.VAE that this model performs its own VAE tiling, so the
+    # generic tiled-decode/encode dispatch defers to decode_tiled/encode_tiled below.
+    comfy_handles_tiling = True
+
     def __init__(
         self,
         *args,
@@ -2098,6 +1961,76 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         x = x[..., :h2, :w2]
 
         return x
+
+    def decode_tiled(self, z, tile_x=32, tile_y=32, overlap=8, tile_t=None, overlap_t=None):
+        # SeedVR2 owns temporal via the MemoryState causal cache; the VAE temporal
+        # tiling knobs (tile_t / overlap_t) are not meaningful here and are discarded.
+        sf = self.spatial_downsample_factor
+        seedvr2_tiling = {
+            "enable_tiling": True,
+            "tile_size": (tile_y * sf, tile_x * sf),
+            "tile_overlap": (overlap * sf, overlap * sf),
+            "temporal_size": 0,
+            "temporal_overlap": 0,
+        }
+        return self.decode(z, seedvr2_tiling=seedvr2_tiling)
+
+    def encode_tiled(self, x, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+        # Temporal tiling knobs are discarded; MemoryState owns temporal.
+        if tile_y is None:
+            tile_y = 512
+        if tile_x is None:
+            tile_x = 512
+        if overlap is None:
+            overlap_y = 64
+            overlap_x = 64
+        else:
+            overlap_y = overlap
+            overlap_x = overlap
+        overlap_y = min(overlap_y, max(0, tile_y - 8))
+        overlap_x = min(overlap_x, max(0, tile_x - 8))
+        self.device = x.device
+        return tiled_vae(
+            x,
+            self,
+            tile_size=(tile_y, tile_x),
+            tile_overlap=(overlap_y, overlap_x),
+            temporal_size=0,
+            temporal_overlap=0,
+            encode=True,
+        )
+
+    def comfy_format_encoded(self, samples):
+        if samples.ndim == 4:
+            samples = samples.unsqueeze(2)
+        samples = samples.contiguous()
+        samples = samples * 0.9152
+        return samples
+
+    def comfy_memory_used_decode(self, shape):
+        bytes_per_output_pixel = 160
+
+        def output_pixels(latent_t, latent_h, latent_w):
+            output_t = max(1, (latent_t - 1) * 4 + 1)
+            return output_t * latent_h * 8 * latent_w * 8
+
+        # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
+        # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
+        if len(shape) == 5:
+            candidates = []
+            if shape[1] == 16:
+                candidates.append((shape[2], shape[3], shape[4]))
+            if shape[-1] == 16:
+                candidates.append((shape[1], shape[2], shape[3]))
+            if len(candidates) == 0:
+                candidates.append((shape[2], shape[3], shape[4]))
+            pixels = max(output_pixels(*candidate) for candidate in candidates)
+        elif len(shape) == 4:
+            latent_t = max(1, (shape[1] + 15) // 16)
+            pixels = output_pixels(latent_t, shape[2], shape[3])
+        else:
+            pixels = output_pixels(1, shape[-2], shape[-1])
+        return pixels * bytes_per_output_pixel
 
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
         set_norm_limit(norm_max_mem)
