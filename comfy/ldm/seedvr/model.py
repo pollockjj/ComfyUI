@@ -7,7 +7,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention
+from comfy.ldm.seedvr.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math

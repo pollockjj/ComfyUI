@@ -32,7 +32,7 @@ from comfy.ldm.seedvr.vae import (  # noqa: E402
     causal_norm_wrapper,
     set_norm_limit,
 )
-from comfy.ldm.modules.attention import var_attention_optimized_split  # noqa: E402
+from comfy.ldm.seedvr.attention import var_attention_optimized_split  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +92,6 @@ def test_seedvr_groupnorm_low_limit_uses_chunked_groupnorm_path(groupnorm_cls):
 # ---------------------------------------------------------------------------
 # SeedVR2 var_attention split-loop tests
 # ---------------------------------------------------------------------------
-
-def test_var_attention_registry_contains_always_available_entries():
-    assert (
-        attention.REGISTERED_ATTENTION_FUNCTIONS["var_attention_optimized_split"]
-        is attention.var_attention_optimized_split
-    )
-
 
 def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypatch):
     dim = 8
