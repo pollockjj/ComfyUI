@@ -2005,6 +2005,8 @@ class VideoAutoencoderKL(nn.Module):
             return _unwrap(self.decode_(latent))
 
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
+    comfy_handles_tiling = True
+
     def __init__(
         self,
         *args,
@@ -2098,6 +2100,28 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         x = x[..., :h2, :w2]
 
         return x
+
+    def decode_tiled(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
+        sf_s = self.spatial_downsample_factor
+        sf_t = self.temporal_downsample_factor
+        if tile_t is None:
+            tile_t = 16
+        if overlap_t is None:
+            overlap_t = 4
+        if tile_t > 0:
+            temporal_size = tile_t * sf_t
+            temporal_overlap = max(0, overlap_t) * sf_t
+        else:
+            temporal_size = 0
+            temporal_overlap = 0
+        seedvr2_tiling = {
+            "enable_tiling": True,
+            "tile_size": (tile_y * sf_s, tile_x * sf_s),
+            "tile_overlap": (overlap * sf_s, overlap * sf_s),
+            "temporal_size": temporal_size,
+            "temporal_overlap": temporal_overlap,
+        }
+        return self.decode(samples, seedvr2_tiling=seedvr2_tiling)
 
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
         set_norm_limit(norm_max_mem)

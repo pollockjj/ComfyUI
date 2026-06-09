@@ -218,7 +218,7 @@ def _dispatch(vae, samples, seedvr2_call, generic_call, patch_wrapper_decode):
         stack.enter_context(patch.object(mm, "raise_non_oom", lambda e: None))
         stack.enter_context(patch.object(mm, "load_models_gpu", lambda *a, **k: None))
         stack.enter_context(patch.object(mm, "soft_empty_cache", lambda: None))
-        stack.enter_context(patch.object(sd_mod.VAE, "decode_tiled_seedvr2", seedvr2_call))
+        stack.enter_context(patch.object(sd_mod.VAE, "_decode_tiled_model", seedvr2_call))
         stack.enter_context(patch.object(sd_mod.VAE, "decode_tiled_", generic_call))
         if patch_wrapper_decode:
             stack.enter_context(patch.object(
@@ -227,7 +227,7 @@ def _dispatch(vae, samples, seedvr2_call, generic_call, patch_wrapper_decode):
         vae.decode(samples)
 
 
-def test_4d_seedvr2_latent_routes_to_decode_tiled_seedvr2():
+def test_4d_seedvr2_latent_routes_to_model_decode_tiled():
     wrapper = seedvr_vae_mod.VideoAutoencoderKLWrapper.__new__(
         seedvr_vae_mod.VideoAutoencoderKLWrapper)
     vae = _make_vae(wrapper, latent_channels=16, latent_dim=3)
@@ -240,6 +240,7 @@ def test_4d_seedvr2_latent_routes_to_decode_tiled_seedvr2():
 
 def test_4d_non_seedvr2_latent_still_routes_to_generic_decode_tiled():
     first_stage = MagicMock()
+    first_stage.comfy_handles_tiling = False
     first_stage.decode = MagicMock(side_effect=_force_oom)
     vae = _make_vae(first_stage, latent_channels=4, latent_dim=2)
     seedvr2_call = MagicMock(return_value=torch.zeros(1, 3, 9, 64, 64))

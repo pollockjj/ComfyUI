@@ -1055,31 +1055,11 @@ class VAE:
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
-    def decode_tiled_seedvr2(self, samples, tile_x=32, tile_y=32, overlap=8, tile_t=16, overlap_t=4):
-        sf_s = getattr(self.first_stage_model, "spatial_downsample_factor", 8)
-        sf_t = getattr(self.first_stage_model, "temporal_downsample_factor", 4)
-        if tile_t is None:
-            tile_t = 16
-        if overlap_t is None:
-            overlap_t = 4
-        if tile_t > 0:
-            temporal_size = tile_t * sf_t
-            temporal_overlap = max(0, overlap_t) * sf_t
-        else:
-            temporal_size = 0
-            temporal_overlap = 0
-        args = {
-            "enable_tiling": True,
-            "tile_size": (tile_y * sf_s, tile_x * sf_s),
-            "tile_overlap": (overlap * sf_s, overlap * sf_s),
-            "temporal_size": temporal_size,
-            "temporal_overlap": temporal_overlap,
-        }
-        output = self.first_stage_model.decode(
-            samples.to(self.vae_dtype).to(self.device),
-            seedvr2_tiling=args,
+    def _decode_tiled_model(self, samples, **kwargs):
+        decoded = self.first_stage_model.decode_tiled(
+            samples.to(self.vae_dtype).to(self.device), **kwargs
         )
-        return self.process_output(output.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
+        return self.process_output(decoded.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
 
     def _format_seedvr2_encoded_samples(self, samples):
         if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
@@ -1202,25 +1182,17 @@ class VAE:
                 if dims == 1 or self.extra_1d_channel is not None:
                     pixel_samples = self.decode_tiled_1d(samples_in)
                 elif dims == 2:
-                    # SeedVR2 latents arrive in 4D collapsed form ``(B, 16*T, H, W)``
-                    # downstream of ``SeedVR2Conditioning`` (which performs the
-                    # ``rearrange(b c t h w -> b (c t) h w)`` collapse). The
-                    # generic ``decode_tiled_`` would treat the channel dim as
-                    # spatial-only and crash on the collapsed (16, T) layout
-                    # under ``tiled_scale``'s mask broadcast; route SeedVR2 4D
-                    # latents to ``decode_tiled_seedvr2`` instead, whose wrapper
-                    # dispatch handles both 4D and 5D inputs.
-                    if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
+                    if getattr(self.first_stage_model, "comfy_handles_tiling", False):
                         tile = 256 // self.spacial_compression_decode()
                         overlap = tile // 4
-                        pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                        pixel_samples = self._decode_tiled_model(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
                         pixel_samples = self.decode_tiled_(samples_in)
                 elif dims == 3:
                     tile = 256 // self.spacial_compression_decode()
                     overlap = tile // 4
-                    if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper):
-                        pixel_samples = self.decode_tiled_seedvr2(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
+                    if getattr(self.first_stage_model, "comfy_handles_tiling", False):
+                        pixel_samples = self._decode_tiled_model(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
                         pixel_samples = self.decode_tiled_3d(samples_in, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
 
@@ -1249,19 +1221,19 @@ class VAE:
             args["overlap"] = overlap
 
         with model_management.cuda_device_context(self.device):
-            if isinstance(self.first_stage_model, comfy.ldm.seedvr.vae.VideoAutoencoderKLWrapper) and dims in (2, 3):
-                seedvr2_args = {}
+            if getattr(self.first_stage_model, "comfy_handles_tiling", False) and dims in (2, 3):
+                tiled_args = {}
                 if tile_x is not None:
-                    seedvr2_args["tile_x"] = tile_x
+                    tiled_args["tile_x"] = tile_x
                 if tile_y is not None:
-                    seedvr2_args["tile_y"] = tile_y
+                    tiled_args["tile_y"] = tile_y
                 if overlap is not None:
-                    seedvr2_args["overlap"] = overlap
+                    tiled_args["overlap"] = overlap
                 if tile_t is not None:
-                    seedvr2_args["tile_t"] = tile_t
+                    tiled_args["tile_t"] = tile_t
                 if overlap_t is not None:
-                    seedvr2_args["overlap_t"] = overlap_t
-                output = self.decode_tiled_seedvr2(samples, **seedvr2_args)
+                    tiled_args["overlap_t"] = overlap_t
+                output = self._decode_tiled_model(samples, **tiled_args)
             elif dims == 1 or self.extra_1d_channel is not None:
                 args.pop("tile_y")
                 output = self.decode_tiled_1d(samples, **args)
