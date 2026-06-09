@@ -93,10 +93,6 @@ class Cache:
             cache=self.cache,
         )
 
-    def get(self, key: str):
-        key = self.prefix + key
-        return self.cache[key]
-
 def repeat_concat(
     vid: torch.FloatTensor,  # (VL ... c)
     txt: torch.FloatTensor,  # (TL ... c)
@@ -109,34 +105,6 @@ def repeat_concat(
     txt = [[x] * n for x, n in zip(txt, txt_repeat)]
     txt = list(chain(*txt))
     return torch.cat(list(chain(*zip(vid, txt))))
-
-def concat(
-    vid: torch.FloatTensor,  # (VL ... c)
-    txt: torch.FloatTensor,  # (TL ... c)
-    vid_len: torch.LongTensor,  # (b)
-    txt_len: torch.LongTensor,  # (b)
-) -> torch.FloatTensor:  # (L ... c)
-    vid = torch.split(vid, vid_len.tolist())
-    txt = torch.split(txt, txt_len.tolist())
-    return torch.cat(list(chain(*zip(vid, txt))))
-
-def concat_idx(
-    vid_len: torch.LongTensor,  # (b)
-    txt_len: torch.LongTensor,  # (b)
-) -> Tuple[
-    Callable,
-    Callable,
-]:
-    device = vid_len.device
-    vid_idx = torch.arange(vid_len.sum(), device=device)
-    txt_idx = torch.arange(len(vid_idx), len(vid_idx) + txt_len.sum(), device=device)
-    tgt_idx = concat(vid_idx, txt_idx, vid_len, txt_len)
-    src_idx = torch.argsort(tgt_idx)
-    return (
-        lambda vid, txt: torch.index_select(torch.cat([vid, txt]), 0, tgt_idx),
-        lambda all: torch.index_select(all, 0, src_idx).split([len(vid_idx), len(txt_idx)]),
-    )
-
 
 def repeat_concat_idx(
     vid_len: torch.LongTensor,  # (n*b)
@@ -338,10 +306,6 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer('cached_scales', torch.zeros(cache_max_seq_len, dim), persistent = False)
         self.cached_scales_seq_len = 0
 
-        # add apply_rotary_emb as static method
-
-        self.apply_rotary_emb = staticmethod(apply_rotary_emb)
-
     @property
     def device(self):
         return self.dummy.device
@@ -438,25 +402,6 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
         super().__init__(dim, rope_dim=3)
         self.mm = False
 
-    def forward(
-        self,
-        q: torch.FloatTensor,  # b h l d
-        k: torch.FloatTensor,  # b h l d
-        size: Tuple[int, int, int],
-    ) -> Tuple[
-        torch.FloatTensor,
-        torch.FloatTensor,
-    ]:
-        T, H, W = size
-        freqs = self.get_axial_freqs(T, H, W)
-        q = rearrange(q, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        k = rearrange(k, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        q = apply_rotary_emb(freqs, q.float()).to(q.dtype)
-        k = apply_rotary_emb(freqs, k.float()).to(k.dtype)
-        q = rearrange(q, "b h T H W d -> b h (T H W) d")
-        k = rearrange(k, "b h T H W d -> b h (T H W) d")
-        return q, k
-
 
 class NaRotaryEmbedding3d(RotaryEmbedding3d):
     def forward(
@@ -529,43 +474,6 @@ def rotate_half(x):
     return rearrange(x, '... d r -> ... (d r)')
 def exists(val):
     return val is not None
-
-def apply_rotary_emb(
-    freqs,
-    t,
-    start_index = 0,
-    scale = 1.,
-    seq_dim = -2,
-    freqs_seq_dim = None
-):
-    dtype = t.dtype
-    if not exists(freqs_seq_dim):
-        if freqs.ndim == 2 or t.ndim == 3:
-            freqs_seq_dim = 0
-
-    if t.ndim == 3 or exists(freqs_seq_dim):
-        seq_len = t.shape[seq_dim]
-        freqs = slice_at_dim(freqs, slice(-seq_len, None), dim = freqs_seq_dim)
-
-    rot_feats = freqs.shape[-1]
-    end_index = start_index + rot_feats
-
-    t_left = t[..., :start_index]
-    t_middle = t[..., start_index:end_index]
-    t_right = t[..., end_index:]
-
-    angles = freqs.to(t_middle.device)[..., ::2]
-    cos = torch.cos(angles) * scale
-    sin = torch.sin(angles) * scale
-
-    col0 = torch.stack([cos, sin], dim=-1)
-    col1 = torch.stack([-sin, cos], dim=-1)
-    freqs_mat = torch.stack([col0, col1], dim=-1)
-
-    t_middle_out = apply_rope1(t_middle, freqs_mat)
-    out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
-    return out.type(dtype)
-
 
 def _apply_seedvr2_rotary_emb(
     freqs: torch.Tensor,
@@ -813,9 +721,6 @@ class NaMMAttention(nn.Module):
 
 
         self.rope = get_na_rope(rope_type=rope_type, dim=rope_dim)
-
-    def forward(self):
-        pass
 
 def window(
     hid: torch.FloatTensor,  # (L c)
@@ -1309,10 +1214,6 @@ class AdaSingle(nn.Module):
                 return hid.mul_(gateA)
 
         raise NotImplementedError
-
-
-def emb_add(emb1: torch.Tensor, emb2: Optional[torch.Tensor]):
-    return emb1 if emb2 is None else emb1 + emb2
 
 
 class TimeEmbedding(nn.Module):

@@ -9,15 +9,6 @@ Provenance prefixes:
 """
 
 # --------------------------------------------------------------------------------------
-# A. Progressive-sampler chunk-size law  (SEEDVR2 - this integration's VRAM experiment)
-#    n_max(frames/chunk) = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_GB - SEEDVR2_CHUNK_GB_MARGIN)
-#    rounded to the 4n+1 grid. Fit on 22 blocked-5090 cells, validated on a real RTX 4070
-#    (3b and 7b). Resolution-independent (the VAE tiling sets the wall, not the DiT).
-# --------------------------------------------------------------------------------------
-SEEDVR2_CHUNK_GB_MARGIN = 3        # fixed VRAM overhead before chunks scale (GiB)
-SEEDVR2_CHUNK_FRAMES_PER_GB = 4    # empirical slope: pixel frames admitted per free GiB
-
-# --------------------------------------------------------------------------------------
 # B. Fork heuristics  (SEEDVR2 - this integration)
 # --------------------------------------------------------------------------------------
 SEEDVR2_7B_VID_DIM = 3072          # runtime 3b-vs-7b sentinel; tested against vid_dim.
@@ -28,7 +19,6 @@ SEEDVR2_7B_MLP_CHUNK = 8192        # 7b MLP token-chunk to bound peak VRAM.
 SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS = 4096  # partial-RoPE application token-chunk.
 SEEDVR2_LATENT_CHANNELS = 16       # SeedVR2 latent channel count (== BYTEDANCE latent_channels).
 SEEDVR2_COND_CHANNELS = 17         # conditioning channels = vid_in_channels(33) - latent(16).
-SEEDVR2_DEFAULT_TEMPORAL_SIZE = 16 # default VAE temporal tile when unset.
 
 # Color-correction memory model (fork tuning; per-frame VRAM estimate for chunk sizing)
 SEEDVR2_COLOR_MEM_HEADROOM = 0.75  # fraction of free VRAM usable per color-correction chunk.
@@ -52,15 +42,10 @@ BYTEDANCE_BLOCK_OUT_CHANNELS = (128, 256, 512, 512)  # s8_c16_t4_inflation_sd3.y
 BYTEDANCE_SLICING_SAMPLE_MIN = 4        # s8_c16_t4_inflation_sd3.yaml:22 (slicing_sample_min_size).
 BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE = 4   # infer.py:230 (temporal_downsample_factor); the 4n+1 factor.
 BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE = 8    # infer.py:231 (spatial_downsample_factor).
-BYTEDANCE_SCHEDULE_T = 1000.0           # configs_3b/main.yaml:65 (schedule.T); timestep range.
-BYTEDANCE_SPATIAL_DIVISOR = 16          # inference_seedvr2_3b.py:241 (DivisibleCrop((16,16))).
 BYTEDANCE_720P_REF_AREA = 45 * 80       # dit_v2/window.py:32 (720p reference area for window scaling).
 BYTEDANCE_MAX_TEMPORAL_WINDOW = 30      # dit_v2/window.py:35 (max temporal window frames).
 BYTEDANCE_ROPE_MAX_FREQ = 256           # dit_v2/rope.py:31 (pixel-RoPE max frequency).
 BYTEDANCE_SINUSOIDAL_DIM = 256          # dit_3b/nadit.py:120 (timestep sinusoidal embed dim).
-# Resolution-dependent timestep-shift linear fits: (x1, y1, x2, y2) for get_lin_function.
-BYTEDANCE_IMG_SHIFT_FIT = (256 * 256, 1.0, 1024 * 1024, 3.2)            # infer.py:242.
-BYTEDANCE_VID_SHIFT_FIT = (256 * 256 * 37, 1.0, 1280 * 720 * 145, 5.0)  # infer.py:243.
 
 # --------------------------------------------------------------------------------------
 # D. Published standards (cite the literature)
