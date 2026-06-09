@@ -421,17 +421,6 @@ class Attention(nn.Module):
             self.to_k = None
             self.to_v = None
 
-        self.added_proj_bias = added_proj_bias
-        if self.added_kv_proj_dim is not None:
-            self.add_k_proj = ops.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-            self.add_v_proj = ops.Linear(added_kv_proj_dim, self.inner_kv_dim, bias=added_proj_bias)
-            if self.context_pre_only is not None:
-                self.add_q_proj = ops.Linear(added_kv_proj_dim, self.inner_dim, bias=added_proj_bias)
-        else:
-            self.add_q_proj = None
-            self.add_k_proj = None
-            self.add_v_proj = None
-
         if not self.pre_only:
             self.to_out = nn.ModuleList([])
             self.to_out.append(ops.Linear(self.inner_dim, self.out_dim, bias=out_bias))
@@ -439,13 +428,6 @@ class Attention(nn.Module):
         else:
             self.to_out = None
 
-        if self.context_pre_only is not None and not self.context_pre_only:
-            self.to_add_out = ops.Linear(self.inner_dim, self.out_context_dim, bias=out_bias)
-        else:
-            self.to_add_out = None
-
-        self.norm_added_q = None
-        self.norm_added_k = None
         self.optimized_vae_attention = vae_attention()
 
     def __call__(
@@ -472,10 +454,6 @@ class Attention(nn.Module):
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        if attention_mask is not None:
-            attention_mask = self.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, self.heads, -1, attention_mask.shape[-1])
-
         if self.group_norm is not None:
             hidden_states = self.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
@@ -483,8 +461,6 @@ class Attention(nn.Module):
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
-        elif self.norm_cross:
-            encoder_hidden_states = self.norm_encoder_hidden_states(encoder_hidden_states)
 
         key = self.to_k(encoder_hidden_states)
         value = self.to_v(encoder_hidden_states)
