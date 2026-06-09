@@ -291,27 +291,10 @@ def get_cache_size(conv_module, input_len, pad_len, dim=0):
     return cache_len
 
 class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
+    def __init__(self, parameters: torch.Tensor):
         self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
         self.logvar = torch.clamp(self.logvar, BYTEDANCE_LOGVAR_CLAMP_MIN, BYTEDANCE_LOGVAR_CLAMP_MAX)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(
-                self.mean, device=self.parameters.device, dtype=self.parameters.dtype
-            )
-
-    def sample(self, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-        sample = torch.randn(
-            self.mean.shape,
-            generator=generator,
-            device=self.parameters.device,
-            dtype=self.parameters.dtype,
-        )
-        x = self.mean + self.std * sample
-        return x
 
     def mode(self):
         return self.mean
@@ -765,7 +748,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         )
         if (
             memory_state != MemoryState.DISABLED
-            and not self.training
             and (self.memory_device is not None)
         ):
             self.memory = memory
@@ -791,7 +773,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         # Single GPU inference - simplified memory management
         if (
             memory_state in [MemoryState.INITIALIZING, MemoryState.ACTIVE]  # use_slicing
-            and not self.training
             and (self.memory_device is not None)
             and cache_size != 0
         ):
@@ -1537,36 +1518,15 @@ class Encoder3D(nn.Module):
         r"""The forward method of the `Encoder` class."""
         sample = sample.to(next(self.parameters()).device)
         sample = self.conv_in(sample, memory_state = memory_state)
-        if self.training and self.gradient_checkpointing:
+        # down
+        # [Override] add extra block and extra cond
+        for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
+            sample = down_block(sample, memory_state=memory_state)
+            if extra_block is not None:
+                sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
 
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
-            # down
-            # [Override] add extra block and extra cond
-            for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
-                sample = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(down_block), sample, use_reentrant=False
-                )
-                if extra_block is not None:
-                    sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
-
-            # middle
-            sample = self.mid_block(sample)
-
-        else:
-            # down
-            # [Override] add extra block and extra cond
-            for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
-                sample = down_block(sample, memory_state=memory_state)
-                if extra_block is not None:
-                    sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
-
-            # middle
-            sample = self.mid_block(sample, memory_state=memory_state)
+        # middle
+        sample = self.mid_block(sample, memory_state=memory_state)
 
         # post-process
         sample = causal_norm_wrapper(self.conv_norm_out, sample)
