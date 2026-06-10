@@ -826,13 +826,7 @@ class Upsample3D(nn.Module):
         temporal_up: bool = False,
         spatial_up: bool = True,
         slicing: bool = False,
-        interpolate = True,
-        name: str = "conv",
-        use_conv_transpose = False,
         use_conv: bool = False,
-        padding = 1,
-        bias = True,
-        kernel_size = None,
         **kwargs,
     ):
         super().__init__()
@@ -920,10 +914,8 @@ class Downsample3D(nn.Module):
         spatial_down: bool = False,
         temporal_down: bool = False,
         name: str = "conv",
-        kernel_size=3,
         use_conv: bool = False,
         padding = 1,
-        bias=True,
         **kwargs,
     ):
         super().__init__()
@@ -994,7 +986,6 @@ class ResnetBlock3D(nn.Module):
         self,
         in_channels: int,
         out_channels: Optional[int] = None,
-        conv_shortcut: bool = False,
         dropout: float = 0.0,
         temb_channels: int = 512,
         groups: int = 32,
@@ -1007,7 +998,6 @@ class ResnetBlock3D(nn.Module):
         use_in_shortcut: Optional[bool] = None,
         up: bool = False,
         down: bool = False,
-        conv_shortcut_bias: bool = True,
         conv_2d_out_channels: Optional[int] = None,
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
@@ -1270,7 +1260,6 @@ class UpDecoderBlock3D(nn.Module):
                         out_channels=out_channels,
                         temporal_up=temporal_up,
                         spatial_up=spatial_up,
-                        interpolate=False,
                         inflation_mode=inflation_mode,
                         slicing=slicing,
                     )
