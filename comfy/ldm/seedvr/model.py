@@ -224,34 +224,21 @@ class RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim,
-        custom_freqs = None,
         freqs_for = 'lang',
         theta = 10000,
         max_freq = 10,
-        num_freqs = 1,
         learned_freq = False,
-        use_xpos = False,
-        xpos_scale_base = 512,
-        interpolate_factor = 1.,
-        theta_rescale_factor = 1.,
-        seq_before_head_dim = False,
         cache_if_possible = True,
         cache_max_seq_len = 8192
     ):
         super().__init__()
 
-        theta *= theta_rescale_factor ** (dim / (dim - 2))
-
         self.freqs_for = freqs_for
 
-        if exists(custom_freqs):
-            freqs = custom_freqs
-        elif freqs_for == 'lang':
+        if freqs_for == 'lang':
             freqs = 1. / (theta ** (torch.arange(0, dim, 2)[:(dim // 2)].float() / dim))
         elif freqs_for == 'pixel':
             freqs = torch.linspace(1., max_freq / 2, dim // 2) * pi
-        elif freqs_for == 'constant':
-            freqs = torch.ones(num_freqs).float()
 
         self.cache_if_possible = cache_if_possible
         self.cache_max_seq_len = cache_max_seq_len
@@ -266,30 +253,6 @@ class RotaryEmbedding(nn.Module):
         # dummy for device
 
         self.register_buffer('dummy', torch.tensor(0), persistent = False)
-
-        # default sequence dimension
-
-        self.seq_before_head_dim = seq_before_head_dim
-        self.default_seq_dim = -3 if seq_before_head_dim else -2
-
-        # interpolation factors
-
-        assert interpolate_factor >= 1.
-        self.interpolate_factor = interpolate_factor
-
-        # xpos
-
-        self.use_xpos = use_xpos
-
-        if not use_xpos:
-            return
-
-        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-        self.scale_base = xpos_scale_base
-
-        self.register_buffer('scale', scale, persistent = False)
-        self.register_buffer('cached_scales', torch.zeros(cache_max_seq_len, dim), persistent = False)
-        self.cached_scales_seq_len = 0
 
     @property
     def device(self):
