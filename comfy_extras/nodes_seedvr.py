@@ -5,7 +5,6 @@ import math
 import logging
 from einops import rearrange
 
-import gc
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
