@@ -1095,21 +1095,17 @@ class AdaSingle(nn.Module):
         self.emb_dim = emb_dim
         self.layers = layers
 
-        randn_kwargs = {"device": device}
+        param_kwargs = {"device": device}
         fp8_types = _torch_float8_types()
         if dtype is not None and dtype not in fp8_types:
-            randn_kwargs["dtype"] = dtype
+            param_kwargs["dtype"] = dtype
 
         for l in layers:
             if "in" in modes:
-                # Passing fp8 ``dtype=`` here would break CPU weight
-                # loads: CPU has no ``normal_kernel_cpu`` for fp8.
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
-                self.register_parameter(
-                    f"{l}_scale", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5 + 1)
-                )
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.empty(dim, **param_kwargs)))
+                self.register_parameter(f"{l}_scale", nn.Parameter(torch.empty(dim, **param_kwargs)))
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.empty(dim, **param_kwargs)))
 
     def forward(
         self,
