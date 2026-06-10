@@ -143,22 +143,7 @@ class MMArg:
     txt: Any
 
 def safe_pad_operation(x, padding, mode='constant', value=0.0):
-    """Safe padding operation that handles Half precision only for problematic modes"""
-    # Modes qui nécessitent le fix Half precision
-    problematic_modes = ['replicate', 'reflect', 'circular']
-
-    if mode in problematic_modes:
-        try:
-            return F.pad(x, padding, mode=mode, value=value)
-        except RuntimeError as e:
-            if "not implemented for 'Half'" in str(e):
-                original_dtype = x.dtype
-                return F.pad(x.float(), padding, mode=mode, value=value).to(original_dtype)
-            else:
-                raise e
-    else:
-        # Pour 'constant' et autres modes compatibles, pas de fix nécessaire
-        return F.pad(x, padding, mode=mode, value=value)
+    return F.pad(x, padding, mode=mode, value=value)
 
 
 def get_args(key: str, args: List[Any]) -> List[Any]:
@@ -1309,7 +1294,6 @@ class NaDiT(nn.Module):
         patch_size = [ 1,2,2 ],
         shared_qkv: bool = False,
         shared_mlp: bool = False,
-        window_method: Optional[Tuple[str]] = None,
         temporal_window_size: int = None,
         temporal_shifted: bool = False,
         rope_dim = 128,
@@ -1328,15 +1312,10 @@ class NaDiT(nn.Module):
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
         txt_dim = vid_dim
         emb_dim = vid_dim * 6
-        block_type = ["mmdit_sr"] * num_layers
         window = num_layers * [(4,3,3)]
         ada = AdaSingle
         norm = CustomRMSNorm
         qk_norm = CustomRMSNorm
-        if isinstance(block_type, str):
-            block_type = [block_type] * num_layers
-        elif len(block_type) != num_layers:
-            raise ValueError("The ``block_type`` list should equal to ``num_layers``.")
         super().__init__()
         # ``torch.empty`` returns uninitialized memory, not zeros. The
         # SeedVR2Conditioning fail-loud guard at
@@ -1372,8 +1351,6 @@ class NaDiT(nn.Module):
 
         if window is None or isinstance(window[0], int):
             window = [window] * num_layers
-        if window_method is None or isinstance(window_method, str):
-            window_method = [window_method] * num_layers
         if temporal_window_size is None or isinstance(temporal_window_size, int):
             temporal_window_size = [temporal_window_size] * num_layers
         if temporal_shifted is None or isinstance(temporal_shifted, bool):
@@ -1422,12 +1399,6 @@ class NaDiT(nn.Module):
             dim=vid_dim,
             device=device, dtype=dtype, operations=operations
         )
-
-        self.need_txt_repeat = block_type[0] in [
-            "mmdit_stwin",
-            "mmdit_stwin_spatial",
-            "mmdit_stwin_3d_spatial",
-        ]
 
         self.vid_out_norm = None
         if vid_out_norm is not None:
@@ -1504,8 +1475,6 @@ class NaDiT(nn.Module):
         cond_latent, _ = flatten(conditions)
 
         vid = torch.cat([vid, cond_latent], dim=-1)
-        if txt_shape.size(-1) == 1 and self.need_txt_repeat:
-            txt, txt_shape = repeat(txt, txt_shape, "l c -> t l c", t=vid_shape[:, 0])
 
         txt = self.txt_in(txt)
 
