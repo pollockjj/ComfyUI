@@ -143,7 +143,12 @@ class MMArg:
     txt: Any
 
 def safe_pad_operation(x, padding, mode='constant', value=0.0):
-    return F.pad(x, padding, mode=mode, value=value)
+    try:
+        return F.pad(x, padding, mode=mode, value=value)
+    except RuntimeError as e:
+        if "not implemented for" in str(e) and x.dtype in (torch.float16, torch.bfloat16):
+            return F.pad(x.float(), padding, mode=mode, value=value).to(x.dtype)
+        raise
 
 
 def get_args(key: str, args: List[Any]) -> List[Any]:

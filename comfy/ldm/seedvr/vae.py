@@ -1927,8 +1927,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return x
 
     def decode_tiled(self, z, tile_x=32, tile_y=32, overlap=8, tile_t=None, overlap_t=None):
-        # SeedVR2 owns temporal via the MemoryState causal cache; the VAE temporal
-        # tiling knobs (tile_t / overlap_t) are not meaningful here and are discarded.
+        # SeedVR2's causal VAE owns temporal via the MemoryState cache; temporal
+        # slicing breaks that continuity (empirically corrupts decode), so the VAE
+        # tiling knobs (tile_t / overlap_t) are discarded and temporal stays whole.
         sf = self.spatial_downsample_factor
         seedvr2_tiling = {
             "enable_tiling": True,
@@ -1940,7 +1941,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return self.decode(z, seedvr2_tiling=seedvr2_tiling)
 
     def encode_tiled(self, x, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
-        # Temporal tiling knobs are discarded; MemoryState owns temporal.
+        # Temporal tiling knobs are discarded; the causal VAE owns temporal (slicing
+        # breaks MemoryState continuity), so temporal stays whole.
         if tile_y is None:
             tile_y = 512
         if tile_x is None:
