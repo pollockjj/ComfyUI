@@ -75,7 +75,6 @@ def _capture_last_layer_flags(monkeypatch, vid_dim: int, txt_in_dim: int) -> lis
 
     seedvr_model.NaDiT(
         norm_eps=1e-5,
-        qk_rope=None,
         num_layers=4,
         mlp_type="normal",
         vid_dim=vid_dim,
@@ -281,7 +280,7 @@ def test_seedvr2_encode_and_encode_tiled_preserve_native_latent_contract(monkeyp
     assert torch.equal(tiled_latent, torch.full_like(tiled_latent, 3.0 * 0.9152))
 
 
-def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monkeypatch):
+def test_vaedecode_tiled_spatial_applies_temporal_discarded(monkeypatch):
     monkeypatch.setattr(sd_mod.model_management, "load_models_gpu", lambda *a, **k: None)
     vae = _make_vae(_DecodeWrapper())
 
@@ -294,6 +293,9 @@ def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monk
         temporal_overlap=4,
     )
 
+    # Spatial inputs flow through; temporal inputs are discarded — SeedVR2 owns
+    # temporal via the MemoryState causal cache, so VAEDecodeTiled's temporal
+    # knobs are no-ops at the wrapper.
     assert vae.first_stage_model.calls == [
         {
             "shape": (1, 16, 2, 4, 5),
@@ -301,8 +303,8 @@ def test_vaedecode_tiled_visible_inputs_are_seedvr2_decode_tiling_authority(monk
                 "enable_tiling": True,
                 "tile_size": (512, 512),
                 "tile_overlap": (64, 64),
-                "temporal_size": 16,
-                "temporal_overlap": 4,
+                "temporal_size": 0,
+                "temporal_overlap": 0,
             },
         }
     ]

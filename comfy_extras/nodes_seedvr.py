@@ -5,7 +5,6 @@ import math
 import logging
 from einops import rearrange
 
-import gc
 import comfy.model_management
 import comfy.sample
 import comfy.samplers
@@ -15,10 +14,9 @@ from comfy.ldm.seedvr.color_fix import (
     wavelet_color_transfer,
 )
 from comfy.ldm.seedvr.constants import (
-    BYTEDANCE_IMG_SHIFT_FIT,
-    BYTEDANCE_SCHEDULE_T,
-    BYTEDANCE_VID_SHIFT_FIT,
     SEEDVR2_ADAIN_SCALE_MULTIPLIER,
+    SEEDVR2_CHUNK_FRAMES_PER_GB,
+    SEEDVR2_CHUNK_GB_MARGIN,
     SEEDVR2_COLOR_MEM_HEADROOM,
     SEEDVR2_COND_CHANNELS,
     SEEDVR2_DTYPE_BYTES_FLOOR,
@@ -40,6 +38,17 @@ _SEEDVR2_INVALID_MODEL_MSG_PREFIX = (
 # Private sentinel for getattr default: distinguishes "attribute missing"
 # from "attribute present but None" so the failure message is accurate.
 _ATTR_MISSING = object()
+
+
+def _seedvr2_vram_seed_frames_per_chunk(free_bytes, t_pixel):
+    """Predict the largest 4n+1 pixel-frame chunk that fits in free_bytes."""
+    free_gb = free_bytes / (1024 ** 3)
+    predicted = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_gb - SEEDVR2_CHUNK_GB_MARGIN)
+    # round (not floor) to 4n+1: the fit's central prediction lands on measured n_max
+    n = round((predicted - 1) / 4)
+    seed = 4 * int(n) + 1
+    seed = max(1, min(seed, t_pixel))
+    return seed
 
 
 def _seedvr2_auto_chunk_attempts(t_latent, t_pixel, frames_per_chunk):
@@ -100,58 +109,12 @@ def _apply_rope_freqs_float32_cast(diffusion_model):
                 module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
 
 
-def clear_vae_memory(vae_model):
-    for module in vae_model.modules():
-        if hasattr(module, "memory"):
-            module.memory = None
-    gc.collect()
-    comfy.model_management.soft_empty_cache()
-
-def expand_dims(tensor, ndim):
-    shape = tensor.shape + (1,) * (ndim - tensor.ndim)
-    return tensor.reshape(shape)
-
 def get_conditions(latent, latent_blur):
     t, h, w, c = latent.shape
     cond = torch.ones([t, h, w, c + 1], device=latent.device, dtype=latent.dtype)
     cond[:, ..., :-1] = latent_blur[:]
     cond[:, ..., -1:] = 1.0
     return cond
-
-def timestep_transform(timesteps, latents_shapes):
-    vt = 4
-    vs = 8
-    frames = (latents_shapes[:, 0] - 1) * vt + 1
-    heights = latents_shapes[:, 1] * vs
-    widths = latents_shapes[:, 2] * vs
-
-    # Compute shift factor.
-    def get_lin_function(x1, y1, x2, y2):
-        m = (y2 - y1) / (x2 - x1)
-        b = y1 - m * x1
-        return lambda x: m * x + b
-
-    img_shift_fn = get_lin_function(*BYTEDANCE_IMG_SHIFT_FIT)
-    vid_shift_fn = get_lin_function(*BYTEDANCE_VID_SHIFT_FIT)
-    shift = torch.where(
-        frames > 1,
-        vid_shift_fn(heights * widths * frames),
-        img_shift_fn(heights * widths),
-    ).to(timesteps.device)
-
-    # Shift timesteps.
-    T = BYTEDANCE_SCHEDULE_T
-    timesteps = timesteps / T
-    timesteps = shift * timesteps / (1 + (shift - 1) * timesteps)
-    timesteps = timesteps * T
-    return timesteps
-
-def inter(x_0, x_T, t):
-    t = expand_dims(t, x_0.ndim)
-    T = BYTEDANCE_SCHEDULE_T
-    B = lambda t: t / T
-    A = lambda t: 1 - (t / T)
-    return A(t) * x_0 + B(t) * x_T
 
 def div_pad(image, factor):
 
@@ -841,6 +804,12 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         samples_4d = latent["samples"]
+        if torch.count_nonzero(samples_4d) == 0:
+            raise ValueError(
+                "SeedVR2ProgressiveSampler: input latent is empty (all zeros). "
+                "SeedVR2 is an upscaler; connect an encoded latent from "
+                "'Apply SeedVR2 conditioning' rather than an empty latent."
+            )
         samples_4d = comfy.sample.fix_empty_latent_channels(
             model, samples_4d,
             latent.get("downscale_ratio_spacial", None),
@@ -868,8 +837,17 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         if chunking_mode == "auto":
+            free_memory = comfy.model_management.get_free_memory(model.load_device)
+            seed_frames_per_chunk = _seedvr2_vram_seed_frames_per_chunk(
+                free_memory, T_pixel,
+            )
+            logging.info(
+                "SeedVR2ProgressiveSampler auto: free=%.2fGB -> seeding "
+                "frames_per_chunk=%s (4n+1; T_pixel=%s).",
+                free_memory / (1024 ** 3), seed_frames_per_chunk, T_pixel,
+            )
             attempts = _seedvr2_auto_chunk_attempts(
-                T_latent, T_pixel, frames_per_chunk,
+                T_latent, T_pixel, seed_frames_per_chunk,
             )
             for i, attempt_frames_per_chunk in enumerate(attempts):
                 retry = False

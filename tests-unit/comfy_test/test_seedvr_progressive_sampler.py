@@ -58,44 +58,14 @@ def test_progressive_sampler_schema_exposes_manual_default_auto_chunking():
     assert inputs["chunking_mode"].default == "manual"
 
 
-def test_auto_chunking_walks_two_three_four_chunk_ladder():
-    """Auto mode must walk 2-, 3-, then 4-chunk geometries on OOM."""
-    latent, pos, neg, _, _ = _make_inputs(T=17)
-    calls = []
-
-    def _oom_until_four_chunks(model, noise, steps, cfg, sampler_name,
-                               scheduler, positive, negative,
-                               latent_image, denoise=1.0,
-                               noise_mask=None, seed=None):
-        calls.append(tuple(latent_image.shape))
-        if latent_image.shape[1] > _LAT_C * 5:
-            raise torch.cuda.OutOfMemoryError("chunk too large")
-        return latent_image.clone()
-
-    with patch.object(comfy.sample, "sample",
-                      side_effect=_oom_until_four_chunks), \
-         patch.object(comfy.sample, "fix_empty_latent_channels",
-                      side_effect=_identity_fix_empty), \
-         patch.object(comfy.sample, "prepare_noise",
-                      side_effect=_fingerprinted_prepare_noise), \
-         patch.object(nodes_seedvr_mod.comfy.model_management,
-                      "soft_empty_cache") as soft_empty:
-        out = SeedVR2ProgressiveSampler.execute(
-            model=None, seed=0, steps=2, cfg=1.0,
-            sampler_name="euler", scheduler="simple",
-            positive=pos, negative=neg, latent=latent,
-            denoise=1.0, frames_per_chunk=65, temporal_overlap=0,
-            chunking_mode="auto",
-        )
-
-    assert calls[:4] == [
-        (1, _LAT_C * 17, 8, 8),
-        (1, _LAT_C * 9, 8, 8),
-        (1, _LAT_C * 6, 8, 8),
-        (1, _LAT_C * 5, 8, 8),
-    ]
-    assert torch.equal(out.result[0]["samples"], latent["samples"])
-    assert soft_empty.call_count == 3
+def test_vram_seed_frames_per_chunk_predicts_4n1_clamped_to_t_pixel():
+    """VRAM chunk-size law: seed = nearest 4n+1 to 4*(free_GB - 3), clamped to
+    [1, t_pixel]. Pure numerical contract, no mocks."""
+    gib = 1024 ** 3
+    seed = nodes_seedvr_mod._seedvr2_vram_seed_frames_per_chunk
+    assert seed(20 * gib, 65) == 65   # 4*(20-3)=68 -> 4n+1 69 -> clamp to t_pixel 65
+    assert seed(6 * gib, 97) == 13    # 4*(6-3)=12 -> nearest 4n+1 13
+    assert seed(2 * gib, 97) == 1     # below margin -> floor at 1
 
 
 @pytest.mark.parametrize("bad_chunk", [0, -1, 2])

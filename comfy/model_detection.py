@@ -615,7 +615,6 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         # silently miss-load → all-black output.
         dit_config["mm_layers"] = 36
         dit_config["norm_eps"] = 1e-5
-        dit_config["qk_rope"] = True
         dit_config["rope_type"] = "rope3d"
         dit_config["rope_dim"] = 64
         dit_config["mlp_type"] = "normal"
@@ -631,7 +630,6 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         # vid/txt modules, later blocks use shared modules.
         dit_config["mm_layers"] = 10
         dit_config["norm_eps"] = 1e-5
-        dit_config["qk_rope"] = True
         dit_config["rope_type"] = "rope3d"
         dit_config["rope_dim"] = 64
         dit_config["mlp_type"] = "swiglu"
@@ -643,7 +641,6 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["heads"] = 20
         dit_config["num_layers"] = 32
         dit_config["norm_eps"] = 1.0e-05
-        dit_config["qk_rope"] = None
         dit_config["mlp_type"] = "swiglu"
         dit_config["vid_out_norm"] = True
         return dit_config

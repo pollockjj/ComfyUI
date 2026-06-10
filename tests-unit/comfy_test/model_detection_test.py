@@ -154,7 +154,6 @@ class TestModelDetection:
         assert unet_config["num_layers"] == 36
         assert unet_config["mm_layers"] == 36
         assert unet_config["mlp_type"] == "normal"
-        assert unet_config["qk_rope"] is True
         assert unet_config["rope_type"] == "rope3d"
         assert unet_config["rope_dim"] == 64
 
@@ -169,7 +168,6 @@ class TestModelDetection:
         assert unet_config["num_layers"] == 36
         assert unet_config["mm_layers"] == 10
         assert unet_config["mlp_type"] == "swiglu"
-        assert unet_config["qk_rope"] is True
         assert unet_config["rope_type"] == "rope3d"
         assert unet_config["rope_dim"] == 64
 
@@ -183,7 +181,6 @@ class TestModelDetection:
         assert unet_config["heads"] == 20
         assert unet_config["num_layers"] == 32
         assert unet_config["mlp_type"] == "swiglu"
-        assert unet_config["qk_rope"] is None
 
     def test_unet_config_and_required_keys_combination_is_unique(self):
         """Each model in the registry must have a unique combination of

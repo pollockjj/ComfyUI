@@ -8,6 +8,7 @@ if not torch.cuda.is_available():
 import comfy.sd
 import comfy.supported_models
 import comfy.ldm.seedvr.model as seedvr_model
+import comfy.ldm.seedvr.vae as seedvr_vae
 
 
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
@@ -39,7 +40,8 @@ def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():
 
 
 def test_seedvr2_vae_decode_memory_covers_full_frame_lab_transfer():
-    estimate = comfy.sd._seedvr2_vae_decode_memory_used((1, 16, 26, 120, 160))
+    wrapper = seedvr_vae.VideoAutoencoderKLWrapper.__new__(seedvr_vae.VideoAutoencoderKLWrapper)
+    estimate = wrapper.comfy_memory_used_decode((1, 16, 26, 120, 160))
     old_estimate = 16 * 120 * 160 * (4 * 8 * 8) * 2
 
     assert estimate == 101 * 960 * 1280 * 160

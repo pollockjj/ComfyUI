@@ -7,7 +7,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_var_attention
+from comfy.ldm.seedvr.attention import optimized_var_attention
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
@@ -93,10 +93,6 @@ class Cache:
             cache=self.cache,
         )
 
-    def get(self, key: str):
-        key = self.prefix + key
-        return self.cache[key]
-
 def repeat_concat(
     vid: torch.FloatTensor,  # (VL ... c)
     txt: torch.FloatTensor,  # (TL ... c)
@@ -109,34 +105,6 @@ def repeat_concat(
     txt = [[x] * n for x, n in zip(txt, txt_repeat)]
     txt = list(chain(*txt))
     return torch.cat(list(chain(*zip(vid, txt))))
-
-def concat(
-    vid: torch.FloatTensor,  # (VL ... c)
-    txt: torch.FloatTensor,  # (TL ... c)
-    vid_len: torch.LongTensor,  # (b)
-    txt_len: torch.LongTensor,  # (b)
-) -> torch.FloatTensor:  # (L ... c)
-    vid = torch.split(vid, vid_len.tolist())
-    txt = torch.split(txt, txt_len.tolist())
-    return torch.cat(list(chain(*zip(vid, txt))))
-
-def concat_idx(
-    vid_len: torch.LongTensor,  # (b)
-    txt_len: torch.LongTensor,  # (b)
-) -> Tuple[
-    Callable,
-    Callable,
-]:
-    device = vid_len.device
-    vid_idx = torch.arange(vid_len.sum(), device=device)
-    txt_idx = torch.arange(len(vid_idx), len(vid_idx) + txt_len.sum(), device=device)
-    tgt_idx = concat(vid_idx, txt_idx, vid_len, txt_len)
-    src_idx = torch.argsort(tgt_idx)
-    return (
-        lambda vid, txt: torch.index_select(torch.cat([vid, txt]), 0, tgt_idx),
-        lambda all: torch.index_select(all, 0, src_idx).split([len(vid_idx), len(txt_idx)]),
-    )
-
 
 def repeat_concat_idx(
     vid_len: torch.LongTensor,  # (n*b)
@@ -175,22 +143,12 @@ class MMArg:
     txt: Any
 
 def safe_pad_operation(x, padding, mode='constant', value=0.0):
-    """Safe padding operation that handles Half precision only for problematic modes"""
-    # Modes qui nécessitent le fix Half precision
-    problematic_modes = ['replicate', 'reflect', 'circular']
-
-    if mode in problematic_modes:
-        try:
-            return F.pad(x, padding, mode=mode, value=value)
-        except RuntimeError as e:
-            if "not implemented for 'Half'" in str(e):
-                original_dtype = x.dtype
-                return F.pad(x.float(), padding, mode=mode, value=value).to(original_dtype)
-            else:
-                raise e
-    else:
-        # Pour 'constant' et autres modes compatibles, pas de fix nécessaire
+    try:
         return F.pad(x, padding, mode=mode, value=value)
+    except RuntimeError as e:
+        if "not implemented for" in str(e) and x.dtype in (torch.float16, torch.bfloat16):
+            return F.pad(x.float(), padding, mode=mode, value=value).to(x.dtype)
+        raise
 
 
 def get_args(key: str, args: List[Any]) -> List[Any]:
@@ -271,34 +229,21 @@ class RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim,
-        custom_freqs = None,
         freqs_for = 'lang',
         theta = 10000,
         max_freq = 10,
-        num_freqs = 1,
         learned_freq = False,
-        use_xpos = False,
-        xpos_scale_base = 512,
-        interpolate_factor = 1.,
-        theta_rescale_factor = 1.,
-        seq_before_head_dim = False,
         cache_if_possible = True,
         cache_max_seq_len = 8192
     ):
         super().__init__()
 
-        theta *= theta_rescale_factor ** (dim / (dim - 2))
-
         self.freqs_for = freqs_for
 
-        if exists(custom_freqs):
-            freqs = custom_freqs
-        elif freqs_for == 'lang':
+        if freqs_for == 'lang':
             freqs = 1. / (theta ** (torch.arange(0, dim, 2)[:(dim // 2)].float() / dim))
         elif freqs_for == 'pixel':
             freqs = torch.linspace(1., max_freq / 2, dim // 2) * pi
-        elif freqs_for == 'constant':
-            freqs = torch.ones(num_freqs).float()
 
         self.cache_if_possible = cache_if_possible
         self.cache_max_seq_len = cache_max_seq_len
@@ -313,34 +258,6 @@ class RotaryEmbedding(nn.Module):
         # dummy for device
 
         self.register_buffer('dummy', torch.tensor(0), persistent = False)
-
-        # default sequence dimension
-
-        self.seq_before_head_dim = seq_before_head_dim
-        self.default_seq_dim = -3 if seq_before_head_dim else -2
-
-        # interpolation factors
-
-        assert interpolate_factor >= 1.
-        self.interpolate_factor = interpolate_factor
-
-        # xpos
-
-        self.use_xpos = use_xpos
-
-        if not use_xpos:
-            return
-
-        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-        self.scale_base = xpos_scale_base
-
-        self.register_buffer('scale', scale, persistent = False)
-        self.register_buffer('cached_scales', torch.zeros(cache_max_seq_len, dim), persistent = False)
-        self.cached_scales_seq_len = 0
-
-        # add apply_rotary_emb as static method
-
-        self.apply_rotary_emb = staticmethod(apply_rotary_emb)
 
     @property
     def device(self):
@@ -438,25 +355,6 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
         super().__init__(dim, rope_dim=3)
         self.mm = False
 
-    def forward(
-        self,
-        q: torch.FloatTensor,  # b h l d
-        k: torch.FloatTensor,  # b h l d
-        size: Tuple[int, int, int],
-    ) -> Tuple[
-        torch.FloatTensor,
-        torch.FloatTensor,
-    ]:
-        T, H, W = size
-        freqs = self.get_axial_freqs(T, H, W)
-        q = rearrange(q, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        k = rearrange(k, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        q = apply_rotary_emb(freqs, q.float()).to(q.dtype)
-        k = apply_rotary_emb(freqs, k.float()).to(k.dtype)
-        q = rearrange(q, "b h T H W d -> b h (T H W) d")
-        k = rearrange(k, "b h T H W d -> b h (T H W) d")
-        return q, k
-
 
 class NaRotaryEmbedding3d(RotaryEmbedding3d):
     def forward(
@@ -529,43 +427,6 @@ def rotate_half(x):
     return rearrange(x, '... d r -> ... (d r)')
 def exists(val):
     return val is not None
-
-def apply_rotary_emb(
-    freqs,
-    t,
-    start_index = 0,
-    scale = 1.,
-    seq_dim = -2,
-    freqs_seq_dim = None
-):
-    dtype = t.dtype
-    if not exists(freqs_seq_dim):
-        if freqs.ndim == 2 or t.ndim == 3:
-            freqs_seq_dim = 0
-
-    if t.ndim == 3 or exists(freqs_seq_dim):
-        seq_len = t.shape[seq_dim]
-        freqs = slice_at_dim(freqs, slice(-seq_len, None), dim = freqs_seq_dim)
-
-    rot_feats = freqs.shape[-1]
-    end_index = start_index + rot_feats
-
-    t_left = t[..., :start_index]
-    t_middle = t[..., start_index:end_index]
-    t_right = t[..., end_index:]
-
-    angles = freqs.to(t_middle.device)[..., ::2]
-    cos = torch.cos(angles) * scale
-    sin = torch.sin(angles) * scale
-
-    col0 = torch.stack([cos, sin], dim=-1)
-    col1 = torch.stack([-sin, cos], dim=-1)
-    freqs_mat = torch.stack([col0, col1], dim=-1)
-
-    t_middle_out = apply_rope1(t_middle, freqs_mat)
-    out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
-    return out.type(dtype)
-
 
 def _apply_seedvr2_rotary_emb(
     freqs: torch.Tensor,
@@ -813,9 +674,6 @@ class NaMMAttention(nn.Module):
 
 
         self.rope = get_na_rope(rope_type=rope_type, dim=rope_dim)
-
-    def forward(self):
-        pass
 
 def window(
     hid: torch.FloatTensor,  # (L c)
@@ -1242,21 +1100,17 @@ class AdaSingle(nn.Module):
         self.emb_dim = emb_dim
         self.layers = layers
 
-        randn_kwargs = {"device": device}
+        param_kwargs = {"device": device}
         fp8_types = _torch_float8_types()
         if dtype is not None and dtype not in fp8_types:
-            randn_kwargs["dtype"] = dtype
+            param_kwargs["dtype"] = dtype
 
         for l in layers:
             if "in" in modes:
-                # Passing fp8 ``dtype=`` here would break CPU weight
-                # loads: CPU has no ``normal_kernel_cpu`` for fp8.
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
-                self.register_parameter(
-                    f"{l}_scale", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5 + 1)
-                )
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.zeros(dim, **param_kwargs)))
+                self.register_parameter(f"{l}_scale", nn.Parameter(torch.ones(dim, **param_kwargs)))
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim, **randn_kwargs) / dim**0.5))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.zeros(dim, **param_kwargs)))
 
     def forward(
         self,
@@ -1309,10 +1163,6 @@ class AdaSingle(nn.Module):
                 return hid.mul_(gateA)
 
         raise NotImplementedError
-
-
-def emb_add(emb1: torch.Tensor, emb2: Optional[torch.Tensor]):
-    return emb1 if emb2 is None else emb1 + emb2
 
 
 class TimeEmbedding(nn.Module):
@@ -1393,7 +1243,6 @@ class NaDiT(nn.Module):
     def __init__(
         self,
         norm_eps,
-        qk_rope,
         num_layers,
         mlp_type,
         vid_in_channels = 33,
@@ -1406,11 +1255,6 @@ class NaDiT(nn.Module):
         expand_ratio = 4,
         qk_bias = False,
         patch_size = [ 1,2,2 ],
-        shared_qkv: bool = False,
-        shared_mlp: bool = False,
-        window_method: Optional[Tuple[str]] = None,
-        temporal_window_size: int = None,
-        temporal_shifted: bool = False,
         rope_dim = 128,
         rope_type = "mmrope3d",
         vid_out_norm: Optional[str] = None,
@@ -1427,15 +1271,10 @@ class NaDiT(nn.Module):
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
         txt_dim = vid_dim
         emb_dim = vid_dim * 6
-        block_type = ["mmdit_sr"] * num_layers
         window = num_layers * [(4,3,3)]
         ada = AdaSingle
         norm = CustomRMSNorm
         qk_norm = CustomRMSNorm
-        if isinstance(block_type, str):
-            block_type = [block_type] * num_layers
-        elif len(block_type) != num_layers:
-            raise ValueError("The ``block_type`` list should equal to ``num_layers``.")
         super().__init__()
         # ``torch.empty`` returns uninitialized memory, not zeros. The
         # SeedVR2Conditioning fail-loud guard at
@@ -1471,12 +1310,6 @@ class NaDiT(nn.Module):
 
         if window is None or isinstance(window[0], int):
             window = [window] * num_layers
-        if window_method is None or isinstance(window_method, str):
-            window_method = [window_method] * num_layers
-        if temporal_window_size is None or isinstance(temporal_window_size, int):
-            temporal_window_size = [temporal_window_size] * num_layers
-        if temporal_shifted is None or isinstance(temporal_shifted, bool):
-            temporal_shifted = [temporal_shifted] * num_layers
 
         rope_dim = rope_dim if rope_dim is not None else head_dim // 2
         self.blocks = nn.ModuleList(
@@ -1492,16 +1325,11 @@ class NaDiT(nn.Module):
                     norm_eps=norm_eps,
                     ada=ada,
                     qk_bias=qk_bias,
-                    qk_rope=qk_rope,
                     qk_norm=qk_norm,
-                    shared_qkv=shared_qkv,
-                    shared_mlp=shared_mlp,
                     mlp_type=mlp_type,
                     rope_dim = rope_dim,
                     window=window[i],
                     window_method=window_method[i],
-                    temporal_window_size=temporal_window_size[i],
-                    temporal_shifted=temporal_shifted[i],
                     is_last_layer=(i == num_layers - 1) and not self._7b_version,
                     rope_type = rope_type,
                     shared_weights=not (
@@ -1521,12 +1349,6 @@ class NaDiT(nn.Module):
             dim=vid_dim,
             device=device, dtype=dtype, operations=operations
         )
-
-        self.need_txt_repeat = block_type[0] in [
-            "mmdit_stwin",
-            "mmdit_stwin_spatial",
-            "mmdit_stwin_3d_spatial",
-        ]
 
         self.vid_out_norm = None
         if vid_out_norm is not None:
@@ -1603,8 +1425,6 @@ class NaDiT(nn.Module):
         cond_latent, _ = flatten(conditions)
 
         vid = torch.cat([vid, cond_latent], dim=-1)
-        if txt_shape.size(-1) == 1 and self.need_txt_repeat:
-            txt, txt_shape = repeat(txt, txt_shape, "l c -> t l c", t=vid_shape[:, 0])
 
         txt = self.txt_in(txt)
 
