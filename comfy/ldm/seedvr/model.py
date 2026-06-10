@@ -1107,10 +1107,10 @@ class AdaSingle(nn.Module):
 
         for l in layers:
             if "in" in modes:
-                self.register_parameter(f"{l}_shift", nn.Parameter(torch.empty(dim, **param_kwargs)))
-                self.register_parameter(f"{l}_scale", nn.Parameter(torch.empty(dim, **param_kwargs)))
+                self.register_parameter(f"{l}_shift", nn.Parameter(torch.zeros(dim, **param_kwargs)))
+                self.register_parameter(f"{l}_scale", nn.Parameter(torch.ones(dim, **param_kwargs)))
             if "out" in modes:
-                self.register_parameter(f"{l}_gate", nn.Parameter(torch.empty(dim, **param_kwargs)))
+                self.register_parameter(f"{l}_gate", nn.Parameter(torch.zeros(dim, **param_kwargs)))
 
     def forward(
         self,

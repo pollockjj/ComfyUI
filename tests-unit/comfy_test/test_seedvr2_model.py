@@ -75,7 +75,6 @@ def _capture_last_layer_flags(monkeypatch, vid_dim: int, txt_in_dim: int) -> lis
 
     seedvr_model.NaDiT(
         norm_eps=1e-5,
-        qk_rope=None,
         num_layers=4,
         mlp_type="normal",
         vid_dim=vid_dim,
