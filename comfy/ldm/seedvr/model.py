@@ -1292,10 +1292,6 @@ class NaDiT(nn.Module):
         expand_ratio = 4,
         qk_bias = False,
         patch_size = [ 1,2,2 ],
-        shared_qkv: bool = False,
-        shared_mlp: bool = False,
-        temporal_window_size: int = None,
-        temporal_shifted: bool = False,
         rope_dim = 128,
         rope_type = "mmrope3d",
         vid_out_norm: Optional[str] = None,
@@ -1351,10 +1347,6 @@ class NaDiT(nn.Module):
 
         if window is None or isinstance(window[0], int):
             window = [window] * num_layers
-        if temporal_window_size is None or isinstance(temporal_window_size, int):
-            temporal_window_size = [temporal_window_size] * num_layers
-        if temporal_shifted is None or isinstance(temporal_shifted, bool):
-            temporal_shifted = [temporal_shifted] * num_layers
 
         rope_dim = rope_dim if rope_dim is not None else head_dim // 2
         self.blocks = nn.ModuleList(
@@ -1372,14 +1364,10 @@ class NaDiT(nn.Module):
                     qk_bias=qk_bias,
                     qk_rope=qk_rope,
                     qk_norm=qk_norm,
-                    shared_qkv=shared_qkv,
-                    shared_mlp=shared_mlp,
                     mlp_type=mlp_type,
                     rope_dim = rope_dim,
                     window=window[i],
                     window_method=window_method[i],
-                    temporal_window_size=temporal_window_size[i],
-                    temporal_shifted=temporal_shifted[i],
                     is_last_layer=(i == num_layers - 1) and not self._7b_version,
                     rope_type = rope_type,
                     shared_weights=not (
