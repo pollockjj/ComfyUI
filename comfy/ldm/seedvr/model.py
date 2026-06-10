@@ -1238,7 +1238,6 @@ class NaDiT(nn.Module):
     def __init__(
         self,
         norm_eps,
-        qk_rope,
         num_layers,
         mlp_type,
         vid_in_channels = 33,
@@ -1321,7 +1320,6 @@ class NaDiT(nn.Module):
                     norm_eps=norm_eps,
                     ada=ada,
                     qk_bias=qk_bias,
-                    qk_rope=qk_rope,
                     qk_norm=qk_norm,
                     mlp_type=mlp_type,
                     rope_dim = rope_dim,
