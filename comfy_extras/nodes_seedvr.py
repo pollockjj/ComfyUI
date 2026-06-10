@@ -804,6 +804,12 @@ class SeedVR2ProgressiveSampler(io.ComfyNode):
             )
 
         samples_4d = latent["samples"]
+        if torch.count_nonzero(samples_4d) == 0:
+            raise ValueError(
+                "SeedVR2ProgressiveSampler: input latent is empty (all zeros). "
+                "SeedVR2 is an upscaler; connect an encoded latent from "
+                "'Apply SeedVR2 conditioning' rather than an empty latent."
+            )
         samples_4d = comfy.sample.fix_empty_latent_channels(
             model, samples_4d,
             latent.get("downscale_ratio_spacial", None),
