@@ -327,10 +327,7 @@ class Attention(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.0,
         bias: bool = False,
-        upcast_attention: bool = False,
         upcast_softmax: bool = False,
-        added_kv_proj_dim: Optional[int] = None,
-        added_proj_bias: Optional[bool] = True,
         norm_num_groups: Optional[int] = None,
         spatial_norm_dim: Optional[int] = None,
         out_bias: bool = True,
@@ -341,10 +338,7 @@ class Attention(nn.Module):
         residual_connection: bool = False,
         _from_deprecated_attn_block: bool = False,
         out_dim: int = None,
-        out_context_dim: int = None,
-        context_pre_only=None,
         pre_only=False,
-        is_causal: bool = False,
     ):
         super().__init__()
 
@@ -354,17 +348,13 @@ class Attention(nn.Module):
         self.use_bias = bias
         self.is_cross_attention = cross_attention_dim is not None
         self.cross_attention_dim = cross_attention_dim if cross_attention_dim is not None else query_dim
-        self.upcast_attention = upcast_attention
         self.upcast_softmax = upcast_softmax
         self.rescale_output_factor = rescale_output_factor
         self.residual_connection = residual_connection
         self.dropout = dropout
         self.fused_projections = False
         self.out_dim = out_dim if out_dim is not None else query_dim
-        self.out_context_dim = out_context_dim if out_context_dim is not None else query_dim
-        self.context_pre_only = context_pre_only
         self.pre_only = pre_only
-        self.is_causal = is_causal
 
         # we make use of this private variable to know whether this class is loaded
         # with an deprecated state dict so that we can convert it on the fly
@@ -376,7 +366,6 @@ class Attention(nn.Module):
         self.heads = out_dim // dim_head if out_dim is not None else heads
         self.sliceable_head_dim = heads
 
-        self.added_kv_proj_dim = added_kv_proj_dim
         self.only_cross_attention = only_cross_attention
 
         if norm_num_groups is not None:
@@ -593,23 +582,18 @@ class InflatedCausalConv3d(ops.Conv3d):
         self,
         *args,
         inflation_mode,
-        memory_device = "same",
         **kwargs,
     ):
         self.inflation_mode = inflation_mode
         self.memory = None
         super().__init__(*args, **kwargs)
         self.temporal_padding = self.padding[0]
-        self.memory_device = memory_device
         self.padding = (0, *self.padding[1:])
         self.memory_limit = float("inf")
         self.logged_once = False
 
     def set_memory_limit(self, value: float):
         self.memory_limit = value
-
-    def set_memory_device(self, memory_device):
-        self.memory_device = memory_device
 
     def _conv_forward(self, input, weight, bias, *args, **kwargs):
         if (NVIDIA_MEMORY_CONV_BUG_WORKAROUND and
@@ -745,13 +729,8 @@ class InflatedCausalConv3d(ops.Conv3d):
             if (mem_size != 0 and memory_state != MemoryState.DISABLED)
             else None
         )
-        if (
-            memory_state != MemoryState.DISABLED
-            and (self.memory_device is not None)
-        ):
+        if memory_state != MemoryState.DISABLED:
             self.memory = memory
-            if self.memory_device == "cpu" and self.memory is not None:
-                self.memory = self.memory.to("cpu")
         return super().forward(input)
 
     def slicing_forward(
@@ -772,7 +751,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         # Single GPU inference - simplified memory management
         if (
             memory_state in [MemoryState.INITIALIZING, MemoryState.ACTIVE]  # use_slicing
-            and (self.memory_device is not None)
             and cache_size != 0
         ):
             if cache_size > input[-1].size(2) and cache is not None and len(input) == 1:
@@ -780,8 +758,6 @@ class InflatedCausalConv3d(ops.Conv3d):
                 cache = None
             if cache_size <= input[-1].size(2):
                 self.memory = input[-1][:, :, -cache_size:].detach().contiguous()
-                if self.memory_device == "cpu" and self.memory is not None:
-                    self.memory = self.memory.to("cpu")
 
         padding = tuple(x for x in reversed(self.padding) for _ in range(2))
         for i in range(len(input)):
@@ -824,14 +800,11 @@ class Upsample3D(nn.Module):
         inflation_mode = "tail",
         temporal_up: bool = False,
         spatial_up: bool = True,
-        slicing: bool = False,
-        use_conv: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
-        self.use_conv = use_conv
 
         conv = InflatedCausalConv3d(
             self.channels,
@@ -845,7 +818,6 @@ class Upsample3D(nn.Module):
         self.spatial_up = spatial_up
         self.temporal_ratio = 2 if temporal_up else 1
         self.spatial_ratio = 2 if spatial_up else 1
-        self.slicing = slicing
 
         # [Override] MAGViT v2 learnable upsample
         upscale_ratio = (self.spatial_ratio**2) * self.temporal_ratio
@@ -869,37 +841,21 @@ class Upsample3D(nn.Module):
     ) -> torch.FloatTensor:
         assert hidden_states.shape[1] == self.channels
 
-        if self.slicing:
-            split_size = hidden_states.size(2) // 2
-            hidden_states = list(
-                hidden_states.split([split_size, hidden_states.size(2) - split_size], dim=2)
-            )
-        else:
-            hidden_states = [hidden_states]
-
-        for i in range(len(hidden_states)):
-            hidden_states[i] = self.upscale_conv(hidden_states[i])
-            hidden_states[i] = rearrange(
-                hidden_states[i],
-                "b (x y z c) f h w -> b c (f z) (h x) (w y)",
-                x=self.spatial_ratio,
-                y=self.spatial_ratio,
-                z=self.temporal_ratio,
-            )
+        hidden_states = self.upscale_conv(hidden_states)
+        hidden_states = rearrange(
+            hidden_states,
+            "b (x y z c) f h w -> b c (f z) (h x) (w y)",
+            x=self.spatial_ratio,
+            y=self.spatial_ratio,
+            z=self.temporal_ratio,
+        )
 
         if self.temporal_up and memory_state != MemoryState.ACTIVE:
-            hidden_states[0] = remove_head(hidden_states[0])
+            hidden_states = remove_head(hidden_states)
 
-        if not self.slicing:
-            hidden_states = hidden_states[0]
+        hidden_states = self.conv(hidden_states, memory_state=memory_state)
 
-        if self.use_conv:
-            hidden_states = self.conv(hidden_states, memory_state=memory_state)
-
-        if not self.slicing:
-            return hidden_states
-        else:
-            return torch.cat(hidden_states, dim=2)
+        return hidden_states
 
 
 class Downsample3D(nn.Module):
@@ -912,18 +868,13 @@ class Downsample3D(nn.Module):
         inflation_mode = "tail",
         spatial_down: bool = False,
         temporal_down: bool = False,
-        name: str = "conv",
-        padding = 1,
         **kwargs,
     ):
         super().__init__()
-        self.padding = padding
-        self.name = name
         self.channels = channels
         self.out_channels = out_channels or channels
         self.temporal_down = temporal_down
         self.spatial_down = spatial_down
-        self.padding = padding
 
         self.temporal_ratio = 2 if temporal_down else 1
         self.spatial_ratio = 2 if spatial_down else 1
@@ -936,11 +887,7 @@ class Downsample3D(nn.Module):
             self.out_channels,
             kernel_size=(self.temporal_kernel, self.spatial_kernel, self.spatial_kernel),
             stride=(self.temporal_ratio, self.spatial_ratio, self.spatial_ratio),
-            padding=(
-                1 if self.temporal_down else 0,
-                self.padding if self.spatial_down else 0,
-                self.padding if self.spatial_down else 0,
-            ),
+            padding=(1 if self.temporal_down else 0, 0, 0),
             inflation_mode=inflation_mode,
         )
 
@@ -958,7 +905,7 @@ class Downsample3D(nn.Module):
             # [Overridden] change to causal norm.
             hidden_states = causal_norm_wrapper(self.norm, hidden_states)
 
-        if self.padding == 0 and self.spatial_down:
+        if self.spatial_down:
             pad = (0, 1, 0, 1)
             hidden_states = safe_pad_operation(hidden_states, pad, mode="constant", value=0)
 
@@ -981,8 +928,6 @@ class ResnetBlock3D(nn.Module):
         eps: float = 1e-6,
         output_scale_factor: float = 1.0,
         skip_time_act: bool = False,
-        use_in_shortcut: Optional[bool] = None,
-        conv_2d_out_channels: Optional[int] = None,
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
         **kwargs,
@@ -990,8 +935,6 @@ class ResnetBlock3D(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
-        conv_2d_out_channels = conv_2d_out_channels or out_channels
-        self.use_in_shortcut = use_in_shortcut
         self.output_scale_factor = output_scale_factor
         self.skip_time_act = skip_time_act
         self.nonlinearity = nn.SiLU()
@@ -1016,7 +959,7 @@ class ResnetBlock3D(nn.Module):
 
         self.conv2 = InflatedCausalConv3d(
             self.out_channels,
-            conv_2d_out_channels,
+            out_channels,
             kernel_size=3,
             stride=1,
             padding=1,
@@ -1027,7 +970,7 @@ class ResnetBlock3D(nn.Module):
         if self.use_in_shortcut:
             self.conv_shortcut = InflatedCausalConv3d(
                 self.in_channels,
-                conv_2d_out_channels,
+                out_channels,
                 kernel_size=1,
                 stride=1,
                 padding=0,
@@ -1078,10 +1021,8 @@ class DownEncoderBlock3D(nn.Module):
         num_layers: int = 1,
         resnet_eps: float = 1e-6,
         resnet_groups: int = 32,
-        resnet_pre_norm: bool = True,
         output_scale_factor: float = 1.0,
         add_downsample: bool = True,
-        downsample_padding: int = 1,
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
         temporal_down: bool = True,
@@ -1103,7 +1044,6 @@ class DownEncoderBlock3D(nn.Module):
                     groups=resnet_groups,
                     dropout=dropout,
                     output_scale_factor=output_scale_factor,
-                    pre_norm=resnet_pre_norm,
                     inflation_mode=inflation_mode,
                     time_receptive_field=time_receptive_field,
                 )
@@ -1119,8 +1059,6 @@ class DownEncoderBlock3D(nn.Module):
                     Downsample3D(
                         out_channels,
                         out_channels=out_channels,
-                        padding=downsample_padding,
-                        name="op",
                         temporal_down=temporal_down,
                         spatial_down=spatial_down,
                         inflation_mode=inflation_mode,
@@ -1156,7 +1094,6 @@ class UpDecoderBlock3D(nn.Module):
         num_layers: int = 1,
         resnet_eps: float = 1e-6,
         resnet_groups: int = 32,
-        resnet_pre_norm: bool = True,
         output_scale_factor: float = 1.0,
         add_upsample: bool = True,
         temb_channels: Optional[int] = None,
@@ -1164,7 +1101,6 @@ class UpDecoderBlock3D(nn.Module):
         time_receptive_field: _receptive_field_t = "half",
         temporal_up: bool = True,
         spatial_up: bool = True,
-        slicing: bool = False,
     ):
         super().__init__()
         resnets = []
@@ -1183,10 +1119,8 @@ class UpDecoderBlock3D(nn.Module):
                     groups=resnet_groups,
                     dropout=dropout,
                     output_scale_factor=output_scale_factor,
-                    pre_norm=resnet_pre_norm,
                     inflation_mode=inflation_mode,
                     time_receptive_field=time_receptive_field,
-                    slicing=slicing,
                 )
             )
 
@@ -1201,12 +1135,10 @@ class UpDecoderBlock3D(nn.Module):
                 [
                     Upsample3D(
                         out_channels,
-                        use_conv=True,
                         out_channels=out_channels,
                         temporal_up=temporal_up,
                         spatial_up=spatial_up,
                         inflation_mode=inflation_mode,
-                        slicing=slicing,
                     )
                 ]
             )
@@ -1240,7 +1172,6 @@ class UNetMidBlock3D(nn.Module):
         resnet_eps: float = 1e-6,
         resnet_time_scale_shift: str = "default",  # default, spatial
         resnet_groups: int = 32,
-        resnet_pre_norm: bool = True,
         add_attention: bool = True,
         attention_head_dim: int = 1,
         output_scale_factor: float = 1.0,
@@ -1262,7 +1193,6 @@ class UNetMidBlock3D(nn.Module):
                 groups=resnet_groups,
                 dropout=dropout,
                 output_scale_factor=output_scale_factor,
-                pre_norm=resnet_pre_norm,
                 inflation_mode=inflation_mode,
                 time_receptive_field=time_receptive_field,
             )
@@ -1305,7 +1235,6 @@ class UNetMidBlock3D(nn.Module):
                     groups=resnet_groups,
                     dropout=dropout,
                     output_scale_factor=output_scale_factor,
-                    pre_norm=resnet_pre_norm,
                     inflation_mode=inflation_mode,
                     time_receptive_field=time_receptive_field,
                 )
@@ -1338,12 +1267,9 @@ class Encoder3D(nn.Module):
         block_out_channels: Tuple[int, ...] = (64,),
         layers_per_block: int = 2,
         norm_num_groups: int = 32,
-        double_z: bool = True,
         mid_block_add_attention=True,
-        # [Override] add extra_cond_dim, temporal down num
+        # [Override] add temporal down num
         temporal_down_num: int = 2,
-        extra_cond_dim: int = None,
-        gradient_checkpoint: bool = False,
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
     ):
@@ -1362,9 +1288,6 @@ class Encoder3D(nn.Module):
 
         self.mid_block = None
         self.down_blocks = nn.ModuleList([])
-        self.extra_cond_dim = extra_cond_dim
-
-        self.conv_extra_cond = nn.ModuleList([])
 
         # down
         output_channel = block_out_channels[0]
@@ -1384,8 +1307,6 @@ class Encoder3D(nn.Module):
                 out_channels=output_channel,
                 add_downsample=not is_final_block,
                 resnet_eps=1e-6,
-                downsample_padding=0,
-                # Note: Don't know why set it as 0
                 resnet_groups=norm_num_groups,
                 temporal_down=is_temporal_down_block,
                 spatial_down=True,
@@ -1393,20 +1314,6 @@ class Encoder3D(nn.Module):
                 time_receptive_field=time_receptive_field,
             )
             self.down_blocks.append(down_block)
-
-            def zero_module(module):
-                # Zero out the parameters of a module and return it.
-                for p in module.parameters():
-                    p.detach().zero_()
-                return module
-
-            self.conv_extra_cond.append(
-                zero_module(
-                    ops.Conv3d(extra_cond_dim, output_channel, kernel_size=1, stride=1, padding=0)
-                )
-                if self.extra_cond_dim is not None and self.extra_cond_dim > 0
-                else None
-            )
 
         # mid
         self.mid_block = UNetMidBlock3D(
@@ -1428,28 +1335,23 @@ class Encoder3D(nn.Module):
         )
         self.conv_act = nn.SiLU()
 
-        conv_out_channels = 2 * out_channels if double_z else out_channels
+        conv_out_channels = 2 * out_channels
         self.conv_out = InflatedCausalConv3d(
             block_out_channels[-1], conv_out_channels, 3, padding=1, inflation_mode=inflation_mode
         )
 
-        self.gradient_checkpointing = gradient_checkpoint
 
     def forward(
         self,
         sample: torch.FloatTensor,
-        extra_cond=None,
         memory_state = None
     ) -> torch.FloatTensor:
         r"""The forward method of the `Encoder` class."""
         sample = sample.to(next(self.parameters()).device)
         sample = self.conv_in(sample, memory_state = memory_state)
         # down
-        # [Override] add extra block and extra cond
-        for down_block, extra_block in zip(self.down_blocks, self.conv_extra_cond):
+        for down_block in self.down_blocks:
             sample = down_block(sample, memory_state=memory_state)
-            if extra_block is not None:
-                sample = sample + safe_interpolate_operation(extra_block(extra_cond), size=sample.shape[2:])
 
         # middle
         sample = self.mid_block(sample, memory_state=memory_state)
@@ -1472,14 +1374,11 @@ class Decoder3D(nn.Module):
         block_out_channels: Tuple[int, ...] = (64,),
         layers_per_block: int = 2,
         norm_num_groups: int = 32,
-        norm_type: str = "group",  # group, spatial
         mid_block_add_attention=True,
         # [Override] add temporal up block
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
         temporal_up_num: int = 2,
-        slicing_up_num: int = 0,
-        gradient_checkpoint: bool = False,
     ):
         super().__init__()
         self.layers_per_block = layers_per_block
@@ -1497,14 +1396,14 @@ class Decoder3D(nn.Module):
         self.mid_block = None
         self.up_blocks = nn.ModuleList([])
 
-        temb_channels = in_channels if norm_type == "spatial" else None
+        temb_channels = None
 
         # mid
         self.mid_block = UNetMidBlock3D(
             in_channels=block_out_channels[-1],
             resnet_eps=1e-6,
             output_scale_factor=1,
-            resnet_time_scale_shift="default" if norm_type == "group" else norm_type,
+            resnet_time_scale_shift="default",
             attention_head_dim=block_out_channels[-1],
             resnet_groups=norm_num_groups,
             temb_channels=temb_channels,
@@ -1522,9 +1421,6 @@ class Decoder3D(nn.Module):
 
             is_final_block = i == len(block_out_channels) - 1
             is_temporal_up_block = i < self.temporal_up_num
-            is_slicing_up_block = i >= len(block_out_channels) - slicing_up_num
-            # Note: Keep symmetric
-
             assert up_block_type == "UpDecoderBlock3D"
             up_block = UpDecoderBlock3D(
                 num_layers=self.layers_per_block + 1,
@@ -1535,7 +1431,6 @@ class Decoder3D(nn.Module):
                 resnet_groups=norm_num_groups,
                 temb_channels=temb_channels,
                 temporal_up=is_temporal_up_block,
-                slicing=is_slicing_up_block,
                 inflation_mode=inflation_mode,
                 time_receptive_field=time_receptive_field,
             )
@@ -1543,18 +1438,14 @@ class Decoder3D(nn.Module):
             prev_output_channel = output_channel
 
         # out
-        if norm_type == "spatial":
-            self.conv_norm_out = SpatialNorm(block_out_channels[0], temb_channels)
-        else:
-            self.conv_norm_out = ops.GroupNorm(
-                num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=1e-6
-            )
+        self.conv_norm_out = ops.GroupNorm(
+            num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=1e-6
+        )
         self.conv_act = nn.SiLU()
         self.conv_out = InflatedCausalConv3d(
             block_out_channels[0], out_channels, 3, padding=1, inflation_mode=inflation_mode
         )
 
-        self.gradient_checkpointing = gradient_checkpoint
 
     # Note: Just copy from Decoder.
     def forward(
@@ -1591,21 +1482,15 @@ class VideoAutoencoderKL(nn.Module):
         layers_per_block: int = 2,
         latent_channels: int = SEEDVR2_LATENT_CHANNELS,
         norm_num_groups: int = 32,
-        attention: bool = True,
         temporal_scale_num: int = 2,
-        slicing_up_num: int = 0,
-        gradient_checkpoint: bool = False,
         inflation_mode = "pad",
         time_receptive_field: _receptive_field_t = "full",
-        use_quant_conv: bool = False,
-        use_post_quant_conv: bool = False,
         slicing_sample_min_size = BYTEDANCE_SLICING_SAMPLE_MIN,
         *args,
         **kwargs,
     ):
         self.slicing_sample_min_size = slicing_sample_min_size
         self.slicing_latent_min_size = slicing_sample_min_size // (2**temporal_scale_num)
-        extra_cond_dim = kwargs.pop("extra_cond_dim") if "extra_cond_dim" in kwargs else None
         block_out_channels = BYTEDANCE_BLOCK_OUT_CHANNELS
         down_block_types = ("DownEncoderBlock3D",) * 4
         up_block_types = ("UpDecoderBlock3D",) * 4
@@ -1619,11 +1504,8 @@ class VideoAutoencoderKL(nn.Module):
             block_out_channels=block_out_channels,
             layers_per_block=layers_per_block,
             norm_num_groups=norm_num_groups,
-            double_z=True,
-            extra_cond_dim=extra_cond_dim,
             # [Override] add temporal_down_num parameter
             temporal_down_num=temporal_scale_num,
-            gradient_checkpoint=gradient_checkpoint,
             inflation_mode=inflation_mode,
             time_receptive_field=time_receptive_field,
         )
@@ -1638,37 +1520,9 @@ class VideoAutoencoderKL(nn.Module):
             norm_num_groups=norm_num_groups,
             # [Override] add temporal_up_num parameter
             temporal_up_num=temporal_scale_num,
-            slicing_up_num=slicing_up_num,
-            gradient_checkpoint=gradient_checkpoint,
             inflation_mode=inflation_mode,
             time_receptive_field=time_receptive_field,
         )
-
-        self.quant_conv = (
-            InflatedCausalConv3d(
-                in_channels=2 * latent_channels,
-                out_channels=2 * latent_channels,
-                kernel_size=1,
-                inflation_mode=inflation_mode,
-            )
-            if use_quant_conv
-            else None
-        )
-        self.post_quant_conv = (
-            InflatedCausalConv3d(
-                in_channels=latent_channels,
-                out_channels=latent_channels,
-                kernel_size=1,
-                inflation_mode=inflation_mode,
-            )
-            if use_post_quant_conv
-            else None
-        )
-
-        # A hacky way to remove attention.
-        if not attention:
-            self.encoder.mid_block.attentions = torch.nn.ModuleList([None])
-            self.decoder.mid_block.attentions = torch.nn.ModuleList([None])
 
         self.use_slicing = True
 
@@ -1696,20 +1550,12 @@ class VideoAutoencoderKL(nn.Module):
     ) -> torch.Tensor:
         _x = x.to(self.device)
         h = self.encoder(_x, memory_state=memory_state)
-        if self.quant_conv is not None:
-            output = self.quant_conv(h, memory_state=memory_state)
-        else:
-            output = h
-        return output.to(x.device)
+        return h.to(x.device)
 
     def _decode(
         self, z, memory_state = MemoryState.DISABLED
     ) -> torch.Tensor:
         _z = z.to(self.device)
-
-        if self.post_quant_conv is not None:
-            _z = self.post_quant_conv(_z, memory_state=memory_state)
-
         output = self.decoder(_z, memory_state=memory_state)
         return output.to(z.device)
 
@@ -1953,12 +1799,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             pixels = output_pixels(1, shape[-2], shape[-1])
         return pixels * bytes_per_output_pixel
 
-    def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float], memory_device = "same"):
+    def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float]):
         set_norm_limit(norm_max_mem)
         for m in self.modules():
             if isinstance(m, InflatedCausalConv3d):
                 m.set_memory_limit(conv_max_mem if conv_max_mem is not None else float("inf"))
-
-        for module in self.modules():
-            if isinstance(module, InflatedCausalConv3d):
-                module.set_memory_device(memory_device)
