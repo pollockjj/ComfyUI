@@ -12,7 +12,6 @@ from comfy.utils import ProgressBar
 from comfy.ldm.seedvr.model import safe_pad_operation
 from comfy.ldm.seedvr.constants import (
     BYTEDANCE_BLOCK_OUT_CHANNELS,
-    BYTEDANCE_CONTIGUOUS_BATCH_THRESHOLD,
     BYTEDANCE_GN_CHUNKS_FP16,
     BYTEDANCE_GN_CHUNKS_FP32,
     BYTEDANCE_LOGVAR_CLAMP_MAX,
@@ -914,7 +913,6 @@ class Downsample3D(nn.Module):
         spatial_down: bool = False,
         temporal_down: bool = False,
         name: str = "conv",
-        use_conv: bool = False,
         padding = 1,
         **kwargs,
     ):
@@ -925,7 +923,6 @@ class Downsample3D(nn.Module):
         self.out_channels = out_channels or channels
         self.temporal_down = temporal_down
         self.spatial_down = spatial_down
-        self.use_conv = use_conv
         self.padding = padding
 
         self.temporal_ratio = 2 if temporal_down else 1
@@ -934,27 +931,18 @@ class Downsample3D(nn.Module):
         self.temporal_kernel = 3 if temporal_down else 1
         self.spatial_kernel = 3 if spatial_down else 1
 
-        if use_conv:
-            conv = InflatedCausalConv3d(
-                self.channels,
-                self.out_channels,
-                kernel_size=(self.temporal_kernel, self.spatial_kernel, self.spatial_kernel),
-                stride=(self.temporal_ratio, self.spatial_ratio, self.spatial_ratio),
-                padding=(
-                    1 if self.temporal_down else 0,
-                    self.padding if self.spatial_down else 0,
-                    self.padding if self.spatial_down else 0,
-                ),
-                inflation_mode=inflation_mode,
-            )
-        else:
-            assert self.channels == self.out_channels
-            conv = nn.AvgPool3d(
-                kernel_size=(self.temporal_ratio, self.spatial_ratio, self.spatial_ratio),
-                stride=(self.temporal_ratio, self.spatial_ratio, self.spatial_ratio),
-            )
-
-        self.conv = conv
+        self.conv = InflatedCausalConv3d(
+            self.channels,
+            self.out_channels,
+            kernel_size=(self.temporal_kernel, self.spatial_kernel, self.spatial_kernel),
+            stride=(self.temporal_ratio, self.spatial_ratio, self.spatial_ratio),
+            padding=(
+                1 if self.temporal_down else 0,
+                self.padding if self.spatial_down else 0,
+                self.padding if self.spatial_down else 0,
+            ),
+            inflation_mode=inflation_mode,
+        )
 
 
     def forward(
@@ -970,7 +958,7 @@ class Downsample3D(nn.Module):
             # [Overridden] change to causal norm.
             hidden_states = causal_norm_wrapper(self.norm, hidden_states)
 
-        if self.use_conv and self.padding == 0 and self.spatial_down:
+        if self.padding == 0 and self.spatial_down:
             pad = (0, 1, 0, 1)
             hidden_states = safe_pad_operation(hidden_states, pad, mode="constant", value=0)
 
@@ -994,17 +982,12 @@ class ResnetBlock3D(nn.Module):
         output_scale_factor: float = 1.0,
         skip_time_act: bool = False,
         use_in_shortcut: Optional[bool] = None,
-        up: bool = False,
-        down: bool = False,
         conv_2d_out_channels: Optional[int] = None,
         inflation_mode = "tail",
         time_receptive_field: _receptive_field_t = "half",
-        slicing: bool = False,
         **kwargs,
     ):
         super().__init__()
-        self.up = up
-        self.down = down
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
         conv_2d_out_channels = conv_2d_out_channels or out_channels
@@ -1040,23 +1023,6 @@ class ResnetBlock3D(nn.Module):
             inflation_mode=inflation_mode,
         )
 
-        self.upsample = self.downsample = None
-        if self.up:
-            self.upsample = Upsample3D(
-                self.in_channels,
-                use_conv=False,
-                inflation_mode=inflation_mode,
-                slicing=slicing,
-            )
-        elif self.down:
-            self.downsample = Downsample3D(
-                self.in_channels,
-                use_conv=False,
-                padding=1,
-                name="op",
-                inflation_mode=inflation_mode,
-            )
-
         self.conv_shortcut = None
         if self.use_in_shortcut:
             self.conv_shortcut = InflatedCausalConv3d(
@@ -1077,16 +1043,6 @@ class ResnetBlock3D(nn.Module):
         hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
 
         hidden_states = self.nonlinearity(hidden_states)
-
-        if self.upsample is not None:
-            if hidden_states.shape[0] >= BYTEDANCE_CONTIGUOUS_BATCH_THRESHOLD:
-                input_tensor = input_tensor.contiguous()
-                hidden_states = hidden_states.contiguous()
-            input_tensor = self.upsample(input_tensor, memory_state=memory_state)
-            hidden_states = self.upsample(hidden_states, memory_state=memory_state)
-        elif self.downsample is not None:
-            input_tensor = self.downsample(input_tensor, memory_state=memory_state)
-            hidden_states = self.downsample(hidden_states, memory_state=memory_state)
 
         hidden_states = self.conv1(hidden_states, memory_state=memory_state)
 
@@ -1162,7 +1118,6 @@ class DownEncoderBlock3D(nn.Module):
                 [
                     Downsample3D(
                         out_channels,
-                        use_conv=True,
                         out_channels=out_channels,
                         padding=downsample_padding,
                         name="op",
