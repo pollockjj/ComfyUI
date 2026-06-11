@@ -187,6 +187,7 @@ def tiled_vae(
 
         if single_spatial_tile:
             result = tile_out[:, :, :target_d, :target_h, :target_w]
+            _seedvr2_clear_temporal_memory(vae_model)
             if result.device != x.device:
                 result = result.to(x.device).to(x.dtype)
             if x.shape[2] == 1 and sf_t == 1:
