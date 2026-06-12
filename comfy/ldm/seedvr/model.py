@@ -58,14 +58,11 @@ class CustomRMSNorm(nn.Module):
 
         dims = tuple(range(-len(self.normalized_shape), 0))
 
-        # fp32 output is intentional: the SeedVR reference propagates fp32 norm
-        # activations and the validated output depends on it; the manual-cast
-        # layers downstream own the dtype boundary. Do not cast back to input dtype.
-        normalized = input.float()
-        variance = normalized.pow(2).mean(dim=dims, keepdim=True)
+        # issue-290 experiment variant NOFIX: pre-2d6bb8df input-dtype norm math
+        variance = input.pow(2).mean(dim=dims, keepdim=True)
         rms = torch.sqrt(variance + self.eps)
 
-        normalized = normalized / rms
+        normalized = input / rms
 
         if self.elementwise_affine:
             return normalized * self.weight.to(input.dtype)
