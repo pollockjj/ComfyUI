@@ -58,15 +58,17 @@ class CustomRMSNorm(nn.Module):
 
         dims = tuple(range(-len(self.normalized_shape), 0))
 
-        # issue-290 experiment variant NOFIX: pre-2d6bb8df input-dtype norm math
-        variance = input.pow(2).mean(dim=dims, keepdim=True)
+        # issue-290 experiment variant BF16FIX: fp32 norm math, bf16 activations
+        # out (numz-equivalent precision class: fp32 norm internals + bf16 GEMMs)
+        normalized = input.float()
+        variance = normalized.pow(2).mean(dim=dims, keepdim=True)
         rms = torch.sqrt(variance + self.eps)
 
-        normalized = input / rms
+        normalized = normalized / rms
 
         if self.elementwise_affine:
-            return normalized * self.weight.to(input.dtype)
-        return normalized
+            return (normalized * self.weight.to(torch.float32)).to(torch.bfloat16)
+        return normalized.to(torch.bfloat16)
 
 class Cache:
     def __init__(self, disable=False, prefix="", cache=None):
