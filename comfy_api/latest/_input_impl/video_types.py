@@ -324,7 +324,7 @@ class VideoFromFile(VideoInput):
                                 g.configure()
                                 align_graph = (g, g_src, g_sink)
                             align_graph[1].push(frame)
-                            img = align_graph[2].pull().to_ndarray(format=image_format)[:, :frame.width]
+                            img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:, :frame.width])
                         else:
                             img = frame.to_ndarray(format=image_format)
                         if frame.rotation != 0:
