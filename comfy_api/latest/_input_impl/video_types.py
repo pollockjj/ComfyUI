@@ -325,7 +325,7 @@ class VideoFromFile(VideoInput):
                             checked_alpha = True
 
                         # Fix non-deterministic video decode when the video width is not a multiple of 32
-                        # For non-yuvj pixel formats (all H.264/H.265 video)
+                        # For non-yuvj pixel formats: most H.264/H.265 video and static images (e.g. lossy WebP via LoadImage)
                         # Pad both axes to a multiple of 32 and smear the border so the alignment padding never bleeds into the cropped edges
                         if image_format in ('gbrpf32le', 'gbrapf32le') and frame.width % 32 != 0:
                             if align_graph is None:
