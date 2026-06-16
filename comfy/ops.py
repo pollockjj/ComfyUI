@@ -1089,14 +1089,6 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
             if ts is None or bs is None:
                 raise ValueError(f"Missing NVFP4 scales for layer {layer_name}")
             scales = {"scale": ts, "block_scale": bs}
-        elif module.quant_format == "svdquant_w4a4":
-            ws = pop_scale("weight_scale")
-            pd = pop_scale("proj_down")
-            pu = pop_scale("proj_up")
-            sf = pop_scale("smooth_factor")
-            if any(t is None for t in (ws, pd, pu, sf)):
-                raise ValueError(f"Missing SVDQuant W4A4 params for layer {layer_name}")
-            scales = {"scale": ws, "proj_down": pd, "proj_up": pu, "smooth_factor": sf}
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
@@ -1247,10 +1239,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         scale = getattr(self, 'input_scale', None)
                         if scale is not None:
                             scale = comfy.model_management.cast_to_device(scale, input.device, None)
-                        if getattr(self, 'quant_format', None) == "svdquant_w4a4":
-                            input = input_reshaped
-                        else:
-                            input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
+                        input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
 
                 output = self.forward_comfy_cast_weights(input, compute_dtype, want_requant=isinstance(input, QuantizedTensor))
 
