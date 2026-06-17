@@ -79,6 +79,19 @@ def _make_seedvr2_7b_separate_mm_sd():
     }
 
 
+def _make_seedvr2_7b_quantized_separate_mm_sd():
+    return {
+        "blocks.35.mlp.vid.proj_in.weight": torch.empty(1, 1536, dtype=torch.uint8),
+        "blocks.35.mlp.vid.proj_in.comfy_quant": torch.empty(19, dtype=torch.uint8),
+    }
+
+
+def _make_seedvr2_7b_packed_without_quant_metadata_sd():
+    return {
+        "blocks.35.mlp.vid.proj_in.weight": torch.empty(1, 1536, dtype=torch.uint8),
+    }
+
+
 def _make_seedvr2_7b_shared_mm_sd():
     return {
         "blocks.35.mlp.all.proj_in_gate.weight": torch.empty(1, 1),
@@ -156,6 +169,26 @@ class TestModelDetection:
         assert unet_config["mlp_type"] == "normal"
         assert unet_config["rope_type"] == "rope3d"
         assert unet_config["rope_dim"] == 64
+
+    def test_seedvr2_7b_quantized_separate_mm_detection_config(self):
+        sd = _make_seedvr2_7b_quantized_separate_mm_sd()
+        unet_config = detect_unet_config(sd, "")
+
+        assert unet_config is not None
+        assert unet_config["image_model"] == "seedvr2"
+        assert unet_config["vid_dim"] == 3072
+        assert unet_config["heads"] == 24
+        assert unet_config["num_layers"] == 36
+        assert unet_config["mm_layers"] == 36
+        assert unet_config["mlp_type"] == "normal"
+        assert unet_config["rope_type"] == "rope3d"
+        assert unet_config["rope_dim"] == 64
+
+    def test_seedvr2_7b_packed_without_quant_metadata_is_not_detected(self):
+        sd = _make_seedvr2_7b_packed_without_quant_metadata_sd()
+        unet_config = detect_unet_config(sd, "")
+
+        assert unet_config is None
 
     def test_seedvr2_7b_shared_mm_detection_config(self):
         sd = _make_seedvr2_7b_shared_mm_sd()

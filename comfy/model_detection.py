@@ -601,10 +601,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
     seedvr2_7b_vid_proj_in_key = "{}blocks.35.mlp.vid.proj_in".format(key_prefix)
     seedvr2_7b_vid_proj_in_weight_key = "{}.weight".format(seedvr2_7b_vid_proj_in_key)
     seedvr2_7b_vid_proj_in_quant_key = "{}.comfy_quant".format(seedvr2_7b_vid_proj_in_key)
+    seedvr2_7b_vid_proj_in_weight = state_dict.get(seedvr2_7b_vid_proj_in_weight_key)
     seedvr2_7b_has_separate_mm_signature = (
         seedvr2_7b_vid_proj_in_weight_key in state_dict_keys
+        and seedvr2_7b_vid_proj_in_weight.ndim == 2
         and (
-            state_dict[seedvr2_7b_vid_proj_in_weight_key].shape[1] == 3072
+            seedvr2_7b_vid_proj_in_weight.shape[1] == 3072
             or seedvr2_7b_vid_proj_in_quant_key in state_dict_keys
         )
     )
