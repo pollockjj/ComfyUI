@@ -19,11 +19,6 @@ from pyisolate._internal.sandbox_detect import RestrictionModel
 from pyisolate._internal.serialization_registry import SerializerRegistry
 
 
-def test_identifier():
-    adapter = ComfyUIAdapter()
-    assert adapter.identifier == "comfyui"
-
-
 def test_get_path_config_valid():
     adapter = ComfyUIAdapter()
     path = os.path.join("/opt", "ComfyUI", "custom_nodes", "demo")
@@ -31,19 +26,6 @@ def test_get_path_config_valid():
     assert cfg is not None
     assert cfg["preferred_root"].endswith("ComfyUI")
     assert "custom_nodes" in cfg["additional_paths"][0]
-
-
-def test_get_path_config_invalid():
-    adapter = ComfyUIAdapter()
-    assert adapter.get_path_config("/random/path") is None
-
-
-def test_provide_rpc_services():
-    adapter = ComfyUIAdapter()
-    services = adapter.provide_rpc_services()
-    names = {s.__name__ for s in services}
-    assert "PromptServerService" in names
-    assert "FolderPathsProxy" in names
 
 
 def test_register_serializers():

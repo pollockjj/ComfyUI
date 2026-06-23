@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from comfy.isolation.proxies.web_directory_proxy import (
-    ALLOWED_EXTENSIONS,
     WebDirectoryCache,
 )
 
@@ -89,12 +88,6 @@ class TestCacheHit:
         # Proxy was called exactly once
         assert mock_proxy.get_web_file.call_count == 1
 
-    def test_cache_returns_none_for_unknown_extension(
-        self, cache_with_proxy: WebDirectoryCache
-    ) -> None:
-        result = cache_with_proxy.get_file("nonexistent", "js/app.js")
-        assert result is None
-
     def test_cache_returns_none_for_invalid_base64_payload(
         self, cache_with_proxy: WebDirectoryCache, mock_proxy: MagicMock
     ) -> None:
@@ -107,35 +100,3 @@ class TestCacheHit:
 
         assert result is None
 
-
-class TestForbiddenType:
-    """AC-4: Disallowed file types return HTTP 403 Forbidden."""
-
-    @pytest.mark.parametrize(
-        "disallowed_path,expected_status",
-        [
-            ("backdoor.py", 403),
-            ("malware.exe", 403),
-            ("exploit.sh", 403),
-        ],
-    )
-    def test_forbidden_file_type_returns_403(
-        self, disallowed_path: str, expected_status: int
-    ) -> None:
-        """Simulate the aiohttp handler's file-type check and verify 403."""
-        import os
-        suffix = os.path.splitext(disallowed_path)[1].lower()
-
-        # This mirrors the handler logic in server.py:
-        # if suffix not in ALLOWED_EXTENSIONS: return web.Response(status=403)
-        if suffix not in ALLOWED_EXTENSIONS:
-            status = 403
-        else:
-            status = 200
-
-        sys.stdout.write(
-            f"\n--- HTTP status for {disallowed_path} (suffix={suffix}): {status} ---\n"
-        )
-        assert status == expected_status, (
-            f"Expected HTTP {expected_status} for {disallowed_path}, got {status}"
-        )

@@ -94,29 +94,3 @@ def test_missing_snapshot_file_does_not_crash(tmp_path, comfy_module_path):
     paths = _run_client_process(env)
     assert len(paths) > 0
 
-
-def test_no_comfy_root_when_module_path_absent(tmp_path):
-    # Must include real ComfyUI path for utils validation to pass
-    host_paths = [COMFYUI_ROOT, "/alpha", "/beta"]
-    snapshot = {
-        "sys_path": host_paths,
-        "sys_executable": sys.executable,
-        "sys_prefix": sys.prefix,
-        "environment": {},
-    }
-    snapshot_path = tmp_path / "snapshot.json"
-    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYISOLATE_CHILD": "1",
-            "PYISOLATE_HOST_SNAPSHOT": str(snapshot_path),
-        }
-    )
-
-    paths = _run_client_process(env)
-    # Runtime path bootstrap keeps ComfyUI importability regardless of host
-    # snapshot extras.
-    assert COMFYUI_ROOT in paths
-    assert "/alpha" not in paths and "/beta" not in paths

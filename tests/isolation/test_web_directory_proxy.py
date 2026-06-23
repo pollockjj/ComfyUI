@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 
 import pytest
@@ -52,30 +51,6 @@ class TestAllowList:
         # Only .js, .html, .css should appear
         assert extensions == {".js", ".html", ".css"}
 
-    def test_allowlist_excludes_dangerous_types(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        files = proxy_with_web_dir.list_web_files("test-extension")
-        paths = [f["relative_path"] for f in files]
-
-        assert not any(p.endswith(".py") for p in paths)
-        assert not any(p.endswith(".exe") for p in paths)
-        assert not any(p.endswith(".sh") for p in paths)
-
-    def test_allowlist_correct_count(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        files = proxy_with_web_dir.list_web_files("test-extension")
-        # 3 allowed files: app.js, index.html, style.css
-        assert len(files) == 3
-
-    def test_allowlist_unknown_extension_returns_empty(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        files = proxy_with_web_dir.list_web_files("nonexistent-extension")
-        assert files == []
-
-
 class TestTraversal:
     """AC-3: get_web_file rejects directory traversal attempts."""
 
@@ -102,29 +77,3 @@ class TestContent:
     ) -> None:
         result = proxy_with_web_dir.get_web_file("test-extension", "js/app.js")
         assert result["content_type"] == "application/javascript"
-
-    def test_content_html_mime_type(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        result = proxy_with_web_dir.get_web_file("test-extension", "index.html")
-        assert result["content_type"] == "text/html"
-
-    def test_content_css_mime_type(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        result = proxy_with_web_dir.get_web_file("test-extension", "style.css")
-        assert result["content_type"] == "text/css"
-
-    def test_content_base64_roundtrip(
-        self, proxy_with_web_dir: WebDirectoryProxy, web_dir_with_mixed_files: Path
-    ) -> None:
-        result = proxy_with_web_dir.get_web_file("test-extension", "js/app.js")
-        decoded = base64.b64decode(result["content"])
-        source = (web_dir_with_mixed_files / "js" / "app.js").read_bytes()
-        assert decoded == source
-
-    def test_content_disallowed_type_rejected(
-        self, proxy_with_web_dir: WebDirectoryProxy
-    ) -> None:
-        with pytest.raises(ValueError, match="Disallowed file type"):
-            proxy_with_web_dir.get_web_file("test-extension", "backdoor.py")

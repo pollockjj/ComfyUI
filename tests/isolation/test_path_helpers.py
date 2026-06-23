@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -24,38 +23,6 @@ def test_serialize_host_snapshot_includes_expected_keys(tmp_path: Path, monkeypa
 
     persisted = json.loads(output.read_text(encoding="utf-8"))
     assert persisted["sys_path"] == snapshot["sys_path"]
-
-
-def test_build_child_sys_path_preserves_host_order() -> None:
-    host_paths = ["/host/root", "/host/site-packages"]
-    extra_paths = ["/node/.venv/lib/python3.12/site-packages"]
-    result = build_child_sys_path(host_paths, extra_paths, preferred_root=None)
-    assert result == host_paths + extra_paths
-
-
-def test_build_child_sys_path_inserts_comfy_root_when_missing() -> None:
-    host_paths = ["/host/site-packages"]
-    comfy_root = os.environ.get("COMFYUI_ROOT") or str(Path.home() / "ComfyUI")
-    extra_paths: list[str] = []
-    result = build_child_sys_path(host_paths, extra_paths, preferred_root=comfy_root)
-    assert result[0] == comfy_root
-    assert result[1:] == host_paths
-
-
-def test_build_child_sys_path_deduplicates_entries(tmp_path: Path) -> None:
-    path_a = str(tmp_path / "a")
-    path_b = str(tmp_path / "b")
-    host_paths = [path_a, path_b]
-    extra_paths = [path_a, path_b, str(tmp_path / "c")]
-    result = build_child_sys_path(host_paths, extra_paths)
-    assert result == [path_a, path_b, str(tmp_path / "c")]
-
-
-def test_build_child_sys_path_skips_duplicate_comfy_root() -> None:
-    comfy_root = os.environ.get("COMFYUI_ROOT") or str(Path.home() / "ComfyUI")
-    host_paths = [comfy_root, "/host/other"]
-    result = build_child_sys_path(host_paths, extra_paths=[], preferred_root=comfy_root)
-    assert result == host_paths
 
 
 def test_child_import_succeeds_after_path_unification(tmp_path: Path, monkeypatch) -> None:

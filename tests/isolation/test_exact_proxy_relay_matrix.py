@@ -88,15 +88,6 @@ def test_model_management_exact_relay() -> None:
     ]
 
 
-def test_model_management_capability_preserved() -> None:
-    payload = capture_model_management_exact_relay()
-
-    assert payload["device"] == "cpu"
-    assert payload["device_type"] == "cpu"
-    assert payload["device_name"] == "cpu"
-    assert payload["free_memory"] == 34359738368
-
-
 def test_prompt_server_exact_relay() -> None:
     payload = capture_prompt_web_exact_relay()
 

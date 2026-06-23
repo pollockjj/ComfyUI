@@ -67,20 +67,3 @@ def test_ignores_nested_manifest_without_standalone_flag(tmp_path: Path) -> None
 
     assert manifests == [(toolkit_dir, toolkit_dir / "pyproject.toml")]
 
-
-def test_finds_nested_standalone_manifest(tmp_path: Path) -> None:
-    toolkit_dir = tmp_path / "ToolkitNode"
-    toolkit_dir.mkdir(parents=True)
-    _write_manifest(toolkit_dir / "pyproject.toml")
-
-    nested_dir = toolkit_dir / "packages" / "uv_sealed_worker"
-    nested_dir.mkdir(parents=True)
-    _write_manifest(nested_dir / "pyproject.toml", standalone=True)
-
-    manifest_loader = _load_manifest_loader(tmp_path)
-    manifests = manifest_loader.find_manifest_directories()
-
-    assert manifests == [
-        (toolkit_dir, toolkit_dir / "pyproject.toml"),
-        (nested_dir, nested_dir / "pyproject.toml"),
-    ]

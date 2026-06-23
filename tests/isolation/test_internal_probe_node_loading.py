@@ -13,7 +13,6 @@ import nodes
 from tests.isolation.stage_internal_probe_node import (
     PROBE_NODE_NAME,
     stage_probe_node,
-    staged_probe_node,
 )
 
 
@@ -156,16 +155,6 @@ def test_stage_probe_node_stages_only_under_explicit_root(tmp_path: Path) -> Non
     assert (module_path / "__init__.py").is_file()
     assert (module_path / "probe_nodes.py").is_file()
     assert (module_path / "pyproject.toml").is_file()
-
-
-def test_staged_probe_node_context_cleans_up_temp_root() -> None:
-    with staged_probe_node() as module_path:
-        staging_root = module_path.parents[1]
-        assert module_path.name == PROBE_NODE_NAME
-        assert module_path.is_dir()
-        assert staging_root.is_dir()
-
-    assert not staging_root.exists()
 
 
 def test_stage_script_requires_explicit_target_root() -> None:

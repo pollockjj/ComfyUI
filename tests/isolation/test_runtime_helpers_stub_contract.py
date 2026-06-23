@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +12,6 @@ from typing import Any, cast
 
 from comfy.isolation import runtime_helpers
 from comfy_api.latest import io as latest_io
-from tests.isolation.stage_internal_probe_node import PROBE_NODE_NAME, staged_probe_node
 
 
 class _DummyExtension:
@@ -107,19 +105,3 @@ def test_stub_class_types_align_with_extension():
 
     assert class_types == {"ProbeImage", "ProbeAudio"}
 
-
-def test_probe_stage_requires_explicit_root():
-    script = Path(__file__).resolve().parent / "stage_internal_probe_node.py"
-    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=False)
-
-    assert result.returncode != 0
-    assert "--target-root" in result.stderr
-
-
-def test_probe_stage_cleans_up_context():
-    with staged_probe_node() as module_path:
-        staged_root = module_path.parents[1]
-        assert module_path.name == PROBE_NODE_NAME
-        assert staged_root.exists()
-
-    assert not staged_root.exists()

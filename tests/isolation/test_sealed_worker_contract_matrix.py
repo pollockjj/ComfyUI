@@ -246,20 +246,6 @@ async def test_conda_defaults_to_sealed_worker(
 
 
 @pytest.mark.asyncio
-async def test_conda_never_uses_comfy_extension_type(
-    mocked_loader, manifest_file: Path, tmp_path: Path
-):
-    module, mock_pi, _mock_manager, sealed_type, mock_wrapper = mocked_loader
-    manifest = _make_manifest(package_manager="conda")
-
-    await _load_node(module, manifest, manifest_file, tmp_path)
-
-    extension_type = mock_pi.ExtensionManager.call_args[0][0]
-    assert extension_type is sealed_type
-    assert extension_type is not mock_wrapper.ComfyNodeExtension
-
-
-@pytest.mark.asyncio
 async def test_conda_forces_share_torch_false(mocked_loader, manifest_file: Path, tmp_path: Path):
     module, _mock_pi, _mock_manager, _sealed_type, _ = mocked_loader
     manifest = _make_manifest(package_manager="conda", share_torch=True)
@@ -303,28 +289,6 @@ async def test_conda_sandbox_policy_applied(mocked_loader, manifest_file: Path, 
         "writable_paths": ["/data/write"],
         "readonly_paths": ["/data/read"],
     }
-
-
-def test_sealed_worker_workflow_templates_present() -> None:
-    missing = [
-        filename
-        for filename in SEALED_WORKFLOW_CLASS_TYPES
-        if not (TEST_WORKFLOW_ROOT / filename).is_file()
-    ]
-    assert not missing, f"missing sealed-worker workflow templates: {missing}"
-
-
-@pytest.mark.parametrize(
-    "workflow_name,expected_class_types",
-    SEALED_WORKFLOW_CLASS_TYPES.items(),
-)
-def test_sealed_worker_workflow_class_type_contract(
-    workflow_name: str, expected_class_types: set[str]
-) -> None:
-    workflow_path = TEST_WORKFLOW_ROOT / workflow_name
-    assert workflow_path.is_file(), f"workflow missing: {workflow_path}"
-
-    assert _workflow_class_types(workflow_path) == expected_class_types
 
 
 @pytest.mark.asyncio

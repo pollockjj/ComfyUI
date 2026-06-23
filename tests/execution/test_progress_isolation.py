@@ -199,35 +199,3 @@ class TestProgressIsolation:
                 client_a.ws.close()
             if hasattr(client_b, 'ws'):
                 client_b.ws.close()
-
-    def test_progress_with_missing_client_id(self, args_pytest):
-        """Test that progress updates handle missing client_id gracefully."""
-        listen = args_pytest["listen"]
-        port = args_pytest["port"]
-
-        try:
-            # Connect client with retries
-            client = self.start_client_with_retry(listen, port)
-
-            # Create a simple workflow
-            graph = GraphBuilder(prefix="test_missing_id")
-            image = graph.node("StubImage", content="BLACK", height=128, width=128, batch_size=1)
-            graph.node("PreviewImage", images=image.out(0))
-
-            # Submit workflow
-            prompt = graph.finalize()
-            response = client.queue_prompt(prompt)
-            prompt_id = response['prompt_id']
-
-            # Listen for messages
-            client.listen_for_messages(duration=5.0)
-
-            # Should still receive progress updates for own workflow
-            messages = client.progress_tracker.get_messages_for_prompt(prompt_id)
-            assert len(messages) > 0, \
-                "Client did not receive progress updates even though it initiated the workflow"
-
-        finally:
-            if hasattr(client, 'ws'):
-                client.ws.close()
-

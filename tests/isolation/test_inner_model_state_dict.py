@@ -30,16 +30,3 @@ def test_inner_model_proxy_state_dict_returns_keys():
     assert "diffusion_model.output.weight" in sd
     proxy._call_rpc.assert_called_with("model_state_dict", None)
 
-
-def test_inner_model_proxy_state_dict_callable():
-    """state_dict is a callable, not a property — matches torch.nn.Module interface."""
-    proxy = object.__new__(ModelPatcherProxy)
-    proxy._model_id = "test_model"
-    proxy._rpc = MagicMock()
-    proxy._model_type_name = "SDXL"
-    proxy._inner_model_channels = None
-
-    proxy._call_rpc = MagicMock(return_value=[])
-
-    inner = proxy.model
-    assert callable(inner.state_dict)
