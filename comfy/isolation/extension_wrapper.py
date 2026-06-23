@@ -670,6 +670,25 @@ class ComfyNodeExtension(ExtensionBase):
                 return getattr(obj, attr_name)
             return None
         if method_name == "inner_model_apply_model":
+            # The host moves sampler args to CUDA for zero-copy IPC sharing; on platforms
+            # without CUDA-IPC (native Windows) the transport downgrades them to CPU, so
+            # restore them onto the model's device before the forward. No-op on Linux,
+            # where the shared tensors already arrive on the model's device.
+            def _to_dev(tree: Any, device: Any) -> Any:
+                if isinstance(tree, torch.Tensor):
+                    return tree.to(device) if tree.device != device else tree
+                if isinstance(tree, dict):
+                    return {k: _to_dev(v, device) for k, v in tree.items()}
+                if isinstance(tree, (list, tuple)):
+                    return type(tree)([_to_dev(v, device) for v in tree])
+                return tree
+
+            try:
+                model_device = next(obj.model.parameters()).device
+            except (StopIteration, AttributeError):
+                model_device = getattr(obj, "load_device", None)
+            if model_device is not None:
+                return obj.model.apply_model(*_to_dev(args[0], model_device), **_to_dev(args[1], model_device))
             return obj.model.apply_model(*args[0], **args[1])
         if method_name == "inner_model_extra_conds_shapes":
             return obj.model.extra_conds_shapes(*args[0], **args[1])
