@@ -220,8 +220,8 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
     def apply_hooks(self, hooks: Any) -> Any:
         return self._call_rpc("apply_hooks", hooks)
 
-    def prepare_state(self, timestep: Any) -> Any:
-        return self._call_rpc("prepare_state", timestep)
+    def prepare_state(self, timestep: Any, model_options: Any) -> Any:
+        return self._call_rpc("prepare_state", timestep, model_options)
 
     def restore_hook_patches(self) -> None:
         self._call_rpc("restore_hook_patches")
@@ -540,6 +540,9 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def current_loaded_device(self) -> Any:
         return self._call_rpc("current_loaded_device")
+
+    def match_multigpu_clones(self) -> None:
+        self._call_rpc("match_multigpu_clones")
 
     @property
     def size(self) -> int:
