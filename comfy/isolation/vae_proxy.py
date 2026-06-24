@@ -102,6 +102,15 @@ class VAERegistry(BaseRegistry[Any]):
     async def process_output(self, instance_id: str, image: Any) -> Any:
         return detach_if_grad(self._get_instance(instance_id).process_output(image))
 
+    async def spacial_compression_decode(self, instance_id: str) -> Any:
+        return self._get_instance(instance_id).spacial_compression_decode()
+
+    async def spacial_compression_encode(self, instance_id: str) -> Any:
+        return self._get_instance(instance_id).spacial_compression_encode()
+
+    async def temporal_compression_decode(self, instance_id: str) -> Any:
+        return self._get_instance(instance_id).temporal_compression_decode()
+
 
 class VAEProxy(BaseProxy[VAERegistry]):
     _registry_class = VAERegistry
@@ -152,6 +161,15 @@ class VAEProxy(BaseProxy[VAERegistry]):
 
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")
+
+    def spacial_compression_decode(self) -> Any:
+        return self._call_rpc("spacial_compression_decode")
+
+    def spacial_compression_encode(self) -> Any:
+        return self._call_rpc("spacial_compression_encode")
+
+    def temporal_compression_decode(self) -> Any:
+        return self._call_rpc("temporal_compression_decode")
 
     def _get_property(self, name: str) -> Any:
         return self._call_rpc("get_property", name)

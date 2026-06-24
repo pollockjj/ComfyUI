@@ -51,3 +51,21 @@ def test_proxy_relays_to_matching_registry_method_names(monkeypatch):
     assert cloned == ("spawned", "child-id")       # deepclone wraps the new patcher id in a proxy
     assert calls[0][1] == ("cuda:1",)              # device arg relayed verbatim
     assert calls[3][1] == ("cuda:1",)              # deepclone relays only new_load_device
+
+
+def test_clip_proxy_relays_state_dict_for_saving():
+    # CheckpointSave on an isolated CLIP relays clip.state_dict_for_saving (sd.py:2089).
+    from comfy.isolation.clip_proxy import CLIPProxy, CLIPRegistry
+
+    assert "state_dict_for_saving" in vars(CLIPProxy)
+    assert callable(getattr(CLIPRegistry, "state_dict_for_saving", None))
+
+
+def test_vae_proxy_relays_compression_ratio_methods():
+    # Tiling/controlnet math runs these on an isolated VAE before decode/encode
+    # (nodes.py:336/344, controlnet.py:275).
+    from comfy.isolation.vae_proxy import VAEProxy, VAERegistry
+
+    for name in ("spacial_compression_decode", "spacial_compression_encode", "temporal_compression_decode"):
+        assert name in vars(VAEProxy), f"VAEProxy missing relay for {name}"
+        assert callable(getattr(VAERegistry, name, None)), f"VAERegistry missing handler for {name}"

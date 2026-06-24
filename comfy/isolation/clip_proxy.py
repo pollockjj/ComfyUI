@@ -171,6 +171,9 @@ class CLIPRegistry(BaseRegistry[Any]):
     async def get_sd(self, instance_id: str) -> Any:
         return self._get_instance(instance_id).get_sd()
 
+    async def state_dict_for_saving(self, instance_id: str) -> Any:
+        return self._get_instance(instance_id).state_dict_for_saving()
+
     async def clone(self, instance_id: str) -> str:
         return self.register(self._get_instance(instance_id).clone())
 
@@ -315,6 +318,9 @@ class CLIPProxy(BaseProxy[CLIPRegistry]):
 
     def get_sd(self) -> Any:
         return self._call_rpc("get_sd")
+
+    def state_dict_for_saving(self) -> Any:
+        return self._call_rpc("state_dict_for_saving")
 
     def clone(self) -> CLIPProxy:
         new_id = self._call_rpc("clone")
