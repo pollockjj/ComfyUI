@@ -176,6 +176,10 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
         new_id = self._call_rpc("clone")
         return self._spawn_related_proxy(new_id)
 
+    def deepclone_multigpu(self, new_load_device: Any = None, models_cache: Any = None) -> "ModelPatcherProxy":
+        new_id = self._call_rpc("deepclone_multigpu", new_load_device)
+        return self._spawn_related_proxy(new_id)
+
     def clone_has_same_weights(self, clone: Any) -> bool:
         if isinstance(clone, ModelPatcherProxy):
             return self._call_rpc("clone_has_same_weights_by_id", clone._instance_id)
@@ -543,6 +547,22 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     def match_multigpu_clones(self) -> None:
         self._call_rpc("match_multigpu_clones")
+
+    def register_load_device(self, device: Any) -> None:
+        self._call_rpc("register_load_device", device)
+
+    def state_dict_for_saving(
+        self,
+        clip_state_dict: Any = None,
+        vae_state_dict: Any = None,
+        clip_vision_state_dict: Any = None,
+    ) -> Any:
+        return self._call_rpc(
+            "state_dict_for_saving",
+            clip_state_dict,
+            vae_state_dict,
+            clip_vision_state_dict,
+        )
 
     @property
     def size(self) -> int:

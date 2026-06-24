@@ -238,6 +238,11 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
         new_model = instance.clone()
         return self.register(new_model)
 
+    async def deepclone_multigpu(self, instance_id: str, new_load_device: Any = None) -> str:
+        instance = self._get_instance(instance_id)
+        new_model = instance.deepclone_multigpu(new_load_device=new_load_device)
+        return self.register(new_model)
+
     async def is_clone(self, instance_id: str, other: Any) -> bool:
         instance = self._get_instance(instance_id)
         if hasattr(other, "model"):
@@ -363,6 +368,20 @@ class ModelPatcherRegistry(BaseRegistry[Any]):
 
     async def match_multigpu_clones(self, instance_id: str) -> None:
         self._get_instance(instance_id).match_multigpu_clones()
+
+    async def register_load_device(self, instance_id: str, device: Any) -> None:
+        self._get_instance(instance_id).register_load_device(device)
+
+    async def state_dict_for_saving(
+        self,
+        instance_id: str,
+        clip_state_dict: Any = None,
+        vae_state_dict: Any = None,
+        clip_vision_state_dict: Any = None,
+    ) -> Any:
+        return self._get_instance(instance_id).state_dict_for_saving(
+            clip_state_dict, vae_state_dict, clip_vision_state_dict
+        )
 
     async def get_size(self, instance_id: str) -> int:
         return self._get_instance(instance_id).size
