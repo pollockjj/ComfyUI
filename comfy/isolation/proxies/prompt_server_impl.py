@@ -43,33 +43,14 @@ class PromptServerStub:
     @classmethod
     def set_rpc(cls, rpc: Any) -> None:
         """Inject RPC client (called by adapter.py or manually)."""
-        # Create caller for HOST Service
-        # Assuming Host Service is registered as "PromptServerService" (class name)
-        # We target the Host Service Class
+        # Bind a caller to the host-side PromptServerService, registered under its
+        # class name. The Service is defined in this module, importable on either side.
         target_id = "PromptServerService"
-        # We need to pass a class to create_caller? Usually yes.
-        # But we don't have the Service class imported here necessarily (if running on child).
-        # pyisolate check verify_service type?
-        # If we pass PromptServerStub as the 'class', it might mismatch if checking types.
-        # But we can try passing PromptServerStub if it mirrors the service name? No, stub is PromptServerStub.
-        # We need a dummy class with right name?
-        # Or just rely on string ID if create_caller supports it?
-        # Standard: rpc.create_caller(PromptServerStub, target_id)
-        # But wait, PromptServerStub is the *Local* class.
-        # We want to call *Remote* class.
-        # If we use PromptServerStub as the type, returning object will be typed as PromptServerStub?
-        # The first arg is 'service_cls'.
-        cls._rpc = rpc.create_caller(
-            PromptServerService, target_id
-        )  # We import Service below?
+        cls._rpc = rpc.create_caller(PromptServerService, target_id)
 
     @classmethod
     def clear_rpc(cls) -> None:
         cls._rpc = None
-
-    # We need PromptServerService available for the create_caller call?
-    # Or just use the Stub class if ID matches?
-    # prompt_server_impl.py defines BOTH. So PromptServerService IS available!
 
     @property
     def instance(self) -> "PromptServerStub":
@@ -122,13 +103,8 @@ class PromptServerStub:
 
     def send_progress_text(self, text: str, node_id: str, sid=None) -> None:
         if self._rpc:
-            # Fire and forget likely needed. If method is async on host, caller invocation returns coroutine.
-            # We must schedule it?
-            # Or use fire_remote equivalent?
-            # Caller object usually proxies calls. If host method is async, it returns coro.
-            # If we are sync here (send_progress_text checks imply sync usage), we must background it.
-            # But UtilsProxy hook wrapper creates task.
-            # Does send_progress_text need to be sync? Yes, node code calls it sync.
+            # Node code calls this synchronously; schedule the async host send on the
+            # running loop when there is one, else relay it synchronously.
             import asyncio
 
             try:

@@ -82,11 +82,7 @@ def _normalize_argument(value: Any) -> Any:
 
 
 class ModelManagementProxy(ProxiedSingleton):
-    """
-    Exact-relay proxy for comfy.model_management.
-    Child calls never import comfy.model_management directly; they serialize
-    arguments, relay to host, and deserialize the host result back.
-    """
+    """Exact-relay proxy for comfy.model_management: the child serializes args, relays to the host, and deserializes the result instead of importing the module."""
 
     _rpc: Optional[Any] = None
 

@@ -6,11 +6,7 @@ from typing import Any
 
 
 def register_custom_node_serializers(_registry: Any) -> None:
-    """Legacy no-op shim.
-
-    Serializer registration now lives directly in the active isolation adapter.
-    This module remains importable because the isolation index still references it.
-    """
+    """Legacy no-op shim; serializer registration lives in the isolation adapter, kept importable because the isolation index still references it."""
     return None
 
 __all__ = ["register_custom_node_serializers"]

@@ -93,7 +93,7 @@ class ComfyUIAdapter(IsolationAdapter):
         """Returns required application paths to mount in the sandbox."""
         # By inspecting where our adapter is loaded from, we can determine the comfy root
         adapter_file = inspect.getfile(self.__class__)
-        # adapter_file = /opt/comfyui/comfy/isolation/adapter.py
+        # e.g. /opt/comfyui/comfy/isolation/adapter.py
         comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(adapter_file)))
         if os.path.exists(comfy_root):
             return [comfy_root]
@@ -749,10 +749,7 @@ class ComfyUIAdapter(IsolationAdapter):
         extension.register_event_handler("progress", _host_progress_handler)
 
     def setup_child_event_hooks(self, extension: Any) -> None:
-        """Wire PROGRESS_BAR_HOOK in the child to emit_event on the extension.
-
-        Host-coupled only — sealed workers do not have comfy.utils (torch).
-        """
+        """Wire the child's PROGRESS_BAR_HOOK to emit_event on the extension (host-coupled only; sealed workers have no comfy.utils)."""
         is_child = os.environ.get("PYISOLATE_CHILD") == "1"
         logger.info("][ ISO:setup_child_event_hooks called, PYISOLATE_CHILD=%s", is_child)
         if not is_child:

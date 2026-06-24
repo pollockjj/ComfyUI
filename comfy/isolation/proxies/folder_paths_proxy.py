@@ -36,11 +36,7 @@ def _deserialize_folder_names_and_paths(data: dict[str, dict[str, list[str]]]) -
 
 
 class FolderPathsProxy(ProxiedSingleton):
-    """
-    Dynamic proxy for folder_paths.
-    Uses __getattr__ for most lookups, with explicit handling for
-    mutable collections to ensure efficient by-value transfer.
-    """
+    """Dynamic proxy for folder_paths; __getattr__ relays most lookups, with explicit by-value handling for mutable collections."""
 
     _rpc: Optional[Any] = None
 

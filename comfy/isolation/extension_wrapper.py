@@ -836,10 +836,6 @@ class ComfyNodeExtension(ExtensionBase):
             from .proxies.progress_proxy import ProgressProxy
 
             ComfyAPI_latest.Execution = ProgressProxy
-            # ComfyAPI_latest.execution = ProgressProxy()  # Eliminated to avoid Singleton collision
-            # fp_proxy = FolderPathsProxy()                 # Eliminated to avoid Singleton collision
-            # latest_ui.folder_paths = fp_proxy
-            # latest_resources.folder_paths = fp_proxy
         except Exception:
             pass
 

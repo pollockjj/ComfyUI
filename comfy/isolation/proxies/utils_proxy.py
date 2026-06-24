@@ -13,11 +13,7 @@ def _comfy_utils():
 
 
 class UtilsProxy(ProxiedSingleton):
-    """
-    Proxy for comfy.utils.
-    Primarily handles the PROGRESS_BAR_HOOK to ensure progress updates
-    from isolated nodes reach the host.
-    """
+    """Proxy for comfy.utils; relays PROGRESS_BAR_HOOK so progress from isolated nodes reaches the host."""
 
     # _instance and __new__ removed to rely on SingletonMetaclass
     _rpc: Optional[Any] = None
@@ -38,10 +34,7 @@ class UtilsProxy(ProxiedSingleton):
         preview: Optional[bytes] = None,
         node_id: Optional[str] = None,
     ) -> Any:
-        """
-        Host-side implementation: forwards the call to the real global hook.
-        Child-side: this method call is intercepted by RPC and sent to host.
-        """
+        """On the host, forward to the real global hook; on the child, the call is intercepted by RPC and relayed to the host."""
         if os.environ.get("PYISOLATE_CHILD") == "1":
             if UtilsProxy._rpc is None:
                 raise RuntimeError("UtilsProxy RPC caller is not configured")
