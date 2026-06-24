@@ -166,8 +166,6 @@ def load_host_policy(comfy_root: Path) -> HostSecurityPolicy:
     if isinstance(whitelist_raw, dict):
         policy["whitelist"].update({str(k): str(v) for k, v in whitelist_raw.items()})
 
-    os.environ["PYISOLATE_SANDBOX_MODE"] = policy["sandbox_mode"]
-
     logger.debug(
         "Loaded Host Policy: %d whitelisted nodes, Sandbox=%s, Network=%s",
         len(policy["whitelist"]),
