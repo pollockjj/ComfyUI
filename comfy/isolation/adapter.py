@@ -93,7 +93,7 @@ class ComfyUIAdapter(IsolationAdapter):
         """Returns required application paths to mount in the sandbox."""
         # By inspecting where our adapter is loaded from, we can determine the comfy root
         adapter_file = inspect.getfile(self.__class__)
-        # adapter_file = /home/johnj/ComfyUI/comfy/isolation/adapter.py
+        # adapter_file = /opt/comfyui/comfy/isolation/adapter.py
         comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(adapter_file)))
         if os.path.exists(comfy_root):
             return [comfy_root]

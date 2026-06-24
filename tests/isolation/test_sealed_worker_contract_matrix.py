@@ -319,7 +319,7 @@ async def test_sealed_worker_host_policy_ro_import_matrix(
             "allow_network": False,
             "writable_paths": [],
             "readonly_paths": [],
-            "sealed_worker_ro_import_paths": ["/home/johnj/ComfyUI"],
+            "sealed_worker_ro_import_paths": ["/opt/comfyui"],
         },
     ):
         opt_in_config = await _load_node(module, manifest, manifest_file, tmp_path)
@@ -328,5 +328,5 @@ async def test_sealed_worker_host_policy_ro_import_matrix(
     assert "sealed_host_ro_paths" not in default_config
 
     assert opt_in_config["execution_model"] == "sealed_worker"
-    assert opt_in_config["sealed_host_ro_paths"] == ["/home/johnj/ComfyUI"]
+    assert opt_in_config["sealed_host_ro_paths"] == ["/opt/comfyui"]
     assert "apis" not in opt_in_config

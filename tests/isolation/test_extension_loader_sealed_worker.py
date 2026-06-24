@@ -113,7 +113,7 @@ async def test_sealed_worker_manifest_ro_import_paths_blocked(
 ):
     manifest = _make_manifest(
         execution_model="sealed_worker",
-        sealed_host_ro_paths=["/home/johnj/ComfyUI"],
+        sealed_host_ro_paths=["/opt/comfyui"],
     )
 
     _, _, _mock_manager, _, _ = mock_pyisolate

@@ -88,7 +88,7 @@ def test_sealed_worker_ro_import_paths_rejects_non_list_or_relative(tmp_path):
         tmp_path / "pyproject.toml",
         """
 [tool.comfy.host]
-sealed_worker_ro_import_paths = "/home/johnj/ComfyUI"
+sealed_worker_ro_import_paths = "/opt/comfyui"
 """.strip(),
     )
     with pytest.raises(ValueError, match="must be a list of absolute paths"):

@@ -3,8 +3,8 @@
 The boundary-crossing multigpu / checkpoint-save additions on ModelPatcher must be
 relayed by *class-defined* methods on ModelPatcherProxy. If one falls through to the
 closed ``__getattr__`` whitelist it raises AttributeError the moment an isolated
-MultiGPU node or CheckpointSave node touches it. This pins the avenger Phase 2 trio
-(deepclone_multigpu, register_load_device, state_dict_for_saving) plus
+MultiGPU node or CheckpointSave node touches it. This pins the three multigpu/save
+relays (deepclone_multigpu, register_load_device, state_dict_for_saving) plus
 match_multigpu_clones and proves each relays to a matching registry handler.
 """
 from unittest.mock import Mock
