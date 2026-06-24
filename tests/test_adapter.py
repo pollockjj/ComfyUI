@@ -44,9 +44,7 @@ def test_register_serializers():
 def test_child_temp_directory_fence_uses_private_tmp(tmp_path):
     if sys.platform != "linux" or shutil.which("bwrap") is None:
         pytest.skip("bubblewrap sandbox test requires Linux with bwrap")
-    module_path = repo_root / "custom_nodes" / "ComfyUI-IsolationToolkit"
-    if not module_path.exists():
-        pytest.skip("bubblewrap sandbox test requires ComfyUI-IsolationToolkit fixture")
+    module_path = Path(__file__).parent / "isolation" / "internal_probe_node"
 
     adapter = ComfyUIAdapter()
     child_script = textwrap.dedent(

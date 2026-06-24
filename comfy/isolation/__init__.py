@@ -108,7 +108,6 @@ async def initialize_isolation_nodes() -> List[IsolatedNodeSpec]:
     if not manifest_entries:
         return []
 
-    os.environ["PYISOLATE_ISOLATION_ACTIVE"] = "1"
     concurrency_limit = max(1, (os.cpu_count() or 4) // 2)
     semaphore = asyncio.Semaphore(concurrency_limit)
 

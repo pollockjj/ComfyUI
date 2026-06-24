@@ -337,7 +337,6 @@ def test_maybe_wrap_model_for_isolation_uses_runtime_flag(monkeypatch):
             self.manage_lifecycle = manage_lifecycle
 
     monkeypatch.setattr(model_patcher_proxy_utils.args, "use_process_isolation", True)
-    monkeypatch.delenv("PYISOLATE_ISOLATION_ACTIVE", raising=False)
     monkeypatch.delenv("PYISOLATE_CHILD", raising=False)
     monkeypatch.setitem(
         sys.modules,
@@ -359,7 +358,6 @@ def test_maybe_wrap_model_for_isolation_uses_runtime_flag(monkeypatch):
 
 def test_flush_transport_state_uses_child_env_without_legacy_flag(monkeypatch):
     monkeypatch.setenv("PYISOLATE_CHILD", "1")
-    monkeypatch.delenv("PYISOLATE_ISOLATION_ACTIVE", raising=False)
     monkeypatch.setattr(extension_wrapper_module, "_flush_tensor_transport_state", lambda marker: 3)
     monkeypatch.setitem(
         sys.modules,
@@ -385,7 +383,6 @@ def test_build_stub_class_relieves_host_vram_without_legacy_flag(monkeypatch):
         return result
 
     monkeypatch.delenv("PYISOLATE_CHILD", raising=False)
-    monkeypatch.delenv("PYISOLATE_ISOLATION_ACTIVE", raising=False)
     monkeypatch.setattr(
         runtime_helpers, "_relieve_host_vram_pressure", lambda marker, logger: relieve_calls.append(marker)
     )
