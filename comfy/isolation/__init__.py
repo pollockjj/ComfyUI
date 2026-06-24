@@ -392,7 +392,6 @@ def update_rpc_event_loops(loop: "asyncio.AbstractEventLoop | None" = None) -> N
 
     update_count = 0
 
-    # Update RPCs from ExtensionManagers
     for manager in _EXTENSION_MANAGERS:
         if not hasattr(manager, "extensions"):
             continue

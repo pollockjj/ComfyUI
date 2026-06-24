@@ -20,7 +20,6 @@ class UtilsProxy(ProxiedSingleton):
 
     @classmethod
     def set_rpc(cls, rpc: Any) -> None:
-        # Create caller using class name as ID (standard for Singletons)
         cls._rpc = rpc.create_caller(cls, "UtilsProxy")
 
     @classmethod

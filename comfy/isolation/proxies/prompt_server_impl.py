@@ -20,12 +20,6 @@ from .base import call_singleton_rpc
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[Isolation:C<->H]"
 
-# ...
-
-# =============================================================================
-# CHILD SIDE: PromptServerStub
-# =============================================================================
-
 
 class PromptServerStub:
     """Stateless Stub for PromptServer."""
@@ -56,7 +50,6 @@ class PromptServerStub:
     def instance(self) -> "PromptServerStub":
         return self
 
-    # ... Compatibility ...
     @classmethod
     def _get_source_file(cls) -> str:
         if cls._source_file is None:
@@ -69,7 +62,6 @@ class PromptServerStub:
     def __file__(self) -> str:
         return self._get_source_file()
 
-    # --- Properties ---
     @property
     def client_id(self) -> Optional[str]:
         return "isolated_client"
@@ -88,7 +80,6 @@ class PromptServerStub:
             "PromptServer.prompt_queue is not accessible in isolated nodes."
         )
 
-    # --- UI Communication (RPC Delegates) ---
     async def send_sync(
         self, event: str, data: Dict[str, Any], sid: Optional[str] = None
     ) -> None:
@@ -113,7 +104,6 @@ class PromptServerStub:
             except RuntimeError:
                 call_singleton_rpc(self._rpc, "ui_send_progress_text", text, node_id, sid)
 
-    # --- Route Registration Logic ---
     _pending_child_routes: list = []
 
     def register_route(self, method: str, path: str, handler: Callable):
@@ -177,11 +167,6 @@ class RouteStub:
             return handler
 
         return decorator
-
-
-# =============================================================================
-# HOST SIDE: PromptServerService
-# =============================================================================
 
 
 class PromptServerService(ProxiedSingleton):

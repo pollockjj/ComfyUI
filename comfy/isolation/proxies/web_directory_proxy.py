@@ -126,11 +126,6 @@ def _validate_path(relative_path: str) -> None:
         raise ValueError(f"Directory traversal is not allowed: {relative_path}")
 
 
-# ---------------------------------------------------------------------------
-# Host-side cache and aiohttp handler
-# ---------------------------------------------------------------------------
-
-
 class WebDirectoryCache:
     """Host-side in-memory cache for proxied web directory contents.
 

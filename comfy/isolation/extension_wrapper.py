@@ -215,7 +215,6 @@ class ComfyNodeExtension(ExtensionBase):
             self.display_names = getattr(module, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}
             self._register_module_routes(module)
 
-            # Register web directory with WebDirectoryProxy (child-side)
             web_dir_attr = getattr(module, "WEB_DIRECTORY", None)
             if web_dir_attr is not None:
                 module_dir = os.path.dirname(os.path.abspath(module.__file__))
@@ -508,16 +507,13 @@ class ComfyNodeExtension(ExtensionBase):
                 hidden_found[key] = resolved_inputs[key]
                 keys_to_remove.append(key)
 
-        # Remove hidden params from kwargs
         for key in keys_to_remove:
             resolved_inputs.pop(key)
 
-        # Set hidden on node class if any hidden params found
         if hidden_found:
             if not hasattr(node_cls, "hidden") or node_cls.hidden is None:
                 node_cls.hidden = HiddenHolder.from_dict(hidden_found)
             else:
-                # Update existing hidden holder
                 for key, value in hidden_found.items():
                     setattr(node_cls.hidden, key.value.lower(), value)
 

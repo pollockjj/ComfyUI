@@ -299,7 +299,6 @@ async def load_isolated_node(
     if not isinstance(dependencies, list):
         dependencies = []
 
-    # Get extension name (default to folder name if not in project.name)
     extension_name = project_config.get("name", node_dir.name)
 
     # LOGIC: Isolation Decision
@@ -411,11 +410,9 @@ async def load_isolated_node(
     extension = manager.load_extension(extension_config)
     register_dummy_module(extension_name, node_dir)
 
-    # Register host-side event handlers via adapter
     from .adapter import ComfyUIAdapter
     ComfyUIAdapter.register_host_event_handlers(extension)
 
-    # Register web directory on the host — only when sandbox is disabled.
     # In sandbox mode, serving untrusted JS to the browser is not safe.
     if host_policy["sandbox_mode"] == "disabled":
         _register_web_directory(extension_name, node_dir)
@@ -515,7 +512,6 @@ async def load_isolated_node(
         await _stop_extension_safe(extension, extension_name)
         return []
 
-    # Save metadata to cache for future runs
     save_to_cache(node_dir, venv_root, cache_data, manifest_path)
     logger.debug(f"][ {extension_name} metadata cached")
 

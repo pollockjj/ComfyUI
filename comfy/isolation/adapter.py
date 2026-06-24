@@ -278,15 +278,12 @@ class ComfyUIAdapter(IsolationAdapter):
             else:
                 return ModelPatcherRegistry()._get_instance(data["model_id"])
 
-        # Register ModelPatcher type for serialization
         registry.register(
             "ModelPatcher", serialize_model_patcher, deserialize_model_patcher
         )
-        # Register ModelPatcherProxy type (already a proxy, just return ref)
         registry.register(
             "ModelPatcherProxy", serialize_model_patcher, deserialize_model_patcher
         )
-        # Register ModelPatcherRef for deserialization (context-aware: host or child)
         registry.register("ModelPatcherRef", None, deserialize_model_patcher_ref)
 
         def serialize_clip(obj: Any) -> Dict[str, Any]:
@@ -308,11 +305,8 @@ class ComfyUIAdapter(IsolationAdapter):
             else:
                 return CLIPRegistry()._get_instance(data["clip_id"])
 
-        # Register CLIP type for serialization
         registry.register("CLIP", serialize_clip, deserialize_clip)
-        # Register CLIPProxy type (already a proxy, just return ref)
         registry.register("CLIPProxy", serialize_clip, deserialize_clip)
-        # Register CLIPRef for deserialization (context-aware: host or child)
         registry.register("CLIPRef", None, deserialize_clip_ref)
 
         def serialize_vae(obj: Any) -> Dict[str, Any]:
@@ -336,11 +330,8 @@ class ComfyUIAdapter(IsolationAdapter):
                 # Host: lookup real VAE from registry
                 return VAERegistry()._get_instance(data["vae_id"])
 
-        # Register VAE type for serialization
         registry.register("VAE", serialize_vae, deserialize_vae)
-        # Register VAEProxy type (already a proxy, just return ref)
         registry.register("VAEProxy", serialize_vae, deserialize_vae)
-        # Register VAERef for deserialization (context-aware: host or child)
         registry.register("VAERef", None, deserialize_vae_ref)
 
         # ModelSampling serialization - handles ModelSampling* types
@@ -410,7 +401,6 @@ class ComfyUIAdapter(IsolationAdapter):
                 raise RuntimeError(
                     f"Cannot reconstruct ModelSampling: no known bases in {data['bases']}"
                 )
-            # Create dynamic class matching the child's class hierarchy
             ReconstructedSampling = type("ReconstructedSampling", tuple(base_classes), {})
             obj = ReconstructedSampling.__new__(ReconstructedSampling)
             torch.nn.Module.__init__(obj)
@@ -442,7 +432,6 @@ class ComfyUIAdapter(IsolationAdapter):
             else:
                 return ModelSamplingRegistry()._get_instance(data["ms_id"])
 
-        # Register all ModelSampling* and StableCascadeSampling classes dynamically
         import comfy.model_sampling
 
         for ms_cls in vars(comfy.model_sampling).values():
@@ -460,9 +449,7 @@ class ComfyUIAdapter(IsolationAdapter):
         registry.register(
             "ModelSamplingProxy", serialize_model_sampling, deserialize_model_sampling
         )
-        # Register ModelSamplingRef for deserialization (context-aware: host or child)
         registry.register("ModelSamplingRef", None, deserialize_model_sampling_ref)
-        # Register ModelSamplingInline for deserialization (child→host inline transfer)
         registry.register(
             "ModelSamplingInline", None, lambda data: _reconstruct_model_sampling_inline(data)
         )
@@ -586,7 +573,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
         register_hooks_serializers(registry)
 
-        # -- File3D (comfy_api.latest._util.geometry_types) ---------------------
+        # File3D (comfy_api.latest._util.geometry_types)
         # Origin: comfy_api by ComfyOrg (Alexander Piskun), PR #12129
 
         def serialize_file3d(obj: Any) -> Dict[str, Any]:
@@ -605,7 +592,7 @@ class ComfyUIAdapter(IsolationAdapter):
 
         registry.register("File3D", serialize_file3d, deserialize_file3d, data_type=True)
 
-        # -- VIDEO (comfy_api.latest._input_impl.video_types) -------------------
+        # VIDEO (comfy_api.latest._input_impl.video_types)
         # Origin: ComfyAPI Core v0.0.2 by ComfyOrg (guill), PR #8962
 
         def serialize_video(obj: Any) -> Dict[str, Any]:
