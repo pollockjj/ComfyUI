@@ -211,7 +211,7 @@ def create_block_external_middleware():
 class PromptServer():
     def __init__(self, loop):
         PromptServer.instance = self
-        if loop is None:
+        if loop is None and (args.use_process_isolation or os.environ.get("PYISOLATE_CHILD") == "1"):
             loop = asyncio.get_event_loop()
 
         self.user_manager = UserManager()

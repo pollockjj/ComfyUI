@@ -561,17 +561,20 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                         comfy_aimdo.control.analyze()
                     comfy.model_management.reset_cast_buffers()
                     comfy.model_prefetch.cleanup_prefetch_queues()
-                    vbar_lib = getattr(comfy_aimdo.model_vbar, "lib", None)
-                    if vbar_lib is not None:
-                        comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                    if args.use_process_isolation or os.environ.get("PYISOLATE_CHILD") == "1":
+                        vbar_lib = getattr(comfy_aimdo.model_vbar, "lib", None)
+                        if vbar_lib is not None:
+                            comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
+                        else:
+                            global _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED
+                            if not _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED:
+                                logging.warning(
+                                    "DynamicVRAM backend unavailable for watermark reset; "
+                                    "skipping vbar reset for this process."
+                                )
+                                _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED = True
                     else:
-                        global _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED
-                        if not _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED:
-                            logging.warning(
-                                "DynamicVRAM backend unavailable for watermark reset; "
-                                "skipping vbar reset for this process."
-                            )
-                            _AIMDO_VBAR_RESET_UNAVAILABLE_LOGGED = True
+                        comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
 
             if has_pending_tasks:
                 pending_async_nodes[unique_id] = output_data

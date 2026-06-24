@@ -217,8 +217,7 @@ def _calc_cond_batch_outer(model: BaseModel, conds: list[list[dict]], x_in: torc
         _calc_cond_batch,
         comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.CALC_COND_BATCH, model_options, is_model_options=True)
     )
-    result = executor.execute(model, conds, x_in, timestep, model_options)
-    return result
+    return executor.execute(model, conds, x_in, timestep, model_options)
 
 def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep: torch.Tensor, model_options: dict[str]):
     # NOTE: keep in sync with _calc_cond_batch_multigpu below. Shared logic
@@ -282,8 +281,7 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                     for k, v in to_run[tt][0].conditioning.items():
                         cond_shapes[k].append(v.size())
 
-                memory_required = model.memory_required(input_shape, cond_shapes=cond_shapes)
-                if memory_required * 1.5 < free_memory:
+                if model.memory_required(input_shape, cond_shapes=cond_shapes) * 1.5 < free_memory:
                     to_batch = batch_amount
                     break
 
@@ -1027,11 +1025,7 @@ class KSAMPLER(Sampler):
         else:
             model_k.noise = noise
 
-        max_denoise = self.max_denoise(model_wrap, sigmas)
-        model_sampling = model_wrap.inner_model.model_sampling
-        noise = model_sampling.noise_scaling(
-            sigmas[0], noise, latent_image, max_denoise
-        )
+        noise = model_wrap.inner_model.model_sampling.noise_scaling(sigmas[0], noise, latent_image, self.max_denoise(model_wrap, sigmas))
 
         k_callback = None
         total_steps = len(sigmas) - 1

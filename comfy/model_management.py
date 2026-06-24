@@ -777,8 +777,7 @@ class LoadedModel:
         return model_ref_gone, real_model_ref_gone
 
     def is_dead(self):
-        model_ref_gone, real_model_ref_gone = self.dead_state()
-        return model_ref_gone or real_model_ref_gone
+        return self.real_model() is not None and self.model is None
 
 
 def use_more_memory(extra_memory, loaded_models, device):
@@ -855,11 +854,12 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
 
     for i in sorted(unloaded_model, reverse=True):
         unloaded = current_loaded_models.pop(i)
-        model_obj = unloaded.model
-        if model_obj is not None:
-            cleanup = getattr(model_obj, "cleanup", None)
-            if callable(cleanup):
-                cleanup()
+        if isolation_active:
+            model_obj = unloaded.model
+            if model_obj is not None:
+                cleanup = getattr(model_obj, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
         unloaded_models.append(unloaded)
 
     if not for_dynamic and pins_required > 0:
@@ -991,31 +991,27 @@ def loaded_models(only_currently_used=False):
 
 
 def cleanup_models_gc():
-    reset_cast_buffers()
     if not _isolation_mode_enabled():
-        dead_found = False
+        do_gc = False
+
         for i in range(len(current_loaded_models)):
-            if current_loaded_models[i].is_dead():
-                dead_found = True
+            cur = current_loaded_models[i]
+            if cur.is_dead():
+                logging.info("Potential memory leak detected with model {}, doing a full garbage collect, for maximum performance avoid circular references in the model code.".format(cur.real_model().__class__.__name__))
+                do_gc = True
                 break
 
-        if dead_found:
-            logging.info("Potential memory leak detected with model NoneType, doing a full garbage collect, for maximum performance avoid circular references in the model code.")
+        if do_gc:
             gc.collect()
             soft_empty_cache()
 
-            for i in range(len(current_loaded_models) - 1, -1, -1):
+            for i in range(len(current_loaded_models)):
                 cur = current_loaded_models[i]
                 if cur.is_dead():
-                    logging.warning("WARNING, memory leak with model NoneType. Please make sure it is not being referenced from somewhere.")
-                    leaked = current_loaded_models.pop(i)
-                    model_obj = getattr(leaked, "model", None)
-                    if model_obj is not None:
-                        cleanup = getattr(model_obj, "cleanup", None)
-                        if callable(cleanup):
-                            cleanup()
+                    logging.warning("WARNING, memory leak with model {}. Please make sure it is not being referenced from somewhere.".format(cur.real_model().__class__.__name__))
         return
 
+    reset_cast_buffers()
     dead_found = False
     has_real_model_leak = False
     for i in range(len(current_loaded_models)):
@@ -1058,22 +1054,28 @@ def archive_model_dtypes(model):
 
 
 def cleanup_models():
+    isolation_active = _isolation_mode_enabled()
     to_delete = []
     for i in range(len(current_loaded_models)):
-        real_model_ref = current_loaded_models[i].real_model
-        if real_model_ref is None:
-            to_delete = [i] + to_delete
-            continue
-        if callable(real_model_ref) and real_model_ref() is None:
-            to_delete = [i] + to_delete
+        if isolation_active:
+            real_model_ref = current_loaded_models[i].real_model
+            if real_model_ref is None:
+                to_delete = [i] + to_delete
+                continue
+            if callable(real_model_ref) and real_model_ref() is None:
+                to_delete = [i] + to_delete
+        else:
+            if current_loaded_models[i].real_model() is None:
+                to_delete = [i] + to_delete
 
     for i in to_delete:
         x = current_loaded_models.pop(i)
-        model_obj = getattr(x, "model", None)
-        if model_obj is not None:
-            cleanup = getattr(model_obj, "cleanup", None)
-            if callable(cleanup):
-                cleanup()
+        if isolation_active:
+            model_obj = getattr(x, "model", None)
+            if model_obj is not None:
+                cleanup = getattr(model_obj, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
         del x
 
 def dtype_size(dtype):
