@@ -781,6 +781,34 @@ class ComfyUIAdapter(IsolationAdapter):
             ])
         return services
 
+    def get_service_module_map(self) -> dict:
+        """Host-service modules to expose to sealed workers as RPC-backed shims.
+
+        A sealed worker runs in a foreign interpreter without comfy, so it cannot
+        import folder_paths. pyisolate installs a forwarding shim from this map so
+        the worker's `import folder_paths; folder_paths.get_input_directory()`
+        dispatches by name to the FolderPathsProxy host endpoints (the async
+        rpc_* methods). Calls resolve at node-execution time (RPC live), not at
+        module import.
+        """
+        return {
+            "folder_paths": {
+                "service": FolderPathsProxy.get_remote_id(),
+                "methods": {
+                    "get_input_directory": "rpc_get_input_directory",
+                    "get_output_directory": "rpc_get_output_directory",
+                    "get_temp_directory": "rpc_get_temp_directory",
+                    "get_user_directory": "rpc_get_user_directory",
+                    "get_annotated_filepath": "rpc_get_annotated_filepath",
+                    "exists_annotated_filepath": "rpc_exists_annotated_filepath",
+                    "get_folder_paths": "rpc_get_folder_paths",
+                    "get_filename_list": "rpc_get_filename_list",
+                    "get_full_path": "rpc_get_full_path",
+                    "add_model_folder_path": "rpc_add_model_folder_path",
+                },
+            }
+        }
+
     def handle_api_registration(self, api: ProxiedSingleton, rpc: AsyncRPC) -> None:
         # Resolve the real name whether it's an instance or the Singleton class itself
         api_name = api.__name__ if isinstance(api, type) else api.__class__.__name__
