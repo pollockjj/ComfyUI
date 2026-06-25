@@ -1076,6 +1076,7 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         layout_cls = get_layout_class(module.layout_type)
 
         # Per-format scales; fp8 dtype views handle both legacy uint8-on-disk and native fp8.
+        extra_params = {}
         if module.quant_format in ("float8_e4m3fn", "float8_e5m2"):
             scales = {"scale": pop_scale("weight_scale")}
         elif module.quant_format == "mxfp8":
@@ -1089,10 +1090,21 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
             if ts is None or bs is None:
                 raise ValueError(f"Missing NVFP4 scales for layer {layer_name}")
             scales = {"scale": ts, "block_scale": bs}
+        elif module.quant_format == "int8":
+            scale = pop_scale("weight_scale")
+            if scale is None:
+                raise ValueError(f"Missing INT8 weight scale for layer {layer_name}")
+            scales = {"scale": scale}
+            # ConvRot params are scalar, not tensors, so they ride in the comfy_quant marker.
+            extra_params = {
+                "is_weight": True,
+                "convrot": bool(layer_conf.get("convrot", False)),
+                "convrot_groupsize": int(layer_conf.get("convrot_groupsize", 256)),
+            }
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
-        params = layout_cls.Params(**scales, orig_dtype=compute_dtype, orig_shape=module._orig_shape)
+        params = layout_cls.Params(**scales, **extra_params, orig_dtype=compute_dtype, orig_shape=module._orig_shape)
         module.weight = torch.nn.Parameter(
             QuantizedTensor(weight.to(device=device, dtype=qconfig["storage_t"]), module.layout_type, params),
             requires_grad=False,

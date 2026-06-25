@@ -65,6 +65,14 @@ if not _CK_MXFP8_AVAILABLE:
     class _CKMxfp8Layout:
         pass
 
+_CK_INT8_AVAILABLE = False
+if _CK_AVAILABLE:
+    try:
+        from comfy_kitchen.tensor import TensorWiseINT8Layout as _CKInt8Layout  # noqa: F401
+        _CK_INT8_AVAILABLE = True
+    except ImportError:
+        logging.warning("comfy_kitchen does not support INT8, please update comfy_kitchen.")
+
 import comfy.float
 
 # ==============================================================================
@@ -212,6 +220,15 @@ if _CK_MXFP8_AVAILABLE:
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "TensorCoreMXFP8Layout",
         "group_size": 32,
+    }
+
+# TensorWiseINT8Layout is registered by comfy_kitchen on import; ConvRot weights are produced
+# offline (comfy-model-tools seedvr2_convert int8) and reconstructed via the comfy_quant marker.
+if _CK_INT8_AVAILABLE:
+    QUANT_ALGOS["int8"] = {
+        "storage_t": torch.int8,
+        "parameters": {"weight_scale"},
+        "comfy_tensor_layout": "TensorWiseINT8Layout",
     }
 
 
