@@ -386,6 +386,16 @@ async def load_isolated_node(
             )
         extension_config["extra_index_urls"] = extra_index_urls
 
+    env_overrides = tool_config.get("env", {})
+    if env_overrides:
+        if not isinstance(env_overrides, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env_overrides.items()
+        ):
+            raise ExtensionLoadError(
+                "[tool.comfy.isolation.env] must be a table of string keys and string values"
+            )
+        extension_config["env"] = {str(k): str(v) for k, v in env_overrides.items()}
+
     # Conda-specific keys
     if is_conda:
         extension_config["package_manager"] = "conda"
