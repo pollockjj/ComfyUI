@@ -50,6 +50,9 @@ from app.database.db import init_db, dependencies_available
 
 import comfy_aimdo.control
 
+if not IS_PYISOLATE_CHILD:
+    setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
+
 if enables_dynamic_vram():
     if not comfy_aimdo.control.init():
         logging.warning(
@@ -84,9 +87,6 @@ if not IS_PYISOLATE_CHILD:
 if IS_PRIMARY_PROCESS:
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
-
-if not IS_PYISOLATE_CHILD:
-    setup_logger(log_level=args.verbose, use_stdout=args.log_stdout)
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
