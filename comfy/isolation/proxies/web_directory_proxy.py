@@ -51,7 +51,7 @@ class WebDirectoryProxy(ProxiedSingleton):
             web_dir_path,
         )
 
-    def list_web_files(self, extension_name: str) -> List[Dict[str, str]]:
+    async def list_web_files(self, extension_name: str) -> List[Dict[str, str]]:
         """Return a list of servable files in the extension's web directory.
 
         Each entry is {"relative_path": "js/foo.js", "content_type": "application/javascript"}.
@@ -79,7 +79,7 @@ class WebDirectoryProxy(ProxiedSingleton):
             })
         return result
 
-    def get_web_file(
+    async def get_web_file(
         self, extension_name: str, relative_path: str
     ) -> Dict[str, Any]:
         """Return the contents of a single web file as base64.
