@@ -740,7 +740,6 @@ class ComfyUIAdapter(IsolationAdapter):
     def setup_child_event_hooks(self, extension: Any) -> None:
         """Wire the child's PROGRESS_BAR_HOOK to emit_event on the extension (host-coupled only; sealed workers have no comfy.utils)."""
         is_child = os.environ.get("PYISOLATE_CHILD") == "1"
-        logger.info("][ ISO:setup_child_event_hooks called, PYISOLATE_CHILD=%s", is_child)
         if not is_child:
             return
 
@@ -759,7 +758,6 @@ class ComfyUIAdapter(IsolationAdapter):
             })
 
         comfy.utils.PROGRESS_BAR_HOOK = _event_progress_hook
-        logger.info("][ ISO:PROGRESS_BAR_HOOK wired to event channel")
 
     def provide_rpc_services(self) -> List[type[ProxiedSingleton]]:
         # Always available — no torch/PIL dependency
@@ -828,9 +826,6 @@ class ComfyUIAdapter(IsolationAdapter):
             # Static Injection of RPC mechanism to ensure Child can access it
             # independent of instance lifecycle.
             api.set_rpc(rpc)
-
-            is_child = os.environ.get("PYISOLATE_CHILD") == "1"
-            logger.info("][ ISO:UtilsProxy handle_api_registration PYISOLATE_CHILD=%s", is_child)
 
             # Progress hook wiring moved to setup_child_event_hooks via event channel
 
