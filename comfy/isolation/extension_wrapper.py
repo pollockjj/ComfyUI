@@ -666,10 +666,15 @@ class ComfyNodeExtension(ExtensionBase):
                 return getattr(obj, attr_name)
             return None
         if method_name == "inner_model_apply_model":
-            # The host moves sampler args to CUDA for zero-copy IPC sharing; on platforms
-            # without CUDA-IPC (native Windows) the transport downgrades them to CPU, so
-            # restore them onto the model's device before the forward. No-op on Linux,
-            # where the shared tensors already arrive on the model's device.
+            # Move sampler args onto the model's COMPUTE device before the forward. Inputs
+            # arrive where the transport delivered them: on CUDA when CUDA-IPC/zero-copy is
+            # active, on CPU under the native-Windows fallback.
+            #
+            # The compute device is the ModelPatcher's load_device. Do NOT derive it from
+            # next(obj.model.parameters()).device: a DynamicVRAM / partially-offloaded model
+            # keeps its first parameter on CPU while the forward computes on CUDA, so that
+            # heuristic mis-reports CPU and downgrades correctly-placed CUDA inputs, raising
+            # "mat1 is on cpu, ... other tensors on cuda:0".
             def _to_dev(tree: Any, device: Any) -> Any:
                 if isinstance(tree, torch.Tensor):
                     return tree.to(device) if tree.device != device else tree
@@ -679,10 +684,16 @@ class ComfyNodeExtension(ExtensionBase):
                     return type(tree)([_to_dev(v, device) for v in tree])
                 return tree
 
-            try:
-                model_device = next(obj.model.parameters()).device
-            except (StopIteration, AttributeError):
-                model_device = getattr(obj, "load_device", None)
+            model_device = getattr(obj, "load_device", None)
+            if model_device is None:
+                try:
+                    param_devices = {p.device for p in obj.model.parameters()}
+                except (AttributeError, TypeError):
+                    param_devices = set()
+                model_device = next((d for d in param_devices if d.type == "cuda"), None)
+                if model_device is None and param_devices:
+                    model_device = next(iter(param_devices))
+
             if model_device is not None:
                 return obj.model.apply_model(*_to_dev(args[0], model_device), **_to_dev(args[1], model_device))
             return obj.model.apply_model(*args[0], **args[1])
