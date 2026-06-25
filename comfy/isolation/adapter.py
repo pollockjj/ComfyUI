@@ -175,8 +175,9 @@ class ComfyUIAdapter(IsolationAdapter):
         def serialize_device(obj: Any) -> Dict[str, Any]:
             return {"__type__": "device", "device_str": str(obj)}
 
-        def deserialize_device(data: Dict[str, Any]) -> Any:
-            return torch.device(data["device_str"])
+        def deserialize_device(data: Any) -> Any:
+            device_str = data["device_str"] if isinstance(data, dict) else str(data)
+            return torch.device(device_str)
 
         registry.register("device", serialize_device, deserialize_device)
 
@@ -189,10 +190,11 @@ class ComfyUIAdapter(IsolationAdapter):
         def serialize_dtype(obj: Any) -> Dict[str, Any]:
             return {"__type__": "dtype", "dtype_str": str(obj)}
 
-        def deserialize_dtype(data: Dict[str, Any]) -> Any:
-            dtype_name = data["dtype_str"].replace("torch.", "")
+        def deserialize_dtype(data: Any) -> Any:
+            dtype_str = data["dtype_str"] if isinstance(data, dict) else str(data)
+            dtype_name = dtype_str.replace("torch.", "")
             if dtype_name not in _VALID_DTYPES:
-                raise ValueError(f"Invalid dtype: {data['dtype_str']}")
+                raise ValueError(f"Invalid dtype: {dtype_str}")
             return getattr(torch, dtype_name)
 
         registry.register("dtype", serialize_dtype, deserialize_dtype)
