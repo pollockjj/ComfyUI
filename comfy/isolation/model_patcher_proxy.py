@@ -532,11 +532,17 @@ class ModelPatcherProxy(BaseProxy[ModelPatcherRegistry]):
 
     @property
     def load_device(self) -> Any:
-        return self._call_rpc("get_load_device")
+        import torch
+
+        dev = self._call_rpc("get_load_device")
+        return None if dev is None else torch.device(str(dev))
 
     @property
     def offload_device(self) -> Any:
-        return self._call_rpc("get_offload_device")
+        import torch
+
+        dev = self._call_rpc("get_offload_device")
+        return None if dev is None else torch.device(str(dev))
 
     @property
     def device(self) -> Any:

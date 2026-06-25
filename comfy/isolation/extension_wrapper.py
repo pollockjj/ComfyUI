@@ -648,9 +648,11 @@ class ComfyNodeExtension(ExtensionBase):
         if method_name == "get_callbacks":
             return getattr(obj, "callbacks")
         if method_name == "get_load_device":
-            return getattr(obj, "load_device")
+            dev = getattr(obj, "load_device", None)
+            return None if dev is None else str(dev)
         if method_name == "get_offload_device":
-            return getattr(obj, "offload_device")
+            dev = getattr(obj, "offload_device", None)
+            return None if dev is None else str(dev)
         if method_name == "get_hook_mode":
             return getattr(obj, "hook_mode")
         if method_name == "get_parent":
