@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
+from tqdm import tqdm
 
 from comfy import sd1_clip
 import comfy.ops
@@ -648,7 +649,9 @@ class DiffusionGenerate:
         cur_len = embeds.shape[1]
 
         max_new_canvases = math.ceil(max_length / canvas_length)
-        pbar = comfy.utils.ProgressBar(max_new_canvases * max_denoising_steps)
+        total_steps = max_new_canvases * max_denoising_steps
+        pbar = comfy.utils.ProgressBar(total_steps)
+        tq = tqdm(total=total_steps, desc="Denoising steps")
         generated_token_ids = []
         commit_canvas = None
 
@@ -690,11 +693,13 @@ class DiffusionGenerate:
                 self_conditioning_logits = processed_logits.to(execution_dtype)
                 steps_done += 1
                 pbar.update(1)
+                tq.update(1)
                 if torch.all(finished_denoising):
                     break
 
             if steps_done < max_denoising_steps:
                 pbar.update(max_denoising_steps - steps_done)
+                tq.update(max_denoising_steps - steps_done)
 
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
@@ -707,6 +712,7 @@ class DiffusionGenerate:
             cur_len += canvas_length
             commit_canvas = argmax_canvas
 
+        tq.close()
         return generated_token_ids
 
 
