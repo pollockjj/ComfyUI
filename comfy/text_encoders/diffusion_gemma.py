@@ -699,7 +699,6 @@ class DiffusionGenerate:
 
             if steps_done < max_denoising_steps:
                 pbar.update(max_denoising_steps - steps_done)
-                tq.update(max_denoising_steps - steps_done)
 
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
