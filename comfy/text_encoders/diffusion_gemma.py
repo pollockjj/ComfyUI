@@ -1,5 +1,6 @@
 import contextlib
 import math
+import os
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -218,7 +219,7 @@ def _bank_bmm(module, x):
 
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
-    grouped_min_tokens = 64
+    grouped_min_tokens = int(os.environ.get("DG_GROUPED_MIN_TOKENS", "64"))
 
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
