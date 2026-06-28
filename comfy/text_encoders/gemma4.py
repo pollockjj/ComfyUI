@@ -1089,7 +1089,7 @@ class Gemma4_Tokenizer():
             h, w = samples.shape[2], samples.shape[3]
             patch_size = 16
             pooling_k = 3
-            max_soft_tokens = 70 if is_video else 1120  # image uses the max visual-token budget; video smaller per frame
+            max_soft_tokens = 70 if is_video else 280
             logging.info(f"[gemma4] image max_soft_tokens={max_soft_tokens}")
             max_patches = max_soft_tokens * pooling_k * pooling_k
             target_px = max_patches * patch_size * patch_size
