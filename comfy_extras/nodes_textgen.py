@@ -1,5 +1,7 @@
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
+import json
+import time
 
 class TextGenerate(io.ComfyNode):
     @classmethod
@@ -54,6 +56,7 @@ class TextGenerate(io.ComfyNode):
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
+                io.String.Output(display_name="generation_metrics_json"),
             ],
         )
 
@@ -63,8 +66,9 @@ class TextGenerate(io.ComfyNode):
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
 
         mode = sampling_mode.get("sampling_mode")
+        generation_start = time.perf_counter()
         if mode == "diffusion":
-            generated_ids = clip.generate(
+            generated_ids, generation_metrics = clip.generate(
                 tokens,
                 max_length=max_length,
                 seed=sampling_mode.get("seed", 0),
@@ -74,6 +78,7 @@ class TextGenerate(io.ComfyNode):
                 t_max=sampling_mode.get("t_max", 0.8),
                 stability_threshold=sampling_mode.get("stability_threshold", 1),
                 confidence_threshold=sampling_mode.get("confidence_threshold", 0.005),
+                return_generation_info=True,
             )
         else:
             generated_ids = clip.generate(
@@ -88,10 +93,19 @@ class TextGenerate(io.ComfyNode):
                 presence_penalty=sampling_mode.get("presence_penalty", 0.0),
                 seed=sampling_mode.get("seed", None),
             )
+            generation_wall_s = time.perf_counter() - generation_start
+            output_tokens = len(generated_ids)
+            generation_metrics = {
+                "sampling_mode": mode,
+                "output_tokens": output_tokens,
+                "generation_wall_s": generation_wall_s,
+                "output_tok_s": output_tokens / generation_wall_s if generation_wall_s > 0 else None,
+            }
 
         generated_text = clip.decode(generated_ids)
+        metrics_text = json.dumps(generation_metrics, sort_keys=True)
 
-        return io.NodeOutput(generated_text)
+        return io.NodeOutput(generated_text, metrics_text, ui={"text": [metrics_text], "generation_metrics": [metrics_text]})
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
