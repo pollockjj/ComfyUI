@@ -235,8 +235,13 @@ class DiffusionGemmaExperts(nn.Module):
             self.gate_up_proj = ops.MoEExperts(num_experts=E, in_features=H, out_features=2 * I, bias=False, device=device, dtype=dtype)
         self.down_proj = ops.MoEExperts(num_experts=E, in_features=I, out_features=H, bias=False, device=device, dtype=dtype)
 
+    def _has_quantized_unfused_banks(self):
+        if not self.unfused:
+            return False
+        return any(getattr(bank, "layout_type", None) is not None for bank in (self.gate_proj, self.up_proj, self.down_proj))
+
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        if hidden_states.shape[0] >= self.grouped_min_tokens:
+        if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
 
@@ -760,7 +765,8 @@ class DiffusionGemmaClipModel(Gemma4Model):
         if model_options.get("custom_operations") is None:
             model_options = model_options.copy()
             quant_config = model_options.get("quantization_metadata") or {}
-            model_options["custom_operations"] = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=True)
+            full_precision_mm = not self.config_overrides.get("unfused_experts", False)
+            model_options["custom_operations"] = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=full_precision_mm)
         self.dtypes = set()
         self.dtypes.add(dtype)
         sd1_clip.SDClipModel.__init__(self, device=device, layer=layer, layer_idx=layer_idx,
