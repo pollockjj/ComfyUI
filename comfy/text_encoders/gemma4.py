@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 from dataclasses import dataclass
 import math
-import logging
 
 from comfy import sd1_clip
 import comfy.model_management
@@ -1090,7 +1089,6 @@ class Gemma4_Tokenizer():
             patch_size = 16
             pooling_k = 3
             max_soft_tokens = 70 if is_video else 280
-            logging.info(f"[gemma4] image max_soft_tokens={max_soft_tokens}")
             max_patches = max_soft_tokens * pooling_k * pooling_k
             target_px = max_patches * patch_size * patch_size
             factor = (target_px / (h * w)) ** 0.5
