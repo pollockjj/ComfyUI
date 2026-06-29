@@ -249,7 +249,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
                 tensor = tensor.dequantize()
             return tensor
 
-        if orig.dtype != dtype or len(fns) > 0:
+        force_dequant = getattr(s, "_full_precision_mm", False) and isinstance(x, QuantizedTensor)
+        if orig.dtype != dtype or len(fns) > 0 or force_dequant:
             x = to_dequant(x, dtype)
         if not resident and lowvram_fn is not None:
             x = to_dequant(x, dtype if compute_dtype is None else compute_dtype)
@@ -373,7 +374,8 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         for f in s.bias_function:
             bias = f(bias)
 
-    if weight_has_function or weight.dtype != dtype:
+    force_dequant = getattr(s, "_full_precision_mm", False) and isinstance(weight, QuantizedTensor)
+    if weight_has_function or weight.dtype != dtype or force_dequant:
         weight = weight.to(dtype=dtype)
         if isinstance(weight, QuantizedTensor):
             weight = weight.dequantize()
