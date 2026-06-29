@@ -1,7 +1,6 @@
 import contextlib
 import math
 import os
-import time
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -626,7 +625,6 @@ class DiffusionGenerate:
     def generate(self, embeds=None, max_length=256, seed=42, max_denoising_steps=48, entropy_bound=0.1,
                  t_min=0.4, t_max=0.8, stability_threshold=1, confidence_threshold=0.005,
                  execution_dtype=None, mm_spans=None, stop_tokens=None, **kwargs):
-        generation_start = time.perf_counter()
         device = embeds.device
         config = self.model.config
 
@@ -705,7 +703,8 @@ class DiffusionGenerate:
                 )
                 estimated_output_tokens = len(generated_token_ids) + estimated_canvas_tokens
                 pbar.update_absolute(estimated_output_tokens, max_length)
-                tq.update(estimated_output_tokens - tq.n)
+                tq.n = estimated_output_tokens
+                tq.refresh()
                 if torch.all(finished_denoising):
                     break
 
@@ -720,18 +719,11 @@ class DiffusionGenerate:
             cur_len += canvas_length
             commit_canvas = argmax_canvas
 
-        generation_wall_s = time.perf_counter() - generation_start
         output_tokens = len(generated_token_ids)
         pbar.update_absolute(output_tokens, max_length)
-        tq.update(output_tokens - tq.n)
+        tq.n = output_tokens
+        tq.refresh()
         tq.close()
-        output_tok_s = output_tokens / generation_wall_s if generation_wall_s > 0 else None
-        print(
-            f"Generated tokens: output_tokens={output_tokens} "
-            f"generation_wall_s={generation_wall_s:.3f} "
-            f"output_tok_s={output_tok_s:.4f}",
-            flush=True,
-        )
         return generated_token_ids
 
 
