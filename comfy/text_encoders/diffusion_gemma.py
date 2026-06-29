@@ -625,7 +625,7 @@ class DiffusionGenerate:
 
     def generate(self, embeds=None, max_length=256, seed=42, max_denoising_steps=48, entropy_bound=0.1,
                  t_min=0.4, t_max=0.8, stability_threshold=1, confidence_threshold=0.005,
-                 execution_dtype=None, mm_spans=None, stop_tokens=None, return_generation_info=False, **kwargs):
+                 execution_dtype=None, mm_spans=None, stop_tokens=None, **kwargs):
         generation_start = time.perf_counter()
         device = embeds.device
         config = self.model.config
@@ -645,31 +645,28 @@ class DiffusionGenerate:
         vocab_size = config.vocab_size
         generator = torch.Generator(device=device).manual_seed(seed) if seed is not None else None
         eos_tensor = torch.tensor(stop_tokens, device=device)
-
+        pbar = comfy.utils.ProgressBar(max_length)
+        tq = tqdm(
+            total=max_length,
+            desc="Generating tokens",
+            unit="it",
+            smoothing=0,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, est {rate_fmt}]",
+        )
         past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
-        encoder_start = time.perf_counter()
         _, _, past_key_values = self.model(None, embeds=embeds, past_key_values=past_key_values,
                                            mode="encoder", mm_spans=mm_spans)
-        encoder_wall_s = time.perf_counter() - encoder_start
         cur_len = embeds.shape[1]
 
         max_new_canvases = math.ceil(max_length / canvas_length)
-        pbar = comfy.utils.ProgressBar(max_new_canvases)
-        tq = tqdm(desc="DG denoising iterations", unit="iter")
         generated_token_ids = []
         commit_canvas = None
-        denoising_iterations = 0
-        denoising_wall_s = 0.0
-        canvas_metrics = []
-        stop_reason = "max_length"
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
-                commit_start = time.perf_counter()
                 commit_embeds = self.model.decoder.embed_tokens(commit_canvas).to(execution_dtype)
                 _, _, past_key_values = self.model(None, embeds=commit_embeds, past_key_values=past_key_values,
                                                    mode="encoder")
-                encoder_wall_s += time.perf_counter() - commit_start
 
             current_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                            device=device, generator=generator)
@@ -678,11 +675,8 @@ class DiffusionGenerate:
             decoder_position_ids = torch.arange(cur_len, cur_len + canvas_length, device=device).unsqueeze(0)
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
 
-            steps_done = 0
-            canvas_start = time.perf_counter()
             for cur_step in reversed(range(1, max_denoising_steps + 1)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
-                step_start = time.perf_counter()
                 x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                      self_conditioning_logits=self_conditioning_logits,
                                      position_ids=decoder_position_ids, dtype=execution_dtype)
@@ -703,11 +697,6 @@ class DiffusionGenerate:
 
                 finished_denoising = stopping(argmax_canvas, processed_logits)
                 self_conditioning_logits = processed_logits.to(execution_dtype)
-                steps_done += 1
-                denoising_iterations += 1
-                denoising_wall_s += time.perf_counter() - step_start
-                pbar.update_absolute(canvas_idx + (steps_done / max_denoising_steps), max_new_canvases)
-                tq.update(1)
                 step_eos = torch.isin(argmax_canvas[0], eos_tensor)
                 step_eos_positions = torch.nonzero(step_eos, as_tuple=False).flatten()
                 estimated_canvas_tokens = (
@@ -715,20 +704,10 @@ class DiffusionGenerate:
                     if step_eos_positions.numel() > 0 else canvas_length
                 )
                 estimated_output_tokens = len(generated_token_ids) + estimated_canvas_tokens
-                elapsed_wall_s = time.perf_counter() - generation_start
-                estimated_tok_s = estimated_output_tokens / elapsed_wall_s if elapsed_wall_s > 0 else 0.0
-                tq.set_postfix_str(
-                    f"canvas={canvas_idx + 1}/{max_new_canvases} "
-                    f"step={steps_done}/{max_denoising_steps} "
-                    f"committed_tokens={len(generated_token_ids)} "
-                    f"est_output_tokens={estimated_output_tokens} "
-                    f"est_tok_s={estimated_tok_s:.2f}"
-                )
+                pbar.update_absolute(estimated_output_tokens, max_length)
+                tq.update(estimated_output_tokens - tq.n)
                 if torch.all(finished_denoising):
                     break
-
-            pbar.update_absolute(canvas_idx + 1, max_new_canvases)
-            canvas_wall_s = time.perf_counter() - canvas_start
 
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
@@ -736,67 +715,23 @@ class DiffusionGenerate:
             if eos_positions.numel() > 0:
                 first_eos = int(eos_positions[0].item())
                 generated_token_ids.extend(canvas_ids[:first_eos + 1])
-                canvas_metrics.append({
-                    "canvas_index": canvas_idx,
-                    "denoising_steps": steps_done,
-                    "wall_s": canvas_wall_s,
-                    "committed_tokens": first_eos + 1,
-                    "eos_position": first_eos,
-                })
-                stop_reason = "eos"
                 break
             generated_token_ids.extend(canvas_ids)
-            canvas_metrics.append({
-                "canvas_index": canvas_idx,
-                "denoising_steps": steps_done,
-                "wall_s": canvas_wall_s,
-                "committed_tokens": canvas_length,
-                "eos_position": None,
-            })
             cur_len += canvas_length
             commit_canvas = argmax_canvas
 
-        tq.close()
         generation_wall_s = time.perf_counter() - generation_start
         output_tokens = len(generated_token_ids)
+        pbar.update_absolute(output_tokens, max_length)
+        tq.update(output_tokens - tq.n)
+        tq.close()
         output_tok_s = output_tokens / generation_wall_s if generation_wall_s > 0 else None
-        denoising_iter_s = denoising_iterations / denoising_wall_s if denoising_wall_s > 0 else None
-        denoising_s_per_iter = denoising_wall_s / denoising_iterations if denoising_iterations > 0 else None
-        canvases_started = len(canvas_metrics)
-        metrics = {
-            "sampling_mode": "diffusion",
-            "output_tokens": output_tokens,
-            "generation_wall_s": generation_wall_s,
-            "output_tok_s": output_tok_s,
-            "encoder_wall_s": encoder_wall_s,
-            "denoising_wall_s": denoising_wall_s,
-            "denoising_iterations": denoising_iterations,
-            "denoising_iter_s": denoising_iter_s,
-            "denoising_s_per_iter": denoising_s_per_iter,
-            "canvases_started": canvases_started,
-            "avg_denoising_steps_per_canvas": denoising_iterations / canvases_started if canvases_started else None,
-            "canvas_length": canvas_length,
-            "max_denoising_steps": max_denoising_steps,
-            "max_length": max_length,
-            "max_new_canvases": max_new_canvases,
-            "stop_reason": stop_reason,
-            "canvas_metrics": canvas_metrics,
-        }
         print(
-            "DiffusionGemma metrics: "
-            f"output_tokens={output_tokens} "
+            f"Generated tokens: output_tokens={output_tokens} "
             f"generation_wall_s={generation_wall_s:.3f} "
-            f"output_tok_s={output_tok_s:.4f} "
-            f"denoising_iterations={denoising_iterations} "
-            f"denoising_iter_s={denoising_iter_s:.4f} "
-            f"denoising_s_per_iter={denoising_s_per_iter:.4f} "
-            f"canvases_started={canvases_started} "
-            f"max_denoising_steps={max_denoising_steps} "
-            f"stop_reason={stop_reason}",
+            f"output_tok_s={output_tok_s:.4f}",
             flush=True,
         )
-        if return_generation_info:
-            return generated_token_ids, metrics
         return generated_token_ids
 
 
