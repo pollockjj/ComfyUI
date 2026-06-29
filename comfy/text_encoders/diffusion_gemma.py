@@ -721,6 +721,7 @@ class DiffusionGenerate:
 
         output_tokens = len(generated_token_ids)
         pbar.update_absolute(output_tokens, max_length)
+        tq.bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
         tq.n = output_tokens
         tq.refresh()
         tq.close()
