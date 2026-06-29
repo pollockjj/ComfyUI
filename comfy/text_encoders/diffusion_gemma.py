@@ -714,11 +714,15 @@ class DiffusionGenerate:
                     int(step_eos_positions[0].item()) + 1
                     if step_eos_positions.numel() > 0 else canvas_length
                 )
+                estimated_output_tokens = len(generated_token_ids) + estimated_canvas_tokens
+                elapsed_wall_s = time.perf_counter() - generation_start
+                estimated_tok_s = estimated_output_tokens / elapsed_wall_s if elapsed_wall_s > 0 else 0.0
                 tq.set_postfix_str(
                     f"canvas={canvas_idx + 1}/{max_new_canvases} "
                     f"step={steps_done}/{max_denoising_steps} "
                     f"committed_tokens={len(generated_token_ids)} "
-                    f"est_output_tokens={len(generated_token_ids) + estimated_canvas_tokens}"
+                    f"est_output_tokens={estimated_output_tokens} "
+                    f"est_tok_s={estimated_tok_s:.2f}"
                 )
                 if torch.all(finished_denoising):
                     break
