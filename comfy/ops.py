@@ -908,7 +908,7 @@ from .quant_ops import (
 )
 
 INT8_DEQUANT_SMALL_M = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_M", "1"))
-INT8_DEQUANT_SMALL_MIN_DIM = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_MIN_DIM", "2048"))
+INT8_DEQUANT_SMALL_MIN_DIM = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_MIN_DIM", str(2 ** 31 - 1)))
 INT8_DEQUANT_SMALL_ENABLED = os.environ.get("COMFY_INT8_DEQUANT_SMALL", "1").lower() not in {"0", "false", "no", "off"}
 
 
