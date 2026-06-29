@@ -19,6 +19,7 @@
 import torch
 import logging
 import contextlib
+import os
 import comfy.model_management
 from comfy.cli_args import args, PerformanceFeature
 import comfy.float
@@ -906,6 +907,48 @@ from .quant_ops import (
     get_layout_class,
 )
 
+INT8_DEQUANT_SMALL_M = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_M", "1"))
+INT8_DEQUANT_SMALL_MIN_DIM = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_MIN_DIM", "2048"))
+INT8_DEQUANT_SMALL_ENABLED = os.environ.get("COMFY_INT8_DEQUANT_SMALL", "1").lower() not in {"0", "false", "no", "off"}
+
+
+def _use_cached_int8_dequant_linear(module, input, weight):
+    if not INT8_DEQUANT_SMALL_ENABLED:
+        return False
+    if getattr(module, "quant_format", None) != "int8_tensorwise":
+        return False
+    if not isinstance(weight, QuantizedTensor):
+        return False
+    params = getattr(weight, "_params", None)
+    if not getattr(params, "convrot", False):
+        return False
+    if input.ndim < 2 or input.shape[-1] <= 0:
+        return False
+    rows = input.numel() // input.shape[-1]
+    if rows > INT8_DEQUANT_SMALL_M:
+        return False
+    shape = tuple(weight.shape)
+    if len(shape) != 2 or min(shape) > INT8_DEQUANT_SMALL_MIN_DIM:
+        return False
+    return True
+
+
+def _cached_int8_dequant_weight(module, weight, dtype):
+    params = weight._params
+    key = (
+        weight.device,
+        dtype,
+        tuple(weight.shape),
+        getattr(params, "convrot", False),
+        getattr(params, "convrot_groupsize", None),
+    )
+    cache = getattr(module, "_int8_dequant_weight_cache", None)
+    if cache is not None and cache[0] == key:
+        return cache[1]
+    dequant = weight.to(dtype=dtype).dequantize().contiguous()
+    module._int8_dequant_weight_cache = (key, dequant)
+    return dequant
+
 
 class QuantLinearFunc(torch.autograd.Function):
     """Custom autograd function for quantized linear: quantized forward, optionally FP8 backward.
@@ -1008,6 +1051,8 @@ class QuantLinearFunc(torch.autograd.Function):
 
 def _quantized_apply(module, fn, recurse=True):
     """Re-wrap Parameters after fn so .to()/.cuda() propagate through QuantizedTensor weights."""
+    if hasattr(module, "_int8_dequant_weight_cache"):
+        delattr(module, "_int8_dequant_weight_cache")
     if recurse:
         for child in module.children():
             child._apply(fn)
@@ -1218,7 +1263,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         compute_dtype=compute_dtype,
                         want_requant=want_requant,
                     )
-                    weight = weight.to(dtype=input.dtype)
+                    if _use_cached_int8_dequant_linear(self, input, weight):
+                        weight = _cached_int8_dequant_weight(self, weight, input.dtype)
+                    else:
+                        weight = weight.to(dtype=input.dtype)
                 else:
                     weight, bias, offload_stream = cast_bias_weight(
                         self,
@@ -1314,6 +1362,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     return weight
 
                 assert inplace_update is False  # TODO: eventually remove the inplace_update stuff
+                if hasattr(self, "_int8_dequant_weight_cache"):
+                    delattr(self, "_int8_dequant_weight_cache")
                 self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
             def _apply(self, fn, recurse=True):  # This is to get torch.compile + moving weights to another device working
