@@ -11,10 +11,12 @@ try:
         TensorCoreFP8Layout as _CKFp8Layout,
         TensorCoreNVFP4Layout as _CKNvfp4Layout,
         TensorWiseINT8Layout as _CKTensorWiseINT8Layout,
+        dequantize_args,
         register_layout_op,
         register_layout_class,
         get_layout_class,
     )
+    from comfy_kitchen.tensor.fp8 import _handle_fp8_linear as _ck_handle_fp8_linear
     _CK_AVAILABLE = True
     if torch.version.cuda is None:
         ck.registry.disable("cuda")
@@ -56,6 +58,12 @@ except ImportError as e:
 
     def get_layout_class(name):
         return None
+
+    def dequantize_args(args):
+        return args
+
+    def _ck_handle_fp8_linear(qt, args, kwargs):
+        return torch.nn.functional.linear(*args, **kwargs)
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -192,6 +200,25 @@ register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
 register_layout_class("TensorWiseINT8Layout", _CKTensorWiseINT8Layout)
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
+
+
+def _handle_comfy_fp8_linear(qt, args, kwargs):
+    input_tensor, weight = args[0], args[1]
+    bias = args[2] if len(args) > 2 else None
+    if (
+        isinstance(input_tensor, QuantizedTensor)
+        and isinstance(weight, QuantizedTensor)
+        and (
+            not input_tensor.layout_cls.supports_fast_matmul()
+            or not weight.layout_cls.supports_fast_matmul()
+        )
+    ):
+        return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
+    return _ck_handle_fp8_linear(qt, args, kwargs)
+
+
+register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E4M3Layout)(_handle_comfy_fp8_linear)
+register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E5M2Layout)(_handle_comfy_fp8_linear)
 
 QUANT_ALGOS = {
     "float8_e4m3fn": {
