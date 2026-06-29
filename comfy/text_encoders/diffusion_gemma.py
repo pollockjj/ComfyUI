@@ -649,7 +649,7 @@ class DiffusionGenerate:
             desc="Generating tokens",
             unit="it",
             smoothing=0,
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, est {rate_fmt}]",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
         )
         past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
         _, _, past_key_values = self.model(None, embeds=embeds, past_key_values=past_key_values,
@@ -721,7 +721,6 @@ class DiffusionGenerate:
 
         output_tokens = len(generated_token_ids)
         pbar.update_absolute(output_tokens, max_length)
-        tq.bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
         tq.n = output_tokens
         tq.refresh()
         tq.close()
