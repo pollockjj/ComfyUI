@@ -598,7 +598,7 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
         return dit_config
 
-    if "{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix) in state_dict_keys and state_dict["{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix)].shape[1] == 3072: # seedvr2 7b
+    if "{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix) in state_dict_keys and (state_dict["{}blocks.35.mlp.vid.proj_in.weight".format(key_prefix)].shape[1] == 3072 or "{}blocks.35.mlp.vid.proj_in.comfy_quant".format(key_prefix) in state_dict_keys): # seedvr2 7b, shape check bypassed for quantized weights whose packed storage width differs
         dit_config = {}
         dit_config["image_model"] = "seedvr2"
         dit_config["vid_dim"] = 3072
