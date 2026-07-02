@@ -1493,12 +1493,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if layer_conf is not None:
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
-                # Only fp8 makes sense for embeddings (per-row dequant via index select).
-                # Block-scaled formats (NVFP4, MXFP8) can't do per-row lookup efficiently.
+                # fp8 (scalar scale) and tensor-wise int8 (per-row scale, row-local convrot)
+                # dequantize per looked-up row. Block-scaled formats (NVFP4, MXFP8) can't
+                # do per-row lookup efficiently.
                 quant_format = layer_conf.get("format") if layer_conf is not None else None
                 manually_loaded_keys = []
 
-                if quant_format in ("float8_e4m3fn", "float8_e5m2") and weight_key in state_dict:
+                if quant_format in ("float8_e4m3fn", "float8_e5m2", "int8_tensorwise") and weight_key in state_dict:
                     self.quant_format = quant_format
                     qconfig = QUANT_ALGOS[quant_format]
                     self.layout_type = qconfig["comfy_tensor_layout"]
@@ -1512,8 +1513,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         scale = scale.float()
                         manually_loaded_keys.append(scale_key)
 
+                    scales = {"scale": scale if scale is not None else torch.ones((), dtype=torch.float32)}
+                    if quant_format == "int8_tensorwise" and layer_conf.get("convrot", False):
+                        scales["convrot"] = True
+                        scales["convrot_groupsize"] = int(layer_conf.get("convrot_groupsize", 256))
+
                     params = layout_cls.Params(
-                        scale=scale if scale is not None else torch.ones((), dtype=torch.float32),
+                        **scales,
                         orig_dtype=MixedPrecisionOps._compute_dtype,
                         orig_shape=(self.num_embeddings, self.embedding_dim),
                     )
@@ -1537,13 +1543,15 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def forward_comfy_cast_weights(self, input, out_dtype=None):
                 weight = self.weight
 
-                # Optimized path: lookup in fp8, dequantize only the selected rows.
+                # Optimized path: lookup in the storage dtype, dequantize only the selected rows.
                 if isinstance(weight, QuantizedTensor) and len(self.weight_function) == 0:
                     qdata, _, offload_stream = cast_bias_weight(self, device=input.device, dtype=weight.dtype, offloadable=True)
                     if isinstance(qdata, QuantizedTensor):
-                        scale = qdata._params.scale
+                        qparams = qdata._params
+                        scale = qparams.scale
                         qdata = qdata._qdata
                     else:
+                        qparams = None
                         scale = None
 
                     x = torch.nn.functional.embedding(
@@ -1551,6 +1559,20 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         self.norm_type, self.scale_grad_by_freq, self.sparse)
                     uncast_bias_weight(self, qdata, None, offload_stream)
                     target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
+                    if getattr(self, "quant_format", None) == "int8_tensorwise" and qparams is not None:
+                        # Per-row scale gathers with the rows; convrot inverse rotation is
+                        # row-local so the selected rows dequantize as a batch.
+                        layout_cls = get_layout_class(self.layout_type)
+                        row_scale = torch.nn.functional.embedding(input, scale.to(device=x.device))
+                        flat = x.reshape(-1, x.shape[-1])
+                        dq = layout_cls.dequantize(flat, type(qparams)(
+                            scale=row_scale.reshape(-1, 1),
+                            convrot=qparams.convrot,
+                            convrot_groupsize=qparams.convrot_groupsize,
+                            orig_dtype=target_dtype,
+                            orig_shape=tuple(flat.shape),
+                        ))
+                        return dq.reshape(x.shape)
                     x = x.to(dtype=target_dtype)
                     if scale is not None and scale != 1.0:
                         x = x * scale.to(dtype=target_dtype)
