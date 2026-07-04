@@ -481,7 +481,7 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             chunk_latent_max = max(1, int(budget_gb / (SEEDVR2_CHUNK_GIB_PER_MPX_FRAME * mpx_per_frame)))
             frames_per_chunk = min(4 * (chunk_latent_max - 1) + 1, t_pixel)
             logging.info(
-                "SeedVR2TemporalChunk auto: free=%.2fGB, %.2fMpx -> frames_per_chunk=%d (t_pixel=%d).",
+                "SeedVR2TemporalChunk auto: free=%.2fGiB, %.2fMpx -> frames_per_chunk=%d (t_pixel=%d).",
                 free_gb, mpx_per_frame, frames_per_chunk, t_pixel,
             )
         elif frames_per_chunk < 1 or (frames_per_chunk - 1) % 4 != 0:
