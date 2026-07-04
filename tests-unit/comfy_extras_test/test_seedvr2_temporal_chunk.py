@@ -12,9 +12,9 @@ if not torch.cuda.is_available():
 import comfy.model_management  # noqa: E402
 from comfy_extras.nodes_seedvr import SeedVR2TemporalChunk, SeedVR2TemporalMerge, _seedvr2_chunk_crossfade_weights  # noqa: E402
 
-def _latent(t_latent, h=8, w=8):
+def _latent(t_latent, h=8, w=8, b=1):
     g = torch.Generator().manual_seed(7)
-    return {"samples": torch.randn(1, SEEDVR2_LATENT_CHANNELS, t_latent, h, w, generator=g)}
+    return {"samples": torch.randn(b, SEEDVR2_LATENT_CHANNELS, t_latent, h, w, generator=g)}
 
 def _split(latent, frames_per_chunk, temporal_overlap, chunking_mode="manual"):
     return SeedVR2TemporalChunk.execute(latent, frames_per_chunk, temporal_overlap, chunking_mode).args
@@ -35,6 +35,8 @@ def test_chunk_temporal_windows_and_validation():
     assert overlap == 2 and [c["samples"].shape[2] for c in chunks] == [6, 6, 5]
     assert all(torch.equal(c["samples"], latent["samples"][:, :, s:e]) for c, (s, e) in zip(chunks, [(0, 6), (4, 10), (8, 13)]))
     assert [c["noise_mask"].shape[2] for c in chunks] == [6, 6, 5]
+    latent["noise_mask"] = torch.rand(13, 1, 8, 8)  # temporal 4-D mask: leading dim is T
+    assert [c["noise_mask"].shape[0] for c in _split(latent, 21, 2)[0]] == [6, 6, 5]
     assert len(_split(_latent(13), 21, 999)[0]) == 8  # overlap clamps to chunk_latent-1 -> step=1
     assert (r := _split(_latent(5), 21, 3)) and len(r[0]) == 1 and r[1] == 0  # t_pixel <= 21: passthrough
 
@@ -42,6 +44,7 @@ def test_chunk_auto_mode_applies_vram_law(monkeypatch):
     monkeypatch.setattr(comfy.model_management, "get_free_memory", lambda dev=None: 10.8 * (1024 ** 3))
     # budget = 10.8 - 8.5 - 4*0.55 = 0.1 GiB; 32x32 latent = 0.0655 Mpx -> chunk_latent = 5
     assert [c["samples"].shape[2] for c in _split(_latent(13, h=32, w=32), 1, 0, "auto")[0]] == [5, 5, 3]
+    assert _split(_latent(13, h=32, w=32, b=2), 1, 0, "auto")[0][0]["samples"].shape[2] == 2  # batch halves the chunk
 
 def test_merge_crossfade_and_reassembly():
     latent = _latent(13)

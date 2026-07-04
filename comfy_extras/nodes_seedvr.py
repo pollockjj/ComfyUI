@@ -429,7 +429,7 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             node_id="SeedVR2TemporalChunk",
             display_name="Chunk SeedVR2 Latent",
             category="model/latent/batch",
-            description="Split a SeedVR2 video latent into overlapping temporal chunks small enough to sample one at a time within VRAM. Recombine the sampled chunks with Merge SeedVR2 Latent Chunks using the same temporal_overlap.",
+            description="Split a SeedVR2 video latent into overlapping temporal chunks small enough to sample one at a time within VRAM. Wire latent_chunks to both Apply SeedVR2 Conditioning and the sampler's latent input, then recombine the sampled chunks with Merge SeedVR2 Latent Chunks.",
             search_aliases=["seedvr2", "chunk", "temporal", "video upscale", "rebatch"],
             inputs=[
                 io.Latent.Input("latent", tooltip="The VAE-encoded SeedVR2 latent to split."),
@@ -476,13 +476,13 @@ class SeedVR2TemporalChunk(io.ComfyNode):
         if chunking_mode == "auto":
             free_gb = comfy.model_management.get_free_memory(
                 comfy.model_management.get_torch_device()) / (1024 ** 3)
-            area_mpx = (samples.shape[3] * samples.shape[4]) * (BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE ** 2) / 1e6
+            mpx_per_frame = (samples.shape[0] * samples.shape[3] * samples.shape[4]) * (BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE ** 2) / 1e6
             budget_gb = free_gb - SEEDVR2_CHUNK_RESERVED_GIB - SEEDVR2_CHUNK_SIGMA_K * SEEDVR2_CHUNK_SIGMA_GIB
-            chunk_latent_max = max(1, int(budget_gb / (SEEDVR2_CHUNK_GIB_PER_MPX_FRAME * area_mpx)))
+            chunk_latent_max = max(1, int(budget_gb / (SEEDVR2_CHUNK_GIB_PER_MPX_FRAME * mpx_per_frame)))
             frames_per_chunk = min(4 * (chunk_latent_max - 1) + 1, t_pixel)
             logging.info(
                 "SeedVR2TemporalChunk auto: free=%.2fGB, %.2fMpx -> frames_per_chunk=%d (t_pixel=%d).",
-                free_gb, area_mpx, frames_per_chunk, t_pixel,
+                free_gb, mpx_per_frame, frames_per_chunk, t_pixel,
             )
         elif frames_per_chunk < 1 or (frames_per_chunk - 1) % 4 != 0:
             raise ValueError(
@@ -497,16 +497,23 @@ class SeedVR2TemporalChunk(io.ComfyNode):
         temporal_overlap = min(temporal_overlap, chunk_latent - 1)
         step = chunk_latent - temporal_overlap
 
+        # reshape_mask collapses the leading dims of sub-5-D masks into the temporal
+        # axis for video latents, so temporal masks are sliced on that axis here.
         noise_mask = latent.get("noise_mask", None)
-        slice_mask = noise_mask is not None and noise_mask.ndim == 5 and noise_mask.shape[2] == t_latent
+        mask_t_dim = None
+        if noise_mask is not None:
+            if noise_mask.ndim == 5 and noise_mask.shape[2] == t_latent:
+                mask_t_dim = 2
+            elif noise_mask.ndim in (3, 4) and noise_mask.shape[0] == t_latent:
+                mask_t_dim = 0
 
         chunks = []
         for start in range(0, t_latent, step):
             end = min(start + chunk_latent, t_latent)
             chunk = latent.copy()
             chunk["samples"] = samples[:, :, start:end].contiguous()
-            if slice_mask:
-                chunk["noise_mask"] = noise_mask[:, :, start:end].contiguous()
+            if mask_t_dim is not None:
+                chunk["noise_mask"] = noise_mask.narrow(mask_t_dim, start, end - start).contiguous()
             chunks.append(chunk)
             if end >= t_latent:
                 break
