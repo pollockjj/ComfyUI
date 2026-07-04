@@ -1,5 +1,12 @@
 """SeedVR2 constants."""
 
+# Temporal chunk-size law: frames_per_chunk = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_GB - SEEDVR2_CHUNK_GB_MARGIN),
+# rounded to the 4n+1 grid. Linear fit of measured max chunk frames vs free VRAM
+# (RTX 5090, validated on RTX 4070; 3b and 7b). Resolution-independent: the VAE
+# tiling sets the wall, not the DiT.
+SEEDVR2_CHUNK_FRAMES_PER_GB = 4
+SEEDVR2_CHUNK_GB_MARGIN = 3
+
 SEEDVR2_7B_VID_DIM = 3072
 SEEDVR2_OOM_BACKOFF_DIVISOR = 2
 SEEDVR2_DTYPE_BYTES_FLOOR = 4
