@@ -440,6 +440,8 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             outputs=[
                 io.Latent.Output(display_name="latent_chunks", is_output_list=True,
                                  tooltip="The temporal chunks in sequence order."),
+                io.Int.Output(display_name="temporal_overlap",
+                              tooltip="The effective latent-frame overlap between adjacent chunks, for Merge SeedVR2 Latent Chunks."),
             ],
         )
 
@@ -480,10 +482,11 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             )
 
         if t_pixel <= frames_per_chunk:
-            return io.NodeOutput([latent])
+            return io.NodeOutput([latent], 0)
 
         chunk_latent = (frames_per_chunk - 1) // 4 + 1
-        step = chunk_latent - min(temporal_overlap, chunk_latent - 1)
+        temporal_overlap = min(temporal_overlap, chunk_latent - 1)
+        step = chunk_latent - temporal_overlap
 
         noise_mask = latent.get("noise_mask", None)
         slice_mask = noise_mask is not None and noise_mask.ndim == 5 and noise_mask.shape[2] == t_latent
@@ -498,7 +501,7 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             chunks.append(chunk)
             if end >= t_latent:
                 break
-        return io.NodeOutput(chunks)
+        return io.NodeOutput(chunks, temporal_overlap)
 
 
 class SeedVR2TemporalMerge(io.ComfyNode):
@@ -509,12 +512,12 @@ class SeedVR2TemporalMerge(io.ComfyNode):
             display_name="Merge SeedVR2 Latent Chunks",
             category="model/latent/batch",
             is_input_list=True,
-            description="Recombine sampled SeedVR2 temporal chunks into one latent, crossfading each overlap with a Hann window. Use the same temporal_overlap as Chunk SeedVR2 Latent.",
+            description="Recombine sampled SeedVR2 temporal chunks into one latent, crossfading each overlap with a Hann window. Wire temporal_overlap from Chunk SeedVR2 Latent.",
             search_aliases=["seedvr2", "merge", "temporal", "hann", "crossfade"],
             inputs=[
                 io.Latent.Input("latent_chunks", tooltip="The sampled temporal chunks in sequence order."),
-                io.Int.Input("temporal_overlap", default=0, min=0, max=16384,
-                             tooltip="Latent frames shared between adjacent chunks; must match the chunk node. 0 = plain concatenation."),
+                io.Int.Input("temporal_overlap", default=0, min=0, max=16384, force_input=True,
+                             tooltip="The temporal_overlap output of Chunk SeedVR2 Latent. 0 = plain concatenation."),
             ],
             outputs=[
                 io.Latent.Output(display_name="latent", tooltip="The recombined full-length latent."),

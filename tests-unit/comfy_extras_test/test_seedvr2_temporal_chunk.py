@@ -24,7 +24,7 @@ def _latent(t_latent, b=1, h=8, w=8):
 
 def _split(latent, frames_per_chunk, temporal_overlap, chunking_mode="manual"):
     return SeedVR2TemporalChunk.execute(
-        latent, frames_per_chunk, temporal_overlap, chunking_mode).args[0]
+        latent, frames_per_chunk, temporal_overlap, chunking_mode).args
 
 
 def _merge(chunks, temporal_overlap):
@@ -43,8 +43,9 @@ def test_chunk_rejects_non_5d_latent():
 
 def test_chunk_windows_match_source_slices():
     latent = _latent(13)
-    chunks = _split(latent, 21, 2)  # chunk_latent=6, step=4 -> [0:6], [4:10], [8:13]
+    chunks, overlap = _split(latent, 21, 2)  # chunk_latent=6, step=4 -> [0:6], [4:10], [8:13]
     src = latent["samples"]
+    assert overlap == 2
     assert [c["samples"].shape[2] for c in chunks] == [6, 6, 5]
     assert torch.equal(chunks[0]["samples"], src[:, :, 0:6])
     assert torch.equal(chunks[1]["samples"], src[:, :, 4:10])
@@ -53,13 +54,15 @@ def test_chunk_windows_match_source_slices():
 
 def test_chunk_short_sequence_passes_through():
     latent = _latent(5)  # t_pixel=17 <= 21
-    chunks = _split(latent, 21, 0)
+    chunks, overlap = _split(latent, 21, 3)
     assert len(chunks) == 1
+    assert overlap == 0
     assert torch.equal(chunks[0]["samples"], latent["samples"])
 
 
 def test_chunk_overlap_clamps_to_chunk_length():
-    chunks = _split(_latent(13), 21, 999)  # clamps to chunk_latent-1 -> step=1
+    chunks, overlap = _split(_latent(13), 21, 999)  # clamps to chunk_latent-1 -> step=1
+    assert overlap == 5
     assert len(chunks) == 8
     assert all(c["samples"].shape[2] == 6 for c in chunks)
 
@@ -67,16 +70,16 @@ def test_chunk_overlap_clamps_to_chunk_length():
 def test_chunk_slices_temporal_noise_mask_only():
     latent = _latent(13)
     latent["noise_mask"] = torch.rand(1, 1, 13, 8, 8)
-    chunks = _split(latent, 21, 0)
+    chunks, _ = _split(latent, 21, 0)
     assert [c["noise_mask"].shape[2] for c in chunks] == [6, 6, 1]
     latent["noise_mask"] = torch.rand(1, 1, 8, 8)
-    chunks = _split(latent, 21, 0)
+    chunks, _ = _split(latent, 21, 0)
     assert all(c["noise_mask"].shape == (1, 1, 8, 8) for c in chunks)
 
 
 def test_chunk_auto_mode_applies_vram_law(monkeypatch):
     monkeypatch.setattr(comfy.model_management, "get_free_memory", lambda dev=None: 11 * (1024 ** 3))
-    chunks = _split(_latent(13), 1, 0, "auto")  # 4*(11-3)=32 -> 33 frames -> chunk_latent=9
+    chunks, _ = _split(_latent(13), 1, 0, "auto")  # 4*(11-3)=32 -> 33 frames -> chunk_latent=9
     assert [c["samples"].shape[2] for c in chunks] == [9, 4]
 
 
@@ -92,34 +95,38 @@ def test_crossfade_weights_descend_from_one_to_zero():
 
 def test_merge_zero_overlap_is_exact_concat():
     latent = _latent(13)
-    merged = _merge(_split(latent, 21, 0), 0)
+    chunks, overlap = _split(latent, 21, 0)
+    merged = _merge(chunks, overlap)
     assert torch.equal(merged["samples"], latent["samples"])
 
 
 def test_merge_round_trips_overlapping_split():
     latent = _latent(13)
-    merged = _merge(_split(latent, 21, 3), 3)
+    chunks, overlap = _split(latent, 21, 3)
+    merged = _merge(chunks, overlap)
     assert merged["samples"].shape == latent["samples"].shape
     assert torch.allclose(merged["samples"], latent["samples"], atol=1e-6)
 
 
 def test_merge_single_chunk_passes_through():
     latent = _latent(5)
-    merged = _merge(_split(latent, 21, 0), 0)
+    chunks, overlap = _split(latent, 21, 0)
+    merged = _merge(chunks, overlap)
     assert torch.equal(merged["samples"], latent["samples"])
 
 
 def test_merge_rejects_short_mid_chunk():
-    chunks = _split(_latent(13), 21, 2)
+    chunks, overlap = _split(_latent(13), 21, 2)
     chunks[0]["samples"] = chunks[0]["samples"][:, :, :4]
     with pytest.raises(ValueError, match="only the final chunk may be shorter"):
-        _merge(chunks, 2)
+        _merge(chunks, overlap)
 
 
 def test_merge_drops_sliced_mask_keeps_batch_index():
     latent = _latent(13)
     latent["noise_mask"] = torch.rand(1, 1, 13, 8, 8)
     latent["batch_index"] = [0]
-    merged = _merge(_split(latent, 21, 0), 0)
+    chunks, overlap = _split(latent, 21, 0)
+    merged = _merge(chunks, overlap)
     assert "noise_mask" not in merged
     assert merged["batch_index"] == [0]
