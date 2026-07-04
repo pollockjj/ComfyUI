@@ -465,6 +465,11 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             raise ValueError(
                 f"SeedVR2TemporalChunk: temporal_overlap must be >= 0; got {temporal_overlap}."
             )
+        if chunking_mode not in ("auto", "manual"):
+            raise ValueError(
+                f"SeedVR2TemporalChunk: chunking_mode must be 'auto' or 'manual'; "
+                f"got {chunking_mode!r}."
+            )
         t_latent = samples.shape[2]
         t_pixel = 4 * (t_latent - 1) + 1
 

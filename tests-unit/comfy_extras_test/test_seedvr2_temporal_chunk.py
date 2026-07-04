@@ -85,6 +85,21 @@ def test_chunk_auto_mode_applies_vram_law(monkeypatch):
     assert [c["samples"].shape[2] for c in chunks] == [5, 5, 3]
 
 
+def test_chunk_rejects_unknown_chunking_mode():
+    with pytest.raises(ValueError, match="chunking_mode"):
+        _split(_latent(13), 21, 0, "adaptive")
+
+
+def test_merge_crossfade_favors_previous_chunk_first():
+    ones = {"samples": torch.ones(1, SEEDVR2_LATENT_CHANNELS, 6, 8, 8)}
+    zeros = {"samples": torch.zeros(1, SEEDVR2_LATENT_CHANNELS, 6, 8, 8)}
+    merged = _merge([ones, zeros], 3)["samples"]
+    w = _seedvr2_chunk_crossfade_weights(3, merged.device, merged.dtype)
+    assert torch.equal(merged[:, :, :3], torch.ones(1, SEEDVR2_LATENT_CHANNELS, 3, 8, 8))
+    assert torch.equal(merged[:, :, 3:6], w.view(1, 1, 3, 1, 1).expand(1, SEEDVR2_LATENT_CHANNELS, 3, 8, 8))
+    assert torch.equal(merged[:, :, 6:], torch.zeros(1, SEEDVR2_LATENT_CHANNELS, 3, 8, 8))
+
+
 def test_crossfade_weights_descend_from_one_to_zero():
     w = _seedvr2_chunk_crossfade_weights(7, torch.device("cpu"), torch.float32)
     assert w[0] == 1.0 and w[-1] == 0.0
