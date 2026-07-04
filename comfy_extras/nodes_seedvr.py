@@ -11,9 +11,12 @@ from comfy.ldm.seedvr.color_fix import (
     wavelet_color_transfer,
 )
 from comfy.ldm.seedvr.constants import (
+    BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE,
     SEEDVR2_ADAIN_SCALE_MULTIPLIER,
-    SEEDVR2_CHUNK_FRAMES_PER_GB,
-    SEEDVR2_CHUNK_GB_MARGIN,
+    SEEDVR2_CHUNK_GIB_PER_MPX_FRAME,
+    SEEDVR2_CHUNK_RESERVED_GIB,
+    SEEDVR2_CHUNK_SIGMA_GIB,
+    SEEDVR2_CHUNK_SIGMA_K,
     SEEDVR2_COLOR_MEM_HEADROOM,
     SEEDVR2_DTYPE_BYTES_FLOOR,
     SEEDVR2_LAB_SCALE_MULTIPLIER,
@@ -468,12 +471,13 @@ class SeedVR2TemporalChunk(io.ComfyNode):
         if chunking_mode == "auto":
             free_gb = comfy.model_management.get_free_memory(
                 comfy.model_management.get_torch_device()) / (1024 ** 3)
-            predicted = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_gb - SEEDVR2_CHUNK_GB_MARGIN)
-            # round (not floor): the fit's center, not its floor, matches the largest chunk that samples without OOM
-            frames_per_chunk = max(1, min(4 * int(round((predicted - 1) / 4)) + 1, t_pixel))
+            area_mpx = (samples.shape[3] * samples.shape[4]) * (BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE ** 2) / 1e6
+            budget_gb = free_gb - SEEDVR2_CHUNK_RESERVED_GIB - SEEDVR2_CHUNK_SIGMA_K * SEEDVR2_CHUNK_SIGMA_GIB
+            chunk_latent_max = max(1, int(budget_gb / (SEEDVR2_CHUNK_GIB_PER_MPX_FRAME * area_mpx)))
+            frames_per_chunk = min(4 * (chunk_latent_max - 1) + 1, t_pixel)
             logging.info(
-                "SeedVR2TemporalChunk auto: free=%.2fGB -> frames_per_chunk=%d (t_pixel=%d).",
-                free_gb, frames_per_chunk, t_pixel,
+                "SeedVR2TemporalChunk auto: free=%.2fGB, %.2fMpx -> frames_per_chunk=%d (t_pixel=%d).",
+                free_gb, area_mpx, frames_per_chunk, t_pixel,
             )
         elif frames_per_chunk < 1 or (frames_per_chunk - 1) % 4 != 0:
             raise ValueError(

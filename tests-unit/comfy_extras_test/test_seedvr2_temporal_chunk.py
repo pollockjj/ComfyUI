@@ -78,9 +78,11 @@ def test_chunk_slices_temporal_noise_mask_only():
 
 
 def test_chunk_auto_mode_applies_vram_law(monkeypatch):
-    monkeypatch.setattr(comfy.model_management, "get_free_memory", lambda dev=None: 11 * (1024 ** 3))
-    chunks, _ = _split(_latent(13), 1, 0, "auto")  # 4*(11-3)=32 -> 33 frames -> chunk_latent=9
-    assert [c["samples"].shape[2] for c in chunks] == [9, 4]
+    monkeypatch.setattr(comfy.model_management, "get_free_memory", lambda dev=None: 10.8 * (1024 ** 3))
+    # budget = 10.8 - 8.5 - 4*0.55 = 0.1 GiB; 32x32 latent = 0.0655 Mpx -> 0.0197 GiB
+    # per latent frame -> chunk_latent = 5
+    chunks, _ = _split(_latent(13, h=32, w=32), 1, 0, "auto")
+    assert [c["samples"].shape[2] for c in chunks] == [5, 5, 3]
 
 
 def test_crossfade_weights_descend_from_one_to_zero():
