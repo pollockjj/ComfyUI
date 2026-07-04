@@ -30,13 +30,9 @@ def test_chunk_temporal_windows_and_validation():
     with pytest.raises(ValueError, match="chunking_mode"):
         _split(_latent(13), 21, 0, "adaptive")
     latent = _latent(13)
-    latent["noise_mask"] = torch.rand(1, 1, 13, 8, 8)
     chunks, overlap = _split(latent, 21, 2)  # chunk_latent=6, step=4 -> [0:6], [4:10], [8:13]
     assert overlap == 2 and [c["samples"].shape[2] for c in chunks] == [6, 6, 5]
     assert all(torch.equal(c["samples"], latent["samples"][:, :, s:e]) for c, (s, e) in zip(chunks, [(0, 6), (4, 10), (8, 13)]))
-    assert [c["noise_mask"].shape[2] for c in chunks] == [6, 6, 5]
-    latent["noise_mask"] = torch.rand(13, 1, 8, 8)  # temporal 4-D mask: leading dim is T
-    assert [c["noise_mask"].shape[0] for c in _split(latent, 21, 2)[0]] == [6, 6, 5]
     assert len(_split(_latent(13), 21, 999)[0]) == 8  # overlap clamps to chunk_latent-1 -> step=1
     assert (r := _split(_latent(5), 21, 3)) and len(r[0]) == 1 and r[1] == 0  # t_pixel <= 21: passthrough
 

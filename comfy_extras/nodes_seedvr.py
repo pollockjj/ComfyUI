@@ -414,9 +414,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         return io.NodeOutput(positive, negative)
 
 def _seedvr2_chunk_crossfade_weights(overlap, device, dtype):
-    """Descending weights for the previous chunk across the overlap (current chunk gets
-    ``1 - w``): a Hann fade over the middle third of the window with flat shoulders on
-    the outer thirds."""
+    """Descending previous-chunk weights across the overlap (next chunk gets ``1 - w``): a Hann fade over the middle third, flat shoulders on the outer thirds."""
     ramp = torch.linspace(0.0, 1.0, steps=overlap, device=device, dtype=dtype)
     ramp = ((ramp - 1.0 / 3.0) / (1.0 / 3.0)).clamp(0.0, 1.0)
     return 0.5 + 0.5 * torch.cos(torch.pi * ramp)
@@ -429,7 +427,7 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             node_id="SeedVR2TemporalChunk",
             display_name="Chunk SeedVR2 Latent",
             category="model/latent/batch",
-            description="Split a SeedVR2 video latent into overlapping temporal chunks small enough to sample one at a time within VRAM. Wire latent_chunks to both Apply SeedVR2 Conditioning and the sampler's latent input, then recombine the sampled chunks with Merge SeedVR2 Latent Chunks.",
+            description="Split a SeedVR2 video latent into overlapping temporal chunks small enough to sample one at a time within VRAM, wiring latent_chunks to both Apply SeedVR2 Conditioning and the sampler latent input before recombining with Merge SeedVR2 Latent Chunks.",
             search_aliases=["seedvr2", "chunk", "temporal", "video upscale", "rebatch"],
             inputs=[
                 io.Latent.Input("latent", tooltip="The VAE-encoded SeedVR2 latent to split."),
@@ -497,23 +495,11 @@ class SeedVR2TemporalChunk(io.ComfyNode):
         temporal_overlap = min(temporal_overlap, chunk_latent - 1)
         step = chunk_latent - temporal_overlap
 
-        # reshape_mask collapses the leading dims of sub-5-D masks into the temporal
-        # axis for video latents, so temporal masks are sliced on that axis here.
-        noise_mask = latent.get("noise_mask", None)
-        mask_t_dim = None
-        if noise_mask is not None:
-            if noise_mask.ndim == 5 and noise_mask.shape[2] == t_latent:
-                mask_t_dim = 2
-            elif noise_mask.ndim in (3, 4) and noise_mask.shape[0] == t_latent:
-                mask_t_dim = 0
-
         chunks = []
         for start in range(0, t_latent, step):
             end = min(start + chunk_latent, t_latent)
             chunk = latent.copy()
             chunk["samples"] = samples[:, :, start:end].contiguous()
-            if mask_t_dim is not None:
-                chunk["noise_mask"] = noise_mask.narrow(mask_t_dim, start, end - start).contiguous()
             chunks.append(chunk)
             if end >= t_latent:
                 break
@@ -528,7 +514,7 @@ class SeedVR2TemporalMerge(io.ComfyNode):
             display_name="Merge SeedVR2 Latent Chunks",
             category="model/latent/batch",
             is_input_list=True,
-            description="Recombine sampled SeedVR2 temporal chunks into one latent, crossfading each overlap with a Hann window. Wire temporal_overlap from Chunk SeedVR2 Latent.",
+            description="Recombine sampled SeedVR2 temporal chunks into one latent, crossfading each overlap with a Hann window sized by the temporal_overlap wired from Chunk SeedVR2 Latent.",
             search_aliases=["seedvr2", "merge", "temporal", "hann", "crossfade"],
             inputs=[
                 io.Latent.Input("latent_chunks", tooltip="The sampled temporal chunks in sequence order."),
