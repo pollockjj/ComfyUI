@@ -469,8 +469,8 @@ class SeedVR2TemporalChunk(io.ComfyNode):
             free_gb = comfy.model_management.get_free_memory(
                 comfy.model_management.get_torch_device()) / (1024 ** 3)
             predicted = SEEDVR2_CHUNK_FRAMES_PER_GB * (free_gb - SEEDVR2_CHUNK_GB_MARGIN)
-            # floor: with no OOM retry downstream, a miss must land low, never high
-            frames_per_chunk = max(1, min(4 * int((predicted - 1) // 4) + 1, t_pixel))
+            # round (not floor): the fit's center, not its floor, matches the largest chunk that samples without OOM
+            frames_per_chunk = max(1, min(4 * int(round((predicted - 1) / 4)) + 1, t_pixel))
             logging.info(
                 "SeedVR2TemporalChunk auto: free=%.2fGB -> frames_per_chunk=%d (t_pixel=%d).",
                 free_gb, frames_per_chunk, t_pixel,
