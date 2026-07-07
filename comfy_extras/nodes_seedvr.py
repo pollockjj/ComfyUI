@@ -436,11 +436,11 @@ class SeedVR2TemporalChunk(io.ComfyNode):
                 io.DynamicCombo.Input("chunking_mode",
                                       tooltip="manual = use frames_per_chunk exactly; auto = predict the largest chunk that fits free VRAM.",
                                       options=[
+                                          io.DynamicCombo.Option("auto", []),
                                           io.DynamicCombo.Option("manual", [
                                               io.Int.Input("frames_per_chunk", default=21, min=1, max=16384, step=4,
                                                            tooltip="Pixel frames per temporal chunk (4n+1: 1, 5, 9, 13, ...)."),
                                           ]),
-                                          io.DynamicCombo.Option("auto", []),
                                       ]),
             ],
             outputs=[
