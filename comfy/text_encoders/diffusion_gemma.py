@@ -117,7 +117,7 @@ class DiffusionGemmaAttention(nn.Module):
                 if len(past_key_value) == 4:
                     past_key, past_value, cumulative_len, cache_len = past_key_value
                     next_cache_len = cache_len + seq_length
-                    if past_key.shape[2] != past_value.shape[2] or cache_len > past_key.shape[2]:
+                    if past_key.shape[2] != past_value.shape[2] or cache_len < 0 or cache_len > past_key.shape[2]:
                         raise RuntimeError("DiffusionGemma KV cache metadata is invalid")
                     if next_cache_len == past_key.shape[2]:
                         past_key[:, :, cache_len:next_cache_len].copy_(xk)
