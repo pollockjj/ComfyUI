@@ -1480,6 +1480,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 }
                 if hasattr(params, "block_scale"): # NVFP4
                     kwargs["block_scale"] = params.block_scale[i]
+                if getattr(params, "convrot", False): # INT8 convrot
+                    kwargs["convrot"] = True
+                    kwargs["convrot_groupsize"] = params.convrot_groupsize
                 return QuantizedTensor(weight._qdata[i], weight._layout_cls, type(params)(**kwargs))
 
             def state_dict(self, *args, destination=None, prefix="", **kwargs):
