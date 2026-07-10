@@ -997,10 +997,6 @@ class DiffusionGenerate:
             device.type == "cuda"
             and torch.version.hip is None
             and torch.cuda.get_device_capability(device) == (12, 0)
-            and all(
-                layer.experts._has_fused_nvfp4_banks()
-                for layer in self.model.decoder.layers
-            )
         )
 
     def _compiled_sampling_stats_for(self, device):
