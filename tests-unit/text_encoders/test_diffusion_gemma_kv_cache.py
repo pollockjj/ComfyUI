@@ -16,10 +16,20 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaConfig,
     DiffusionGemmaModel,
     DiffusionGenerate,
+    _diffusion_probs_and_entropy,
 )
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
+    def test_reused_sampling_probabilities_match_categorical_statistics(self):
+        logits = torch.linspace(-4.0, 4.0, 170).reshape(2, 5, 17)
+
+        probs, entropy = _diffusion_probs_and_entropy(logits)
+        reference = torch.distributions.Categorical(logits=logits)
+
+        self.assertTrue(torch.allclose(probs, reference.probs, rtol=1e-6, atol=1e-8))
+        self.assertTrue(torch.allclose(entropy, reference.entropy(), rtol=1e-6, atol=1e-6))
+
     def test_reserved_tail_matches_legacy_attention(self):
         config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)
         prefix = torch.arange(48, dtype=torch.float32).reshape(1, 3, 16) / 50
