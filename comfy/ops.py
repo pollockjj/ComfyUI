@@ -916,6 +916,35 @@ INT8_DEQUANT_SMALL_ENABLED = os.environ.get("COMFY_INT8_DEQUANT_SMALL", "1").low
 INT8_FAST_LINEAR_ENABLED = os.environ.get("COMFY_INT8_FAST_LINEAR", "0").lower() not in {"0", "false", "no", "off"}
 INT8_FAST_LINEAR_MIN_DIM = int(os.environ.get("COMFY_INT8_FAST_LINEAR_MIN_DIM", "1536"))
 INT8_FAST_LINEAR_M1_ELEMS = int(os.environ.get("COMFY_INT8_FAST_LINEAR_M1_ELEMS", str(16 * 1024 * 1024)))
+INT8_RESIDENT_LINEAR_ENABLED = os.environ.get("COMFY_INT8_RESIDENT_LINEAR", "0").lower() not in {"0", "false", "no", "off"}
+
+_INT8_LINEAR_DTYPE_CODE = {torch.float32: 0, torch.float16: 1, torch.bfloat16: 2}
+
+
+def _use_int8_resident_linear(module, input):
+    # Direct fused-kernel call on device-resident int8 weights: skips the per-call
+    # cast/uncast/dispatch machinery whose overhead dominates M=1 decode.
+    if not INT8_RESIDENT_LINEAR_ENABLED:
+        return False
+    if getattr(module, "quant_format", None) != "int8_tensorwise":
+        return False
+    w = module.weight
+    if not isinstance(w, QuantizedTensor):
+        return False
+    if getattr(w._params, "transposed", False):
+        return False
+    if input.ndim < 2 or input.shape[-1] != w.shape[-1]:
+        return False
+    if input.dtype not in _INT8_LINEAR_DTYPE_CODE:
+        return False
+    if w.device != input.device:
+        return False
+    b = module.bias
+    if b is not None and (b.device != input.device or b.dtype != input.dtype):
+        return False
+    if len(module.weight_function) or len(module.bias_function):
+        return False
+    return min(w.shape) >= INT8_FAST_LINEAR_MIN_DIM
 
 
 def _use_int8_fast_linear(module, input, weight):
@@ -1280,6 +1309,17 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 weight_only_quant=False,
             ):
                 if weight_only_quant:
+                    if _use_int8_resident_linear(self, input):
+                        w = self.weight
+                        p = w._params
+                        x2d = input.reshape(-1, input.shape[-1]) if input.ndim != 2 else input
+                        x = torch.ops.comfy_kitchen.int8_linear(
+                            x2d.contiguous(), w._qdata, p.scale, self.bias,
+                            _INT8_LINEAR_DTYPE_CODE[input.dtype],
+                            getattr(p, "convrot", False), getattr(p, "convrot_groupsize", 256))
+                        if input.ndim != 2:
+                            x = x.reshape(*input.shape[:-1], x.shape[-1])
+                        return x
                     weight, bias, offload_stream = cast_bias_weight(
                         self,
                         input=None,
