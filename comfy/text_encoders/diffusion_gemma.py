@@ -961,8 +961,6 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
 
 
 class DiffusionGenerate:
-    reuse_categorical_probs = os.environ.get("DG_REUSE_CATEGORICAL_PROBS", "1") != "0"
-
     def logits(self, x):
         module = self.model.decoder.embed_tokens
         offload_stream = None
@@ -1058,11 +1056,7 @@ class DiffusionGenerate:
 
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                 processed_logits = raw_logits / temperature
-                if self.reuse_categorical_probs:
-                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
-                else:
-                    probs = torch.softmax(processed_logits, dim=-1, dtype=torch.float32)
-                    token_entropy = None
+                probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
                 argmax_canvas = torch.argmax(processed_logits, dim=-1)
