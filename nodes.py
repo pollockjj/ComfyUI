@@ -2458,6 +2458,7 @@ async def init_builtin_extra_nodes():
         "nodes_camera_trajectory.py",
         "nodes_edit_model.py",
         "nodes_tcfg.py",
+        "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
         "nodes_boogu.py",
@@ -2478,6 +2479,7 @@ async def init_builtin_extra_nodes():
         "nodes_glsl.py",
         "nodes_lora_debug.py",
         "nodes_textgen.py",
+        "nodes_text_overlay.py",
         "nodes_color.py",
         "nodes_toolkit.py",
         "nodes_replacements.py",
@@ -2502,6 +2504,7 @@ async def init_builtin_extra_nodes():
         "nodes_triposplat.py",
         "nodes_depth_anything_3.py",
         "nodes_seed.py",
+        "nodes_text.py",
     ]
 
     import_failed = []
