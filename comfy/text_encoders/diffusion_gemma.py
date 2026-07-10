@@ -413,10 +413,10 @@ class DiffusionGemmaExperts(nn.Module):
         if (
             hidden_states.dtype != torch.bfloat16
             or hidden_states.shape[1:] != (2816,)
-            or num_tokens not in (256, 344)
+            or num_tokens not in (256, 340)
         ):
             raise RuntimeError(
-                "DiffusionGemma FlashInfer tactic cache requires BF16 hidden states [256|344, 2816]"
+                "DiffusionGemma FlashInfer tactic cache requires BF16 hidden states [256|340, 2816]"
             )
         if not hidden_states.is_contiguous():
             raise RuntimeError("DiffusionGemma FlashInfer hidden states must be contiguous")
@@ -497,7 +497,7 @@ class DiffusionGemmaExperts(nn.Module):
                 quant_scales=quant_scales,
                 output=output,
                 activation_type=activation_type,
-                tune_max_num_tokens=344,
+                tune_max_num_tokens=340,
             )
             return output
 
