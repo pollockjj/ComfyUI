@@ -196,13 +196,20 @@ def _dequant_bank(module, weight, dtype):
         return w
     if scale.dim() >= 2:
         # per-row bank scales (int8_tensorwise), [E, out] or [E, out, 1]: scale and convrot
-        # groups are row-local, so one flat [E*rows, in] dequant is exact
-        flat_params = type(params)(scale=scale.reshape(E * out_f, -1), orig_dtype=dtype,
-                                   orig_shape=(E * out_f, in_f),
-                                   convrot=getattr(params, "convrot", False),
-                                   convrot_groupsize=getattr(params, "convrot_groupsize", 256))
-        w = weight.layout_cls.dequantize(qdata.reshape(E * out_f, in_f), flat_params)
-        return w.view(E, out_f, in_f)
+        # groups are row-local, so flat [experts*rows, in] dequants are exact. Chunked so
+        # each kernel call stays under the CUDA gridDim.y row limit (65535).
+        w = torch.empty((E, out_f, in_f), dtype=dtype, device=qdata.device)
+        flat_scale = scale.reshape(E * out_f, -1)
+        chunk = max(1, 65535 // out_f)
+        for i in range(0, E, chunk):
+            n = min(chunk, E - i)
+            flat_params = type(params)(scale=flat_scale[i * out_f:(i + n) * out_f],
+                                       orig_dtype=dtype, orig_shape=(n * out_f, in_f),
+                                       convrot=getattr(params, "convrot", False),
+                                       convrot_groupsize=getattr(params, "convrot_groupsize", 256))
+            w[i:i + n] = weight.layout_cls.dequantize(
+                qdata[i:i + n].reshape(n * out_f, in_f), flat_params).view(n, out_f, in_f)
+        return w
     w = torch.empty((E, out_f, in_f), dtype=dtype, device=qdata.device)
     chunk = 32
     for i in range(0, E, chunk):
