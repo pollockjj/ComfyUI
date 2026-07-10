@@ -228,7 +228,9 @@ class DiffusionGemmaExperts(nn.Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.unfused = config.unfused_experts
-        self._native_nvfp4_alpha_cache = {}
+        self.native_fused_nvfp4_available = self._native_fused_nvfp4_available()
+        self._weight_patches_uuid = None
+        self._native_nvfp4_alpha_cache = None
         E = config.num_experts
         H = config.hidden_size
         I = config.moe_intermediate_size
@@ -265,7 +267,14 @@ class DiffusionGemmaExperts(nn.Module):
     @staticmethod
     def _native_fused_nvfp4_available():
         ck = getattr(comfy.quant_ops, "ck", None)
-        return ck is not None and hasattr(ck, "fused_moe_nvfp4")
+        if ck is None or not hasattr(ck, "fused_moe_nvfp4") or not hasattr(ck, "list_backends"):
+            return False
+        cuda_backend = ck.list_backends().get("cuda", {})
+        return (
+            cuda_backend.get("available", False)
+            and not cuda_backend.get("disabled", False)
+            and "fused_moe_nvfp4" in cuda_backend.get("capabilities", ())
+        )
 
     @staticmethod
     def _grouped_nvfp4_mm(
@@ -358,7 +367,7 @@ class DiffusionGemmaExperts(nn.Module):
     def _supports_native_fused_nvfp4(self, hidden_states):
         return (
             self._supports_grouped_fused_nvfp4(hidden_states)
-            and self._native_fused_nvfp4_available()
+            and self.native_fused_nvfp4_available
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.ndim == 2
             and hidden_states.shape[0] in (256, 340)
@@ -451,20 +460,27 @@ class DiffusionGemmaExperts(nn.Module):
             if gate_up_input_scale.numel() != 1 or down_input_scale.numel() != 1:
                 raise RuntimeError("DiffusionGemma native NVFP4 requires scalar activation scales")
 
+            alpha_sources = (
+                gate_up_params.scale,
+                down_params.scale,
+                self.gate_up_proj.input_scale,
+                self.down_proj.input_scale,
+            )
             cache_key = (
                 hidden_states.device,
-                gate_up_params.scale.data_ptr(),
-                down_params.scale.data_ptr(),
-                gate_up_input_scale.data_ptr(),
-                down_input_scale.data_ptr(),
+                self._weight_patches_uuid,
+                tuple(id(tensor) for tensor in alpha_sources),
+                tuple(None if tensor.is_inference() else tensor._version for tensor in alpha_sources),
             )
-            alphas = self._native_nvfp4_alpha_cache.get(cache_key)
-            if alphas is None:
+            cached = self._native_nvfp4_alpha_cache
+            if cached is None or cached[0] != cache_key:
                 alphas = (
                     (gate_up_params.scale * gate_up_input_scale).contiguous(),
                     (down_params.scale * down_input_scale).contiguous(),
                 )
-                self._native_nvfp4_alpha_cache = {cache_key: alphas}
+                self._native_nvfp4_alpha_cache = (cache_key, alpha_sources, alphas)
+            else:
+                alphas = cached[2]
 
             return ck.fused_moe_nvfp4(
                 hidden_states,
@@ -1181,7 +1197,11 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
             super().__init__(device=device, dtype=dtype, name="gemma4", clip_model=DiffusionGemmaClipModel_, model_options=model_options)
 
         def generate(self, tokens, **kwargs):
-            self.gemma4.transformer._weight_patches_uuid = self.current_weight_patches_uuid
+            transformer = self.gemma4.transformer
+            weight_patches_uuid = getattr(self, "current_weight_patches_uuid", None)
+            transformer._weight_patches_uuid = weight_patches_uuid
+            for layer in transformer.model.decoder.layers:
+                layer.experts._weight_patches_uuid = weight_patches_uuid
             return super().generate(tokens, **kwargs)
 
         def memory_estimation_function(self, tokens, device=None):
