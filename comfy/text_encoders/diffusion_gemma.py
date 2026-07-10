@@ -962,8 +962,6 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
 
 
 class DiffusionGenerate:
-    cache_decoder_rope = os.environ.get("DG_CACHE_DECODER_ROPE", "1") != "0"
-
     def logits(self, x):
         module = self.model.decoder.embed_tokens
         offload_stream = None
@@ -1048,11 +1046,9 @@ class DiffusionGenerate:
             self_conditioning_logits = None
             argmax_canvas = current_canvas
             decoder_position_ids = torch.arange(cur_len, cur_len + canvas_length, device=device).unsqueeze(0)
-            decoder_freqs_cis = None
-            if self.cache_decoder_rope:
-                decoder_freqs_cis = self.model.decoder.compute_freqs_cis(
-                    decoder_position_ids, device, dtype=execution_dtype
-                )
+            decoder_freqs_cis = self.model.decoder.compute_freqs_cis(
+                decoder_position_ids, device, dtype=execution_dtype
+            )
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
 
             for cur_step in reversed(range(1, max_denoising_steps + 1)):
