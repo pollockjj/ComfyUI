@@ -237,6 +237,15 @@ QUANT_ALGOS = {
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
     },
+    "nvfp4_cutlass_fused_moe_v1": {
+        "storage_t": torch.uint8,
+        "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
+        # This layout is storage-only for the fused format. DiffusionGemma's
+        # grouped path consumes the low-first qdata directly and must never
+        # fall back to the layout's high-first generic operations.
+        "comfy_tensor_layout": "TensorCoreNVFP4Layout",
+        "group_size": 16,
+    },
 }
 
 if _CK_MXFP8_AVAILABLE:

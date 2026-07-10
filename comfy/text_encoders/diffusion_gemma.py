@@ -222,6 +222,7 @@ class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
     grouped_nvfp4_bucket = 128
     grouped_min_tokens = int(os.environ.get("DG_GROUPED_MIN_TOKENS", "64"))
+    fused_nvfp4_format = "nvfp4_cutlass_fused_moe_v1"
 
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
@@ -241,6 +242,14 @@ class DiffusionGemmaExperts(nn.Module):
         if not self.unfused:
             return False
         return any(getattr(bank, "layout_type", None) is not None for bank in (self.gate_proj, self.up_proj, self.down_proj))
+
+    def _has_fused_nvfp4_banks(self):
+        if self.unfused:
+            return False
+        return any(
+            getattr(bank, "quant_format", None) == self.fused_nvfp4_format
+            for bank in (self.gate_up_proj, self.down_proj)
+        )
 
     @staticmethod
     def _grouped_nvfp4_available():
@@ -316,7 +325,37 @@ class DiffusionGemmaExperts(nn.Module):
             )
         )
 
+    def _supports_grouped_fused_nvfp4(self, hidden_states):
+        if self.unfused or not hidden_states.is_cuda:
+            return False
+        if torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
+            return False
+        if not self._grouped_nvfp4_available():
+            return False
+        banks = (self.gate_up_proj, self.down_proj)
+        if not all(
+            getattr(bank, "quant_format", None) == self.fused_nvfp4_format
+            and isinstance(getattr(bank, "weight", None), QuantizedTensor)
+            and bank.bias is None
+            and isinstance(getattr(bank, "input_scale", None), torch.Tensor)
+            and bank.input_scale.numel() == 1
+            for bank in banks
+        ):
+            return False
+        gate_up_qdata = self.gate_up_proj.weight._qdata
+        down_qdata = self.down_proj.weight._qdata
+        return (
+            tuple(gate_up_qdata.shape) == (self.num_experts, 1408, 1408)
+            and tuple(down_qdata.shape) == (self.num_experts, 2816, 352)
+        )
+
     def forward(self, hidden_states, top_k_index, top_k_weights):
+        if self._has_fused_nvfp4_banks():
+            if not self._supports_grouped_fused_nvfp4(hidden_states):
+                raise RuntimeError(
+                    "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
+                )
+            return self._forward_grouped_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
         if hidden_states.shape[0] >= self.grouped_min_tokens and self._supports_grouped_nvfp4(hidden_states):
             return self._forward_grouped_nvfp4(hidden_states, top_k_index, top_k_weights)
         if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
@@ -376,6 +415,66 @@ class DiffusionGemmaExperts(nn.Module):
             intermediate = _gelu_tanh(gate) * up
             qi, i_scale, i_block_scale = quantize(intermediate)
             y = grouped_linear(qi, i_scale, i_block_scale, weights[2])
+
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = slot
+        y = y.reshape(E * C, H)[pair_order]
+        y = y * top_k_weights.reshape(-1, 1)
+        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
+
+    def _forward_grouped_fused_nvfp4(self, hidden_states, top_k_index, top_k_weights):
+        ck = comfy.quant_ops.ck
+        N, H = hidden_states.shape
+        E = self.num_experts
+        K = top_k_index.shape[-1]
+
+        flat_experts = top_k_index.reshape(-1)
+        counts = torch.bincount(flat_experts, minlength=E)
+        C = -(-int(counts.max()) // self.grouped_nvfp4_bucket) * self.grouped_nvfp4_bucket
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
+        slot = sorted_experts * C + rank
+
+        gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
+        gather_tok[slot] = order // K
+        x = hidden_states[gather_tok].view(E, C, H)
+
+        def quantize(tensor, scale):
+            flat = tensor.flatten(0, 1)
+            scale = scale.to(device=flat.device, dtype=torch.float32)
+            qdata, block_scale = ck.quantize_nvfp4(flat, scale, hi_first=False)
+            return qdata, scale, block_scale
+
+        def grouped_linear(qdata, input_scale, input_block_scale, weight):
+            params = weight._params
+            return self._grouped_nvfp4_mm(
+                qdata,
+                weight._qdata,
+                input_scale,
+                params.scale,
+                input_block_scale,
+                params.block_scale,
+                C,
+                out_dtype=hidden_states.dtype,
+            )
+
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for bank in banks:
+                weight, bias = bank._resident_bank
+                if not isinstance(weight, QuantizedTensor) or bias is not None:
+                    raise RuntimeError("grouped DiffusionGemma fused NVFP4 requires unbiased resident banks")
+                weights.append(weight)
+
+            qx, x_scale, x_block_scale = quantize(x, self.gate_up_proj.input_scale)
+            gate_up = grouped_linear(qx, x_scale, x_block_scale, weights[0])
+            up, gate = gate_up.chunk(2, dim=-1)
+            intermediate = _gelu_tanh(gate) * up
+            qi, i_scale, i_block_scale = quantize(intermediate, self.down_proj.input_scale)
+            y = grouped_linear(qi, i_scale, i_block_scale, weights[1])
 
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
         pair_order[order] = slot

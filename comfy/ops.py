@@ -1130,7 +1130,7 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
             if bs is None:
                 raise ValueError(f"Missing MXFP8 block scales for layer {layer_name}")
             scales = {"scale": bs}
-        elif module.quant_format == "nvfp4":
+        elif module.quant_format in ("nvfp4", "nvfp4_cutlass_fused_moe_v1"):
             ts = pop_scale("weight_scale_2")
             bs = pop_scale("weight_scale", torch.float8_e4m3fn)
             if ts is None or bs is None:
@@ -1417,7 +1417,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return _quantized_apply(self, fn, recurse)
 
             def _load_from_state_dict(self, *args):
-                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=False)
+                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=True)
 
             def expert_weight(self, i: int):
                 """Expert i's weight (Tensor or per-expert QuantizedTensor view)."""
@@ -1484,7 +1484,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             def state_dict(self, *args, destination=None, prefix="", **kwargs):
                 sd = destination if destination is not None else {}
-                return _quantized_weight_state_dict(self, sd, prefix, extra_quant_conf={"num_experts": self.num_experts})
+                return _quantized_weight_state_dict(
+                    self,
+                    sd,
+                    prefix,
+                    extra_quant_conf={"num_experts": self.num_experts},
+                    extra_quant_params=("input_scale",),
+                )
 
         class Embedding(manual_cast.Embedding):
             def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
