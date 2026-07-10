@@ -1,6 +1,7 @@
 import contextlib
 import math
 import os
+import sys
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -218,6 +219,47 @@ def _bank_bmm(module, x):
         comfy.ops.uncast_bias_weight(module, weight, bias, offload_stream)
 
 
+_DG_FLASHINFER_RUNTIME = None
+
+
+def _load_dg_flashinfer_runtime():
+    global _DG_FLASHINFER_RUNTIME
+    if _DG_FLASHINFER_RUNTIME is not None:
+        return _DG_FLASHINFER_RUNTIME
+
+    package_path = os.environ.get("COMFY_FLASHINFER_PATH")
+    if not package_path or not os.path.isdir(package_path):
+        raise RuntimeError(
+            "COMFY_DG_FLASHINFER=1 requires COMFY_FLASHINFER_PATH to name the FlashInfer package directory"
+        )
+    if package_path not in sys.path:
+        sys.path.append(package_path)
+
+    try:
+        import flashinfer
+        from flashinfer.autotuner import AutoTuner
+        from flashinfer.fused_moe.core import ActivationType
+    except Exception as exc:
+        raise RuntimeError("failed to import the requested DiffusionGemma FlashInfer runtime") from exc
+    if not hasattr(flashinfer, "cutlass_fused_moe"):
+        raise RuntimeError("requested FlashInfer runtime does not provide cutlass_fused_moe")
+
+    cache_path = os.environ.get("COMFY_DG_FLASHINFER_AUTOTUNE_CACHE")
+    if not cache_path or not os.path.isfile(cache_path):
+        raise RuntimeError(
+            "COMFY_DG_FLASHINFER=1 requires COMFY_DG_FLASHINFER_AUTOTUNE_CACHE"
+        )
+    try:
+        cache_loaded = AutoTuner.get().load_configs(cache_path)
+    except Exception as exc:
+        raise RuntimeError("failed to load the DiffusionGemma FlashInfer tactic cache") from exc
+    if not cache_loaded:
+        raise RuntimeError("DiffusionGemma FlashInfer tactic cache does not match this runtime")
+
+    _DG_FLASHINFER_RUNTIME = (flashinfer, ActivationType.Geglu)
+    return _DG_FLASHINFER_RUNTIME
+
+
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
     grouped_nvfp4_bucket = 128
@@ -351,6 +393,8 @@ class DiffusionGemmaExperts(nn.Module):
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
         if self._has_fused_nvfp4_banks():
+            if os.environ.get("COMFY_DG_FLASHINFER") == "1":
+                return self._forward_flashinfer_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
             if not self._supports_grouped_fused_nvfp4(hidden_states):
                 raise RuntimeError(
                     "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
@@ -361,6 +405,94 @@ class DiffusionGemmaExperts(nn.Module):
         if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
+
+    def _forward_flashinfer_fused_nvfp4(self, hidden_states, top_k_index, top_k_weights):
+        if not hidden_states.is_cuda or torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
+            raise RuntimeError("DiffusionGemma FlashInfer NVFP4 requires CUDA SM120")
+        if hidden_states.dtype != torch.bfloat16 or tuple(hidden_states.shape) != (256, 2816):
+            raise RuntimeError("DiffusionGemma FlashInfer tactic cache requires BF16 hidden states [256, 2816]")
+        if not hidden_states.is_contiguous():
+            raise RuntimeError("DiffusionGemma FlashInfer hidden states must be contiguous")
+        if tuple(top_k_index.shape) != (256, 8) or top_k_index.device != hidden_states.device:
+            raise RuntimeError("DiffusionGemma FlashInfer expert indices must be [256, 8] on the input device")
+        if tuple(top_k_weights.shape) != (256, 8) or top_k_weights.device != hidden_states.device:
+            raise RuntimeError("DiffusionGemma FlashInfer expert weights must be [256, 8] on the input device")
+        if top_k_weights.dtype != torch.float32 or not top_k_weights.is_contiguous():
+            raise RuntimeError("DiffusionGemma FlashInfer expert weights must be contiguous FP32")
+
+        flashinfer, activation_type = _load_dg_flashinfer_runtime()
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for module, bank in zip(modules, banks):
+                weight, bias = bank._resident_bank
+                if (
+                    module.quant_format != self.fused_nvfp4_format
+                    or not isinstance(weight, QuantizedTensor)
+                    or bias is not None
+                ):
+                    raise RuntimeError("DiffusionGemma FlashInfer requires complete unbiased fused NVFP4 banks")
+                weights.append(weight)
+
+            gate_up_weight, down_weight = weights
+            gate_up_qdata = gate_up_weight._qdata
+            down_qdata = down_weight._qdata
+            if (
+                gate_up_qdata.dtype != torch.uint8
+                or tuple(gate_up_qdata.shape) != (128, 1408, 1408)
+                or not gate_up_qdata.is_contiguous()
+                or down_qdata.dtype != torch.uint8
+                or tuple(down_qdata.shape) != (128, 2816, 352)
+                or not down_qdata.is_contiguous()
+            ):
+                raise RuntimeError("DiffusionGemma FlashInfer fused NVFP4 qdata contract mismatch")
+
+            gate_up_params = gate_up_weight._params
+            down_params = down_weight._params
+            if (
+                tuple(gate_up_params.scale.shape) != (128,)
+                or gate_up_params.scale.dtype != torch.float32
+                or tuple(gate_up_params.block_scale.shape) != (128, 1408, 176)
+                or not gate_up_params.block_scale.is_contiguous()
+                or tuple(down_params.scale.shape) != (128,)
+                or down_params.scale.dtype != torch.float32
+                or tuple(down_params.block_scale.shape) != (128, 2816, 44)
+                or not down_params.block_scale.is_contiguous()
+            ):
+                raise RuntimeError("DiffusionGemma FlashInfer fused NVFP4 scale contract mismatch")
+
+            gate_up_input_scale = self.gate_up_proj.input_scale.to(
+                device=hidden_states.device, dtype=torch.float32
+            )
+            down_input_scale = self.down_proj.input_scale.to(
+                device=hidden_states.device, dtype=torch.float32
+            )
+            if gate_up_input_scale.numel() != 1 or down_input_scale.numel() != 1:
+                raise RuntimeError("DiffusionGemma FlashInfer requires scalar activation scales")
+
+            quant_scales = [
+                (1.0 / gate_up_input_scale).expand(128).contiguous(),
+                gate_up_params.block_scale.view(torch.int32),
+                (gate_up_params.scale * gate_up_input_scale).contiguous(),
+                (1.0 / down_input_scale).expand(128).contiguous(),
+                down_params.block_scale.view(torch.int32),
+                (down_params.scale * down_input_scale).contiguous(),
+            ]
+            output = torch.empty_like(hidden_states)
+            flashinfer.cutlass_fused_moe(
+                input=hidden_states,
+                token_selected_experts=top_k_index.to(torch.int32).contiguous(),
+                token_final_scales=top_k_weights,
+                fc1_expert_weights=gate_up_qdata.view(torch.long),
+                fc2_expert_weights=down_qdata.view(torch.long),
+                output_dtype=torch.bfloat16,
+                quant_scales=quant_scales,
+                output=output,
+                activation_type=activation_type,
+                tune_max_num_tokens=256,
+            )
+            return output
 
     def _forward_grouped_nvfp4(self, hidden_states, top_k_index, top_k_weights):
         ck = comfy.quant_ops.ck
