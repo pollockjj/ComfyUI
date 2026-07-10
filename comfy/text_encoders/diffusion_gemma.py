@@ -217,6 +217,24 @@ def _dequant_bank(module, weight, dtype):
     return w
 
 
+def _dequant_2d_chunked(weight, dtype):
+    # Full-table dequant in row slices under the CUDA convrot kernel's gridDim.y
+    # limit (65535); row scales and convrot groups are row-local, so slices are exact.
+    qdata = weight._qdata
+    params = weight._params
+    rows, cols = qdata.shape
+    scale = params.scale
+    w = torch.empty((rows, cols), dtype=dtype, device=qdata.device)
+    step = 65535
+    for i in range(0, rows, step):
+        n = min(step, rows - i)
+        p = type(params)(scale=scale[i:i + n], orig_dtype=dtype, orig_shape=(n, cols),
+                         convrot=getattr(params, "convrot", False),
+                         convrot_groupsize=getattr(params, "convrot_groupsize", 256))
+        w[i:i + n] = weight.layout_cls.dequantize(qdata[i:i + n], p)
+    return w
+
+
 def _bank_bmm(module, x):
     # x [E, C, in] against the whole bank [E, out, in]; banks handled one at a
     # time to cap the dequant transient.
@@ -538,6 +556,8 @@ class DiffusionGemmaModel(nn.Module):
                     weight, _, offload_stream = comfy.ops.cast_bias_weight(embed_module, x, offloadable=True)
                 else:
                     weight, offload_stream = embed_module.weight.to(device=x.device), None
+                if isinstance(weight, QuantizedTensor):
+                    weight = _dequant_2d_chunked(weight, x.dtype)
                 scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight.dtype).item()
                 soft_embeddings = torch.matmul(
                     self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(weight.dtype), weight) * scale
