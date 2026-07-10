@@ -766,7 +766,7 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, token_entropy, entrop
     accepted_token_mask = torch.scatter(
         input=torch.zeros_like(sorted_selection_mask), dim=-1, index=sorted_indices, src=sorted_selection_mask)
     accepted_canvas = torch.where(accepted_token_mask, denoiser_canvas, current_canvas)
-    return accepted_canvas, accepted_token_mask, token_entropy
+    return accepted_canvas, accepted_token_mask
 
 
 class DiffusionGenerate:
