@@ -111,7 +111,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
         if operations is None:
             if quant_config is not None:
-                operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=False)
+                operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=True)
                 logging.info("Using MixedPrecisionOps for text encoder")
             else:
                 operations = comfy.ops.manual_cast
@@ -308,14 +308,14 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def load_sd(self, sd):
         return self.transformer.load_state_dict(sd, strict=False, assign=getattr(self, "can_assign_sd", False))
 
-    def generate(self, tokens, **kwargs):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, **kwargs):
         if isinstance(tokens, dict):
             tokens_only = next(iter(tokens.values())) # todo: get this better?
         else:
             tokens_only = tokens
         tokens_only = [[t[0] for t in b] for b in tokens_only]
         embeds = self.process_tokens(tokens_only, device=self.execution_device)[0]
-        return self.transformer.generate(embeds, **kwargs)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=presence_penalty, **kwargs)
 
 def parse_parentheses(string):
     result = []
@@ -746,5 +746,5 @@ class SD1ClipModel(torch.nn.Module):
     def load_sd(self, sd):
         return getattr(self, self.clip).load_sd(sd)
 
-    def generate(self, tokens, **kwargs):
-        return getattr(self, self.clip).generate(tokens, **kwargs)
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, **kwargs):
+        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty, **kwargs)
