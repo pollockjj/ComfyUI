@@ -1097,13 +1097,23 @@ class DiffusionGemma26B(BaseLlama, DiffusionGenerate, torch.nn.Module):
         self.num_layers = config.num_hidden_layers
         self.model = DiffusionGemmaModel(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
+        self._vision_cache = None
+        self._weight_patches_uuid = None
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
-            image = embed.pop("data").movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
+            image = embed.pop("data")
             max_soft_tokens = embed.get("max_soft_tokens", None)
+            image_cpu = image.detach().to("cpu")
+            cache_key = (image_cpu.shape, image_cpu.dtype, torch.device(device), max_soft_tokens, self._weight_patches_uuid)
+            cached = self._vision_cache
+            if cached is not None and cached[0] == cache_key and torch.equal(cached[1], image_cpu):
+                return cached[2].to(device), None
+            image = image.movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
             vision_out = self.model.encoder.vision_tower(image.to(device, dtype=torch.float32), max_soft_tokens=max_soft_tokens)
-            return self.model.encoder.embed_vision(vision_out), None
+            projected = self.model.encoder.embed_vision(vision_out)
+            self._vision_cache = (cache_key, image_cpu.clone(), projected.detach().to("cpu"))
+            return projected, None
         return None, None
 
 
@@ -1169,6 +1179,10 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
             if dtype_llama is not None:
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, name="gemma4", clip_model=DiffusionGemmaClipModel_, model_options=model_options)
+
+        def generate(self, tokens, **kwargs):
+            self.gemma4.transformer._weight_patches_uuid = self.current_weight_patches_uuid
+            return super().generate(tokens, **kwargs)
 
         def memory_estimation_function(self, tokens, device=None):
             # logits/softmax fp32 buffers + dequantized expert bank + tied-embed cast
