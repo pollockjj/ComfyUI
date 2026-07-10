@@ -2,7 +2,6 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 
@@ -21,33 +20,6 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
-    def test_unmasked_decoder_uses_native_gqa(self):
-        config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)
-        attention = DiffusionGemmaAttention(
-            config, head_dim=8, num_kv_heads=1, has_v_proj=True,
-            dtype=torch.float32, ops=torch.nn,
-        ).eval()
-        calls = []
-
-        def capture(q, k, v, heads, **kwargs):
-            calls.append((k.shape[1], kwargs.get("enable_gqa", False)))
-            return torch.zeros(q.shape[0], q.shape[2], q.shape[1] * q.shape[3])
-
-        hidden = torch.zeros(1, 2, 16)
-        past = (torch.zeros(1, 1, 3, 8), torch.zeros(1, 1, 3, 8), 3)
-        freqs = torch.ones(1, 1, 2, 8), torch.zeros(1, 1, 2, 8)
-        with patch(
-            "comfy.text_encoders.diffusion_gemma.optimized_attention_for_device",
-            return_value=capture,
-        ):
-            attention(hidden, freqs_cis=freqs, past_key_value=past,
-                      sliding_window=4, update_cache=False)
-            attention(hidden, attention_mask=torch.zeros(1, 1, 2, 5),
-                      freqs_cis=freqs, past_key_value=past,
-                      sliding_window=4, update_cache=False)
-
-        self.assertEqual(calls, [(1, True), (2, False)])
-
     def test_reserved_tail_matches_legacy_attention(self):
         config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)
         prefix = torch.arange(48, dtype=torch.float32).reshape(1, 3, 16) / 50

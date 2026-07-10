@@ -4,8 +4,23 @@ from typing_extensions import override
 class TextGenerate(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        # Define dynamic combo options for sampling mode
         sampling_options = [
+            io.DynamicCombo.Option(
+                key="diffusion",
+                inputs=[
+                    io.Int.Input("max_denoising_steps", default=48, min=1, max=256, tooltip="Maximum denoising steps per 256 token canvas."),
+                    io.Float.Input("entropy_bound", default=0.1, min=0.001, max=10.0, step=0.001, tooltip="Maximum cumulative entropy accepted per denoising step; higher values accept more tokens."),
+                    io.Float.Input("t_min", default=0.4, min=0.0, max=2.0, step=0.01, tooltip="Minimum sampling temperature at the end of the denoising schedule."),
+                    io.Float.Input("t_max", default=0.8, min=0.0, max=2.0, step=0.01, tooltip="Maximum sampling temperature at the start of the denoising schedule."),
+                    io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, tooltip="Seed used to initialize the diffusion sampler."),
+                    io.Int.Input("stability_threshold", optional=True, default=1, min=0, max=16, advanced=True, tooltip="Consecutive unchanged denoising steps required before stopping; 0 disables stability checking."),
+                    io.Float.Input("confidence_threshold", optional=True, default=0.005, min=0.0001, max=1.0, step=0.0001, advanced=True, tooltip="Maximum mean token entropy required before stopping."),
+                ]
+            ),
+            io.DynamicCombo.Option(
+                key="off",
+                inputs=[]
+            ),
             io.DynamicCombo.Option(
                 key="on",
                 inputs=[
@@ -16,22 +31,6 @@ class TextGenerate(io.ComfyNode):
                     io.Float.Input("repetition_penalty", default=1.05, min=0.0, max=5.0, step=0.01),
                     io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
                     io.Float.Input("presence_penalty", optional=True, default=0.0, min=0.0, max=5.0, step=0.01),
-                ]
-            ),
-            io.DynamicCombo.Option(
-                key="off",
-                inputs=[]
-            ),
-            io.DynamicCombo.Option(
-                key="diffusion",
-                inputs=[
-                    io.Int.Input("max_denoising_steps", default=48, min=1, max=256, tooltip="Maximum denoising steps per 256 token canvas."),
-                    io.Float.Input("entropy_bound", default=0.1, min=0.001, max=10.0, step=0.001, tooltip="Higher accepts more tokens per step (faster, less accurate)."),
-                    io.Float.Input("t_min", default=0.4, min=0.0, max=2.0, step=0.01),
-                    io.Float.Input("t_max", default=0.8, min=0.0, max=2.0, step=0.01),
-                    io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
-                    io.Int.Input("stability_threshold", optional=True, default=1, min=0, max=16, advanced=True),
-                    io.Float.Input("confidence_threshold", optional=True, default=0.005, min=0.0001, max=1.0, step=0.0001, advanced=True),
                 ]
             ),
         ]

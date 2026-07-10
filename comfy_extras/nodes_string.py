@@ -1,10 +1,8 @@
-import os
 import re
 import json
 import string
 from typing_extensions import override
 
-import folder_paths
 from comfy_api.latest import ComfyExtension, io
 
 
@@ -493,40 +491,11 @@ class ConvertArrayToString(io.ComfyNode):
         return io.NodeOutput(_dump_json(array, indent))
 
 
-class SaveText(io.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="SaveText",
-            display_name="Save Text",
-            category="text",
-            search_aliases=["save string", "write text"],
-            description="Write a string to a .txt file in the output directory.",
-            is_output_node=True,
-            inputs=[
-                io.String.Input("text", multiline=True, default="", force_input=True),
-                io.String.Input("filename_prefix", default="ComfyUI"),
-            ],
-            outputs=[],
-        )
-
-    @classmethod
-    def execute(cls, text: str, filename_prefix: str = "ComfyUI") -> io.NodeOutput:
-        full_output_folder, filename, counter, _subfolder, _filename_prefix = folder_paths.get_save_image_path(
-            filename_prefix, folder_paths.get_output_directory()
-        )
-        file = f"{filename}_{counter:05}_.txt"
-        with open(os.path.join(full_output_folder, file), "w", encoding="utf-8") as f:
-            f.write(text)
-        return io.NodeOutput(ui={"text": [text]})
-
-
 class StringExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             StringFormat,
-            SaveText,
             StringConcatenate,
             StringSubstring,
             StringLength,

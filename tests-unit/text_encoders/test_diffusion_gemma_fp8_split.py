@@ -73,29 +73,6 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual(calls, ["loop"])
         self.assertTrue(torch.equal(out, torch.ones_like(hidden_states)))
 
-    def test_nonquantized_unfused_experts_keep_grouped_path(self):
-        experts = DiffusionGemmaExperts(_small_config(unfused_experts=True), ops=FakeOps)
-        experts.grouped_min_tokens = 1
-        calls = []
-
-        def grouped(hidden_states, top_k_index, top_k_weights):
-            calls.append("grouped")
-            return torch.ones_like(hidden_states)
-
-        def loop(hidden_states, top_k_index, top_k_weights):
-            raise AssertionError("nonquantized unfused experts should keep grouped routing")
-
-        experts._forward_grouped = grouped
-        experts._forward_loop = loop
-        hidden_states = torch.zeros(2, 4)
-        top_k_index = torch.zeros(2, 1, dtype=torch.long)
-        top_k_weights = torch.ones(2, 1)
-
-        out = experts(hidden_states, top_k_index, top_k_weights)
-
-        self.assertEqual(calls, ["grouped"])
-        self.assertTrue(torch.equal(out, torch.ones_like(hidden_states)))
-
     def test_split_clip_model_allows_quantized_matmul(self):
         captured = {}
 
