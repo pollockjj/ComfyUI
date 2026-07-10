@@ -645,28 +645,10 @@ class DiffusionGemmaModel(nn.Module):
             masks = {k: v + pad for k, v in masks.items()}
         return masks
 
-    def compute_soft_embeddings(self, probs, dtype):
-        embed_module = self.decoder.embed_tokens
-        if embed_module.comfy_cast_weights:
-            weight, _, offload_stream = comfy.ops.cast_bias_weight(
-                embed_module,
-                input=None,
-                dtype=dtype,
-                device=probs.device,
-                bias_dtype=dtype,
-                offloadable=True,
-            )
-        else:
-            weight, offload_stream = embed_module.weight.to(device=probs.device, dtype=dtype), None
-        scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight.dtype).item()
-        soft_embeddings = torch.matmul(probs.to(weight.dtype), weight) * scale
-        comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
-        return soft_embeddings.to(dtype)
-
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=None,
                 past_key_values=None, input_ids=None, mode="encoder", self_conditioning_logits=None,
-                mm_spans=None, self_conditioning_embeds=None):
+                mm_spans=None):
         if embeds is not None:
             x = embeds
         else:
@@ -674,9 +656,7 @@ class DiffusionGemmaModel(nn.Module):
 
         if mode == "decoder":
             embed_module = self.decoder.embed_tokens
-            if self_conditioning_embeds is not None:
-                soft_embeddings = self_conditioning_embeds.to(x.dtype)
-            elif self_conditioning_logits is not None:
+            if self_conditioning_logits is not None:
                 if embed_module.comfy_cast_weights:
                     weight, _, offload_stream = comfy.ops.cast_bias_weight(embed_module, x, offloadable=True)
                 else:
@@ -759,14 +739,15 @@ class _StableAndConfidentStopping:
         return stable & confident
 
 
-def _entropy_bound_accept(current_canvas, denoiser_canvas, token_entropy, entropy_bound):
+def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound):
+    token_entropy = torch.distributions.Categorical(logits=logits).entropy()
     sorted_token_entropy, sorted_indices = torch.sort(token_entropy, dim=-1, descending=False)
     cumulative_entropy = torch.cumsum(sorted_token_entropy, dim=-1)
     sorted_selection_mask = cumulative_entropy - sorted_token_entropy <= entropy_bound
     accepted_token_mask = torch.scatter(
         input=torch.zeros_like(sorted_selection_mask), dim=-1, index=sorted_indices, src=sorted_selection_mask)
     accepted_canvas = torch.where(accepted_token_mask, denoiser_canvas, current_canvas)
-    return accepted_canvas, accepted_token_mask
+    return accepted_canvas, accepted_token_mask, token_entropy
 
 
 class DiffusionGenerate:
@@ -833,7 +814,7 @@ class DiffusionGenerate:
 
             current_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                            device=device, generator=generator)
-            self_conditioning_embeds = None
+            self_conditioning_logits = None
             argmax_canvas = current_canvas
             decoder_position_ids = torch.arange(cur_len, cur_len + canvas_length, device=device).unsqueeze(0)
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
@@ -841,26 +822,25 @@ class DiffusionGenerate:
             for cur_step in reversed(range(1, max_denoising_steps + 1)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
-                                     self_conditioning_embeds=self_conditioning_embeds,
+                                     self_conditioning_logits=self_conditioning_logits,
                                      position_ids=decoder_position_ids, dtype=execution_dtype)
                 raw_logits = self.logits(x)
 
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                 processed_logits = raw_logits / temperature
-                log_probs = torch.log_softmax(processed_logits, dim=-1, dtype=torch.float32)
-                probs = log_probs.exp()
-                token_entropy = -(probs * log_probs).sum(dim=-1)
+                probs = torch.softmax(processed_logits, dim=-1, dtype=torch.float32)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
                 argmax_canvas = torch.argmax(processed_logits, dim=-1)
 
-                accepted_canvas, accepted_mask = _entropy_bound_accept(
-                    current_canvas, denoiser_canvas, token_entropy, entropy_bound)
+                accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
+                    current_canvas, denoiser_canvas, processed_logits, entropy_bound)
                 random_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                               device=device, generator=generator)
                 current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
 
                 finished_denoising = stopping(argmax_canvas, token_entropy)
+                self_conditioning_logits = processed_logits.to(execution_dtype)
                 step_eos = torch.isin(argmax_canvas[0], eos_tensor)
                 step_eos_positions = torch.nonzero(step_eos, as_tuple=False).flatten()
                 estimated_canvas_tokens = (
@@ -873,7 +853,6 @@ class DiffusionGenerate:
                 tq.refresh()
                 if torch.all(finished_denoising):
                     break
-                self_conditioning_embeds = self.model.compute_soft_embeddings(probs, execution_dtype)
 
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
