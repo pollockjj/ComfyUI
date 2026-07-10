@@ -913,7 +913,7 @@ INT8_DEQUANT_SMALL_M = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_M", "1"))
 INT8_DEQUANT_SMALL_MIN_DIM = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_MIN_DIM", str(2 ** 31 - 1)))
 INT8_DEQUANT_SMALL_ENABLED = os.environ.get("COMFY_INT8_DEQUANT_SMALL", "1").lower() not in {"0", "false", "no", "off"}
 
-INT8_FAST_LINEAR_ENABLED = os.environ.get("COMFY_INT8_FAST_LINEAR", "1").lower() not in {"0", "false", "no", "off"}
+INT8_FAST_LINEAR_ENABLED = os.environ.get("COMFY_INT8_FAST_LINEAR", "0").lower() not in {"0", "false", "no", "off"}
 INT8_FAST_LINEAR_MIN_DIM = int(os.environ.get("COMFY_INT8_FAST_LINEAR_MIN_DIM", "1536"))
 INT8_FAST_LINEAR_M1_ELEMS = int(os.environ.get("COMFY_INT8_FAST_LINEAR_M1_ELEMS", str(16 * 1024 * 1024)))
 
