@@ -220,6 +220,17 @@ def _handle_comfy_fp8_linear(qt, args, kwargs):
 register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E4M3Layout)(_handle_comfy_fp8_linear)
 register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E5M2Layout)(_handle_comfy_fp8_linear)
 
+NVFP4_FUSED_MOE_FORMAT = "nvfp4_cutlass_fused_moe_v1"
+NVFP4_FUSED_MOE_V1_FIELDS = {
+    "artifact_contract": "diffusiongemma_nvfp4_cutlass_fused_moe.v1",
+    "group_size": 16,
+    "nibble_order": "low_first",
+    "block_scale_layout": "cutlass_128x4",
+    "projection_order": "up_gate",
+    "activation_scale": "static",
+    "full_precision_matrix_mult": False,
+}
+
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -237,7 +248,7 @@ QUANT_ALGOS = {
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
     },
-    "nvfp4_cutlass_fused_moe_v1": {
+    NVFP4_FUSED_MOE_FORMAT: {
         "storage_t": torch.uint8,
         "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
         # This layout is storage-only for the fused format. DiffusionGemma's
@@ -277,5 +288,7 @@ __all__ = [
     "TensorCoreNVFP4Layout",
     "TensorWiseINT8Layout",
     "QUANT_ALGOS",
+    "NVFP4_FUSED_MOE_FORMAT",
+    "NVFP4_FUSED_MOE_V1_FIELDS",
     "register_layout_op",
 ]

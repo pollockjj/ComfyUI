@@ -222,7 +222,7 @@ class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
     grouped_nvfp4_bucket = 128
     grouped_min_tokens = int(os.environ.get("DG_GROUPED_MIN_TOKENS", "64"))
-    fused_nvfp4_format = "nvfp4_cutlass_fused_moe_v1"
+    fused_nvfp4_format = comfy.quant_ops.NVFP4_FUSED_MOE_FORMAT
 
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
