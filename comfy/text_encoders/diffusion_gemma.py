@@ -953,9 +953,29 @@ def _diffusion_softcap_inverse_temperature(logits, cap, inverse_temperature):
     return torch.tanh(logits.to(torch.float32) / cap) * cap * inverse_temperature
 
 
+def _diffusion_softcap_probs_and_entropy(logits, cap, inverse_temperature):
+    processed_logits = _diffusion_softcap_inverse_temperature(logits, cap, inverse_temperature)
+    normalized_logits = processed_logits - processed_logits.logsumexp(dim=-1, keepdim=True)
+    probs = torch.nn.functional.softmax(normalized_logits, dim=-1)
+    token_entropy = -(
+        normalized_logits.clamp(min=torch.finfo(normalized_logits.dtype).min) * probs
+    ).sum(dim=-1)
+    return processed_logits, probs, token_entropy
+
+
 _compiled_diffusion_softcap = (
     torch.compile(_diffusion_softcap_inverse_temperature, fullgraph=True, dynamic=False)
     if os.environ.get("DG_COMPILED_SOFTCAP", "0") == "1"
+    else None
+)
+_compiled_diffusion_categorical = (
+    torch.compile(
+        _diffusion_softcap_probs_and_entropy,
+        fullgraph=True,
+        dynamic=False,
+        options={"online_softmax": False},
+    )
+    if os.environ.get("DG_COMPILED_CATEGORICAL", "0") == "1"
     else None
 )
 
@@ -1047,7 +1067,9 @@ class DiffusionGenerate:
         generated_token_ids = []
         commit_canvas = None
         inverse_temperatures = None
-        if _compiled_diffusion_softcap is not None and device.type == "cuda":
+        if (
+            _compiled_diffusion_softcap is not None or _compiled_diffusion_categorical is not None
+        ) and device.type == "cuda":
             inverse_temperatures = torch.tensor(
                 [
                     1.0 / (t_min + ((t_max - t_min) * (step / max_denoising_steps)))
@@ -1084,6 +1106,14 @@ class DiffusionGenerate:
                 if inverse_temperatures is None:
                     raw_logits = self.logits(x)
                     processed_logits = raw_logits / temperature
+                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
+                elif _compiled_diffusion_categorical is not None:
+                    raw_logits = self.logits(x, softcap=False)
+                    processed_logits, probs, token_entropy = _compiled_diffusion_categorical(
+                        raw_logits,
+                        self.model.config.final_logit_softcapping,
+                        inverse_temperatures[cur_step - 1],
+                    )
                 else:
                     raw_logits = self.logits(x, softcap=False)
                     processed_logits = _compiled_diffusion_softcap(
@@ -1091,7 +1121,7 @@ class DiffusionGenerate:
                         self.model.config.final_logit_softcapping,
                         inverse_temperatures[cur_step - 1],
                     )
-                probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
+                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
                 argmax_canvas = torch.argmax(processed_logits, dim=-1)

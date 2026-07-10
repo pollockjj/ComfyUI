@@ -18,6 +18,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     _diffusion_probs_and_entropy,
     _diffusion_softcap_inverse_temperature,
+    _diffusion_softcap_probs_and_entropy,
 )
 
 
@@ -28,6 +29,13 @@ class TestDiffusionGemmaKVCache(unittest.TestCase):
         reference = torch.tanh(logits.float() / 30.0) * 30.0 / temperature
         candidate = _diffusion_softcap_inverse_temperature(logits, 30.0, torch.tensor(1.0 / temperature))
         self.assertTrue(torch.allclose(candidate, reference, rtol=1e-6, atol=1e-5))
+
+    def test_softcap_probabilities_and_entropy_match_reference(self):
+        logits = torch.linspace(-40.0, 40.0, 4096, dtype=torch.bfloat16).reshape(4, 1024)
+        processed, probs, entropy = _diffusion_softcap_probs_and_entropy(logits, 30.0, torch.tensor(2.0))
+        reference = torch.distributions.Categorical(logits=processed)
+        self.assertTrue(torch.allclose(probs, reference.probs, rtol=1e-6, atol=1e-7))
+        self.assertTrue(torch.allclose(entropy, reference.entropy(), rtol=1e-6, atol=1e-5))
 
     def test_reused_categorical_probabilities_match_statistics(self):
         logits = torch.linspace(-4.0, 4.0, 170).reshape(2, 5, 17)
