@@ -721,9 +721,9 @@ class _StableAndConfidentStopping:
         self.argmax_canvas_history = None
         self.history_length = 0
 
-    def __call__(self, argmax_canvas, logits):
+    def __call__(self, argmax_canvas, token_entropy):
         if self.stability_threshold == 0:
-            stable = torch.ones((logits.shape[0]), device=logits.device, dtype=torch.bool)
+            stable = torch.ones((token_entropy.shape[0]), device=token_entropy.device, dtype=torch.bool)
         else:
             if self.argmax_canvas_history is None:
                 self.argmax_canvas_history = torch.full(
@@ -735,7 +735,6 @@ class _StableAndConfidentStopping:
             stable = (self.argmax_canvas_history == argmax_canvas[None, :, :]).all(dim=-1).all(dim=0)
             stable = stable & (self.history_length >= self.stability_threshold)
 
-        token_entropy = torch.distributions.Categorical(logits=logits).entropy()
         confident = torch.mean(token_entropy, dim=-1) < self.confidence_threshold
         return stable & confident
 
@@ -748,7 +747,7 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
     accepted_token_mask = torch.scatter(
         input=torch.zeros_like(sorted_selection_mask), dim=-1, index=sorted_indices, src=sorted_selection_mask)
     accepted_canvas = torch.where(accepted_token_mask, denoiser_canvas, current_canvas)
-    return accepted_canvas, accepted_token_mask
+    return accepted_canvas, accepted_token_mask, token_entropy
 
 
 class DiffusionGenerate:
@@ -834,13 +833,13 @@ class DiffusionGenerate:
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
                 argmax_canvas = torch.argmax(processed_logits, dim=-1)
 
-                accepted_canvas, accepted_mask = _entropy_bound_accept(
+                accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
                     current_canvas, denoiser_canvas, processed_logits, entropy_bound)
                 random_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                               device=device, generator=generator)
                 current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
 
-                finished_denoising = stopping(argmax_canvas, processed_logits)
+                finished_denoising = stopping(argmax_canvas, token_entropy)
                 self_conditioning_logits = processed_logits.to(execution_dtype)
                 step_eos = torch.isin(argmax_canvas[0], eos_tensor)
                 step_eos_positions = torch.nonzero(step_eos, as_tuple=False).flatten()
