@@ -262,14 +262,6 @@ class DiffusionGemmaExperts(nn.Module):
         return cuda_backend._C is not None and hasattr(cuda_backend._C, "cutlass_grouped_gemm_nvfp4")
 
     @staticmethod
-    def _variable_grouped_nvfp4_available():
-        from comfy_kitchen.backends import cuda as cuda_backend
-        return (
-            cuda_backend._C is not None
-            and hasattr(cuda_backend._C, "cutlass_grouped_gemm_nvfp4_variable")
-        )
-
-    @staticmethod
     def _grouped_nvfp4_mm(
         qdata,
         weight,
@@ -319,39 +311,6 @@ class DiffusionGemmaExperts(nn.Module):
         )
         return out
 
-    @staticmethod
-    def _variable_grouped_nvfp4_mm(
-        qdata,
-        weight,
-        input_scale,
-        weight_scale,
-        input_block_scale,
-        weight_block_scale,
-        m_indptr,
-        out_dtype,
-    ):
-        from comfy_kitchen.backends import cuda as cuda_backend
-        groups, output_features, _ = weight.shape
-        alpha = (input_scale * weight_scale).to(device=qdata.device, dtype=torch.float32).reshape(-1)
-        if alpha.numel() == 1:
-            alpha = alpha.expand(groups).contiguous()
-        elif not alpha.is_contiguous():
-            alpha = alpha.contiguous()
-        out = torch.empty((qdata.shape[0], output_features), device=qdata.device, dtype=out_dtype)
-        cuda_backend._C.cutlass_grouped_gemm_nvfp4_variable(
-            cuda_backend._wrap_for_dlpack(qdata),
-            cuda_backend._wrap_for_dlpack(input_block_scale.view(torch.uint8)),
-            cuda_backend._wrap_for_dlpack(weight),
-            cuda_backend._wrap_for_dlpack(weight_block_scale.view(torch.uint8)),
-            cuda_backend._wrap_for_dlpack(m_indptr),
-            cuda_backend._wrap_for_dlpack(out),
-            cuda_backend._wrap_for_dlpack(alpha),
-            cuda_backend._wrap_for_dlpack(cuda_backend.get_cublas_workspace()),
-            cuda_backend.DTYPE_TO_CODE[out_dtype],
-            torch.cuda.current_stream(qdata.device).cuda_stream,
-        )
-        return out
-
     def _supports_grouped_nvfp4(self, hidden_states):
         return (
             self.unfused
@@ -371,7 +330,7 @@ class DiffusionGemmaExperts(nn.Module):
             return False
         if torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
             return False
-        if not self._variable_grouped_nvfp4_available():
+        if not self._grouped_nvfp4_available():
             return False
         banks = (self.gate_up_proj, self.down_proj)
         if not all(
@@ -472,10 +431,6 @@ class DiffusionGemmaExperts(nn.Module):
         flat_experts = top_k_index.reshape(-1)
         counts = torch.bincount(flat_experts, minlength=E)
         C = -(-int(counts.max()) // self.grouped_nvfp4_bucket) * self.grouped_nvfp4_bucket
-        padded_counts = (counts + 3) // 4 * 4
-        m_indptr = torch.cat(
-            (torch.zeros(1, device=counts.device, dtype=torch.int32), padded_counts.cumsum(0).to(torch.int32))
-        )
         order = torch.argsort(flat_experts)
         sorted_experts = flat_experts[order]
         rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
@@ -484,28 +439,23 @@ class DiffusionGemmaExperts(nn.Module):
         gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
         gather_tok[slot] = order // K
         x = hidden_states[gather_tok].view(E, C, H)
-        rows = torch.arange(C, device=flat_experts.device).unsqueeze(0)
-        padded_mask = rows < padded_counts.unsqueeze(1)
-        valid_in_compact = (rows < counts.unsqueeze(1))[padded_mask]
 
         def quantize(tensor, scale):
             flat = tensor.flatten(0, 1)
             scale = scale.to(device=flat.device, dtype=torch.float32)
             qdata, block_scale = ck.quantize_nvfp4(flat, scale, hi_first=False)
-            qdata = qdata.view(E, C, -1)[padded_mask].contiguous()
-            block_scale = block_scale.view(E, C, -1)
             return qdata, scale, block_scale
 
         def grouped_linear(qdata, input_scale, input_block_scale, weight):
             params = weight._params
-            return self._variable_grouped_nvfp4_mm(
+            return self._grouped_nvfp4_mm(
                 qdata,
                 weight._qdata,
                 input_scale,
                 params.scale,
                 input_block_scale,
                 params.block_scale,
-                m_indptr,
+                C,
                 out_dtype=hidden_states.dtype,
             )
 
@@ -523,16 +473,12 @@ class DiffusionGemmaExperts(nn.Module):
             gate_up = grouped_linear(qx, x_scale, x_block_scale, weights[0])
             up, gate = gate_up.chunk(2, dim=-1)
             intermediate = _gelu_tanh(gate) * up
-            intermediate_padded = torch.zeros(
-                (E, C, intermediate.shape[-1]), device=intermediate.device, dtype=intermediate.dtype
-            )
-            intermediate_padded[padded_mask] = intermediate
-            qi, i_scale, i_block_scale = quantize(intermediate_padded, self.down_proj.input_scale)
+            qi, i_scale, i_block_scale = quantize(intermediate, self.down_proj.input_scale)
             y = grouped_linear(qi, i_scale, i_block_scale, weights[1])
 
-        pair_y = torch.empty((N * K, H), dtype=y.dtype, device=y.device)
-        pair_y[order] = y[valid_in_compact]
-        y = pair_y
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = slot
+        y = y.reshape(E * C, H)[pair_order]
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
