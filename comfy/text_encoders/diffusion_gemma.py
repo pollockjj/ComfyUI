@@ -112,15 +112,32 @@ class DiffusionGemmaAttention(nn.Module):
 
         present_key_value = None
         if past_key_value is not None:
+            preallocated_cache = False
             if len(past_key_value) > 0:
-                past_key, past_value, cumulative_len = past_key_value
-                xk = torch.cat((past_key, xk), dim=2)
-                xv = torch.cat((past_value, xv), dim=2)
+                if len(past_key_value) == 4:
+                    past_key, past_value, cumulative_len, cache_len = past_key_value
+                    next_cache_len = cache_len + seq_length
+                    if past_key.shape[2] != past_value.shape[2] or cache_len > past_key.shape[2]:
+                        raise RuntimeError("DiffusionGemma KV cache metadata is invalid")
+                    if next_cache_len == past_key.shape[2]:
+                        past_key[:, :, cache_len:next_cache_len].copy_(xk)
+                        past_value[:, :, cache_len:next_cache_len].copy_(xv)
+                        xk, xv = past_key, past_value
+                        preallocated_cache = True
+                    else:
+                        xk = torch.cat((past_key[:, :, :cache_len], xk), dim=2)
+                        xv = torch.cat((past_value[:, :, :cache_len], xv), dim=2)
+                else:
+                    past_key, past_value, cumulative_len = past_key_value
+                    xk = torch.cat((past_key, xk), dim=2)
+                    xv = torch.cat((past_value, xv), dim=2)
             else:
                 cumulative_len = 0
             if update_cache:
                 new_cumulative = cumulative_len + seq_length
-                if sliding_window is not None and xk.shape[2] > sliding_window - 1:
+                if preallocated_cache:
+                    present_key_value = (past_key, past_value, new_cumulative, next_cache_len)
+                elif sliding_window is not None and xk.shape[2] > sliding_window - 1:
                     present_key_value = (xk[:, :, -(sliding_window - 1):], xv[:, :, -(sliding_window - 1):], new_cumulative)
                 else:
                     present_key_value = (xk, xv, new_cumulative)
@@ -795,10 +812,11 @@ class DiffusionGemmaModel(nn.Module):
                 kv = past_key_values[i]
                 if len(kv) == 0:
                     continue
+                cache_len = kv[3] if len(kv) == 4 else kv[0].shape[2]
                 if layer.sliding_window is not None:
-                    sliding_len = kv[0].shape[2]
+                    sliding_len = cache_len
                 else:
-                    full_len = kv[0].shape[2]
+                    full_len = cache_len
         return full_len, sliding_len
 
     def _encoder_masks(self, q_pos, full_len, sliding_len, sliding_window, dtype, device, mm_spans=None, padding_mask=None):
@@ -953,6 +971,22 @@ class DiffusionGenerate:
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
 
+    def _reserve_kv_cache(self, past_key_values, reserve):
+        for i, (layer, kv) in enumerate(zip(self.model.decoder.layers, past_key_values)):
+            if len(kv) == 4:
+                key, value, cumulative_len, cache_len = kv
+            else:
+                key, value, cumulative_len = kv
+                cache_len = key.shape[2]
+            keep = min(cache_len, layer.sliding_window - 1) if layer.sliding_window is not None else cache_len
+            shape = (key.shape[0], key.shape[1], keep + reserve, key.shape[3])
+            next_key = key.new_empty(shape)
+            next_value = value.new_empty(shape)
+            next_key[:, :, :keep].copy_(key[:, :, cache_len - keep:cache_len])
+            next_value[:, :, :keep].copy_(value[:, :, cache_len - keep:cache_len])
+            past_key_values[i] = (next_key, next_value, cumulative_len, keep)
+        return past_key_values
+
     def generate(self, embeds=None, max_length=256, seed=42, max_denoising_steps=48, entropy_bound=0.1,
                  t_min=0.4, t_max=0.8, stability_threshold=1, confidence_threshold=0.005,
                  execution_dtype=None, mm_spans=None, stop_tokens=None, **kwargs):
@@ -985,6 +1019,7 @@ class DiffusionGenerate:
         past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
         _, _, past_key_values = self.model(None, embeds=embeds, past_key_values=past_key_values,
                                            mode="encoder", mm_spans=mm_spans)
+        past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
         cur_len = embeds.shape[1]
 
         max_new_canvases = math.ceil(max_length / canvas_length)
@@ -996,6 +1031,7 @@ class DiffusionGenerate:
                 commit_embeds = self.model.decoder.embed_tokens(commit_canvas).to(execution_dtype)
                 _, _, past_key_values = self.model(None, embeds=commit_embeds, past_key_values=past_key_values,
                                                    mode="encoder")
+                past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
 
             current_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                            device=device, generator=generator)
