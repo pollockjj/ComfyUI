@@ -21,7 +21,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
-    def test_reused_sampling_probabilities_match_categorical_statistics(self):
+    def test_reused_categorical_probabilities_match_statistics(self):
         logits = torch.linspace(-4.0, 4.0, 170).reshape(2, 5, 17)
 
         probs, entropy = _diffusion_probs_and_entropy(logits)
