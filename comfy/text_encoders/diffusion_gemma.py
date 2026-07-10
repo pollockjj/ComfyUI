@@ -242,14 +242,72 @@ class DiffusionGemmaExperts(nn.Module):
             return False
         return any(getattr(bank, "layout_type", None) is not None for bank in (self.gate_proj, self.up_proj, self.down_proj))
 
-    def _supports_grouped_nvfp4(self, hidden_states):
+    @staticmethod
+    def _grouped_nvfp4_available():
         ck = getattr(comfy.quant_ops, "ck", None)
+        if ck is None:
+            return False
+        if hasattr(ck, "grouped_scaled_mm_nvfp4"):
+            return True
+        from comfy_kitchen.backends import cuda as cuda_backend
+        return cuda_backend._C is not None and hasattr(cuda_backend._C, "cutlass_grouped_gemm_nvfp4")
+
+    @staticmethod
+    def _grouped_nvfp4_mm(
+        qdata,
+        weight,
+        input_scale,
+        weight_scale,
+        input_block_scale,
+        weight_block_scale,
+        group_size,
+        out_dtype,
+    ):
+        ck = comfy.quant_ops.ck
+        if hasattr(ck, "grouped_scaled_mm_nvfp4"):
+            return ck.grouped_scaled_mm_nvfp4(
+                qdata,
+                weight,
+                input_scale,
+                weight_scale,
+                input_block_scale,
+                weight_block_scale,
+                group_size,
+                out_dtype=out_dtype,
+            )
+
+        # Support extension-first deployments whose Python dispatcher predates
+        # the grouped binding.
+        from comfy_kitchen.backends import cuda as cuda_backend
+        groups, output_features, _ = weight.shape
+        alpha = (input_scale * weight_scale).to(device=qdata.device, dtype=torch.float32).reshape(-1)
+        if alpha.numel() == 1:
+            alpha = alpha.expand(groups).contiguous()
+        elif not alpha.is_contiguous():
+            alpha = alpha.contiguous()
+        out = torch.empty(
+            (groups, group_size, output_features), device=qdata.device, dtype=out_dtype
+        )
+        cuda_backend._C.cutlass_grouped_gemm_nvfp4(
+            cuda_backend._wrap_for_dlpack(qdata),
+            cuda_backend._wrap_for_dlpack(input_block_scale.view(torch.uint8)),
+            cuda_backend._wrap_for_dlpack(weight),
+            cuda_backend._wrap_for_dlpack(weight_block_scale.view(torch.uint8)),
+            cuda_backend._wrap_for_dlpack(out),
+            cuda_backend._wrap_for_dlpack(alpha),
+            cuda_backend._wrap_for_dlpack(cuda_backend.get_cublas_workspace()),
+            group_size,
+            cuda_backend.DTYPE_TO_CODE[out_dtype],
+            torch.cuda.current_stream(qdata.device).cuda_stream,
+        )
+        return out
+
+    def _supports_grouped_nvfp4(self, hidden_states):
         return (
             self.unfused
             and hidden_states.is_cuda
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
-            and ck is not None
-            and hasattr(ck, "grouped_scaled_mm_nvfp4")
+            and self._grouped_nvfp4_available()
             and all(
                 getattr(bank, "quant_format", None) == "nvfp4"
                 and isinstance(getattr(bank, "weight", None), QuantizedTensor)
@@ -291,7 +349,7 @@ class DiffusionGemmaExperts(nn.Module):
 
         def grouped_linear(qdata, input_scale, input_block_scale, weight):
             params = weight._params
-            return ck.grouped_scaled_mm_nvfp4(
+            return self._grouped_nvfp4_mm(
                 qdata,
                 weight._qdata,
                 input_scale,
