@@ -143,6 +143,7 @@ class DiffusionGemmaAttention(nn.Module):
                     present_key_value = (xk, xv, new_cumulative)
 
         expand_kv = (self.num_heads != self.num_kv_heads and
+                     attention_mask is not None and
                      sliding_window is not None and
                      xk.shape[2] >= sliding_window)
         if expand_kv:
