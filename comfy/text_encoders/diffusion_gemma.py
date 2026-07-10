@@ -949,6 +949,17 @@ def _diffusion_probs_and_entropy(logits):
     return distribution.probs, distribution.entropy()
 
 
+def _diffusion_softcap_inverse_temperature(logits, cap, inverse_temperature):
+    return torch.tanh(logits.to(torch.float32) / cap) * cap * inverse_temperature
+
+
+_compiled_diffusion_softcap = (
+    torch.compile(_diffusion_softcap_inverse_temperature, fullgraph=True, dynamic=False)
+    if os.environ.get("DG_COMPILED_SOFTCAP", "0") == "1"
+    else None
+)
+
+
 def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound, token_entropy=None):
     if token_entropy is None:
         token_entropy = torch.distributions.Categorical(logits=logits).entropy()
@@ -962,7 +973,7 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
 
 
 class DiffusionGenerate:
-    def logits(self, x):
+    def logits(self, x, softcap=True):
         module = self.model.decoder.embed_tokens
         offload_stream = None
         if module.comfy_cast_weights:
@@ -972,6 +983,8 @@ class DiffusionGenerate:
         logits = torch.nn.functional.linear(x, weight, None)
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
 
+        if not softcap:
+            return logits
         logits = logits.to(torch.float32)
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
@@ -1033,6 +1046,16 @@ class DiffusionGenerate:
         max_new_canvases = math.ceil(max_length / canvas_length)
         generated_token_ids = []
         commit_canvas = None
+        inverse_temperatures = None
+        if _compiled_diffusion_softcap is not None and device.type == "cuda":
+            inverse_temperatures = torch.tensor(
+                [
+                    1.0 / (t_min + ((t_max - t_min) * (step / max_denoising_steps)))
+                    for step in range(1, max_denoising_steps + 1)
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1057,10 +1080,17 @@ class DiffusionGenerate:
                                      self_conditioning_logits=self_conditioning_logits,
                                      position_ids=decoder_position_ids, dtype=execution_dtype,
                                      freqs_cis=decoder_freqs_cis)
-                raw_logits = self.logits(x)
-
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
-                processed_logits = raw_logits / temperature
+                if inverse_temperatures is None:
+                    raw_logits = self.logits(x)
+                    processed_logits = raw_logits / temperature
+                else:
+                    raw_logits = self.logits(x, softcap=False)
+                    processed_logits = _compiled_diffusion_softcap(
+                        raw_logits,
+                        self.model.config.final_logit_softcapping,
+                        inverse_temperatures[cur_step - 1],
+                    )
                 probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
