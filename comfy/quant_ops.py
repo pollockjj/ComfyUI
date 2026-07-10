@@ -251,8 +251,9 @@ def _handle_comfy_fp8_linear(qt, args, kwargs):
     return _ck_handle_fp8_linear(qt, args, kwargs)
 
 
-register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E4M3Layout)(_handle_comfy_fp8_linear)
-register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E5M2Layout)(_handle_comfy_fp8_linear)
+if _CK_AVAILABLE:
+    register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E4M3Layout)(_handle_comfy_fp8_linear)
+    register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E5M2Layout)(_handle_comfy_fp8_linear)
 
 NVFP4_FUSED_MOE_FORMAT = "nvfp4_cutlass_fused_moe_v1"
 NVFP4_FUSED_MOE_V1_FIELDS = {
