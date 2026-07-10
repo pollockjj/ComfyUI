@@ -23,12 +23,18 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
-    def test_softcap_inverse_temperature_matches_reference(self):
+    def test_softcap_inverse_temperature_is_numerically_equivalent(self):
         logits = torch.linspace(-40.0, 40.0, 4096, dtype=torch.bfloat16)
         temperature = 0.65
         reference = torch.tanh(logits.float() / 30.0) * 30.0 / temperature
         candidate = _diffusion_softcap_inverse_temperature(logits, 30.0, torch.tensor(1.0 / temperature))
         self.assertTrue(torch.allclose(candidate, reference, rtol=1e-6, atol=1e-5))
+
+    def test_compiled_sampling_stats_are_disabled_on_cpu(self):
+        generate = DiffusionGenerate()
+        generate._compiled_sampling_stats = None
+        generate.model = SimpleNamespace(decoder=SimpleNamespace(layers=[]))
+        self.assertIsNone(generate._compiled_sampling_stats_for(torch.device("cpu")))
 
     def test_softcap_probabilities_and_entropy_match_reference(self):
         logits = torch.linspace(-40.0, 40.0, 4096, dtype=torch.bfloat16).reshape(4, 1024)

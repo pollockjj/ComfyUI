@@ -963,23 +963,6 @@ def _diffusion_softcap_probs_and_entropy(logits, cap, inverse_temperature):
     return processed_logits, probs, token_entropy
 
 
-_compiled_diffusion_softcap = (
-    torch.compile(_diffusion_softcap_inverse_temperature, fullgraph=True, dynamic=False)
-    if os.environ.get("DG_COMPILED_SOFTCAP", "0") == "1"
-    else None
-)
-_compiled_diffusion_categorical = (
-    torch.compile(
-        _diffusion_softcap_probs_and_entropy,
-        fullgraph=True,
-        dynamic=False,
-        options={"online_softmax": False},
-    )
-    if os.environ.get("DG_COMPILED_CATEGORICAL", "0") == "1"
-    else None
-)
-
-
 def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound, token_entropy=None):
     if token_entropy is None:
         token_entropy = torch.distributions.Categorical(logits=logits).entropy()
@@ -993,7 +976,7 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
 
 
 class DiffusionGenerate:
-    def logits(self, x, softcap=True):
+    def _raw_logits(self, x):
         module = self.model.decoder.embed_tokens
         offload_stream = None
         if module.comfy_cast_weights:
@@ -1002,12 +985,35 @@ class DiffusionGenerate:
             weight = module.weight.to(x)
         logits = torch.nn.functional.linear(x, weight, None)
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
+        return logits
 
-        if not softcap:
-            return logits
-        logits = logits.to(torch.float32)
+    def logits(self, x):
+        logits = self._raw_logits(x).to(torch.float32)
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
+
+    def _supports_compiled_sampling_stats(self, device):
+        return (
+            device.type == "cuda"
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(device) == (12, 0)
+            and all(
+                layer.experts._has_fused_nvfp4_banks()
+                for layer in self.model.decoder.layers
+            )
+        )
+
+    def _compiled_sampling_stats_for(self, device):
+        if not self._supports_compiled_sampling_stats(device):
+            return None
+        if self._compiled_sampling_stats is None:
+            self._compiled_sampling_stats = torch.compile(
+                _diffusion_softcap_probs_and_entropy,
+                fullgraph=True,
+                dynamic=False,
+                options={"online_softmax": False},
+            )
+        return self._compiled_sampling_stats
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
@@ -1066,10 +1072,9 @@ class DiffusionGenerate:
         max_new_canvases = math.ceil(max_length / canvas_length)
         generated_token_ids = []
         commit_canvas = None
+        compiled_sampling_stats = self._compiled_sampling_stats_for(device)
         inverse_temperatures = None
-        if (
-            _compiled_diffusion_softcap is not None or _compiled_diffusion_categorical is not None
-        ) and device.type == "cuda":
+        if compiled_sampling_stats is not None:
             inverse_temperatures = torch.tensor(
                 [
                     1.0 / (t_min + ((t_max - t_min) * (step / max_denoising_steps)))
@@ -1102,26 +1107,17 @@ class DiffusionGenerate:
                                      self_conditioning_logits=self_conditioning_logits,
                                      position_ids=decoder_position_ids, dtype=execution_dtype,
                                      freqs_cis=decoder_freqs_cis)
-                temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
-                if inverse_temperatures is None:
-                    raw_logits = self.logits(x)
-                    processed_logits = raw_logits / temperature
+                if compiled_sampling_stats is None:
+                    temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
+                    processed_logits = self.logits(x) / temperature
                     probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
-                elif _compiled_diffusion_categorical is not None:
-                    raw_logits = self.logits(x, softcap=False)
-                    processed_logits, probs, token_entropy = _compiled_diffusion_categorical(
-                        raw_logits,
-                        self.model.config.final_logit_softcapping,
-                        inverse_temperatures[cur_step - 1],
-                    )
                 else:
-                    raw_logits = self.logits(x, softcap=False)
-                    processed_logits = _compiled_diffusion_softcap(
+                    raw_logits = self._raw_logits(x)
+                    processed_logits, probs, token_entropy = compiled_sampling_stats(
                         raw_logits,
                         self.model.config.final_logit_softcapping,
                         inverse_temperatures[cur_step - 1],
                     )
-                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
                 argmax_canvas = torch.argmax(processed_logits, dim=-1)
@@ -1173,6 +1169,7 @@ class DiffusionGemma26B(BaseLlama, DiffusionGenerate, torch.nn.Module):
         self.num_layers = config.num_hidden_layers
         self.model = DiffusionGemmaModel(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
+        self._compiled_sampling_stats = None
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
