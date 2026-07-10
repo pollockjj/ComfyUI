@@ -719,6 +719,7 @@ class _StableAndConfidentStopping:
         self.stability_threshold = stability_threshold
         self.confidence_threshold = confidence_threshold
         self.argmax_canvas_history = None
+        self.history_length = 0
 
     def __call__(self, argmax_canvas, logits):
         if self.stability_threshold == 0:
@@ -728,9 +729,11 @@ class _StableAndConfidentStopping:
                 self.argmax_canvas_history = torch.full(
                     (self.stability_threshold, argmax_canvas.shape[0], argmax_canvas.shape[1]),
                     -1, dtype=argmax_canvas.dtype, device=argmax_canvas.device)
-            stable = (self.argmax_canvas_history == argmax_canvas[None, :, :]).all(dim=-1).all(dim=0)
             self.argmax_canvas_history = torch.roll(self.argmax_canvas_history, shifts=-1, dims=0)
             self.argmax_canvas_history[-1] = argmax_canvas
+            self.history_length += 1
+            stable = (self.argmax_canvas_history == argmax_canvas[None, :, :]).all(dim=-1).all(dim=0)
+            stable = stable & (self.history_length >= self.stability_threshold)
 
         token_entropy = torch.distributions.Categorical(logits=logits).entropy()
         confident = torch.mean(token_entropy, dim=-1) < self.confidence_threshold
