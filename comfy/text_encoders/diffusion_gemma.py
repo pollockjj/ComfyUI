@@ -852,7 +852,7 @@ class DiffusionGemmaModel(nn.Module):
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=None,
                 past_key_values=None, input_ids=None, mode="encoder", self_conditioning_logits=None,
-                mm_spans=None):
+                mm_spans=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -882,7 +882,8 @@ class DiffusionGemmaModel(nn.Module):
         if position_ids is None:
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
 
-        freqs_cis = self.decoder.compute_freqs_cis(position_ids, x.device, dtype=x.dtype)
+        if freqs_cis is None:
+            freqs_cis = self.decoder.compute_freqs_cis(position_ids, x.device, dtype=x.dtype)
 
         if mode == "decoder":
             masks = {"full": None, "sliding": None}
@@ -961,6 +962,8 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound
 
 
 class DiffusionGenerate:
+    cache_decoder_rope = os.environ.get("DG_CACHE_DECODER_ROPE", "1") != "0"
+
     def logits(self, x):
         module = self.model.decoder.embed_tokens
         offload_stream = None
@@ -1045,13 +1048,19 @@ class DiffusionGenerate:
             self_conditioning_logits = None
             argmax_canvas = current_canvas
             decoder_position_ids = torch.arange(cur_len, cur_len + canvas_length, device=device).unsqueeze(0)
+            decoder_freqs_cis = None
+            if self.cache_decoder_rope:
+                decoder_freqs_cis = self.model.decoder.compute_freqs_cis(
+                    decoder_position_ids, device, dtype=execution_dtype
+                )
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
 
             for cur_step in reversed(range(1, max_denoising_steps + 1)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                      self_conditioning_logits=self_conditioning_logits,
-                                     position_ids=decoder_position_ids, dtype=execution_dtype)
+                                     position_ids=decoder_position_ids, dtype=execution_dtype,
+                                     freqs_cis=decoder_freqs_cis)
                 raw_logits = self.logits(x)
 
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
