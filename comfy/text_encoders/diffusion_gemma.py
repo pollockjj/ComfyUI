@@ -194,10 +194,10 @@ def _dequant_bank(module, weight, dtype):
                                          block_scale=block_scale[i])
             w[i] = weight.layout_cls.dequantize(qdata[i], expert_params)
         return w
-    if scale.dim() == 2:
-        # per-row bank scales (int8_tensorwise): scale and convrot groups are row-local,
-        # so one flat [E*rows, in] dequant is exact; reshape restores the bank
-        flat_params = type(params)(scale=scale.reshape(-1), orig_dtype=dtype,
+    if scale.dim() >= 2:
+        # per-row bank scales (int8_tensorwise), [E, out] or [E, out, 1]: scale and convrot
+        # groups are row-local, so one flat [E*rows, in] dequant is exact
+        flat_params = type(params)(scale=scale.reshape(E * out_f, -1), orig_dtype=dtype,
                                    orig_shape=(E * out_f, in_f),
                                    convrot=getattr(params, "convrot", False),
                                    convrot_groupsize=getattr(params, "convrot_groupsize", 256))
