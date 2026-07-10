@@ -147,16 +147,23 @@ class DiffusionGemmaRouter(nn.Module):
         self.scale = nn.Parameter(torch.empty(config.hidden_size, device=device, dtype=dtype))
         self.per_expert_scale = nn.Parameter(torch.empty(config.num_experts, device=device, dtype=dtype))
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, use_fused_routing=False):
         hidden_states = rms_norm(hidden_states)
         scale = comfy.ops.cast_to_input(self.scale, hidden_states, copy=False)
         hidden_states = hidden_states * scale * self.scalar_root_size
 
         expert_scores = self.proj(hidden_states)
+        per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
+        if use_fused_routing:
+            try:
+                return comfy.quant_ops.ck.gemma4_fused_routing(
+                    expert_scores, per_expert_scale, self.top_k
+                )
+            except comfy.quant_ops.ck.NoCapableBackendError:
+                pass
         router_probabilities = torch.nn.functional.softmax(expert_scores, dim=-1, dtype=torch.float32)
         top_k_weights, top_k_index = torch.topk(router_probabilities, k=self.top_k, dim=-1)
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
-        per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
         top_k_weights = top_k_weights * per_expert_scale[top_k_index]
         return top_k_weights, top_k_index
 
@@ -327,7 +334,7 @@ class DiffusionGemmaExperts(nn.Module):
                 try:
                     return self._forward_native_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
                 except comfy.quant_ops.ck.NoCapableBackendError:
-                    pass
+                    top_k_index = top_k_index.to(dtype=torch.long)
             if not self._supports_grouped_fused_nvfp4(hidden_states):
                 raise RuntimeError(
                     "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
@@ -685,8 +692,12 @@ class DiffusionGemmaBlock(nn.Module):
         hidden_states_1 = self.post_feedforward_layernorm_1(h)
 
         flat = residual.reshape(-1, residual.shape[-1])
-        top_k_weights, top_k_index = self.router(flat)
-        hidden_states_2 = self.experts(self.pre_feedforward_layernorm_2(flat), top_k_index, top_k_weights)
+        expert_input = self.pre_feedforward_layernorm_2(flat)
+        use_fused_routing = self.experts._supports_native_fused_nvfp4(expert_input)
+        top_k_weights, top_k_index = self.router(
+            flat, use_fused_routing=use_fused_routing
+        )
+        hidden_states_2 = self.experts(expert_input, top_k_index, top_k_weights)
         hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2.reshape(residual.shape))
 
         x = self.post_feedforward_layernorm(hidden_states_1 + hidden_states_2)
