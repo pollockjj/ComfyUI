@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from comfy import sd1_clip
 import comfy.ops
+import comfy.quant_ops
 import comfy.utils
 import comfy.model_management
 from comfy.quant_ops import QuantizedTensor
@@ -219,6 +220,7 @@ def _bank_bmm(module, x):
 
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
+    grouped_nvfp4_bucket = 128
     grouped_min_tokens = int(os.environ.get("DG_GROUPED_MIN_TOKENS", "64"))
 
     def __init__(self, config, device=None, dtype=None, ops=None):
@@ -240,10 +242,88 @@ class DiffusionGemmaExperts(nn.Module):
             return False
         return any(getattr(bank, "layout_type", None) is not None for bank in (self.gate_proj, self.up_proj, self.down_proj))
 
+    def _supports_grouped_nvfp4(self, hidden_states):
+        ck = getattr(comfy.quant_ops, "ck", None)
+        return (
+            self.unfused
+            and hidden_states.is_cuda
+            and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
+            and ck is not None
+            and hasattr(ck, "grouped_scaled_mm_nvfp4")
+            and all(
+                getattr(bank, "quant_format", None) == "nvfp4"
+                and isinstance(getattr(bank, "weight", None), QuantizedTensor)
+                and bank.bias is None
+                for bank in (self.gate_proj, self.up_proj, self.down_proj)
+            )
+        )
+
     def forward(self, hidden_states, top_k_index, top_k_weights):
+        if hidden_states.shape[0] >= self.grouped_min_tokens and self._supports_grouped_nvfp4(hidden_states):
+            return self._forward_grouped_nvfp4(hidden_states, top_k_index, top_k_weights)
         if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
+
+    def _forward_grouped_nvfp4(self, hidden_states, top_k_index, top_k_weights):
+        ck = comfy.quant_ops.ck
+        N, H = hidden_states.shape
+        E = self.num_experts
+        K = top_k_index.shape[-1]
+
+        flat_experts = top_k_index.reshape(-1)
+        counts = torch.bincount(flat_experts, minlength=E)
+        C = -(-int(counts.max()) // self.grouped_nvfp4_bucket) * self.grouped_nvfp4_bucket
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
+        slot = sorted_experts * C + rank
+
+        gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
+        gather_tok[slot] = order // K
+        x = hidden_states[gather_tok].view(E, C, H)
+
+        def quantize(tensor):
+            flat = tensor.flatten(0, 1)
+            scale = (torch.amax(flat.abs()) / (448.0 * 6.0)).to(torch.float32)
+            qdata, block_scale = ck.quantize_nvfp4(flat, scale)
+            return qdata, scale, block_scale
+
+        def grouped_linear(qdata, input_scale, input_block_scale, weight):
+            params = weight._params
+            return ck.grouped_scaled_mm_nvfp4(
+                qdata,
+                weight._qdata,
+                input_scale,
+                params.scale,
+                input_block_scale,
+                params.block_scale,
+                C,
+                out_dtype=hidden_states.dtype,
+            )
+
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_proj, self.up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for bank in banks:
+                weight, bias = bank._resident_bank
+                if not isinstance(weight, QuantizedTensor) or bias is not None:
+                    raise RuntimeError("grouped DiffusionGemma NVFP4 requires unbiased resident quantized banks")
+                weights.append(weight)
+
+            qx, x_scale, x_block_scale = quantize(x)
+            gate = grouped_linear(qx, x_scale, x_block_scale, weights[0])
+            up = grouped_linear(qx, x_scale, x_block_scale, weights[1])
+            intermediate = _gelu_tanh(gate) * up
+            qi, i_scale, i_block_scale = quantize(intermediate)
+            y = grouped_linear(qi, i_scale, i_block_scale, weights[2])
+
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = slot
+        y = y.reshape(E * C, H)[pair_order]
+        y = y * top_k_weights.reshape(-1, 1)
+        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
     def _forward_grouped(self, hidden_states, top_k_index, top_k_weights):
         N, H = hidden_states.shape
