@@ -49,7 +49,7 @@ class TestDiffusionGemmaRouting(unittest.TestCase):
         ids = torch.zeros(3, 8, dtype=torch.int32)
 
         with mock.patch.object(
-            comfy.quant_ops.ck, "gemma4_fused_routing", return_value=(weights, ids)
+            comfy.quant_ops.ck, "gemma4_fused_routing", return_value=(weights, ids), create=True
         ) as fused:
             result = router(hidden, use_fused_routing=True)
 
@@ -64,7 +64,7 @@ class TestDiffusionGemmaRouting(unittest.TestCase):
         error = comfy.quant_ops.ck.NoCapableBackendError("gemma4_fused_routing", {})
 
         with mock.patch.object(
-            comfy.quant_ops.ck, "gemma4_fused_routing", side_effect=error
+            comfy.quant_ops.ck, "gemma4_fused_routing", side_effect=error, create=True
         ):
             actual = router(hidden, use_fused_routing=True)
 
@@ -76,7 +76,7 @@ class TestDiffusionGemmaRouting(unittest.TestCase):
         router = _router()
         hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
 
-        with mock.patch.object(comfy.quant_ops.ck, "gemma4_fused_routing") as fused:
+        with mock.patch.object(comfy.quant_ops.ck, "gemma4_fused_routing", create=True) as fused:
             _, ids = router(hidden)
 
         fused.assert_not_called()
@@ -87,7 +87,10 @@ class TestDiffusionGemmaRouting(unittest.TestCase):
         hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
 
         with mock.patch.object(
-            comfy.quant_ops.ck, "gemma4_fused_routing", side_effect=ValueError("bad routing")
+            comfy.quant_ops.ck,
+            "gemma4_fused_routing",
+            side_effect=ValueError("bad routing"),
+            create=True,
         ), self.assertRaisesRegex(ValueError, "bad routing"):
             router(hidden, use_fused_routing=True)
 
