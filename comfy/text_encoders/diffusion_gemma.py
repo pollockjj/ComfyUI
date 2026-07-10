@@ -228,7 +228,6 @@ class DiffusionGemmaExperts(nn.Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.unfused = config.unfused_experts
-        self.native_fused_nvfp4_available = self._native_fused_nvfp4_available()
         self._weight_patches_uuid = None
         self._native_nvfp4_alpha_cache = None
         E = config.num_experts
@@ -255,28 +254,6 @@ class DiffusionGemmaExperts(nn.Module):
         )
 
     @staticmethod
-    def _grouped_nvfp4_available():
-        ck = getattr(comfy.quant_ops, "ck", None)
-        if ck is None:
-            return False
-        if hasattr(ck, "grouped_scaled_mm_nvfp4"):
-            return True
-        from comfy_kitchen.backends import cuda as cuda_backend
-        return cuda_backend._C is not None and hasattr(cuda_backend._C, "cutlass_grouped_gemm_nvfp4")
-
-    @staticmethod
-    def _native_fused_nvfp4_available():
-        ck = getattr(comfy.quant_ops, "ck", None)
-        if ck is None or not hasattr(ck, "fused_moe_nvfp4") or not hasattr(ck, "list_backends"):
-            return False
-        cuda_backend = ck.list_backends().get("cuda", {})
-        return (
-            cuda_backend.get("available", False)
-            and not cuda_backend.get("disabled", False)
-            and "fused_moe_nvfp4" in cuda_backend.get("capabilities", ())
-        )
-
-    @staticmethod
     def _grouped_nvfp4_mm(
         qdata,
         weight,
@@ -288,50 +265,22 @@ class DiffusionGemmaExperts(nn.Module):
         out_dtype,
     ):
         ck = comfy.quant_ops.ck
-        if hasattr(ck, "grouped_scaled_mm_nvfp4"):
-            return ck.grouped_scaled_mm_nvfp4(
-                qdata,
-                weight,
-                input_scale,
-                weight_scale,
-                input_block_scale,
-                weight_block_scale,
-                group_size,
-                out_dtype=out_dtype,
-            )
-
-        # Support extension-first deployments whose Python dispatcher predates
-        # the grouped binding.
-        from comfy_kitchen.backends import cuda as cuda_backend
-        groups, output_features, _ = weight.shape
-        alpha = (input_scale * weight_scale).to(device=qdata.device, dtype=torch.float32).reshape(-1)
-        if alpha.numel() == 1:
-            alpha = alpha.expand(groups).contiguous()
-        elif not alpha.is_contiguous():
-            alpha = alpha.contiguous()
-        out = torch.empty(
-            (groups, group_size, output_features), device=qdata.device, dtype=out_dtype
-        )
-        cuda_backend._C.cutlass_grouped_gemm_nvfp4(
-            cuda_backend._wrap_for_dlpack(qdata),
-            cuda_backend._wrap_for_dlpack(input_block_scale.view(torch.uint8)),
-            cuda_backend._wrap_for_dlpack(weight),
-            cuda_backend._wrap_for_dlpack(weight_block_scale.view(torch.uint8)),
-            cuda_backend._wrap_for_dlpack(out),
-            cuda_backend._wrap_for_dlpack(alpha),
-            cuda_backend._wrap_for_dlpack(cuda_backend.get_cublas_workspace()),
+        return ck.grouped_scaled_mm_nvfp4(
+            qdata,
+            weight,
+            input_scale,
+            weight_scale,
+            input_block_scale,
+            weight_block_scale,
             group_size,
-            cuda_backend.DTYPE_TO_CODE[out_dtype],
-            torch.cuda.current_stream(qdata.device).cuda_stream,
+            out_dtype=out_dtype,
         )
-        return out
 
     def _supports_grouped_nvfp4(self, hidden_states):
         return (
             self.unfused
             and hidden_states.is_cuda
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
-            and self._grouped_nvfp4_available()
             and all(
                 getattr(bank, "quant_format", None) == "nvfp4"
                 and isinstance(getattr(bank, "weight", None), QuantizedTensor)
@@ -344,8 +293,6 @@ class DiffusionGemmaExperts(nn.Module):
         if self.unfused or not hidden_states.is_cuda:
             return False
         if torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
-            return False
-        if not self._grouped_nvfp4_available():
             return False
         banks = (self.gate_up_proj, self.down_proj)
         if not all(
@@ -367,7 +314,6 @@ class DiffusionGemmaExperts(nn.Module):
     def _supports_native_fused_nvfp4(self, hidden_states):
         return (
             self._supports_grouped_fused_nvfp4(hidden_states)
-            and self.native_fused_nvfp4_available
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.ndim == 2
             and hidden_states.shape[0] in (256, 340)
@@ -378,14 +324,20 @@ class DiffusionGemmaExperts(nn.Module):
     def forward(self, hidden_states, top_k_index, top_k_weights):
         if self._has_fused_nvfp4_banks():
             if self._supports_native_fused_nvfp4(hidden_states):
-                return self._forward_native_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
+                try:
+                    return self._forward_native_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
+                except comfy.quant_ops.ck.NoCapableBackendError:
+                    pass
             if not self._supports_grouped_fused_nvfp4(hidden_states):
                 raise RuntimeError(
                     "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
                 )
             return self._forward_grouped_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
         if hidden_states.shape[0] >= self.grouped_min_tokens and self._supports_grouped_nvfp4(hidden_states):
-            return self._forward_grouped_nvfp4(hidden_states, top_k_index, top_k_weights)
+            try:
+                return self._forward_grouped_nvfp4(hidden_states, top_k_index, top_k_weights)
+            except comfy.quant_ops.ck.NoCapableBackendError:
+                pass
         if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
@@ -1113,23 +1065,13 @@ class DiffusionGemma26B(BaseLlama, DiffusionGenerate, torch.nn.Module):
         self.num_layers = config.num_hidden_layers
         self.model = DiffusionGemmaModel(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
-        self._vision_cache = None
-        self._weight_patches_uuid = None
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
-            image = embed.pop("data")
+            image = embed.pop("data").movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
             max_soft_tokens = embed.get("max_soft_tokens", None)
-            image_cpu = image.detach().to("cpu")
-            cache_key = (image_cpu.shape, image_cpu.dtype, torch.device(device), max_soft_tokens, self._weight_patches_uuid)
-            cached = self._vision_cache
-            if cached is not None and cached[0] == cache_key and torch.equal(cached[1], image_cpu):
-                return cached[2].to(device), None
-            image = image.movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
             vision_out = self.model.encoder.vision_tower(image.to(device, dtype=torch.float32), max_soft_tokens=max_soft_tokens)
-            projected = self.model.encoder.embed_vision(vision_out)
-            self._vision_cache = (cache_key, image_cpu.clone(), projected.detach().to("cpu"))
-            return projected, None
+            return self.model.encoder.embed_vision(vision_out), None
         return None, None
 
 
@@ -1195,13 +1137,12 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
             if dtype_llama is not None:
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, name="gemma4", clip_model=DiffusionGemmaClipModel_, model_options=model_options)
+            self.current_weight_patches_uuid = None
 
         def generate(self, tokens, **kwargs):
             transformer = self.gemma4.transformer
-            weight_patches_uuid = getattr(self, "current_weight_patches_uuid", None)
-            transformer._weight_patches_uuid = weight_patches_uuid
             for layer in transformer.model.decoder.layers:
-                layer.experts._weight_patches_uuid = weight_patches_uuid
+                layer.experts._weight_patches_uuid = self.current_weight_patches_uuid
             return super().generate(tokens, **kwargs)
 
         def memory_estimation_function(self, tokens, device=None):
