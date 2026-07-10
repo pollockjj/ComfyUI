@@ -913,6 +913,31 @@ INT8_DEQUANT_SMALL_M = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_M", "1"))
 INT8_DEQUANT_SMALL_MIN_DIM = int(os.environ.get("COMFY_INT8_DEQUANT_SMALL_MIN_DIM", str(2 ** 31 - 1)))
 INT8_DEQUANT_SMALL_ENABLED = os.environ.get("COMFY_INT8_DEQUANT_SMALL", "1").lower() not in {"0", "false", "no", "off"}
 
+INT8_FAST_LINEAR_ENABLED = os.environ.get("COMFY_INT8_FAST_LINEAR", "1").lower() not in {"0", "false", "no", "off"}
+INT8_FAST_LINEAR_MIN_DIM = int(os.environ.get("COMFY_INT8_FAST_LINEAR_MIN_DIM", "1536"))
+INT8_FAST_LINEAR_M1_ELEMS = int(os.environ.get("COMFY_INT8_FAST_LINEAR_M1_ELEMS", str(16 * 1024 * 1024)))
+
+
+def _use_int8_fast_linear(module, input, weight):
+    # kitchen's fused W8A16 convrot linear beats dequant/cached-bf16 matmul when the
+    # call is large enough to amortize its ~35us launch floor (3090-measured):
+    # every multi-row call on non-tiny layers, and M=1 decode only on mlp-class weights.
+    if not INT8_FAST_LINEAR_ENABLED:
+        return False
+    if getattr(module, "quant_format", None) != "int8_tensorwise":
+        return False
+    if not isinstance(weight, QuantizedTensor):
+        return False
+    if getattr(weight._params, "transposed", False):
+        return False
+    if input.ndim < 2 or input.shape[-1] != weight.shape[-1]:
+        return False
+    rows = input.numel() // input.shape[-1]
+    out_f, in_f = weight.shape
+    if rows == 1:
+        return out_f * in_f >= INT8_FAST_LINEAR_M1_ELEMS
+    return min(out_f, in_f) >= INT8_FAST_LINEAR_MIN_DIM
+
 
 def _use_cached_int8_dequant_linear(module, input, weight):
     if not INT8_DEQUANT_SMALL_ENABLED:
@@ -1265,6 +1290,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         compute_dtype=compute_dtype,
                         want_requant=True,
                     )
+                    if _use_int8_fast_linear(self, input, weight):
+                        x2d = input.reshape(-1, input.shape[-1]) if input.ndim != 2 else input
+                        x = torch.nn.functional.linear(x2d, weight, bias)
+                        if input.ndim != 2:
+                            x = x.reshape(*input.shape[:-1], x.shape[-1])
+                        uncast_bias_weight(self, weight, bias, offload_stream)
+                        return x
                     if _use_cached_int8_dequant_linear(self, input, weight):
                         weight = _cached_int8_dequant_weight(self, weight, input.dtype)
                     else:
