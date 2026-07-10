@@ -409,14 +409,21 @@ class DiffusionGemmaExperts(nn.Module):
     def _forward_flashinfer_fused_nvfp4(self, hidden_states, top_k_index, top_k_weights):
         if not hidden_states.is_cuda or torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
             raise RuntimeError("DiffusionGemma FlashInfer NVFP4 requires CUDA SM120")
-        if hidden_states.dtype != torch.bfloat16 or tuple(hidden_states.shape) != (256, 2816):
-            raise RuntimeError("DiffusionGemma FlashInfer tactic cache requires BF16 hidden states [256, 2816]")
+        num_tokens = hidden_states.shape[0]
+        if (
+            hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[1:] != (2816,)
+            or num_tokens not in (256, 344)
+        ):
+            raise RuntimeError(
+                "DiffusionGemma FlashInfer tactic cache requires BF16 hidden states [256|344, 2816]"
+            )
         if not hidden_states.is_contiguous():
             raise RuntimeError("DiffusionGemma FlashInfer hidden states must be contiguous")
-        if tuple(top_k_index.shape) != (256, 8) or top_k_index.device != hidden_states.device:
-            raise RuntimeError("DiffusionGemma FlashInfer expert indices must be [256, 8] on the input device")
-        if tuple(top_k_weights.shape) != (256, 8) or top_k_weights.device != hidden_states.device:
-            raise RuntimeError("DiffusionGemma FlashInfer expert weights must be [256, 8] on the input device")
+        if tuple(top_k_index.shape) != (num_tokens, 8) or top_k_index.device != hidden_states.device:
+            raise RuntimeError("DiffusionGemma FlashInfer expert indices must be [N, 8] on the input device")
+        if tuple(top_k_weights.shape) != (num_tokens, 8) or top_k_weights.device != hidden_states.device:
+            raise RuntimeError("DiffusionGemma FlashInfer expert weights must be [N, 8] on the input device")
         if top_k_weights.dtype != torch.float32 or not top_k_weights.is_contiguous():
             raise RuntimeError("DiffusionGemma FlashInfer expert weights must be contiguous FP32")
 
@@ -490,7 +497,7 @@ class DiffusionGemmaExperts(nn.Module):
                 quant_scales=quant_scales,
                 output=output,
                 activation_type=activation_type,
-                tune_max_num_tokens=256,
+                tune_max_num_tokens=344,
             )
             return output
 
