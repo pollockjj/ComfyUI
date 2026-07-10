@@ -1492,9 +1492,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if layer_conf is not None:
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
-                # fp8 (scalar scale) and tensor-wise int8 (per-row scale, row-local convrot)
-                # dequantize per looked-up row. Block-scaled formats (NVFP4, MXFP8) can't
-                # do per-row lookup efficiently.
+            # FP8 and tensor-wise INT8 dequantize per selected row; block-scaled NVFP4 and MXFP8 cannot.
                 quant_format = layer_conf.get("format") if layer_conf is not None else None
                 manually_loaded_keys = []
 
@@ -1559,8 +1557,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     uncast_bias_weight(self, qdata, None, offload_stream)
                     target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
                     if getattr(self, "quant_format", None) == "int8_tensorwise" and qparams is not None:
-                        # Per-row scale gathers with the rows; convrot inverse rotation is
-                        # row-local so the selected rows dequantize as a batch.
+                # Per-row scales and row-local convrot inverse rotation let selected rows dequantize as a batch.
                         layout_cls = get_layout_class(self.layout_type)
                         row_scale = torch.nn.functional.embedding(input, scale.to(device=x.device))
                         flat = x.reshape(-1, x.shape[-1])

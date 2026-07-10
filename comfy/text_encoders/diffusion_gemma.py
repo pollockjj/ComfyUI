@@ -180,8 +180,7 @@ class DiffusionGemmaRouter(nn.Module):
 
 
 def _dequant_bank(module, weight, dtype):
-    # Chunked over experts to cap the fp32 transient; shapes are identical every
-    # layer so the allocations are reused by the caching allocator.
+    # Chunk over experts to cap the fp32 transient while the allocator reuses identical layer shapes.
     qdata = weight._qdata
     params = weight._params
     E = qdata.shape[0]
@@ -221,8 +220,7 @@ def _dequant_bank(module, weight, dtype):
 
 
 def _bank_bmm(module, x):
-    # x [E, C, in] against the whole bank [E, out, in]; banks handled one at a
-    # time to cap the dequant transient.
+    # Multiply x [E, C, in] by one [E, out, in] bank at a time to cap the dequant transient.
     weight, bias, offload_stream = comfy.ops.cast_bias_weight(module, x, offloadable=True)
     try:
         w = weight
@@ -593,8 +591,7 @@ class DiffusionGemmaExperts(nn.Module):
 
         flat_experts = top_k_index.reshape(-1)
         counts = torch.bincount(flat_experts, minlength=E)
-        # bucket rounded up to limit allocator size churn; bmm padding waste is
-        # negligible next to the bank dequant traffic
+        # Round the bucket up to limit allocator churn; padding is negligible beside bank dequant traffic.
         C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
         order = torch.argsort(flat_experts)
         sorted_experts = flat_experts[order]
@@ -629,8 +626,7 @@ class DiffusionGemmaExperts(nn.Module):
         with contextlib.ExitStack() as stack:
             banks = [stack.enter_context(b.bank_resident(hidden_states)) for b in gate_up_banks + (self.down_proj,)]
             down_bank = banks[-1]
-            # Copy the compact hit list to the host once. Calling .item() for every
-            # expert serializes the CUDA stream once per routed expert.
+        # Copy the hit list once because per-expert .item() calls serialize the CUDA stream.
             for expert_idx in expert_hit.flatten().tolist():
                 top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
                 current_state = hidden_states[token_idx]
