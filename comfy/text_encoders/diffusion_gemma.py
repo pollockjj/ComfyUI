@@ -288,8 +288,9 @@ class DiffusionGemmaExperts(nn.Module):
         with contextlib.ExitStack() as stack:
             banks = [stack.enter_context(b.bank_resident(hidden_states)) for b in gate_up_banks + (self.down_proj,)]
             down_bank = banks[-1]
-            for ei in expert_hit:
-                expert_idx = int(ei.item())
+            # Copy the compact hit list to the host once. Calling .item() for every
+            # expert serializes the CUDA stream once per routed expert.
+            for expert_idx in expert_hit.flatten().tolist():
                 top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
                 current_state = hidden_states[token_idx]
                 if self.unfused:
