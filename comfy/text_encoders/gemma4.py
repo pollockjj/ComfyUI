@@ -41,6 +41,8 @@ class StaticLayerKV:
         self.v[:, :, :n] = v[:, :, -n:]
         self.mask[..., :n] = 0.0
         self.idx = torch.tensor([n % self.slots], device=k.device)
+        for t in (self.k, self.v, self.mask, self.idx):
+            torch._dynamo.mark_static_address(t)
 
     def append(self, xk, xv):
         # single-token in-place write; graph-safe (static addresses, tensor index,
