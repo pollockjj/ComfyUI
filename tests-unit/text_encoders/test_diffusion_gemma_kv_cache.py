@@ -16,41 +16,21 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaConfig,
     DiffusionGemmaModel,
     DiffusionGenerate,
-    _diffusion_probs_and_entropy,
-    _diffusion_softcap_inverse_temperature,
-    _diffusion_softcap_probs_and_entropy,
+    _diffusion_probs_entropy_argmax_,
 )
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
-    def test_softcap_inverse_temperature_is_numerically_equivalent(self):
-        logits = torch.linspace(-40.0, 40.0, 4096, dtype=torch.bfloat16)
-        temperature = 0.65
-        reference = torch.tanh(logits.float() / 30.0) * 30.0 / temperature
-        candidate = _diffusion_softcap_inverse_temperature(logits, 30.0, torch.tensor(1.0 / temperature))
-        self.assertTrue(torch.allclose(candidate, reference, rtol=1e-6, atol=1e-5))
-
-    def test_compiled_sampling_stats_are_disabled_on_cpu(self):
-        generate = DiffusionGenerate()
-        generate._compiled_sampling_stats = None
-        generate.model = SimpleNamespace(decoder=SimpleNamespace(layers=[]))
-        self.assertIsNone(generate._compiled_sampling_stats_for(torch.device("cpu")))
-
-    def test_softcap_probabilities_and_entropy_match_reference(self):
-        logits = torch.linspace(-40.0, 40.0, 4096, dtype=torch.bfloat16).reshape(4, 1024)
-        processed, probs, entropy = _diffusion_softcap_probs_and_entropy(logits, 30.0, torch.tensor(2.0))
-        reference = torch.distributions.Categorical(logits=processed)
-        self.assertTrue(torch.allclose(probs, reference.probs, rtol=1e-6, atol=1e-7))
-        self.assertTrue(torch.allclose(entropy, reference.entropy(), rtol=1e-6, atol=1e-5))
-
-    def test_reused_categorical_probabilities_match_statistics(self):
+    def test_in_place_sampling_statistics_are_bit_exact(self):
         logits = torch.linspace(-4.0, 4.0, 170).reshape(2, 5, 17)
-
-        probs, entropy = _diffusion_probs_and_entropy(logits)
         reference = torch.distributions.Categorical(logits=logits)
+        workspace = logits.clone()
 
-        self.assertTrue(torch.allclose(probs, reference.probs, rtol=1e-6, atol=1e-8))
-        self.assertTrue(torch.allclose(entropy, reference.entropy(), rtol=1e-6, atol=1e-6))
+        probs, entropy, argmax = _diffusion_probs_entropy_argmax_(workspace)
+
+        self.assertTrue(torch.equal(probs, reference.probs))
+        self.assertTrue(torch.equal(entropy, reference.entropy()))
+        self.assertTrue(torch.equal(argmax, logits.argmax(dim=-1)))
 
     def test_reserved_tail_matches_legacy_attention(self):
         config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)

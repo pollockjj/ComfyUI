@@ -137,7 +137,11 @@ class DiffusionGemmaAttention(nn.Module):
                 if preallocated_cache:
                     present_key_value = (past_key, past_value, new_cumulative, next_cache_len)
                 elif sliding_window is not None and xk.shape[2] > sliding_window - 1:
-                    present_key_value = (xk[:, :, -(sliding_window - 1):], xv[:, :, -(sliding_window - 1):], new_cumulative)
+                    present_key_value = (
+                        xk[:, :, -(sliding_window - 1):].clone(),
+                        xv[:, :, -(sliding_window - 1):].clone(),
+                        new_cumulative,
+                    )
                 else:
                     present_key_value = (xk, xv, new_cumulative)
 
@@ -678,7 +682,7 @@ class DiffusionGemmaBlock(nn.Module):
         self.post_feedforward_layernorm_1 = RMSNorm(config.hidden_size, **norm_kwargs)
         self.post_feedforward_layernorm_2 = RMSNorm(config.hidden_size, **norm_kwargs)
         self.pre_feedforward_layernorm_2 = RMSNorm(config.hidden_size, **norm_kwargs)
-        self.register_buffer("layer_scalar", torch.ones(1, device=device, dtype=dtype))
+        self.register_buffer("layer_scalar", torch.empty(1, device=device, dtype=dtype))
 
     def forward(self, x, attention_mask=None, freqs_cis=None, past_key_value=None,
                 update_cache=True, layer_scalar=None):
@@ -746,7 +750,7 @@ class DiffusionGemmaDecoder(nn.Module):
 class _EncoderLayerScalar(nn.Module):
     def __init__(self, device=None, dtype=None):
         super().__init__()
-        self.register_buffer("layer_scalar", torch.ones(1, device=device, dtype=dtype))
+        self.register_buffer("layer_scalar", torch.empty(1, device=device, dtype=dtype))
 
 
 class _EncoderLanguageModel(nn.Module):
@@ -759,8 +763,8 @@ class _EncoderLanguageModel(nn.Module):
 class DiffusionGemmaVisionTower(Gemma4VisionEncoder):
     def __init__(self, config, dtype=None, device=None, ops=None):
         super().__init__(config, dtype=dtype, device=device, ops=ops)
-        self.register_buffer("std_bias", torch.zeros(config["hidden_size"], device=device, dtype=dtype))
-        self.register_buffer("std_scale", torch.ones(config["hidden_size"], device=device, dtype=dtype))
+        self.register_buffer("std_bias", torch.empty(config["hidden_size"], device=device, dtype=dtype))
+        self.register_buffer("std_scale", torch.empty(config["hidden_size"], device=device, dtype=dtype))
         # use_clipped_linears=False in this model: no clip buffers in the checkpoint
         for m in self.modules():
             if isinstance(m, ClippedLinear):
@@ -939,28 +943,16 @@ class _StableAndConfidentStopping:
         return stable & confident
 
 
-def _diffusion_probs_and_entropy(logits):
-    distribution = torch.distributions.Categorical(logits=logits)
-    return distribution.probs, distribution.entropy()
+def _diffusion_probs_entropy_argmax_(processed_logits):
+    processed_logits.sub_(processed_logits.logsumexp(dim=-1, keepdim=True))
+    probs = torch.nn.functional.softmax(processed_logits, dim=-1)
+    argmax = torch.argmax(processed_logits, dim=-1)
+    processed_logits.mul_(probs)
+    token_entropy = -processed_logits.sum(dim=-1)
+    return probs, token_entropy, argmax
 
 
-def _diffusion_softcap_inverse_temperature(logits, cap, inverse_temperature):
-    return torch.tanh(logits.to(torch.float32) / cap) * cap * inverse_temperature
-
-
-def _diffusion_softcap_probs_and_entropy(logits, cap, inverse_temperature):
-    processed_logits = _diffusion_softcap_inverse_temperature(logits, cap, inverse_temperature)
-    normalized_logits = processed_logits - processed_logits.logsumexp(dim=-1, keepdim=True)
-    probs = torch.nn.functional.softmax(normalized_logits, dim=-1)
-    token_entropy = -(
-        normalized_logits.clamp(min=torch.finfo(normalized_logits.dtype).min) * probs
-    ).sum(dim=-1)
-    return processed_logits, probs, token_entropy
-
-
-def _entropy_bound_accept(current_canvas, denoiser_canvas, logits, entropy_bound, token_entropy=None):
-    if token_entropy is None:
-        token_entropy = torch.distributions.Categorical(logits=logits).entropy()
+def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_entropy):
     sorted_token_entropy, sorted_indices = torch.sort(token_entropy, dim=-1, descending=False)
     cumulative_entropy = torch.cumsum(sorted_token_entropy, dim=-1)
     sorted_selection_mask = cumulative_entropy - sorted_token_entropy <= entropy_bound
@@ -986,25 +978,6 @@ class DiffusionGenerate:
         logits = self._raw_logits(x).to(torch.float32)
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
-
-    def _supports_compiled_sampling_stats(self, device):
-        return (
-            device.type == "cuda"
-            and torch.version.hip is None
-            and torch.cuda.get_device_capability(device) == (12, 0)
-        )
-
-    def _compiled_sampling_stats_for(self, device):
-        if not self._supports_compiled_sampling_stats(device):
-            return None
-        if self._compiled_sampling_stats is None:
-            self._compiled_sampling_stats = torch.compile(
-                _diffusion_softcap_probs_and_entropy,
-                fullgraph=True,
-                dynamic=False,
-                options={"online_softmax": False},
-            )
-        return self._compiled_sampling_stats
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
@@ -1063,17 +1036,6 @@ class DiffusionGenerate:
         max_new_canvases = math.ceil(max_length / canvas_length)
         generated_token_ids = []
         commit_canvas = None
-        compiled_sampling_stats = self._compiled_sampling_stats_for(device)
-        inverse_temperatures = None
-        if compiled_sampling_stats is not None:
-            inverse_temperatures = torch.tensor(
-                [
-                    1.0 / (t_min + ((t_max - t_min) * (step / max_denoising_steps)))
-                    for step in range(1, max_denoising_steps + 1)
-                ],
-                dtype=torch.float32,
-                device=device,
-            )
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1098,23 +1060,15 @@ class DiffusionGenerate:
                                      self_conditioning_logits=self_conditioning_logits,
                                      position_ids=decoder_position_ids, dtype=execution_dtype,
                                      freqs_cis=decoder_freqs_cis)
-                if compiled_sampling_stats is None:
-                    temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
-                    processed_logits = self.logits(x) / temperature
-                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
-                else:
-                    raw_logits = self._raw_logits(x)
-                    processed_logits, probs, token_entropy = compiled_sampling_stats(
-                        raw_logits,
-                        self.model.config.final_logit_softcapping,
-                        inverse_temperatures[cur_step - 1],
-                    )
+                temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
+                processed_logits = self.logits(x) / temperature
+                next_self_conditioning_logits = processed_logits.to(execution_dtype)
+                probs, token_entropy, argmax_canvas = _diffusion_probs_entropy_argmax_(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
-                argmax_canvas = torch.argmax(processed_logits, dim=-1)
 
                 accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
-                    current_canvas, denoiser_canvas, processed_logits, entropy_bound, token_entropy)
+                    current_canvas, denoiser_canvas, entropy_bound, token_entropy)
                 random_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                               device=device, generator=generator)
                 current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
@@ -1126,22 +1080,31 @@ class DiffusionGenerate:
                     int(step_eos_positions[0].item()) + 1
                     if step_eos_positions.numel() > 0 else canvas_length
                 )
-                estimated_output_tokens = len(generated_token_ids) + estimated_canvas_tokens
+                estimated_output_tokens = min(max_length, len(generated_token_ids) + estimated_canvas_tokens)
                 pbar.update_absolute(estimated_output_tokens, max_length)
                 tq.n = estimated_output_tokens
                 tq.refresh()
-                if torch.all(finished_denoising):
+                should_stop = torch.all(finished_denoising)
+                if should_stop:
+                    del next_self_conditioning_logits
+                else:
+                    self_conditioning_logits = next_self_conditioning_logits
+                del processed_logits, probs, token_entropy
+                if should_stop:
                     break
-                self_conditioning_logits = processed_logits.to(execution_dtype)
 
+            del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
             eos_positions = is_eos.nonzero()
+            remaining = max_length - len(generated_token_ids)
             if eos_positions.numel() > 0:
                 first_eos = int(eos_positions[0].item())
-                generated_token_ids.extend(canvas_ids[:first_eos + 1])
+                generated_token_ids.extend(canvas_ids[:min(first_eos + 1, remaining)])
                 break
-            generated_token_ids.extend(canvas_ids)
+            generated_token_ids.extend(canvas_ids[:remaining])
+            if len(generated_token_ids) >= max_length:
+                break
             cur_len += canvas_length
             commit_canvas = argmax_canvas
 
@@ -1160,7 +1123,6 @@ class DiffusionGemma26B(BaseLlama, DiffusionGenerate, torch.nn.Module):
         self.num_layers = config.num_hidden_layers
         self.model = DiffusionGemmaModel(config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
-        self._compiled_sampling_stats = None
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
