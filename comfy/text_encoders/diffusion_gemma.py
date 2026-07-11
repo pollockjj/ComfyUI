@@ -646,6 +646,22 @@ class DiffusionGemmaExperts(nn.Module):
                 or tuple(down._params.scale.shape) != (128, 2816, 24)
             ):
                 raise RuntimeError("DiffusionGemma native fused MXFP8 bank shape mismatch")
+            if (
+                os.environ.get("COMFY_DG_MXFP8_POINTERS") == "1"
+                and _mxfp8_debug_compare_calls == 0
+            ):
+                print(
+                    "DG_MXFP8_POINTERS",
+                    gate_up._qdata.data_ptr(),
+                    gate_up._qdata.numel() * gate_up._qdata.element_size(),
+                    gate_up._params.scale.data_ptr(),
+                    gate_up._params.scale.numel() * gate_up._params.scale.element_size(),
+                    down._qdata.data_ptr(),
+                    down._qdata.numel() * down._qdata.element_size(),
+                    down._params.scale.data_ptr(),
+                    down._params.scale.numel() * down._params.scale.element_size(),
+                    flush=True,
+                )
             return ck.fused_moe_mxfp8(
                 hidden_states,
                 top_k_index,
