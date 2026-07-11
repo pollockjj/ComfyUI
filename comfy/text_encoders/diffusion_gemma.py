@@ -1,5 +1,8 @@
 import contextlib
+import json
 import math
+import os
+import time
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -1450,6 +1453,9 @@ class DiffusionGenerate:
         use_native_sampling = self._use_native_sampling(device, execution_dtype)
         use_decoder_graph = self._use_conditioned_decoder_graph(device, execution_dtype)
         capture_stream = torch.cuda.Stream(device=device) if use_decoder_graph else None
+        timing_path = os.environ.get("COMFY_DG_CAPTURE_TIMING_PATH")
+        capture_timings_ns = []
+        teardown_timings_ns = []
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1487,10 +1493,12 @@ class DiffusionGenerate:
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
                     elif decoder_graph is None:
+                        capture_started_ns = time.perf_counter_ns()
                         decoder_graph = _ConditionedDecoderGraph(
                             self, current_canvas, self_conditioning_logits, past_key_values,
                             decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
                         )
+                        capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
                         x = decoder_graph.output
                     else:
                         x = decoder_graph.replay(current_canvas, self_conditioning_logits)
@@ -1533,7 +1541,9 @@ class DiffusionGenerate:
                         break
             finally:
                 if decoder_graph is not None:
+                    teardown_started_ns = time.perf_counter_ns()
                     decoder_graph.close()
+                    teardown_timings_ns.append(time.perf_counter_ns() - teardown_started_ns)
                     decoder_graph = None
                 if capture_stream is not None:
                     comfy.quant_ops.ck.release_cuda_stream_workspaces(capture_stream)
@@ -1560,6 +1570,18 @@ class DiffusionGenerate:
         tq.n = output_tokens
         tq.refresh()
         tq.close()
+        if timing_path is not None:
+            timing_path = os.path.abspath(timing_path)
+            if "/scratch/" not in timing_path:
+                raise RuntimeError("COMFY_DG_CAPTURE_TIMING_PATH must be under a scratch directory")
+            with open(timing_path, "w", encoding="utf-8") as timing_file:
+                json.dump(
+                    {
+                        "capture_ns": capture_timings_ns,
+                        "teardown_ns": teardown_timings_ns,
+                    },
+                    timing_file,
+                )
         return generated_token_ids
 
 
