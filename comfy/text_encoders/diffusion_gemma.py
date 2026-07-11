@@ -686,10 +686,13 @@ class DiffusionGemmaExperts(nn.Module):
             )
             down_qdata = down._qdata.clone() if clone_resident else down._qdata
             down_scale = down._params.scale.clone() if clone_resident else down._params.scale
+            native_input = hidden_states.clone() if clone_resident else hidden_states
+            native_indices = top_k_index.clone() if clone_resident else top_k_index
+            native_weights = top_k_weights.clone() if clone_resident else top_k_weights
             return ck.fused_moe_mxfp8(
-                hidden_states,
-                top_k_index,
-                top_k_weights,
+                native_input,
+                native_indices,
+                native_weights,
                 gate_up_qdata,
                 gate_up_scale,
                 down_qdata,
