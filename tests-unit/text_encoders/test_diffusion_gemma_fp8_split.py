@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 import unittest
 
 import torch
@@ -10,7 +11,8 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
-from comfy.text_encoders.diffusion_gemma import diffusion_gemma_detect  # noqa: E402
+from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
+from comfy.text_encoders.diffusion_gemma import DiffusionGemmaExperts, diffusion_gemma_detect  # noqa: E402
 
 
 class TestDiffusionGemmaFp8Split(unittest.TestCase):
@@ -21,6 +23,49 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         }
 
         self.assertTrue(diffusion_gemma_detect((sd,))["unfused_experts"])
+
+    @staticmethod
+    def _mxfp8_bank(qdata_shape, scale_shape):
+        params = TensorCoreMXFP8Layout.Params(
+            scale=torch.empty(scale_shape, dtype=torch.float8_e8m0fnu, device="meta"),
+            orig_dtype=torch.bfloat16,
+            orig_shape=qdata_shape,
+        )
+        return types.SimpleNamespace(
+            quant_format="mxfp8",
+            weight=QuantizedTensor(
+                torch.empty(qdata_shape, dtype=torch.float8_e4m3fn, device="meta"),
+                "TensorCoreMXFP8Layout",
+                params,
+            ),
+            bias=None,
+            _full_precision_mm=False,
+            weight_function=[],
+            bias_function=[],
+            weight_lowvram_function=None,
+            bias_lowvram_function=None,
+        )
+
+    def test_mxfp8_expert_bank_contract(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.unfused = True
+        experts._bank_mode = None
+        experts._fused_banks_compatible = False
+        experts._grouped_mxfp8_compatible = False
+        experts._banks = (
+            self._mxfp8_bank((128, 704, 2816), (128, 768, 88)),
+            self._mxfp8_bank((128, 704, 2816), (128, 768, 88)),
+            self._mxfp8_bank((128, 2816, 704), (128, 2816, 24)),
+        )
+
+        experts._configure_loaded_banks(experts, None)
+        self.assertEqual(experts._bank_mode, "unfused_mxfp8")
+        self.assertTrue(experts._grouped_mxfp8_compatible)
+
+        experts._banks = (self._mxfp8_bank((128, 704, 2816), (128, 704, 88)), *experts._banks[1:])
+        with self.assertRaisesRegex(ValueError, "MXFP8 expert bank contract mismatch"):
+            experts._configure_loaded_banks(experts, None)
 
 if __name__ == "__main__":
     unittest.main()
