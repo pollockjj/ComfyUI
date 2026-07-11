@@ -903,6 +903,7 @@ if CUBLAS_IS_AVAILABLE:
 # ==============================================================================
 # Mixed Precision Operations
 # ==============================================================================
+from . import quant_ops
 from .quant_ops import (
     MXFP8_FUSED_MOE_FORMAT,
     MXFP8_FUSED_MOE_V1_FIELDS,
@@ -1512,7 +1513,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 manually_loaded_keys = []
 
                 if quant_format in ("float8_e4m3fn", "float8_e5m2", "int8_tensorwise", "mxfp8") and weight_key in state_dict:
-                    if quant_format == "mxfp8" and not callable(getattr(ck, "mxfp8_embedding", None)):
+                    if quant_format == "mxfp8" and not callable(getattr(getattr(quant_ops, "ck", None), "mxfp8_embedding", None)):
                         raise ValueError("MXFP8 embeddings require comfy-kitchen mxfp8_embedding support")
                     self.quant_format = quant_format
                     qconfig = QUANT_ALGOS[quant_format]
@@ -1574,7 +1575,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     if getattr(self, "quant_format", None) == "mxfp8":
                         if qparams is None or scale is None:
                             raise RuntimeError("Invalid resident MXFP8 embedding state")
-                        x = ck.mxfp8_embedding(qdata, scale, input, target_dtype)
+                        x = quant_ops.ck.mxfp8_embedding(qdata, scale, input, target_dtype)
                         uncast_bias_weight(self, qdata, None, offload_stream)
                         return x
 
