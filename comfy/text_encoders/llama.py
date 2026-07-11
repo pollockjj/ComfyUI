@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -5,6 +7,8 @@ from typing import Optional, Any, Tuple
 import math
 from tqdm import tqdm
 import comfy.utils
+
+STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
@@ -905,16 +909,41 @@ class BaseGenerate:
         # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
+        # Static-KV captured decode: prefill runs the dynamic path, then caches
+        # convert to fixed-shape buffers and the per-token step is compiled with
+        # reduce-overhead (CUDA graphs). Requires explicit tensor position ids.
+        static_kv = STATIC_KV and hasattr(self, "convert_kv_to_static") and embeds.is_cuda and position_ids is None
+        prompt_len = embeds.shape[1]
+        compiled_step = None
+        static_pos = None
+
         # Generation loop
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
-            logits = self.logits(x)[:, -1]
+            if static_kv and step == 1:
+                past_key_values = self.convert_kv_to_static(past_key_values, max_cache_len)
+                static_pos = torch.tensor([[prompt_len]], device=device)
+                static_past = past_key_values
+
+                def _decode_step(e, ids, pos):
+                    x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
+                    return self.logits(x)[:, -1]
+                compiled_step = torch.compile(_decode_step, mode="reduce-overhead", dynamic=False)
+
+            if compiled_step is not None:
+                # clone: the sampler mutates logits in place and a graph output
+                # buffer is rewritten by the next replay
+                logits = compiled_step(embeds, current_input_ids, static_pos).clone()
+                static_pos = static_pos + 1
+                x = None
+            else:
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                logits = self.logits(x)[:, -1]
             next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
             token_id = next_token[0].item()
             generated_token_ids.append(token_id)

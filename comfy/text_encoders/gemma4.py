@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -9,6 +11,44 @@ import comfy.model_management
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
 from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _make_scaled_embedding
+
+STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
+
+
+class StaticLayerKV:
+    """Fixed-shape per-layer KV for graph-capturable decode.
+
+    Sliding layers hold a ring of `window` slots; global layers hold `max_len`
+    slots. Keys/values are written in place at the on-device `idx` tensor;
+    attention runs over the whole buffer under `mask`, an additive validity mask
+    (0 = valid, dtype-min = empty slot). All per-step state lives in tensors so
+    a captured decode graph replays correctly. Rope is applied before caching,
+    so ring order is irrelevant to attention. `cum_len` mirrors the dynamic
+    tuple's third field and is only read outside the captured region.
+    """
+
+    def __init__(self, past, window, max_len):
+        k, v, self.cum_len = past
+        b, h, prefill_len, d = k.shape
+        self.window = window
+        self.slots = window if window is not None else max_len
+        fmin = torch.finfo(k.dtype).min
+        self.k = torch.zeros(b, h, self.slots, d, dtype=k.dtype, device=k.device)
+        self.v = torch.zeros_like(self.k)
+        self.mask = torch.full((1, 1, 1, self.slots), fmin, dtype=k.dtype, device=k.device)
+        n = min(prefill_len, self.slots)
+        self.k[:, :, :n] = k[:, :, -n:]
+        self.v[:, :, :n] = v[:, :, -n:]
+        self.mask[..., :n] = 0.0
+        self.idx = torch.tensor([n % self.slots], device=k.device)
+
+    def append(self, xk, xv):
+        # single-token in-place write; graph-safe (static addresses, tensor index,
+        # no python-side state — cum_len advances in the generate loop)
+        self.k.index_copy_(2, self.idx, xk)
+        self.v.index_copy_(2, self.idx, xv)
+        self.mask.index_fill_(3, self.idx, 0.0)
+        self.idx.add_(1).remainder_(self.slots)
 
 
 # Intentional minor divergences from transformers -reference implementation:
@@ -125,12 +165,32 @@ class Gemma4Attention(nn.Module):
         if self.q_norm is not None:
             xq = self.q_norm(xq)
 
+        static_mask = None
         if shared_kv is not None:
-            xk, xv = shared_kv
+            if len(shared_kv) == 3:      # static-KV source: buffers + validity mask
+                xk, xv, static_mask = shared_kv
+            else:
+                xk, xv = shared_kv
             # Apply RoPE to Q only (K already has RoPE from source layer)
             xq = _apply_rotary_pos_emb(xq, freqs_cis)
             present_key_value = None
             shareable_kv = None
+        elif isinstance(past_key_value, StaticLayerKV):
+            xk = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            if self.k_norm is not None:
+                xk = self.k_norm(xk)
+            xv = rms_norm(xv)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+            xq = _apply_rotary_pos_emb(xq, freqs_cis)
+            xk = _apply_rotary_pos_emb(xk, freqs_cis)
+            past_key_value.append(xk, xv)
+            xk = past_key_value.k
+            xv = past_key_value.v
+            static_mask = past_key_value.mask
+            present_key_value = past_key_value
+            shareable_kv = (xk, xv, static_mask)
         else:
             xk = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
             xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
@@ -164,6 +224,11 @@ class Gemma4Attention(nn.Module):
         # GQA: pass unexpanded KV with enable_gqa when no sliding mask,
         # expand heads when sliding mask is present
         # has to be done within SDPA itself to match the reference code, pre-scaling expansion causes numerical differences
+        if static_mask is not None:
+            gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+            output = optimized_attention_for_device(xq.device, mask=True, small_input=True)(xq, xk, xv, self.num_heads, mask=static_mask, skip_reshape=True, scale=1.0, **gqa_kwargs)
+            return self.o_proj(output), present_key_value, shareable_kv
+
         expand_kv = (self.num_heads != self.num_kv_heads and
                      sliding_window is not None and
                      xk.shape[2] >= sliding_window)
@@ -288,7 +353,9 @@ class Gemma4Transformer(nn.Module):
 
     def get_past_len(self, past_key_values):
         for kv in past_key_values:
-            if len(kv) >= 3:
+            if isinstance(kv, StaticLayerKV):
+                return kv.cum_len
+            if isinstance(kv, (tuple, list)) and len(kv) >= 3:
                 return kv[2]
         return 0
 
@@ -314,11 +381,15 @@ class Gemma4Transformer(nn.Module):
             x = self.embed_tokens(x, out_dtype=dtype)
 
         seq_len = x.shape[1]
-        past_len = 0
-        if past_key_values is not None and len(past_key_values) > 0:
-            past_len = self.get_past_len(past_key_values)
+        # past length is read lazily so a captured decode step (position_ids
+        # provided, seq_len == 1) never bakes a per-step python guard
+        def _past_len():
+            if past_key_values is not None and len(past_key_values) > 0:
+                return self.get_past_len(past_key_values)
+            return 0
 
         if position_ids is None:
+            past_len = _past_len()
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
 
         freqs_cis = self.compute_freqs_cis(position_ids, x.device, dtype=x.dtype)
@@ -330,6 +401,7 @@ class Gemma4Transformer(nn.Module):
             mask = mask.masked_fill(mask.to(torch.bool), min_val)
 
         if seq_len > 1:
+            past_len = _past_len()
             causal_mask = torch.zeros(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device)
             causal_mask.masked_fill_(torch.ones_like(causal_mask, dtype=torch.bool).triu_(1), min_val)
             mask = mask + causal_mask if mask is not None else causal_mask
@@ -411,6 +483,18 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         for _ in range(self.model.config.num_hidden_layers):
             past_key_values.append(())
         return past_key_values
+
+    def convert_kv_to_static(self, past_key_values, max_cache_len):
+        """Post-prefill: rebuild each layer's dynamic (k, v, cum_len) tuple as a
+        fixed-shape StaticLayerKV so the decode step can be graph-captured."""
+        out = []
+        for layer, past in zip(self.model.layers, past_key_values):
+            if past is None or len(past) == 0:
+                out.append(past if past is not None else ())
+                continue
+            window = layer.sliding_attention if getattr(layer, "sliding_attention", False) else None
+            out.append(StaticLayerKV(past, window, max_cache_len))
+        return out
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
