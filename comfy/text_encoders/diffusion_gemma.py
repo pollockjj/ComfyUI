@@ -1093,6 +1093,10 @@ class DiffusionGenerate:
                     processed_logits = self.logits(x) / temperature
                     probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                     argmax_canvas = torch.argmax(processed_logits, dim=-1)
+                    denoiser_canvas = torch.multinomial(
+                        probs.view(-1, vocab_size), num_samples=1, generator=generator
+                    ).squeeze(-1).view(1, canvas_length)
+                    del probs
                 else:
                     raw_logits = self._raw_logits(x)
                     processed_logits = comfy.quant_ops.ck.softcap_scale(
@@ -1101,9 +1105,11 @@ class DiffusionGenerate:
                         1.0 / temperature,
                     )
                     del raw_logits
-                    probs, token_entropy, argmax_canvas = comfy.quant_ops.ck.categorical_stats(processed_logits)
-                denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
-                denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
+                    sampling_noise = torch.empty_like(processed_logits).exponential_(generator=generator)
+                    token_entropy, argmax_canvas, denoiser_canvas = comfy.quant_ops.ck.categorical_stats_sample(
+                        processed_logits, sampling_noise
+                    )
+                    del sampling_noise
 
                 accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
                     current_canvas, denoiser_canvas, entropy_bound, token_entropy)
@@ -1115,7 +1121,7 @@ class DiffusionGenerate:
                 should_stop = bool(torch.all(finished_denoising))
                 if not should_stop:
                     self_conditioning_logits = processed_logits.to(execution_dtype)
-                del processed_logits, probs, token_entropy
+                del processed_logits, token_entropy
                 if should_stop:
                     break
 
