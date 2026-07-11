@@ -78,6 +78,11 @@ class TestDiffusionGemmaKVCache(unittest.TestCase):
                     SimpleNamespace(decoder=SimpleNamespace(layers=[layer])), [compacted]
                 )
                 self.assertEqual(lengths, (0, 3) if sliding_window else (5, 0))
+                fixed = (*compacted, torch.empty(0))
+                fixed_lengths = DiffusionGemmaModel._cached_kv_lens(
+                    SimpleNamespace(decoder=SimpleNamespace(layers=[layer])), [fixed]
+                )
+                self.assertEqual(fixed_lengths, lengths)
 
 
 if __name__ == "__main__":

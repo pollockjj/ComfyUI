@@ -1183,7 +1183,7 @@ class DiffusionGemmaModel(nn.Module):
                 kv = past_key_values[i]
                 if len(kv) == 0:
                     continue
-                cache_len = kv[3] if len(kv) == 4 else kv[0].shape[2]
+                cache_len = kv[3] if len(kv) >= 4 else kv[0].shape[2]
                 if layer.sliding_window is not None:
                     sliding_len = cache_len
                 else:
