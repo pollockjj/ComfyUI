@@ -16,21 +16,19 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaConfig,
     DiffusionGemmaModel,
     DiffusionGenerate,
-    _diffusion_probs_entropy_argmax_,
+    _diffusion_probs_and_entropy,
 )
 
 
 class TestDiffusionGemmaKVCache(unittest.TestCase):
-    def test_in_place_sampling_statistics_are_bit_exact(self):
+    def test_sampling_statistics_are_bit_exact(self):
         logits = torch.linspace(-4.0, 4.0, 170).reshape(2, 5, 17)
         reference = torch.distributions.Categorical(logits=logits)
-        workspace = logits.clone()
 
-        probs, entropy, argmax = _diffusion_probs_entropy_argmax_(workspace)
+        probs, entropy = _diffusion_probs_and_entropy(logits)
 
         self.assertTrue(torch.equal(probs, reference.probs))
         self.assertTrue(torch.equal(entropy, reference.entropy()))
-        self.assertTrue(torch.equal(argmax, logits.argmax(dim=-1)))
 
     def test_reserved_tail_matches_legacy_attention(self):
         config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)

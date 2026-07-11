@@ -967,13 +967,9 @@ class _StableAndConfidentStopping:
         return stable & confident
 
 
-def _diffusion_probs_entropy_argmax_(processed_logits):
-    processed_logits.sub_(processed_logits.logsumexp(dim=-1, keepdim=True))
-    probs = torch.nn.functional.softmax(processed_logits, dim=-1)
-    argmax = torch.argmax(processed_logits, dim=-1)
-    processed_logits.mul_(probs)
-    token_entropy = -processed_logits.sum(dim=-1)
-    return probs, token_entropy, argmax
+def _diffusion_probs_and_entropy(processed_logits):
+    distribution = torch.distributions.Categorical(logits=processed_logits)
+    return distribution.probs, distribution.entropy()
 
 
 def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_entropy):
@@ -1086,10 +1082,10 @@ class DiffusionGenerate:
                                      freqs_cis=decoder_freqs_cis)
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                 processed_logits = self.logits(x) / temperature
-                next_self_conditioning_logits = processed_logits.to(execution_dtype)
-                probs, token_entropy, argmax_canvas = _diffusion_probs_entropy_argmax_(processed_logits)
+                probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
+                argmax_canvas = torch.argmax(processed_logits, dim=-1)
 
                 accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
                     current_canvas, denoiser_canvas, entropy_bound, token_entropy)
@@ -1109,10 +1105,8 @@ class DiffusionGenerate:
                 tq.n = estimated_output_tokens
                 tq.refresh()
                 should_stop = bool(torch.all(finished_denoising))
-                if should_stop:
-                    del next_self_conditioning_logits
-                else:
-                    self_conditioning_logits = next_self_conditioning_logits
+                if not should_stop:
+                    self_conditioning_logits = processed_logits.to(execution_dtype)
                 del processed_logits, probs, token_entropy
                 if should_stop:
                     break
