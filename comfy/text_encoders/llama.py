@@ -49,19 +49,21 @@ def _freeze_resident_weights(root, ref_input):
         if len(getattr(m, "weight_function", ())) or len(getattr(m, "bias_function", ())):
             continue
         is_qt = isinstance(w, _QT) or isinstance(getattr(w, "data", None), _QT)
-        # keeping big weights quantized routes them through the fused int8 kernel
-        # in-graph, whose per-call cost loses to plain bf16 GEMV at M=1 (measured:
-        # 49 vs 112 tok/s) — default is probe-identical full bf16 adoption
+        # keeping big weights quantized (as the cast GPU-resident QT — the raw
+        # parameter presents off-device under aimdo) avoids a ~13 GB bf16 working
+        # set; the in-graph fused int8 GEMV carries its own per-call cost
         keep_qt = (STATIC_KV_KEEP_INT8 and is_qt
                    and getattr(m, "quant_format", None) == "int8_tensorwise"
                    and w.dim() == 2 and min(w.shape) >= 1536
                    and not isinstance(m, torch.nn.Embedding)
-                   and getattr(m, "bias", None) is None
-                   and w.device == ref_input.device)
+                   and getattr(m, "bias", None) is None)
         if keep_qt:
-            frozen.append((m, None, None, True))
-            m.comfy_cast_weights = False
-            continue
+            rw, _ = _ops.cast_bias_weight(m, input=ref_input, offloadable=False)
+            if isinstance(rw, _QT) and rw._qdata.is_cuda:
+                frozen.append((m, m._parameters.get("weight"), None, True))
+                m._parameters["weight"] = torch.nn.Parameter(rw, requires_grad=False)
+                m.comfy_cast_weights = False
+                continue
         warm_cache = getattr(m, "_int8_dequant_weight_cache", None)
         if warm_cache is not None and getattr(m, "bias", None) is None:
             # adopt the warm step's cached dequant: resident, stable, zero new
