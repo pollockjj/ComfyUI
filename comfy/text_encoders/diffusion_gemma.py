@@ -430,7 +430,7 @@ def _bank_bmm(module, x):
 
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
-    grouped_int8_graph_bucket = 128
+    grouped_int8_graph_bucket = 256
     grouped_nvfp4_bucket = 128
     grouped_mxfp8_bucket = 128
     grouped_min_tokens = 64
@@ -1126,13 +1126,7 @@ class DiffusionGemmaExperts(nn.Module):
             torch._assert_async(rank.max() < C, "DiffusionGemma INT8 expert route exceeds graph bucket")
         else:
             counts = torch.bincount(flat_experts, minlength=E)
-            peak = int(counts.max())
-            if os.environ.get("COMFY_DG_INT8_ROUTE_PROBE_PATH") is not None:
-                peaks = getattr(self, "_int8_route_probe_peaks", None)
-                if peaks is None:
-                    peaks = self._int8_route_probe_peaks = {}
-                peaks[N] = max(peaks.get(N, 0), peak)
-            C = -(-peak // self.grouped_bucket) * self.grouped_bucket
+            C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
             rank = positions - (counts.cumsum(0) - counts)[sorted_experts]
         slot = sorted_experts * C + rank
 
@@ -2009,18 +2003,6 @@ class DiffusionGenerate:
                     },
                     timing_file,
                 )
-        route_probe_path = os.environ.get("COMFY_DG_INT8_ROUTE_PROBE_PATH")
-        if route_probe_path is not None:
-            route_probe_path = os.path.abspath(route_probe_path)
-            if "/scratch/" not in route_probe_path:
-                raise RuntimeError("COMFY_DG_INT8_ROUTE_PROBE_PATH must be under a scratch directory")
-            route_peaks = {
-                name: module._int8_route_probe_peaks
-                for name, module in self.model.decoder.named_modules()
-                if hasattr(module, "_int8_route_probe_peaks")
-            }
-            with open(route_probe_path, "w", encoding="utf-8") as route_probe_file:
-                json.dump(route_peaks, route_probe_file, sort_keys=True)
         return generated_token_ids
 
 
