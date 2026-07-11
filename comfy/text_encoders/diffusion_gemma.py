@@ -685,6 +685,13 @@ class DiffusionGemmaExperts(nn.Module):
         reference = self._forward_grouped_fused_mxfp8(
             hidden_states, top_k_index, top_k_weights
         )
+        native_after_reference = self._forward_native_fused_mxfp8(
+            hidden_states, top_k_index, top_k_weights
+        )
+        native_after_reference_finite = bool(
+            torch.isfinite(native_after_reference).all().item()
+        )
+        native_after_reference_absmax = native_after_reference.float().abs().max().item()
         delta = native.float() - reference.float()
         relative_rmse = (
             delta.square().mean().sqrt()
@@ -699,6 +706,8 @@ class DiffusionGemmaExperts(nn.Module):
             native_finite_before,
             "second_finite",
             native_second_finite,
+            "post_reference_finite",
+            native_after_reference_finite,
             "input_absmax",
             hidden_states.float().abs().max().item(),
             "native_absmax",
@@ -707,6 +716,8 @@ class DiffusionGemmaExperts(nn.Module):
             native_absmax_before,
             "second_absmax",
             native_second_absmax,
+            "post_reference_absmax",
+            native_after_reference_absmax,
             "reference_absmax",
             reference.float().abs().max().item(),
             "max_abs_delta",
