@@ -1448,6 +1448,9 @@ class DiffusionGenerate:
         generated_token_ids = []
         commit_canvas = None
         use_native_sampling = self._use_native_sampling(device, execution_dtype)
+        use_fused_native_sampling = use_native_sampling and callable(
+            getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample", None)
+        )
         use_decoder_graph = self._use_conditioned_decoder_graph(device, execution_dtype)
         capture_stream = torch.cuda.Stream(device=device) if use_decoder_graph else None
         timing_path = os.environ.get("COMFY_DG_CAPTURE_TIMING_PATH")
@@ -1501,6 +1504,7 @@ class DiffusionGenerate:
                         x = decoder_graph.replay(current_canvas, self_conditioning_logits)
 
                     temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
+                    next_self_conditioning_logits = None
                     if not use_native_sampling:
                         processed_logits = self.logits(x) / temperature
                         probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
@@ -1511,16 +1515,33 @@ class DiffusionGenerate:
                         del probs
                     else:
                         raw_logits = self._raw_logits(x)
-                        processed_logits = comfy.quant_ops.ck.softcap_scale(
-                            raw_logits,
-                            self.model.config.final_logit_softcapping,
-                            1.0 / temperature,
-                        )
+                        if use_fused_native_sampling:
+                            sampling_noise = torch.empty(
+                                raw_logits.shape, dtype=torch.float32, device=raw_logits.device
+                            ).exponential_(generator=generator)
+                            (
+                                processed_logits,
+                                next_self_conditioning_logits,
+                                token_entropy,
+                                argmax_canvas,
+                                denoiser_canvas,
+                            ) = comfy.quant_ops.ck.softcap_categorical_stats_sample(
+                                raw_logits,
+                                sampling_noise,
+                                self.model.config.final_logit_softcapping,
+                                1.0 / temperature,
+                            )
+                        else:
+                            processed_logits = comfy.quant_ops.ck.softcap_scale(
+                                raw_logits,
+                                self.model.config.final_logit_softcapping,
+                                1.0 / temperature,
+                            )
+                            sampling_noise = torch.empty_like(processed_logits).exponential_(generator=generator)
+                            token_entropy, argmax_canvas, denoiser_canvas = comfy.quant_ops.ck.categorical_stats_sample(
+                                processed_logits, sampling_noise
+                            )
                         del raw_logits
-                        sampling_noise = torch.empty_like(processed_logits).exponential_(generator=generator)
-                        token_entropy, argmax_canvas, denoiser_canvas = comfy.quant_ops.ck.categorical_stats_sample(
-                            processed_logits, sampling_noise
-                        )
                         del sampling_noise
 
                     accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
@@ -1532,8 +1553,12 @@ class DiffusionGenerate:
                     finished_denoising = stopping(argmax_canvas, token_entropy)
                     should_stop = bool(torch.all(finished_denoising))
                     if not should_stop:
-                        self_conditioning_logits = processed_logits.to(execution_dtype)
-                    del processed_logits, token_entropy
+                        self_conditioning_logits = (
+                            next_self_conditioning_logits
+                            if next_self_conditioning_logits is not None
+                            else processed_logits.to(execution_dtype)
+                        )
+                    del processed_logits, next_self_conditioning_logits, token_entropy
                     if should_stop:
                         break
             finally:
