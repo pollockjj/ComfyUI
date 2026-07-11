@@ -9,6 +9,7 @@ from tqdm import tqdm
 import comfy.utils
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").lower() not in {"0", "false", "no", "off"}
 
 
 def _dequant_qt_chunked(weight, dtype, step=65535):
@@ -1008,6 +1009,7 @@ class BaseGenerate:
                        visual_pos_masks, past_key_values, generator, pbar, next_pos, device,
                        static_kv, prompt_len, max_cache_len, frozen_weights):
         compiled_step = None
+        compiled_fused = None
         static_pos = None
         generated_token_ids = []
         # penalties need per-token history on host; without them the token chain
@@ -1028,10 +1030,41 @@ class BaseGenerate:
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
                 static_past = past_key_values
 
+                if STATIC_KV_FUSED_SAMPLER and batched_sync:
+                    torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
+
+                    def _decode_step_fused(e, ids, pos):
+                        x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
+                        logits = self.logits(x)[:, -1]
+                        tok = self._sample_in_graph(logits, temperature, top_k, top_p, min_p, do_sample)
+                        e2 = self.model.embed_tokens(tok).to(execution_dtype)
+                        return tok, e2
+                    compiled_fused = torch.compile(_decode_step_fused, mode="reduce-overhead", dynamic=False)
+
                 def _decode_step(e, ids, pos):
                     x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
                     return self.logits(x)[:, -1]
                 compiled_step = torch.compile(_decode_step, mode="reduce-overhead", dynamic=False)
+
+            if compiled_fused is not None:
+                # whole token step (forward + sample + embed) replays as one graph;
+                # outputs are cloned off the graph pool before feeding the next replay
+                tok, e2 = compiled_fused(embeds, current_input_ids, static_pos)
+                static_pos = static_pos + 1
+                tok = tok.clone()
+                embeds = e2.clone()
+                device_tokens.append(tok)
+                current_input_ids = tok if initial_input_ids is not None else None
+                if len(device_tokens) >= SYNC_EVERY or step == max_length - 1:
+                    ids = torch.cat(device_tokens, dim=1)[0].tolist()
+                    device_tokens.clear()
+                    pbar.update(len(ids))
+                    hit = next((j for j, t in enumerate(ids) if t in stop_tokens), None)
+                    if hit is not None:
+                        generated_token_ids.extend(ids[:hit + 1])
+                        break
+                    generated_token_ids.extend(ids)
+                continue
 
             if compiled_step is not None:
                 # clone: the sampler mutates logits in place and a graph output
@@ -1079,6 +1112,32 @@ class BaseGenerate:
                 break
 
         return generated_token_ids
+
+    def _sample_in_graph(self, logits, temperature, top_k, top_p, min_p, do_sample):
+        # sample_token minus history penalties and the Generator object, so the whole
+        # filter+sample chain stays capturable (philox RNG); seeded per item by the caller
+        if not do_sample or temperature == 0.0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+        if temperature != 1.0:
+            logits = logits / temperature
+        if top_k > 0:
+            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+            logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+        if min_p > 0.0:
+            probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
+            top_probs, _ = probs_before_filter.max(dim=-1, keepdim=True)
+            indices_to_remove = probs_before_filter < min_p * top_probs
+            logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 0] = False
+            indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+            indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+            logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
