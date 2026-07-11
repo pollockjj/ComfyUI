@@ -27,7 +27,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertFalse(diffusion_gemma_te().supports_native_quantized_compute)
 
     def test_dense_mxfp8_projections_share_one_activation_quantization(self):
-        modules = tuple(self._mxfp8_bank((32, 32), (128, 4)) for _ in range(3))
+        modules = tuple(self._mxfp8_bank((32, 32), (128, 4), device="cpu") for _ in range(3))
         for module in modules:
             module.layout_type = "TensorCoreMXFP8Layout"
             module.input_scale = None
@@ -49,16 +49,16 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertTrue(diffusion_gemma_detect((sd,))["unfused_experts"])
 
     @staticmethod
-    def _mxfp8_bank(qdata_shape, scale_shape, quant_format="mxfp8"):
+    def _mxfp8_bank(qdata_shape, scale_shape, quant_format="mxfp8", device="meta"):
         params = TensorCoreMXFP8Layout.Params(
-            scale=torch.empty(scale_shape, dtype=torch.float8_e8m0fnu, device="meta"),
+            scale=torch.empty(scale_shape, dtype=torch.float8_e8m0fnu, device=device),
             orig_dtype=torch.bfloat16,
             orig_shape=qdata_shape,
         )
         return types.SimpleNamespace(
             quant_format=quant_format,
             weight=QuantizedTensor(
-                torch.empty(qdata_shape, dtype=torch.float8_e4m3fn, device="meta"),
+                torch.empty(qdata_shape, dtype=torch.float8_e4m3fn, device=device),
                 "TensorCoreMXFP8Layout",
                 params,
             ),
