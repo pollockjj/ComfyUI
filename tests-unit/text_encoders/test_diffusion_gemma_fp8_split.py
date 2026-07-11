@@ -31,7 +31,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         probabilities = torch.ones((1, 262144), dtype=torch.bfloat16)
 
         with (
-            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "mxfp8_embedding", return_value=torch.ones((16384, 32), dtype=torch.bfloat16)) as dequantize,
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "mxfp8_embedding", create=True, return_value=torch.ones((16384, 32), dtype=torch.bfloat16)) as dequantize,
             mock.patch.object(torch, "mm", side_effect=lambda a, b, out_dtype: a.float() @ b.float()),
         ):
             output = _mxfp8_self_conditioning(probabilities, weight)
