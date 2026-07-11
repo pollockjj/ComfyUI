@@ -1564,7 +1564,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     uncast_bias_weight(self, qdata, None, offload_stream)
                     target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
                     if getattr(self, "quant_format", None) == "int8_tensorwise" and qparams is not None:
-                    # Per-row scales and row-local convrot inverse rotation let selected rows dequantize as a batch.
+                        # Per-row scales and row-local convrot inverse rotation let selected rows dequantize as a batch.
                         layout_cls = get_layout_class(self.layout_type)
                         row_scale = torch.nn.functional.embedding(input, scale.to(device=x.device))
                         flat = x.reshape(-1, x.shape[-1])

@@ -653,7 +653,7 @@ class DiffusionGemmaExperts(nn.Module):
         with contextlib.ExitStack() as stack:
             banks = [stack.enter_context(b.bank_resident(hidden_states)) for b in gate_up_banks + (self.down_proj,)]
             down_bank = banks[-1]
-        # Copy the hit list once because per-expert .item() calls serialize the CUDA stream.
+            # Copy the hit list once because per-expert .item() calls serialize the CUDA stream.
             for expert_idx in expert_hit.flatten().tolist():
                 top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
                 current_state = hidden_states[token_idx]
@@ -999,23 +999,12 @@ class DiffusionGenerate:
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
 
-    def _native_sampling_ops(self, device):
-        ck = comfy.quant_ops.ck
-        cuda_backend = ck.list_backends().get("cuda", {})
-        capabilities = cuda_backend.get("capabilities", ())
-        if (
-            not hasattr(ck, "categorical_stats")
-            or not hasattr(ck, "softcap_scale")
-            or not cuda_backend.get("available", False)
-            or cuda_backend.get("disabled", False)
-            or "categorical_stats" not in capabilities
-            or "softcap_scale" not in capabilities
-            or device.type != "cuda"
-            or torch.cuda.get_device_capability(device) != (12, 0)
-            or not all(layer.experts._bank_mode == "fused_nvfp4" for layer in self.model.decoder.layers)
-        ):
-            return None, None
-        return ck.softcap_scale, ck.categorical_stats
+    def _use_native_sampling(self, device, execution_dtype):
+        return (
+            device.type == "cuda"
+            and execution_dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(device) == (12, 0)
+        )
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
@@ -1074,7 +1063,7 @@ class DiffusionGenerate:
         max_new_canvases = math.ceil(max_length / canvas_length)
         generated_token_ids = []
         commit_canvas = None
-        softcap_scale, categorical_stats = self._native_sampling_ops(device)
+        use_native_sampling = self._use_native_sampling(device, execution_dtype)
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1100,19 +1089,19 @@ class DiffusionGenerate:
                                      position_ids=decoder_position_ids, dtype=execution_dtype,
                                      freqs_cis=decoder_freqs_cis)
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
-                if categorical_stats is None:
+                if not use_native_sampling:
                     processed_logits = self.logits(x) / temperature
                     probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
                     argmax_canvas = torch.argmax(processed_logits, dim=-1)
                 else:
                     raw_logits = self._raw_logits(x)
-                    processed_logits = softcap_scale(
+                    processed_logits = comfy.quant_ops.ck.softcap_scale(
                         raw_logits,
                         self.model.config.final_logit_softcapping,
                         1.0 / temperature,
                     )
                     del raw_logits
-                    probs, token_entropy, argmax_canvas = categorical_stats(processed_logits)
+                    probs, token_entropy, argmax_canvas = comfy.quant_ops.ck.categorical_stats(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
 
