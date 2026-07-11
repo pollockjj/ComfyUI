@@ -1372,6 +1372,7 @@ class DiffusionGenerate:
             device.type != "cuda"
             or execution_dtype != torch.bfloat16
             or torch.cuda.get_device_capability(device) != (12, 0)
+            or torch.cuda.memory.get_allocator_backend() != "native"
             or not comfy.model_management.args.disable_dynamic_vram
             or not hasattr(comfy.quant_ops.ck, "release_cuda_stream_workspaces")
         ):

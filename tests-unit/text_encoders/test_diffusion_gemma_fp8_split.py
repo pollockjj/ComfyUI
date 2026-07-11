@@ -54,6 +54,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         with (
             mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
+            mock.patch.object(torch.cuda.memory, "get_allocator_backend", return_value="native"),
             mock.patch.object(args, "disable_dynamic_vram", True),
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "release_cuda_stream_workspaces", create=True),
         ):
