@@ -97,11 +97,11 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             decoder_graph = _ConditionedDenoiseStepGraph(
                 owner, current_canvas, self_conditioning_logits, [], None, None,
                 torch.bfloat16, stream, generator, 2.0, 0.1)
-            graph.replay.assert_called_once_with()
+            graph.replay.assert_not_called()
             decoder_graph.replay(
                 torch.ones_like(current_canvas), torch.ones_like(self_conditioning_logits), 3.0)
 
-        self.assertEqual(graph.replay.call_count, 2)
+        graph.replay.assert_called_once_with()
         graph.register_generator_state.assert_called_once_with(generator)
         self.assertTrue(torch.equal(decoder_graph.current_canvas, torch.ones_like(current_canvas)))
         self.assertTrue(torch.equal(
