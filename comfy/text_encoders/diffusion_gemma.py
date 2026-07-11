@@ -972,6 +972,14 @@ def _diffusion_probs_and_entropy(processed_logits):
     return distribution.probs, distribution.entropy()
 
 
+def _sample_categorical(probs, generator):
+    torch._assert_async(torch.all(torch.isfinite(probs) & (probs >= 0)), "invalid multinomial distribution")
+    torch._assert_async(torch.all(probs.sum(dim=-1) > 0), "invalid multinomial distribution")
+    scores = torch.empty_like(probs).exponential_(generator=generator)
+    torch.div(probs, scores, out=scores)
+    return scores.argmax(dim=-1)
+
+
 def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_entropy):
     sorted_token_entropy, sorted_indices = torch.sort(token_entropy, dim=-1, descending=False)
     cumulative_entropy = torch.cumsum(sorted_token_entropy, dim=-1)
@@ -1102,8 +1110,7 @@ class DiffusionGenerate:
                     )
                     del raw_logits
                     probs, token_entropy, argmax_canvas = comfy.quant_ops.ck.categorical_stats(processed_logits)
-                denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
-                denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
+                denoiser_canvas = _sample_categorical(probs, generator)
 
                 accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
                     current_canvas, denoiser_canvas, entropy_bound, token_entropy)
