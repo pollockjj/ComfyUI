@@ -14,7 +14,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
-from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
+from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout, TensorWiseINT8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaAttention,
@@ -264,6 +264,30 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             bias_lowvram_function=None,
         )
 
+    @staticmethod
+    def _int8_bank(qdata_shape, scale_shape, group_size, device="meta"):
+        params = TensorWiseINT8Layout.Params(
+            scale=torch.empty(scale_shape, dtype=torch.float32, device=device),
+            convrot=True,
+            convrot_groupsize=group_size,
+            orig_dtype=torch.bfloat16,
+            orig_shape=qdata_shape,
+        )
+        return types.SimpleNamespace(
+            quant_format="int8_tensorwise",
+            weight=QuantizedTensor(
+                torch.empty(qdata_shape, dtype=torch.int8, device=device),
+                "TensorWiseINT8Layout",
+                params,
+            ),
+            bias=None,
+            _full_precision_mm=False,
+            weight_function=[],
+            bias_function=[],
+            weight_lowvram_function=None,
+            bias_lowvram_function=None,
+        )
+
     def test_mxfp8_expert_bank_contract(self):
         experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
         torch.nn.Module.__init__(experts)
@@ -304,6 +328,24 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         experts._banks = (self._mxfp8_bank((128, 1408, 2816), (128, 1408, 84), experts.fused_mxfp8_format), experts._banks[1])
         with self.assertRaisesRegex(ValueError, "fused MXFP8 expert bank contract mismatch"):
+            experts._configure_loaded_banks(experts, None)
+
+    def test_fused_int8_convrot_expert_bank_contract(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.unfused = False
+        experts._bank_mode = None
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 256),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64),
+        )
+
+        experts._configure_loaded_banks(experts, None)
+        self.assertEqual(experts._bank_mode, "fused_int8_convrot")
+        self.assertTrue(experts._grouped_int8_convrot_compatible)
+
+        experts._banks = (self._int8_bank((128, 1408, 2816), (128, 1408, 1), 64), experts._banks[1])
+        with self.assertRaisesRegex(ValueError, "INT8 ConvRot expert bank contract mismatch"):
             experts._configure_loaded_banks(experts, None)
 
 if __name__ == "__main__":
