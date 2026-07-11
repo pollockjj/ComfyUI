@@ -1107,9 +1107,11 @@ class DiffusionGenerate:
                 should_stop = bool(torch.all(finished_denoising))
                 if not should_stop:
                     self_conditioning_logits = processed_logits.to(execution_dtype)
+                del processed_logits, probs, token_entropy
                 if should_stop:
                     break
 
+            del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()
             is_eos = torch.isin(argmax_canvas[0], eos_tensor)
             eos_positions = is_eos.nonzero()
