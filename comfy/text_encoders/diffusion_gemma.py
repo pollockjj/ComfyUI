@@ -1333,6 +1333,7 @@ class _ConditionedDecoderGraph:
 
     def close(self):
         self.stream.synchronize()
+        self.graph.reset()
         self.graph = None
         self.output = None
         self.current_canvas = None
