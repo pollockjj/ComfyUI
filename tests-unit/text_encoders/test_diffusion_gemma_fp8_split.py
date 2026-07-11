@@ -32,13 +32,16 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             module.layout_type = "TensorCoreMXFP8Layout"
             module.input_scale = None
             module.comfy_force_cast_weights = False
-        x = torch.empty((1, 32, 32), dtype=torch.bfloat16)
+        x = torch.zeros((1, 32, 32), dtype=torch.bfloat16)
         sentinel = object()
 
         with mock.patch.object(QuantizedTensor, "from_float", return_value=sentinel) as quantize:
             self.assertIs(_shared_mxfp8_input(x, modules), sentinel)
 
-        quantize.assert_called_once_with(x.reshape(32, 32), "TensorCoreMXFP8Layout", scale=None)
+        quantize.assert_called_once_with(mock.ANY, "TensorCoreMXFP8Layout", scale=None)
+        quantized_source = quantize.call_args.args[0]
+        self.assertEqual(quantized_source.shape, (32, 32))
+        self.assertEqual(quantized_source.data_ptr(), x.data_ptr())
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
