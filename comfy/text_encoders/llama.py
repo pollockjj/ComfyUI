@@ -56,6 +56,13 @@ def _freeze_resident_weights(root, ref_input):
             frozen.append((m, None, None, True))
             m.comfy_cast_weights = False
             continue
+        warm_cache = getattr(m, "_int8_dequant_weight_cache", None)
+        if warm_cache is not None and getattr(m, "bias", None) is None:
+            # adopt the warm step's cached dequant: resident, stable, zero new allocation
+            frozen.append((m, m._parameters.get("weight"), None, True))
+            m._parameters["weight"] = torch.nn.Parameter(warm_cache[1], requires_grad=False)
+            m.comfy_cast_weights = False
+            continue
         rw, rb = _ops.cast_bias_weight(m, input=ref_input, offloadable=False)
         if isinstance(rw, _QT):
             rw = _dequant_qt_chunked(rw, ref_input.dtype)
