@@ -1345,6 +1345,8 @@ class _ConditionedDenoiseStepGraph:
             self.next_self_conditioning_logits = processed_logits.to(self.execution_dtype)
             del random_canvas
 
+        with torch.cuda.stream(self.stream):
+            self.graph.replay()
         torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
 
     def outputs(self):
