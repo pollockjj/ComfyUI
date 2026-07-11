@@ -1047,8 +1047,10 @@ class BaseGenerate:
                 runner = getattr(self, "_static_runner", None)
                 rkey = (temperature, top_k, top_p, min_p, do_sample, execution_dtype, embeds.shape[0])
                 if runner is not None and runner["key"] == rkey and prompt_len + max_length <= runner["max_len"]:
+                    # kv-sharing layers carry empty tuples, not StaticLayerKV
                     for kv_new, kv_p in zip(past_key_values, runner["caches"]):
-                        kv_p.reset(kv_new)
+                        if hasattr(kv_p, "reset"):
+                            kv_p.reset(kv_new)
                     past_key_values = runner["caches"]
                 else:
                     plen = max(max_cache_len, 12288)
