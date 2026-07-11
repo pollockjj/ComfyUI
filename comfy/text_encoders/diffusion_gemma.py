@@ -1113,15 +1113,20 @@ class DiffusionGemmaExperts(nn.Module):
         K = top_k_index.shape[-1]
 
         flat_experts = top_k_index.reshape(-1)
-        counts = torch.bincount(flat_experts, minlength=E)
-        if torch.cuda.is_current_stream_capturing():
-            C = self.grouped_bucket
-            torch._assert_async(counts.max() <= C, "DiffusionGemma INT8 expert route exceeds graph bucket")
-        else:
-            C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
+        capturing = torch.cuda.is_current_stream_capturing()
         order = torch.argsort(flat_experts)
         sorted_experts = flat_experts[order]
-        rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
+        positions = torch.arange(N * K, device=flat_experts.device)
+        if capturing:
+            C = self.grouped_bucket
+            starts = torch.full((E,), N * K, dtype=torch.long, device=flat_experts.device)
+            starts.scatter_reduce_(0, sorted_experts, positions, reduce="amin")
+            rank = positions - starts[sorted_experts]
+            torch._assert_async(rank.max() < C, "DiffusionGemma INT8 expert route exceeds graph bucket")
+        else:
+            counts = torch.bincount(flat_experts, minlength=E)
+            C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
+            rank = positions - (counts.cumsum(0) - counts)[sorted_experts]
         slot = sorted_experts * C + rank
 
         gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
