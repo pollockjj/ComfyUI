@@ -1333,8 +1333,8 @@ class _ConditionedDecoderGraph:
 
     def close(self):
         self.stream.synchronize()
-        self.output = None
         self.graph = None
+        self.output = None
         self.current_canvas = None
         self.self_conditioning_logits = None
         self.past_key_values = None
@@ -1476,10 +1476,15 @@ class DiffusionGenerate:
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
                     elif not conditioned_eager_complete:
-                        x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
-                                             self_conditioning_logits=self_conditioning_logits,
-                                             position_ids=decoder_position_ids, dtype=execution_dtype,
-                                             freqs_cis=decoder_freqs_cis)
+                        capture_stream.wait_stream(torch.cuda.current_stream(device))
+                        with torch.cuda.stream(capture_stream):
+                            x, _, _ = self.model(
+                                current_canvas, past_key_values=past_key_values, mode="decoder",
+                                self_conditioning_logits=self_conditioning_logits,
+                                position_ids=decoder_position_ids, dtype=execution_dtype,
+                                freqs_cis=decoder_freqs_cis,
+                            )
+                        torch.cuda.current_stream(device).wait_stream(capture_stream)
                         conditioned_eager_complete = True
                     elif decoder_graph is None:
                         decoder_graph = _ConditionedDecoderGraph(
