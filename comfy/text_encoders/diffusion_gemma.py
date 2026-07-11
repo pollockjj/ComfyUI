@@ -665,6 +665,16 @@ class DiffusionGemmaExperts(nn.Module):
         native = self._forward_native_fused_mxfp8(
             hidden_states, top_k_index, top_k_weights
         )
+        capture_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE")
+        if capture_path and _mxfp8_debug_compare_calls == 0:
+            torch.save(
+                {
+                    "hidden_states": hidden_states.detach().cpu(),
+                    "top_k_index": top_k_index.detach().cpu(),
+                    "top_k_weights": top_k_weights.detach().cpu(),
+                },
+                capture_path,
+            )
         reference = self._forward_grouped_fused_mxfp8(
             hidden_states, top_k_index, top_k_weights
         )
