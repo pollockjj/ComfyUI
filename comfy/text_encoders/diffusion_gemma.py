@@ -104,7 +104,7 @@ def _native_mxfp8_embedding(module):
         and isinstance(module.weight, QuantizedTensor)
         and module.weight._layout_cls == "TensorCoreMXFP8Layout"
         and len(module.weight_function) == 0
-        and module.weight_lowvram_function is None
+        and getattr(module, "weight_lowvram_function", None) is None
         and not getattr(module, "comfy_force_cast_weights", False)
     )
 
