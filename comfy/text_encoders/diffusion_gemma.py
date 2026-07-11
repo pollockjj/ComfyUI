@@ -1038,7 +1038,7 @@ class DiffusionGenerate:
         canvas_length = config.canvas_length
         vocab_size = config.vocab_size
         generator = torch.Generator(device=device).manual_seed(seed) if seed is not None else None
-        eos_tensor = torch.tensor(stop_tokens, device=device)
+        stop_token_ids = set(stop_tokens)
         pbar = comfy.utils.ProgressBar(max_length)
         tq = tqdm(
             total=max_length,
@@ -1094,16 +1094,6 @@ class DiffusionGenerate:
                 current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
 
                 finished_denoising = stopping(argmax_canvas, token_entropy)
-                step_eos = torch.isin(argmax_canvas[0], eos_tensor)
-                step_eos_positions = torch.nonzero(step_eos, as_tuple=False).flatten()
-                estimated_canvas_tokens = (
-                    int(step_eos_positions[0].item()) + 1
-                    if step_eos_positions.numel() > 0 else canvas_length
-                )
-                estimated_output_tokens = min(max_length, len(generated_token_ids) + estimated_canvas_tokens)
-                pbar.update_absolute(estimated_output_tokens, max_length)
-                tq.n = estimated_output_tokens
-                tq.refresh()
                 should_stop = bool(torch.all(finished_denoising))
                 if not should_stop:
                     self_conditioning_logits = processed_logits.to(execution_dtype)
@@ -1113,15 +1103,17 @@ class DiffusionGenerate:
 
             del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()
-            is_eos = torch.isin(argmax_canvas[0], eos_tensor)
-            eos_positions = is_eos.nonzero()
             remaining = max_length - len(generated_token_ids)
-            if eos_positions.numel() > 0:
-                first_eos = int(eos_positions[0].item())
+            first_eos = next((i for i, token_id in enumerate(canvas_ids) if token_id in stop_token_ids), None)
+            if first_eos is not None:
                 generated_token_ids.extend(canvas_ids[:min(first_eos + 1, remaining)])
-                break
-            generated_token_ids.extend(canvas_ids[:remaining])
-            if len(generated_token_ids) >= max_length:
+            else:
+                generated_token_ids.extend(canvas_ids[:remaining])
+            output_tokens = len(generated_token_ids)
+            pbar.update_absolute(output_tokens, max_length)
+            tq.n = output_tokens
+            tq.refresh()
+            if first_eos is not None or output_tokens >= max_length:
                 break
             cur_len += canvas_length
             commit_canvas = argmax_canvas
