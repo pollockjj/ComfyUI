@@ -232,11 +232,8 @@ def grouped_int8_convrot_linear_packed(
     out_dtype,
 ):
     if not _CK_AVAILABLE:
-        raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
-    operation = getattr(ck, "grouped_int8_convrot_linear_packed", None)
-    if not callable(operation):
-        raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
-    return operation(
+        raise RuntimeError("Packed INT8 ConvRot expert operations require comfy-kitchen")
+    return ck.grouped_int8_convrot_linear_packed(
         x,
         expert_indptr,
         weight,
