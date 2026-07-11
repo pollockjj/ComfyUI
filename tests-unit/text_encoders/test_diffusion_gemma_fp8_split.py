@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 import types
@@ -16,6 +17,7 @@ from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaExperts,
+    _ConditionedDecoderGraph,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
     diffusion_gemma_te,
@@ -56,11 +58,37 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
             mock.patch.object(torch.cuda.memory, "get_allocator_backend", return_value="native"),
             mock.patch.object(args, "disable_dynamic_vram", True),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "reserve_cuda_stream_workspaces", create=True),
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "release_cuda_stream_workspaces", create=True),
         ):
             self.assertTrue(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
             resident.parameters = lambda: [types.SimpleNamespace(device=torch.device("cpu"))]
             self.assertFalse(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
+
+    def test_conditioned_decoder_graph_defers_first_replay(self):
+        static_canvas = torch.empty((1, 4), dtype=torch.long)
+        static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)
+        output = torch.empty((1, 4, 2), dtype=torch.bfloat16)
+        owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
+        stream = mock.Mock()
+        current_stream = mock.Mock()
+        graph = mock.Mock()
+
+        with (
+            mock.patch.object(torch.cuda, "CUDAGraph", return_value=graph),
+            mock.patch.object(torch.cuda, "graph", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
+        ):
+            decoder_graph = _ConditionedDecoderGraph(
+                owner, static_canvas, static_logits, [], None, None, torch.bfloat16, stream)
+            graph.replay.assert_not_called()
+            self.assertIs(decoder_graph.replay(torch.ones_like(static_canvas), torch.ones_like(static_logits)), output)
+
+        graph.replay.assert_called_once_with()
+        self.assertTrue(torch.equal(static_canvas, torch.ones_like(static_canvas)))
+        self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
+        current_stream.wait_stream.assert_called_once_with(stream)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {

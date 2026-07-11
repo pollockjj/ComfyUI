@@ -1299,19 +1299,18 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
 
 
 class _ConditionedDecoderGraph:
-    """One-canvas CUDA graph with caller-owned lifetime and static input buffers."""
-    def __init__(self, owner, current_canvas, self_conditioning_logits, past_key_values,
+    """One-canvas CUDA graph with caller-owned static buffers and deferred first replay."""
+    def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
                  position_ids, freqs_cis, execution_dtype, stream):
         self.stream = stream
-        self.current_canvas = current_canvas.clone()
-        self.self_conditioning_logits = self_conditioning_logits.clone()
+        self.current_canvas = static_canvas
+        self.self_conditioning_logits = static_self_conditioning_logits
         self.past_key_values = past_key_values
         self.position_ids = position_ids
         self.freqs_cis = freqs_cis
         self.execution_dtype = execution_dtype
         self.graph = torch.cuda.CUDAGraph()
 
-        self.stream.wait_stream(torch.cuda.current_stream(current_canvas.device))
         with torch.cuda.graph(self.graph, stream=self.stream):
             self.output, _, _ = owner.model(
                 self.current_canvas,
@@ -1322,9 +1321,6 @@ class _ConditionedDecoderGraph:
                 dtype=self.execution_dtype,
                 freqs_cis=self.freqs_cis,
             )
-        with torch.cuda.stream(self.stream):
-            self.graph.replay()
-        torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
 
     def replay(self, current_canvas, self_conditioning_logits):
         with torch.cuda.stream(self.stream):
@@ -1377,7 +1373,8 @@ class DiffusionGenerate:
             or torch.cuda.get_device_capability(device) != (12, 0)
             or torch.cuda.memory.get_allocator_backend() != "native"
             or not comfy.model_management.args.disable_dynamic_vram
-            or not hasattr(comfy.quant_ops.ck, "release_cuda_stream_workspaces")
+            or not callable(getattr(comfy.quant_ops.ck, "reserve_cuda_stream_workspaces", None))
+            or not callable(getattr(comfy.quant_ops.ck, "release_cuda_stream_workspaces", None))
         ):
             return False
         for parameter in self.model.decoder.parameters():
@@ -1475,31 +1472,31 @@ class DiffusionGenerate:
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
             decoder_graph = None
             try:
+                if capture_stream is not None:
+                    comfy.quant_ops.ck.reserve_cuda_stream_workspaces(capture_stream)
+                    static_canvas = torch.empty_like(current_canvas)
+                    static_self_conditioning_logits = torch.empty(
+                        (*current_canvas.shape, vocab_size), dtype=execution_dtype, device=device)
                 for cur_step in reversed(range(1, max_denoising_steps + 1)):
                     comfy.model_management.throw_exception_if_processing_interrupted()
                     if self_conditioning_logits is None and capture_stream is not None:
-                        capture_stream.wait_stream(torch.cuda.current_stream(device))
-                        with torch.cuda.stream(capture_stream):
-                            x, _, _ = self.model(
-                                current_canvas, past_key_values=past_key_values, mode="decoder",
-                                self_conditioning_logits=None,
-                                position_ids=decoder_position_ids, dtype=execution_dtype,
-                                freqs_cis=decoder_freqs_cis,
-                            )
-                        torch.cuda.current_stream(device).wait_stream(capture_stream)
+                        x, _, _ = self.model(
+                            current_canvas, past_key_values=past_key_values, mode="decoder",
+                            self_conditioning_logits=None,
+                            position_ids=decoder_position_ids, dtype=execution_dtype,
+                            freqs_cis=decoder_freqs_cis,
+                        )
+                        capture_started_ns = time.perf_counter_ns()
+                        decoder_graph = _ConditionedDecoderGraph(
+                            self, static_canvas, static_self_conditioning_logits, past_key_values,
+                            decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
+                        )
+                        capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
                     elif self_conditioning_logits is None or capture_stream is None:
                         x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                              self_conditioning_logits=self_conditioning_logits,
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
-                    elif decoder_graph is None:
-                        capture_started_ns = time.perf_counter_ns()
-                        decoder_graph = _ConditionedDecoderGraph(
-                            self, current_canvas, self_conditioning_logits, past_key_values,
-                            decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
-                        )
-                        capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
-                        x = decoder_graph.output
                     else:
                         x = decoder_graph.replay(current_canvas, self_conditioning_logits)
 
