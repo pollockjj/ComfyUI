@@ -43,7 +43,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         }
         return torch.tensor(list(json.dumps(config).encode()), dtype=torch.uint8)
 
-    def test_mxfp8_self_conditioning_uses_sixteen_bf16_chunks(self):
+    def test_mxfp8_self_conditioning_uses_one_bf16_chunk(self):
         weight = self._mxfp8_bank((262144, 32), (262144, 4), device="cpu").weight
         probabilities = torch.ones((1, 262144), dtype=torch.bfloat16)
 
@@ -53,7 +53,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         ):
             output = _mxfp8_self_conditioning(probabilities, weight)
 
-        self.assertEqual(dequantize.call_count, 16)
+        self.assertEqual(dequantize.call_count, 1)
         self.assertEqual(output.dtype, torch.float32)
         self.assertTrue(torch.equal(output, torch.full((1, 32), 262144.0)))
 

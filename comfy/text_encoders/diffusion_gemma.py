@@ -96,7 +96,7 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
     return output
 
 
-_MXFP8_SELF_CONDITIONING_CHUNK = 16384
+_MXFP8_SELF_CONDITIONING_CHUNK = 262144
 
 
 def _native_mxfp8_embedding(module):
