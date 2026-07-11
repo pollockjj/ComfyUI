@@ -18,6 +18,8 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaExperts,
     _ConditionedDecoderGraph,
+    _ConditionedDecoderGraphCache,
+    _append_preallocated_kv,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
     diffusion_gemma_te,
@@ -89,6 +91,55 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertTrue(torch.equal(static_canvas, torch.ones_like(static_canvas)))
         self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
         current_stream.wait_stream.assert_called_once_with(stream)
+
+    def test_preallocated_kv_uses_capacity_prefix_without_reallocation(self):
+        past_key = torch.full((1, 1, 6, 2), -1.0)
+        past_value = torch.full_like(past_key, -2.0)
+        xk = torch.ones((1, 1, 2, 2))
+        xv = torch.full_like(xk, 2.0)
+
+        key, value, next_len = _append_preallocated_kv(past_key, past_value, xk, xv, 2)
+
+        self.assertEqual(next_len, 4)
+        self.assertEqual(key.shape[2], 4)
+        self.assertEqual(key.data_ptr(), past_key.data_ptr())
+        self.assertEqual(value.data_ptr(), past_value.data_ptr())
+        self.assertTrue(torch.equal(key[:, :, 2:], xk))
+        self.assertTrue(torch.equal(value[:, :, 2:], xv))
+
+    def test_sliding_kv_compaction_preserves_backing_pointer(self):
+        generate = DiffusionGenerate()
+        generate.model = types.SimpleNamespace(
+            decoder=types.SimpleNamespace(layers=[types.SimpleNamespace(sliding_window=5)]))
+        key = torch.arange(8.0).view(1, 1, 8, 1)
+        value = key + 10
+        key_ptr = key.data_ptr()
+
+        reserved = generate._reserve_kv_cache([(key, value, 8, 8)], 2)[0]
+
+        self.assertEqual(reserved[0].data_ptr(), key_ptr)
+        self.assertEqual(reserved[3], 4)
+        self.assertTrue(torch.equal(reserved[0][0, 0, :4, 0], torch.arange(4.0, 8.0)))
+        self.assertTrue(torch.equal(reserved[1][0, 0, :4, 0], torch.arange(14.0, 18.0)))
+
+    def test_graph_cache_releases_workspace_and_graphs(self):
+        stream = mock.Mock()
+        graph = mock.Mock()
+        ck = sys.modules["comfy.quant_ops"].ck
+        with (
+            mock.patch.object(torch.cuda, "Stream", return_value=stream),
+            mock.patch.object(torch.cuda, "device", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "graph_pool_handle", return_value="pool"),
+            mock.patch.object(ck, "reserve_cuda_stream_workspaces", create=True) as reserve,
+            mock.patch.object(ck, "release_cuda_stream_workspaces", create=True) as release,
+        ):
+            cache = _ConditionedDecoderGraphCache("key", torch.device("cpu"), 1, 4, 8, torch.bfloat16)
+            cache.graphs["geometry"] = graph
+            cache.close()
+
+        reserve.assert_called_once_with(stream)
+        graph.close.assert_called_once_with()
+        release.assert_called_once_with(stream)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
