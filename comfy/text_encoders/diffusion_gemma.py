@@ -1114,7 +1114,11 @@ class DiffusionGemmaExperts(nn.Module):
 
         flat_experts = top_k_index.reshape(-1)
         counts = torch.bincount(flat_experts, minlength=E)
-        C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
+        if torch.cuda.is_current_stream_capturing():
+            C = self.grouped_bucket
+            torch._assert_async(counts.max() <= C, "DiffusionGemma INT8 expert route exceeds graph bucket")
+        else:
+            C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
         order = torch.argsort(flat_experts)
         sorted_experts = flat_experts[order]
         rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
