@@ -243,6 +243,7 @@ class DiffusionGemmaExperts(nn.Module):
     grouped_mxfp8_bucket = 128
     grouped_min_tokens = 64
     fused_nvfp4_format = comfy.quant_ops.NVFP4_FUSED_MOE_FORMAT
+    fused_mxfp8_format = comfy.quant_ops.MXFP8_FUSED_MOE_FORMAT
 
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
@@ -252,6 +253,7 @@ class DiffusionGemmaExperts(nn.Module):
         self._native_nvfp4_alpha_cache = None
         self._bank_mode = None
         self._fused_banks_compatible = False
+        self._fused_mxfp8_banks_compatible = False
         self._grouped_mxfp8_compatible = False
         E = config.num_experts
         H = config.hidden_size
@@ -320,6 +322,27 @@ class DiffusionGemmaExperts(nn.Module):
             ):
                 raise ValueError("DiffusionGemma fused NVFP4 bank shape mismatch")
             self._bank_mode = "fused_nvfp4"
+        elif any(quant_format == self.fused_mxfp8_format for quant_format in formats):
+            if not all(quant_format == self.fused_mxfp8_format for quant_format in formats):
+                raise ValueError("DiffusionGemma fused MXFP8 requires both expert banks")
+            expected = (
+                ((128, 1408, 2816), (128, 1408, 88)),
+                ((128, 2816, 704), (128, 2816, 24)),
+            )
+            for bank, (qdata_shape, scale_shape) in zip(self._banks, expected):
+                weight = bank.weight
+                if (
+                    not isinstance(weight, QuantizedTensor)
+                    or weight._layout_cls != "TensorCoreMXFP8Layout"
+                    or bank.bias is not None
+                    or weight._qdata.dtype != torch.float8_e4m3fn
+                    or tuple(weight._qdata.shape) != qdata_shape
+                    or weight._params.scale.dtype != torch.float8_e8m0fnu
+                    or tuple(weight._params.scale.shape) != scale_shape
+                    or tuple(weight._params.orig_shape) != qdata_shape
+                ):
+                    raise ValueError("DiffusionGemma fused MXFP8 expert bank contract mismatch")
+            self._bank_mode = "fused_mxfp8"
         elif any(quant_format is not None for quant_format in formats):
             self._bank_mode = "quantized"
         else:
@@ -332,6 +355,14 @@ class DiffusionGemmaExperts(nn.Module):
 
     def _refresh_bank_compatibility(self):
         self._fused_banks_compatible = self._bank_mode == "fused_nvfp4" and all(
+            isinstance(bank.weight, QuantizedTensor)
+            and not bank.weight_function
+            and not bank.bias_function
+            and bank.weight_lowvram_function is None
+            and bank.bias_lowvram_function is None
+            for bank in self._banks
+        )
+        self._fused_mxfp8_banks_compatible = self._bank_mode == "fused_mxfp8" and all(
             isinstance(bank.weight, QuantizedTensor)
             and not bank.weight_function
             and not bank.bias_function
@@ -398,6 +429,17 @@ class DiffusionGemmaExperts(nn.Module):
             and hidden_states.is_contiguous()
         )
 
+    def _supports_native_fused_mxfp8(self, hidden_states):
+        return (
+            hidden_states.is_cuda
+            and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
+            and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            and hidden_states.ndim == 2
+            and hidden_states.shape[0] in (256, 340)
+            and hidden_states.shape[1] == 2816
+            and hidden_states.is_contiguous()
+        )
+
     def forward(self, hidden_states, top_k_index, top_k_weights):
         if self._bank_mode is None:
             raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
@@ -414,6 +456,17 @@ class DiffusionGemmaExperts(nn.Module):
                     "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
                 )
             return self._forward_grouped_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
+        if self._bank_mode == "fused_mxfp8":
+            if not self._fused_mxfp8_banks_compatible:
+                raise RuntimeError("DiffusionGemma fused MXFP8 does not support patched expert banks")
+            if self._supports_native_fused_mxfp8(hidden_states):
+                try:
+                    return self._forward_native_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
+                except comfy.quant_ops.ck.NoCapableBackendError:
+                    pass
+            if not self._supports_sm120_nvfp4(hidden_states):
+                raise RuntimeError("DiffusionGemma fused MXFP8 v1 requires the SM120 grouped kernel")
+            return self._forward_grouped_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
         if (
             self._bank_mode == "unfused_nvfp4"
             and hidden_states.shape[0] >= self.grouped_min_tokens
@@ -541,6 +594,59 @@ class DiffusionGemmaExperts(nn.Module):
                 alphas[1],
             )
 
+    def _forward_native_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
+        ck = comfy.quant_ops.ck
+        num_tokens = hidden_states.shape[0]
+        if (
+            hidden_states.dtype not in (torch.float16, torch.bfloat16)
+            or hidden_states.shape[1:] != (2816,)
+            or num_tokens not in (256, 340)
+            or not hidden_states.is_contiguous()
+        ):
+            raise RuntimeError("DiffusionGemma native MXFP8 MoE requires contiguous FP16/BF16 [256|340, 2816]")
+        if tuple(top_k_index.shape) != (num_tokens, 8) or top_k_index.device != hidden_states.device:
+            raise RuntimeError("DiffusionGemma native MXFP8 expert indices must be [N, 8] on the input device")
+        if (
+            tuple(top_k_weights.shape) != (num_tokens, 8)
+            or top_k_weights.device != hidden_states.device
+            or top_k_weights.dtype != torch.float32
+            or not top_k_weights.is_contiguous()
+        ):
+            raise RuntimeError("DiffusionGemma native MXFP8 expert weights must be contiguous FP32 [N, 8]")
+
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for module, bank in zip(modules, banks):
+                weight, bias = bank._resident_bank
+                if (
+                    module.quant_format != self.fused_mxfp8_format
+                    or not isinstance(weight, QuantizedTensor)
+                    or weight._layout_cls != "TensorCoreMXFP8Layout"
+                    or bias is not None
+                ):
+                    raise RuntimeError("DiffusionGemma native MXFP8 requires complete unbiased banks")
+                weights.append(weight)
+
+            gate_up, down = weights
+            if (
+                tuple(gate_up._qdata.shape) != (128, 1408, 2816)
+                or tuple(gate_up._params.scale.shape) != (128, 1408, 88)
+                or tuple(down._qdata.shape) != (128, 2816, 704)
+                or tuple(down._params.scale.shape) != (128, 2816, 24)
+            ):
+                raise RuntimeError("DiffusionGemma native fused MXFP8 bank shape mismatch")
+            return ck.fused_moe_mxfp8(
+                hidden_states,
+                top_k_index,
+                top_k_weights,
+                gate_up._qdata,
+                gate_up._params.scale,
+                down._qdata,
+                down._params.scale,
+            )
+
     def _forward_grouped_nvfp4(self, hidden_states, top_k_index, top_k_weights):
         ck = comfy.quant_ops.ck
         N, H = hidden_states.shape
@@ -654,6 +760,55 @@ class DiffusionGemmaExperts(nn.Module):
             intermediate = _gelu_tanh(gate) * up
             qi, i_scale, i_block_scale = quantize(intermediate, self.down_proj.input_scale)
             y = grouped_linear(qi, i_scale, i_block_scale, weights[1])
+
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = slot
+        y = y.reshape(E * C, H)[pair_order]
+        y = y * top_k_weights.reshape(-1, 1)
+        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
+
+    def _forward_grouped_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
+        ck = comfy.quant_ops.ck
+        N, H = hidden_states.shape
+        E = self.num_experts
+        K = top_k_index.shape[-1]
+
+        flat_experts = top_k_index.reshape(-1)
+        counts = torch.bincount(flat_experts, minlength=E)
+        C = -(-int(counts.max()) // self.grouped_mxfp8_bucket) * self.grouped_mxfp8_bucket
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        rank = torch.arange(N * K, device=flat_experts.device) - (counts.cumsum(0) - counts)[sorted_experts]
+        slot = sorted_experts * C + rank
+
+        gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
+        gather_tok[slot] = order // K
+        x = hidden_states[gather_tok].view(E, C, H)
+
+        def grouped_linear(tensor, weight):
+            qdata, block_scale = ck.quantize_mxfp8(tensor.flatten(0, 1).contiguous(), pad_32x=False)
+            return self._grouped_mxfp8_mm(
+                qdata,
+                weight._qdata,
+                block_scale,
+                weight._params.scale,
+                C,
+                hidden_states.dtype,
+            )
+
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for bank in banks:
+                weight, bias = bank._resident_bank
+                if not isinstance(weight, QuantizedTensor) or bias is not None:
+                    raise RuntimeError("grouped DiffusionGemma fused MXFP8 requires unbiased resident banks")
+                weights.append(weight)
+
+            gate_up = grouped_linear(x, weights[0])
+            gate, up = gate_up.chunk(2, dim=-1)
+            y = grouped_linear(_gelu_tanh(gate) * up, weights[1])
 
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
         pair_order[order] = slot

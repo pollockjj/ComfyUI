@@ -265,6 +265,17 @@ NVFP4_FUSED_MOE_V1_FIELDS = {
     "activation_scale": "static",
     "full_precision_matrix_mult": False,
 }
+MXFP8_FUSED_MOE_FORMAT = "mxfp8_cutlass_fused_moe_v1"
+MXFP8_FUSED_MOE_V1_FIELDS = {
+    "artifact_contract": "diffusiongemma_mxfp8_cutlass_fused_moe.v1",
+    "group_size": 32,
+    "weight_dtype": "float8_e4m3fn",
+    "block_scale_dtype": "ue8m0",
+    "block_scale_layout": "cutlass_128x4",
+    "projection_order": "gate_up",
+    "activation_scale": "dynamic_e8m0_1x32",
+    "full_precision_matrix_mult": False,
+}
 
 QUANT_ALGOS = {
     "float8_e4m3fn": {
@@ -296,6 +307,13 @@ if _CK_MXFP8_AVAILABLE:
     QUANT_ALGOS["mxfp8"] = {
         "storage_t": torch.float8_e4m3fn,
         "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "TensorCoreMXFP8Layout",
+        "group_size": 32,
+    }
+    QUANT_ALGOS[MXFP8_FUSED_MOE_FORMAT] = {
+        "storage_t": torch.float8_e4m3fn,
+        "parameters": {"weight_scale"},
+        # Storage-only layout; DiffusionGemma consumes both complete banks together.
         "comfy_tensor_layout": "TensorCoreMXFP8Layout",
         "group_size": 32,
     }
@@ -331,5 +349,7 @@ __all__ = [
     "QUANT_ALGOS",
     "NVFP4_FUSED_MOE_FORMAT",
     "NVFP4_FUSED_MOE_V1_FIELDS",
+    "MXFP8_FUSED_MOE_FORMAT",
+    "MXFP8_FUSED_MOE_V1_FIELDS",
     "register_layout_op",
 ]

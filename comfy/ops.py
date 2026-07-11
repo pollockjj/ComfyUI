@@ -904,6 +904,8 @@ if CUBLAS_IS_AVAILABLE:
 # Mixed Precision Operations
 # ==============================================================================
 from .quant_ops import (
+    MXFP8_FUSED_MOE_FORMAT,
+    MXFP8_FUSED_MOE_V1_FIELDS,
     NVFP4_FUSED_MOE_FORMAT,
     NVFP4_FUSED_MOE_V1_FIELDS,
     QuantizedTensor,
@@ -1068,17 +1070,23 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         module.weight = torch.nn.Parameter(weight.to(device=device, dtype=compute_dtype), requires_grad=False)
     else:
         module.quant_format = layer_conf.get("format", None)
+        fused_contract = None
         if module.quant_format == NVFP4_FUSED_MOE_FORMAT:
+            fused_contract = ("NVFP4", NVFP4_FUSED_MOE_V1_FIELDS)
+        elif module.quant_format == MXFP8_FUSED_MOE_FORMAT:
+            fused_contract = ("MXFP8", MXFP8_FUSED_MOE_V1_FIELDS)
+        if fused_contract is not None:
+            format_name, expected_fields = fused_contract
             mismatches = {
                 name: (layer_conf.get(name), expected)
-                for name, expected in NVFP4_FUSED_MOE_V1_FIELDS.items()
+                for name, expected in expected_fields.items()
                 if layer_conf.get(name) != expected
             }
             expected_experts = getattr(module, "num_experts", None)
             if layer_conf.get("num_experts") != expected_experts:
                 mismatches["num_experts"] = (layer_conf.get("num_experts"), expected_experts)
             if mismatches:
-                raise ValueError(f"Invalid fused NVFP4 v1 contract for layer {layer_name}: {mismatches}")
+                raise ValueError(f"Invalid fused {format_name} v1 contract for layer {layer_name}: {mismatches}")
         module._full_precision_mm_config = layer_conf.get("full_precision_matrix_mult", False)
         if not module._full_precision_mm:
             module._full_precision_mm = module._full_precision_mm_config
@@ -1094,7 +1102,7 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         # Per-format scales; fp8 dtype views handle both legacy uint8-on-disk and native fp8.
         if module.quant_format in ("float8_e4m3fn", "float8_e5m2"):
             scales = {"scale": pop_scale("weight_scale")}
-        elif module.quant_format == "mxfp8":
+        elif module.quant_format in ("mxfp8", MXFP8_FUSED_MOE_FORMAT):
             bs = pop_scale("weight_scale", torch.float8_e8m0fnu)
             if bs is None:
                 raise ValueError(f"Missing MXFP8 block scales for layer {layer_name}")
@@ -1482,6 +1490,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 extra_quant_conf = {"num_experts": self.num_experts}
                 if self.quant_format == NVFP4_FUSED_MOE_FORMAT:
                     extra_quant_conf.update(NVFP4_FUSED_MOE_V1_FIELDS)
+                elif self.quant_format == MXFP8_FUSED_MOE_FORMAT:
+                    extra_quant_conf.update(MXFP8_FUSED_MOE_V1_FIELDS)
                 return _quantized_weight_state_dict(
                     self,
                     sd,
