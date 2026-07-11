@@ -166,7 +166,30 @@ class DiffusionGemmaAttention(nn.Module):
         if past_key_value is not None:
             preallocated_cache = False
             if len(past_key_value) > 0:
-                if len(past_key_value) == 4:
+                if len(past_key_value) == 5:
+                    past_key, past_value, cumulative_len, cache_len, decoder_mask = past_key_value
+                    capacity = past_key.shape[2]
+                    next_cache_len = cache_len + seq_length
+                    if (
+                        past_value.shape[2] != capacity
+                        or cache_len < 0
+                        or cache_len > capacity
+                    ):
+                        raise RuntimeError("DiffusionGemma fixed KV cache metadata is invalid")
+                    if update_cache:
+                        combined_key = torch.cat((past_key[:, :, :cache_len], xk), dim=2)
+                        combined_value = torch.cat((past_value[:, :, :cache_len], xv), dim=2)
+                        keep = min(next_cache_len, capacity)
+                        past_key[:, :, :keep].copy_(combined_key[:, :, -keep:])
+                        past_value[:, :, :keep].copy_(combined_value[:, :, -keep:])
+                        xk, xv = combined_key, combined_value
+                        next_cache_len = keep
+                        preallocated_cache = True
+                    else:
+                        xk = torch.cat((past_key, xk), dim=2)
+                        xv = torch.cat((past_value, xv), dim=2)
+                        attention_mask = decoder_mask
+                elif len(past_key_value) == 4:
                     past_key, past_value, cumulative_len, cache_len = past_key_value
                     next_cache_len = cache_len + seq_length
                     if past_key.shape[2] != past_value.shape[2] or cache_len < 0 or cache_len > past_key.shape[2]:
@@ -187,7 +210,15 @@ class DiffusionGemmaAttention(nn.Module):
                 cumulative_len = 0
             if update_cache:
                 new_cumulative = cumulative_len + seq_length
-                if preallocated_cache:
+                if len(past_key_value) == 5:
+                    present_key_value = (
+                        past_key,
+                        past_value,
+                        new_cumulative,
+                        next_cache_len,
+                        decoder_mask,
+                    )
+                elif preallocated_cache:
                     present_key_value = (past_key, past_value, new_cumulative, next_cache_len)
                 elif sliding_window is not None and xk.shape[2] > sliding_window - 1:
                     present_key_value = (
@@ -1299,18 +1330,23 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
 
 
 class _ConditionedDecoderGraph:
-    """One-canvas CUDA graph with caller-owned static buffers and deferred first replay."""
+    """Request-local conditioned decoder graph with caller-owned static buffers."""
     def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
                  position_ids, freqs_cis, execution_dtype, stream):
         self.stream = stream
         self.current_canvas = static_canvas
         self.self_conditioning_logits = static_self_conditioning_logits
         self.past_key_values = past_key_values
-        self.position_ids = position_ids
-        self.freqs_cis = freqs_cis
+        self.position_ids = torch.empty_like(position_ids)
+        self.freqs_cis = torch.empty_like(freqs_cis)
         self.execution_dtype = execution_dtype
         self.graph = torch.cuda.CUDAGraph()
 
+        current_stream = torch.cuda.current_stream(static_canvas.device)
+        self.stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.stream):
+            self.position_ids.copy_(position_ids)
+            self.freqs_cis.copy_(freqs_cis)
         with torch.cuda.graph(self.graph, stream=self.stream):
             self.output, _, _ = owner.model(
                 self.current_canvas,
@@ -1322,12 +1358,16 @@ class _ConditionedDecoderGraph:
                 freqs_cis=self.freqs_cis,
             )
 
-    def replay(self, current_canvas, self_conditioning_logits):
+    def replay(self, current_canvas, self_conditioning_logits, position_ids, freqs_cis):
+        current_stream = torch.cuda.current_stream(current_canvas.device)
+        self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):
             self.current_canvas.copy_(current_canvas)
             self.self_conditioning_logits.copy_(self_conditioning_logits)
+            self.position_ids.copy_(position_ids)
+            self.freqs_cis.copy_(freqs_cis)
             self.graph.replay()
-        torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
+        current_stream.wait_stream(self.stream)
         return self.output
 
     def close(self):
@@ -1395,6 +1435,8 @@ class DiffusionGenerate:
 
     def _reserve_kv_cache(self, past_key_values, reserve):
         for i, (layer, kv) in enumerate(zip(self.model.decoder.layers, past_key_values)):
+            if len(kv) == 5:
+                continue
             if len(kv) == 4:
                 key, value, cumulative_len, cache_len = kv
             else:
@@ -1408,6 +1450,47 @@ class DiffusionGenerate:
             next_value[:, :, :keep].copy_(value[:, :, cache_len - keep:cache_len])
             past_key_values[i] = (next_key, next_value, cumulative_len, keep)
         return past_key_values
+
+    def _bind_fixed_decoder_kv(self, past_key_values, max_new_canvases, canvas_length):
+        masks = {}
+        fixed = []
+        for layer, kv in zip(self.model.decoder.layers, past_key_values):
+            key, value, cumulative_len = kv
+            cache_len = key.shape[2]
+            if layer.sliding_window is None:
+                capacity = cache_len + max(0, max_new_canvases - 1) * canvas_length
+                keep = cache_len
+            else:
+                capacity = layer.sliding_window - 1
+                keep = min(cache_len, capacity)
+            shape = (key.shape[0], key.shape[1], capacity, key.shape[3])
+            backing_key = key.new_empty(shape)
+            backing_value = value.new_empty(shape)
+            if keep:
+                backing_key[:, :, :keep].copy_(key[:, :, cache_len - keep:cache_len])
+                backing_value[:, :, :keep].copy_(value[:, :, cache_len - keep:cache_len])
+            mask_key = (capacity, key.dtype, key.device)
+            decoder_mask = masks.get(mask_key)
+            if decoder_mask is None:
+                decoder_mask = key.new_empty((1, 1, canvas_length, capacity + canvas_length))
+                masks[mask_key] = decoder_mask
+            fixed.append((backing_key, backing_value, cumulative_len, keep, decoder_mask))
+        self._update_fixed_decoder_masks(fixed)
+        return fixed
+
+    def _update_fixed_decoder_masks(self, past_key_values):
+        updated = set()
+        min_value = None
+        for key, _, _, cache_len, decoder_mask in past_key_values:
+            mask_ptr = decoder_mask.data_ptr()
+            if mask_ptr in updated:
+                continue
+            updated.add(mask_ptr)
+            capacity = key.shape[2]
+            if min_value is None:
+                min_value = torch.finfo(decoder_mask.dtype).min
+            decoder_mask.zero_()
+            decoder_mask[:, :, :, cache_len:capacity] = min_value
 
     def generate(self, embeds=None, max_length=256, seed=42, max_denoising_steps=48, entropy_bound=0.1,
                  t_min=0.4, t_max=0.8, stability_threshold=1, confidence_threshold=0.005,
@@ -1438,24 +1521,43 @@ class DiffusionGenerate:
             smoothing=0,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
         )
-        past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
-        _, _, past_key_values = self.model(None, embeds=embeds, past_key_values=past_key_values,
-                                           mode="encoder", mm_spans=mm_spans)
-        past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
-        cur_len = embeds.shape[1]
-
         max_new_canvases = math.ceil(max_length / canvas_length)
-        generated_token_ids = []
-        commit_canvas = None
         use_native_sampling = self._use_native_sampling(device, execution_dtype)
         use_fused_native_sampling = use_native_sampling and callable(
             getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample", None)
         )
         use_decoder_graph = self._use_conditioned_decoder_graph(device, execution_dtype)
+
+        past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
+        _, _, past_key_values = self.model(None, embeds=embeds, past_key_values=past_key_values,
+                                           mode="encoder", mm_spans=mm_spans)
+        if use_decoder_graph:
+            past_key_values = self._bind_fixed_decoder_kv(
+                past_key_values, max_new_canvases, canvas_length
+            )
+        else:
+            past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
+        cur_len = embeds.shape[1]
+
+        generated_token_ids = []
+        commit_canvas = None
         capture_stream = torch.cuda.Stream(device=device) if use_decoder_graph else None
         timing_path = os.environ.get("COMFY_DG_CAPTURE_TIMING_PATH")
         capture_timings_ns = []
         teardown_timings_ns = []
+        decoder_graph = None
+        static_canvas = None
+        static_self_conditioning_logits = None
+        if capture_stream is not None:
+            comfy.quant_ops.ck.reserve_cuda_stream_workspaces(capture_stream)
+            static_canvas = torch.empty(
+                (embeds.shape[0], canvas_length), dtype=torch.long, device=device
+            )
+            static_self_conditioning_logits = torch.empty(
+                (embeds.shape[0], canvas_length, vocab_size),
+                dtype=execution_dtype,
+                device=device,
+            )
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1463,6 +1565,8 @@ class DiffusionGenerate:
                 _, _, past_key_values = self.model(None, embeds=commit_embeds, past_key_values=past_key_values,
                                                    mode="encoder")
                 past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
+            if use_decoder_graph:
+                self._update_fixed_decoder_masks(past_key_values)
 
             current_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                            device=device, generator=generator)
@@ -1473,13 +1577,7 @@ class DiffusionGenerate:
                 decoder_position_ids, device, dtype=execution_dtype
             )
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
-            decoder_graph = None
             try:
-                if capture_stream is not None:
-                    comfy.quant_ops.ck.reserve_cuda_stream_workspaces(capture_stream)
-                    static_canvas = torch.empty_like(current_canvas)
-                    static_self_conditioning_logits = torch.empty(
-                        (*current_canvas.shape, vocab_size), dtype=execution_dtype, device=device)
                 for cur_step in reversed(range(1, max_denoising_steps + 1)):
                     comfy.model_management.throw_exception_if_processing_interrupted()
                     if self_conditioning_logits is None and capture_stream is not None:
@@ -1489,19 +1587,25 @@ class DiffusionGenerate:
                             position_ids=decoder_position_ids, dtype=execution_dtype,
                             freqs_cis=decoder_freqs_cis,
                         )
-                        capture_started_ns = time.perf_counter_ns()
-                        decoder_graph = _ConditionedDecoderGraph(
-                            self, static_canvas, static_self_conditioning_logits, past_key_values,
-                            decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
-                        )
-                        capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
+                        if decoder_graph is None:
+                            capture_started_ns = time.perf_counter_ns()
+                            decoder_graph = _ConditionedDecoderGraph(
+                                self, static_canvas, static_self_conditioning_logits, past_key_values,
+                                decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
+                            )
+                            capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
                     elif self_conditioning_logits is None or capture_stream is None:
                         x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                              self_conditioning_logits=self_conditioning_logits,
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
                     else:
-                        x = decoder_graph.replay(current_canvas, self_conditioning_logits)
+                        x = decoder_graph.replay(
+                            current_canvas,
+                            self_conditioning_logits,
+                            decoder_position_ids,
+                            decoder_freqs_cis,
+                        )
 
                     temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                     next_self_conditioning_logits = None
@@ -1561,7 +1665,7 @@ class DiffusionGenerate:
                     del processed_logits, next_self_conditioning_logits, token_entropy
                     if should_stop:
                         break
-            finally:
+            except Exception:
                 if decoder_graph is not None:
                     teardown_started_ns = time.perf_counter_ns()
                     decoder_graph.close()
@@ -1569,6 +1673,7 @@ class DiffusionGenerate:
                     decoder_graph = None
                 if capture_stream is not None:
                     comfy.quant_ops.ck.release_cuda_stream_workspaces(capture_stream)
+                raise
 
             del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()
@@ -1586,6 +1691,14 @@ class DiffusionGenerate:
                 break
             cur_len += canvas_length
             commit_canvas = argmax_canvas
+
+        if decoder_graph is not None:
+            teardown_started_ns = time.perf_counter_ns()
+            decoder_graph.close()
+            teardown_timings_ns.append(time.perf_counter_ns() - teardown_started_ns)
+            decoder_graph = None
+        if capture_stream is not None:
+            comfy.quant_ops.ck.release_cuda_stream_workspaces(capture_stream)
 
         output_tokens = len(generated_token_ids)
         pbar.update_absolute(output_tokens, max_length)
