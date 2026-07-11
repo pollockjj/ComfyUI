@@ -1183,7 +1183,15 @@ class DiffusionGemmaClipModel(Gemma4Model):
                                       return_attention_masks=attention_mask, model_options=model_options)
 
     def generate(self, tokens, generation_mode=None, **kwargs):
-        if generation_mode != "diffusion":
+        diffusion_keys = (
+            "max_denoising_steps",
+            "entropy_bound",
+            "t_min",
+            "t_max",
+            "stability_threshold",
+            "confidence_threshold",
+        )
+        if generation_mode != "diffusion" and not any(key in kwargs for key in diffusion_keys):
             raise ValueError("DiffusionGemma requires the Generate Diffusion Text node")
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
