@@ -12,10 +12,18 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
-from comfy.text_encoders.diffusion_gemma import DiffusionGemmaExperts, diffusion_gemma_detect  # noqa: E402
+from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
+    DiffusionGemmaExperts,
+    diffusion_gemma_detect,
+    diffusion_gemma_te,
+)
 
 
 class TestDiffusionGemmaFp8Split(unittest.TestCase):
+    def test_quantized_diffusion_gemma_enables_native_compute(self):
+        self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
+        self.assertFalse(diffusion_gemma_te().supports_native_quantized_compute)
+
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
             "model.decoder.norm.weight": torch.ones(4, dtype=torch.bfloat16),

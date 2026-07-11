@@ -1494,6 +1494,8 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
         config_overrides = {"unfused_experts": unfused_experts}
 
     class DiffusionGemmaTEModel_(sd1_clip.SD1ClipModel):
+        supports_native_quantized_compute = llama_quantization_metadata is not None
+
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if llama_quantization_metadata is not None:
                 model_options = model_options.copy()
