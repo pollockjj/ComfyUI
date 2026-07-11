@@ -1298,27 +1298,21 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
     return accepted_canvas, accepted_token_mask, token_entropy
 
 
-class _ConditionedDenoiseStepGraph:
-    """One-canvas conditioned decoder and sampling graph."""
-    def __init__(self, owner, current_canvas, self_conditioning_logits, past_key_values,
-                 position_ids, freqs_cis, execution_dtype, stream, generator,
-                 inverse_temperature, entropy_bound):
+class _ConditionedDecoderGraph:
+    """One-canvas CUDA graph with caller-owned static buffers and deferred first replay."""
+    def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
+                 position_ids, freqs_cis, execution_dtype, stream):
         self.stream = stream
-        self.current_canvas = current_canvas.clone()
-        self.self_conditioning_logits = self_conditioning_logits.clone()
-        self.inverse_temperature = torch.tensor(
-            inverse_temperature, dtype=torch.float32, device=current_canvas.device)
+        self.current_canvas = static_canvas
+        self.self_conditioning_logits = static_self_conditioning_logits
         self.past_key_values = past_key_values
         self.position_ids = position_ids
         self.freqs_cis = freqs_cis
         self.execution_dtype = execution_dtype
         self.graph = torch.cuda.CUDAGraph()
-        if generator is not None:
-            self.graph.register_generator_state(generator)
 
-        self.stream.wait_stream(torch.cuda.current_stream(current_canvas.device))
         with torch.cuda.graph(self.graph, stream=self.stream):
-            output, _, _ = owner.model(
+            self.output, _, _ = owner.model(
                 self.current_canvas,
                 past_key_values=self.past_key_values,
                 mode="decoder",
@@ -1327,54 +1321,22 @@ class _ConditionedDenoiseStepGraph:
                 dtype=self.execution_dtype,
                 freqs_cis=self.freqs_cis,
             )
-            processed_logits = owner._native_processed_logits(output, self.inverse_temperature)
-            sampling_noise = torch.empty_like(processed_logits).exponential_(generator=generator)
-            self.token_entropy, self.argmax_canvas, denoiser_canvas = comfy.quant_ops.ck.categorical_stats_sample(
-                processed_logits, sampling_noise)
-            del sampling_noise
-            accepted_canvas, accepted_mask, _ = _entropy_bound_accept(
-                self.current_canvas, denoiser_canvas, entropy_bound, self.token_entropy)
-            random_canvas = torch.randint(
-                low=0,
-                high=owner.model.config.vocab_size,
-                size=self.current_canvas.shape,
-                device=self.current_canvas.device,
-                generator=generator,
-            )
-            self.next_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
-            self.next_self_conditioning_logits = processed_logits.to(self.execution_dtype)
-            del random_canvas
 
-        torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
-
-    def outputs(self):
-        return (
-            self.next_canvas,
-            self.next_self_conditioning_logits,
-            self.token_entropy,
-            self.argmax_canvas,
-        )
-
-    def replay(self, current_canvas, self_conditioning_logits, inverse_temperature):
+    def replay(self, current_canvas, self_conditioning_logits):
         with torch.cuda.stream(self.stream):
             self.current_canvas.copy_(current_canvas)
             self.self_conditioning_logits.copy_(self_conditioning_logits)
-            self.inverse_temperature.fill_(inverse_temperature)
             self.graph.replay()
         torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
-        return self.outputs()
+        return self.output
 
     def close(self):
         self.stream.synchronize()
         self.graph.reset()
         self.graph = None
-        self.next_canvas = None
-        self.next_self_conditioning_logits = None
-        self.token_entropy = None
-        self.argmax_canvas = None
+        self.output = None
         self.current_canvas = None
         self.self_conditioning_logits = None
-        self.inverse_temperature = None
         self.past_key_values = None
         self.position_ids = None
         self.freqs_cis = None
@@ -1396,12 +1358,6 @@ class DiffusionGenerate:
         logits = self._raw_logits(x).to(torch.float32)
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
-
-    def _native_processed_logits(self, x, inverse_temperature):
-        raw_logits = self._raw_logits(x)
-        processed_logits = comfy.quant_ops.ck.softcap_scale(
-            raw_logits, self.model.config.final_logit_softcapping, 1.0)
-        return processed_logits * inverse_temperature
 
     def _use_native_sampling(self, device, execution_dtype):
         return (
@@ -1495,7 +1451,7 @@ class DiffusionGenerate:
         use_fused_native_sampling = use_native_sampling and callable(
             getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample", None)
         )
-        use_decoder_graph = use_native_sampling and self._use_conditioned_decoder_graph(device, execution_dtype)
+        use_decoder_graph = self._use_conditioned_decoder_graph(device, execution_dtype)
         capture_stream = torch.cuda.Stream(device=device) if use_decoder_graph else None
         timing_path = os.environ.get("COMFY_DG_CAPTURE_TIMING_PATH")
         capture_timings_ns = []
@@ -1521,101 +1477,88 @@ class DiffusionGenerate:
             try:
                 if capture_stream is not None:
                     comfy.quant_ops.ck.reserve_cuda_stream_workspaces(capture_stream)
+                    static_canvas = torch.empty_like(current_canvas)
+                    static_self_conditioning_logits = torch.empty(
+                        (*current_canvas.shape, vocab_size), dtype=execution_dtype, device=device)
                 for cur_step in reversed(range(1, max_denoising_steps + 1)):
                     comfy.model_management.throw_exception_if_processing_interrupted()
-                    temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
-                    inverse_temperature = 1.0 / temperature
-                    graphed_step = False
-
-                    if self_conditioning_logits is not None and decoder_graph is None and capture_stream is not None:
+                    if self_conditioning_logits is None and capture_stream is not None:
+                        x, _, _ = self.model(
+                            current_canvas, past_key_values=past_key_values, mode="decoder",
+                            self_conditioning_logits=None,
+                            position_ids=decoder_position_ids, dtype=execution_dtype,
+                            freqs_cis=decoder_freqs_cis,
+                        )
                         capture_started_ns = time.perf_counter_ns()
-                        decoder_graph = _ConditionedDenoiseStepGraph(
-                            self,
-                            current_canvas,
-                            self_conditioning_logits,
-                            past_key_values,
-                            decoder_position_ids,
-                            decoder_freqs_cis,
-                            execution_dtype,
-                            capture_stream,
-                            generator,
-                            inverse_temperature,
-                            entropy_bound,
+                        decoder_graph = _ConditionedDecoderGraph(
+                            self, static_canvas, static_self_conditioning_logits, past_key_values,
+                            decoder_position_ids, decoder_freqs_cis, execution_dtype, capture_stream,
                         )
                         capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
-                        current_canvas, next_self_conditioning_logits, token_entropy, argmax_canvas = (
-                            decoder_graph.outputs())
-                        graphed_step = True
-                    elif self_conditioning_logits is not None and decoder_graph is not None:
-                        current_canvas, next_self_conditioning_logits, token_entropy, argmax_canvas = (
-                            decoder_graph.replay(
-                                current_canvas, self_conditioning_logits, inverse_temperature))
-                        graphed_step = True
-                    else:
+                    elif self_conditioning_logits is None or capture_stream is None:
                         x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                              self_conditioning_logits=self_conditioning_logits,
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
+                    else:
+                        x = decoder_graph.replay(current_canvas, self_conditioning_logits)
 
-                    if not graphed_step:
-                        next_self_conditioning_logits = None
-                        if not use_native_sampling:
-                            processed_logits = self.logits(x) / temperature
-                            probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
-                            argmax_canvas = torch.argmax(processed_logits, dim=-1)
-                            denoiser_canvas = torch.multinomial(
-                                probs.view(-1, vocab_size), num_samples=1, generator=generator
-                            ).squeeze(-1).view(1, canvas_length)
-                            del probs
+                    temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
+                    next_self_conditioning_logits = None
+                    if not use_native_sampling:
+                        processed_logits = self.logits(x) / temperature
+                        probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
+                        argmax_canvas = torch.argmax(processed_logits, dim=-1)
+                        denoiser_canvas = torch.multinomial(
+                            probs.view(-1, vocab_size), num_samples=1, generator=generator
+                        ).squeeze(-1).view(1, canvas_length)
+                        del probs
+                    else:
+                        raw_logits = self._raw_logits(x)
+                        if use_fused_native_sampling:
+                            sampling_noise = torch.empty(
+                                raw_logits.shape, dtype=torch.float32, device=raw_logits.device
+                            ).exponential_(generator=generator)
+                            (
+                                processed_logits,
+                                next_self_conditioning_logits,
+                                token_entropy,
+                                argmax_canvas,
+                                denoiser_canvas,
+                            ) = comfy.quant_ops.ck.softcap_categorical_stats_sample(
+                                raw_logits,
+                                sampling_noise,
+                                self.model.config.final_logit_softcapping,
+                                1.0 / temperature,
+                            )
                         else:
-                            raw_logits = self._raw_logits(x)
-                            if use_fused_native_sampling:
-                                sampling_noise = torch.empty(
-                                    raw_logits.shape, dtype=torch.float32, device=raw_logits.device
-                                ).exponential_(generator=generator)
-                                (
-                                    processed_logits,
-                                    next_self_conditioning_logits,
-                                    token_entropy,
-                                    argmax_canvas,
-                                    denoiser_canvas,
-                                ) = comfy.quant_ops.ck.softcap_categorical_stats_sample(
-                                    raw_logits,
-                                    sampling_noise,
-                                    self.model.config.final_logit_softcapping,
-                                    inverse_temperature,
-                                )
-                            else:
-                                processed_logits = comfy.quant_ops.ck.softcap_scale(
-                                    raw_logits,
-                                    self.model.config.final_logit_softcapping,
-                                    inverse_temperature,
-                                )
-                                sampling_noise = torch.empty_like(processed_logits).exponential_(
-                                    generator=generator
-                                )
-                                token_entropy, argmax_canvas, denoiser_canvas = (
-                                    comfy.quant_ops.ck.categorical_stats_sample(
-                                        processed_logits, sampling_noise
-                                    )
-                                )
-                            del raw_logits
-                            del sampling_noise
+                            processed_logits = comfy.quant_ops.ck.softcap_scale(
+                                raw_logits,
+                                self.model.config.final_logit_softcapping,
+                                1.0 / temperature,
+                            )
+                            sampling_noise = torch.empty_like(processed_logits).exponential_(generator=generator)
+                            token_entropy, argmax_canvas, denoiser_canvas = comfy.quant_ops.ck.categorical_stats_sample(
+                                processed_logits, sampling_noise
+                            )
+                        del raw_logits
+                        del sampling_noise
 
-                        accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
-                            current_canvas, denoiser_canvas, entropy_bound, token_entropy)
-                        random_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
-                                                      device=device, generator=generator)
-                        current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
-                        if next_self_conditioning_logits is None:
-                            next_self_conditioning_logits = processed_logits.to(execution_dtype)
-                        del processed_logits
+                    accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
+                        current_canvas, denoiser_canvas, entropy_bound, token_entropy)
+                    random_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
+                                                  device=device, generator=generator)
+                    current_canvas = torch.where(accepted_mask, accepted_canvas, random_canvas)
 
                     finished_denoising = stopping(argmax_canvas, token_entropy)
                     should_stop = bool(torch.all(finished_denoising))
                     if not should_stop:
-                        self_conditioning_logits = next_self_conditioning_logits
-                    del token_entropy
+                        self_conditioning_logits = (
+                            next_self_conditioning_logits
+                            if next_self_conditioning_logits is not None
+                            else processed_logits.to(execution_dtype)
+                        )
+                    del processed_logits, next_self_conditioning_logits, token_entropy
                     if should_stop:
                         break
             finally:

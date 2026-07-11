@@ -17,7 +17,7 @@ from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaExperts,
-    _ConditionedDenoiseStepGraph,
+    _ConditionedDecoderGraph,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
     diffusion_gemma_te,
@@ -65,61 +65,30 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             resident.parameters = lambda: [types.SimpleNamespace(device=torch.device("cpu"))]
             self.assertFalse(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
 
-    def test_conditioned_denoise_graph_capture_is_the_second_step(self):
-        current_canvas = torch.zeros((1, 4), dtype=torch.long)
-        self_conditioning_logits = torch.zeros((1, 4, 8), dtype=torch.bfloat16)
+    def test_conditioned_decoder_graph_defers_first_replay(self):
+        static_canvas = torch.empty((1, 4), dtype=torch.long)
+        static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)
         output = torch.empty((1, 4, 2), dtype=torch.bfloat16)
-        processed_logits = torch.zeros((1, 4, 8), dtype=torch.float32)
-        model = mock.Mock(return_value=(output, None, None))
-        model.config = types.SimpleNamespace(vocab_size=8)
-        owner = types.SimpleNamespace(
-            model=model,
-            _native_processed_logits=mock.Mock(return_value=processed_logits),
-        )
+        owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
         stream = mock.Mock()
         current_stream = mock.Mock()
         graph = mock.Mock()
-        generator = torch.Generator().manual_seed(7)
-        ck = sys.modules["comfy.quant_ops"].ck
 
         with (
             mock.patch.object(torch.cuda, "CUDAGraph", return_value=graph),
             mock.patch.object(torch.cuda, "graph", return_value=contextlib.nullcontext()),
             mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
             mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
-            mock.patch.object(
-                ck,
-                "categorical_stats_sample",
-                return_value=(torch.zeros((1, 4)), torch.zeros((1, 4), dtype=torch.long),
-                              torch.ones((1, 4), dtype=torch.long)),
-            ),
         ):
-            decoder_graph = _ConditionedDenoiseStepGraph(
-                owner, current_canvas, self_conditioning_logits, [], None, None,
-                torch.bfloat16, stream, generator, 2.0, 0.1)
+            decoder_graph = _ConditionedDecoderGraph(
+                owner, static_canvas, static_logits, [], None, None, torch.bfloat16, stream)
             graph.replay.assert_not_called()
-            decoder_graph.replay(
-                torch.ones_like(current_canvas), torch.ones_like(self_conditioning_logits), 3.0)
+            self.assertIs(decoder_graph.replay(torch.ones_like(static_canvas), torch.ones_like(static_logits)), output)
 
         graph.replay.assert_called_once_with()
-        graph.register_generator_state.assert_called_once_with(generator)
-        self.assertTrue(torch.equal(decoder_graph.current_canvas, torch.ones_like(current_canvas)))
-        self.assertTrue(torch.equal(
-            decoder_graph.self_conditioning_logits, torch.ones_like(self_conditioning_logits)))
-        self.assertEqual(decoder_graph.inverse_temperature.item(), 3.0)
-        self.assertEqual(current_stream.wait_stream.call_count, 2)
-
-    def test_native_processed_logits_uses_device_inverse_temperature(self):
-        generate = DiffusionGenerate()
-        generate.model = types.SimpleNamespace(config=types.SimpleNamespace(final_logit_softcapping=30.0))
-        generate._raw_logits = mock.Mock(return_value=torch.ones((2, 3), dtype=torch.bfloat16))
-        ck = sys.modules["comfy.quant_ops"].ck
-
-        with mock.patch.object(ck, "softcap_scale", return_value=torch.full((2, 3), 4.0)) as softcap:
-            result = generate._native_processed_logits(torch.empty(0), torch.tensor(0.25))
-
-        softcap.assert_called_once_with(mock.ANY, 30.0, 1.0)
-        self.assertTrue(torch.equal(result, torch.ones((2, 3))))
+        self.assertTrue(torch.equal(static_canvas, torch.ones_like(static_canvas)))
+        self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
+        current_stream.wait_stream.assert_called_once_with(stream)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
