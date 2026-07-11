@@ -1329,6 +1329,26 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
     return accepted_canvas, accepted_token_mask, token_entropy
 
 
+def _static_graph_input(value):
+    if isinstance(value, torch.Tensor):
+        return torch.empty_like(value)
+    if isinstance(value, list):
+        return [_static_graph_input(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_static_graph_input(item) for item in value)
+    raise TypeError(f"unsupported DiffusionGemma graph input type: {type(value).__name__}")
+
+
+def _copy_static_graph_input(destination, source):
+    if isinstance(destination, torch.Tensor):
+        destination.copy_(source)
+        return
+    if len(destination) != len(source):
+        raise RuntimeError("DiffusionGemma graph input structure changed")
+    for destination_item, source_item in zip(destination, source):
+        _copy_static_graph_input(destination_item, source_item)
+
+
 class _ConditionedDecoderGraph:
     """Request-local conditioned decoder graph with caller-owned static buffers."""
     def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
@@ -1337,16 +1357,16 @@ class _ConditionedDecoderGraph:
         self.current_canvas = static_canvas
         self.self_conditioning_logits = static_self_conditioning_logits
         self.past_key_values = past_key_values
-        self.position_ids = torch.empty_like(position_ids)
-        self.freqs_cis = torch.empty_like(freqs_cis)
+        self.position_ids = _static_graph_input(position_ids)
+        self.freqs_cis = _static_graph_input(freqs_cis)
         self.execution_dtype = execution_dtype
         self.graph = torch.cuda.CUDAGraph()
 
         current_stream = torch.cuda.current_stream(static_canvas.device)
         self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):
-            self.position_ids.copy_(position_ids)
-            self.freqs_cis.copy_(freqs_cis)
+            _copy_static_graph_input(self.position_ids, position_ids)
+            _copy_static_graph_input(self.freqs_cis, freqs_cis)
         with torch.cuda.graph(self.graph, stream=self.stream):
             self.output, _, _ = owner.model(
                 self.current_canvas,
@@ -1364,8 +1384,8 @@ class _ConditionedDecoderGraph:
         with torch.cuda.stream(self.stream):
             self.current_canvas.copy_(current_canvas)
             self.self_conditioning_logits.copy_(self_conditioning_logits)
-            self.position_ids.copy_(position_ids)
-            self.freqs_cis.copy_(freqs_cis)
+            _copy_static_graph_input(self.position_ids, position_ids)
+            _copy_static_graph_input(self.freqs_cis, freqs_cis)
             self.graph.replay()
         current_stream.wait_stream(self.stream)
         return self.output
