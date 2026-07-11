@@ -921,8 +921,13 @@ class BaseGenerate:
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if static_kv and step == 1:
+                # convert to fixed-shape caches; step 1 runs eagerly so every
+                # module-level M=1 weight cache warms at a stable address
+                # outside the cudagraph pool
                 past_key_values = self.convert_kv_to_static(past_key_values, max_cache_len)
-                static_pos = torch.tensor([[prompt_len]], device=device)
+                position_ids = torch.tensor([[prompt_len]], device=device)
+            if static_kv and step == 2:
+                static_pos = torch.tensor([[prompt_len + 1]], device=device)
                 static_past = past_key_values
 
                 def _decode_step(e, ids, pos):
