@@ -102,10 +102,27 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         if offload_stream is None or not check_largest or len(comfy_modules) != 1:
             return
 
-        current_size = 0 if cast_buffer is None else cast_buffer.size()
-        if current_size < required_size and module is comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[0]:
-            offload_stream = comfy.model_management.get_offload_stream(device)
-            cast_buffer = None
+        stream_buffers = comfy.model_management.STREAM_AIMDO_CAST_BUFFERS
+        current_buffer = stream_buffers.get(offload_stream, None)
+        current_size = 0 if current_buffer is None else current_buffer.size()
+        if current_size < required_size:
+            streams = comfy.model_management.STREAMS.get(device, ())
+            fitting_streams = []
+            if len(streams) > 1 and all(stream in stream_buffers for stream in streams):
+                fitting_streams = [
+                    stream for stream in streams
+                    if stream_buffers[stream].size() >= required_size
+                ]
+            if fitting_streams:
+                preferred_stream = min(fitting_streams, key=lambda stream: stream_buffers[stream].size())
+                for _ in streams:
+                    if offload_stream is preferred_stream:
+                        break
+                    offload_stream = comfy.model_management.get_offload_stream(device)
+                cast_buffer = None
+            elif module is comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[0]:
+                offload_stream = comfy.model_management.get_offload_stream(device)
+                cast_buffer = None
         if required_size > comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[1]:
             comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT = (module, required_size)
 
