@@ -52,6 +52,19 @@ class StaticLayerKV:
         self.mask.index_fill_(3, self.idx, 0.0)
         self.idx.add_(1).remainder_(self.slots)
 
+    def reset(self, past):
+        # refill in place from a fresh prefill tuple so persistent buffers (and the
+        # graphs captured over them) are reused across generate calls
+        k, v, self.cum_len = past
+        n = min(k.shape[2], self.slots)
+        self.k.zero_()
+        self.v.zero_()
+        self.k[:, :, :n] = k[:, :, -n:]
+        self.v[:, :, :n] = v[:, :, -n:]
+        self.mask.fill_(torch.finfo(self.k.dtype).min)
+        self.mask[..., :n] = 0.0
+        self.idx.fill_(n % self.slots)
+
 
 # Intentional minor divergences from transformers -reference implementation:
 # - Embedding sqrt(hidden_size) scale applied as a Python scalar (full precision) instead of dtype-matched buffer tensor.

@@ -1040,30 +1040,50 @@ class BaseGenerate:
             if static_kv and step == 1:
                 # convert to fixed-shape caches; step 1 runs eagerly so every
                 # module-level M=1 weight cache warms at a stable address
-                # outside the cudagraph pool
-                past_key_values = self.convert_kv_to_static(past_key_values, max_cache_len)
+                # outside the cudagraph pool. Caches, frozen weights and compiled
+                # variants persist on self so items after the first pay zero compiles.
+                runner = getattr(self, "_static_runner", None)
+                rkey = (temperature, top_k, top_p, min_p, do_sample, execution_dtype, embeds.shape[0])
+                if runner is not None and runner["key"] == rkey and prompt_len + max_length <= runner["max_len"]:
+                    for kv_new, kv_p in zip(past_key_values, runner["caches"]):
+                        kv_p.reset(kv_new)
+                    past_key_values = runner["caches"]
+                else:
+                    plen = max(max_cache_len, 12288)
+                    past_key_values = self.convert_kv_to_static(past_key_values, plen)
+                    runner = {"key": rkey, "caches": past_key_values, "max_len": plen,
+                              "compiled_fused": None, "compiled_step": None, "frozen": []}
+                    self._static_runner = runner
                 position_ids = torch.tensor([[prompt_len]], device=device)
                 torch._dynamo.config.recompile_limit = 64  # one variant per attention bucket
             if static_kv and step == 2:
-                frozen_weights.extend(_freeze_resident_weights(self.model, embeds.reshape(-1)[:1]))
+                runner = self._static_runner
+                if not runner["frozen"]:
+                    # frozen weights stay installed for the life of the runner;
+                    # the finally-restore only fires if the runner was never built
+                    runner["frozen"] = _freeze_resident_weights(self.model, embeds.reshape(-1)[:1])
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
-                static_past = past_key_values
+                static_past = runner["caches"]
 
-                if STATIC_KV_FUSED_SAMPLER and batched_sync:
-                    torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
-
+                if runner["compiled_step"] is None:
                     def _decode_step_fused(e, ids, pos):
                         x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
                         logits = self.logits(x)[:, -1]
                         tok = self._sample_in_graph(logits, temperature, top_k, top_p, min_p, do_sample)
                         e2 = self.model.embed_tokens(tok).to(execution_dtype)
                         return tok, e2
-                    compiled_fused = torch.compile(_decode_step_fused, mode="reduce-overhead", dynamic=False)
+                    runner["compiled_fused"] = torch.compile(_decode_step_fused, mode="reduce-overhead", dynamic=False)
 
-                def _decode_step(e, ids, pos):
-                    x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
-                    return self.logits(x)[:, -1]
-                compiled_step = torch.compile(_decode_step, mode="reduce-overhead", dynamic=False)
+                    def _decode_step(e, ids, pos):
+                        x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
+                        return self.logits(x)[:, -1]
+                    runner["compiled_step"] = torch.compile(_decode_step, mode="reduce-overhead", dynamic=False)
+
+                if STATIC_KV_FUSED_SAMPLER and batched_sync:
+                    torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
+                    compiled_fused = runner["compiled_fused"]
+                else:
+                    compiled_step = runner["compiled_step"]
 
             if compiled_fused is not None:
                 # whole token step (forward + sample + embed) replays as one graph;
