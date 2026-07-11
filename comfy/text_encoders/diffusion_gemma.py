@@ -50,6 +50,7 @@ class DiffusionGemmaConfig:
     final_logit_softcapping: float = 30.0
     canvas_length: int = 256
     unfused_experts: bool = False
+    fused_qkv: bool = False
     mlp_activation = "gelu_pytorch_tanh"
     qkv_bias = False
     stop_tokens = [1, 106, 50]
@@ -170,40 +171,88 @@ class DiffusionGemmaAttention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.inner_size = self.num_heads * head_dim
+        self.hidden_size = config.hidden_size
+        self.fused_qkv = config.fused_qkv
 
-        self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.k_proj = ops.Linear(config.hidden_size, num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
-        if has_v_proj:
-            self.v_proj = ops.Linear(config.hidden_size, num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        kv_size = num_kv_heads * head_dim
+        if self.fused_qkv:
+            self.qkv_splits = (self.inner_size, kv_size, kv_size) if has_v_proj else (self.inner_size, kv_size)
+            self.qkv_proj = ops.Linear(config.hidden_size, sum(self.qkv_splits), bias=config.qkv_bias, device=device, dtype=dtype)
         else:
-            self.v_proj = None
+            self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            self.k_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            if has_v_proj:
+                self.v_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            else:
+                self.v_proj = None
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
         self.k_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
 
+    def _project_fused_qkv(self, hidden_states):
+        module = self.qkv_proj
+        weight = getattr(module, "weight", None)
+        qdata = getattr(weight, "_qdata", None)
+        params = getattr(weight, "_params", None)
+        scale = getattr(params, "scale", None)
+        expected_shape = (sum(self.qkv_splits), self.hidden_size)
+        expected_scale_shape = (expected_shape[0], (expected_shape[1] + 31) // 32)
+        patched = (
+            any(getattr(module, name, None) for name in ("weight_function", "bias_function"))
+            or getattr(module, "weight_lowvram_function", None) is not None
+            or getattr(module, "bias_lowvram_function", None) is not None
+        )
+        if (
+            getattr(module, "quant_format", None) != "mxfp8"
+            or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
+            or not isinstance(weight, QuantizedTensor)
+            or getattr(weight, "_layout_cls", None) != "TensorCoreMXFP8Layout"
+            or not isinstance(qdata, torch.Tensor)
+            or qdata.dtype != torch.float8_e4m3fn
+            or tuple(qdata.shape) != expected_shape
+            or tuple(getattr(params, "orig_shape", ())) != expected_shape
+            or not isinstance(scale, torch.Tensor)
+            or scale.dtype != torch.float8_e8m0fnu
+            or tuple(scale.shape) != expected_scale_shape
+            or getattr(module, "bias", None) is not None
+            or patched
+        ):
+            raise RuntimeError(
+                f"DiffusionGemma fused QKV requires an unpatched MXFP8 "
+                f"TensorCoreMXFP8Layout weight with shape {expected_shape}"
+            )
+
+        projections = torch.split(module(hidden_states), self.qkv_splits, dim=-1)
+        if len(projections) == 2:
+            return projections[0], projections[1], projections[1]
+        return projections
+
     def forward(self, hidden_states, attention_mask=None, freqs_cis=None, past_key_value=None,
                 sliding_window=None, update_cache=True):
         batch_size, seq_length, _ = hidden_states.shape
 
-        qkv_modules = (self.q_proj, self.k_proj) if self.v_proj is None else (self.q_proj, self.k_proj, self.v_proj)
-        quantized_input = _shared_mxfp8_input(hidden_states, qkv_modules)
+        if self.fused_qkv:
+            xq, xk, xv = self._project_fused_qkv(hidden_states)
+        else:
+            qkv_modules = (self.q_proj, self.k_proj) if self.v_proj is None else (self.q_proj, self.k_proj, self.v_proj)
+            quantized_input = _shared_mxfp8_input(hidden_states, qkv_modules)
 
-        def project(module):
-            if quantized_input is None:
-                return module(hidden_states)
-            return _linear_from_shared_input(module, quantized_input, hidden_states.shape)
+            def project(module):
+                if quantized_input is None:
+                    return module(hidden_states)
+                return _linear_from_shared_input(module, quantized_input, hidden_states.shape)
 
-        xq = project(self.q_proj)
+            xq = project(self.q_proj)
+            xk = project(self.k_proj)
+            xv = xk if self.v_proj is None else project(self.v_proj)
+
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xq = self.q_norm(xq)
         xq = _apply_rotary_pos_emb(xq, freqs_cis)
 
-        xk = project(self.k_proj).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
-        if self.v_proj is not None:
-            xv = project(self.v_proj).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
-        else:
-            xv = xk
+        xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+        xv = xv.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
         xk = self.k_norm(xk)
         xv = rms_norm(xv)
         xk = xk.transpose(1, 2)
@@ -1862,6 +1911,53 @@ class DiffusionGemmaClipModel(Gemma4Model):
         return self.transformer.generate(embeds=embeds, mm_spans=mm_spans if mm_spans else None, **kwargs)
 
 
+_DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT = "diffusiongemma_mxfp8_qkv_fused.v1"
+_DIFFUSION_GEMMA_QKV_LAYER_COUNT = 30
+
+
+def _detect_diffusion_gemma_fused_qkv(sd):
+    marker_keys = [
+        f"model.decoder.layers.{layer}.self_attn.qkv_proj.comfy_quant"
+        for layer in range(_DIFFUSION_GEMMA_QKV_LAYER_COUNT)
+    ]
+    has_qkv_payload = any(
+        key.startswith("model.decoder.layers.") and ".self_attn.qkv_proj." in key
+        for key in sd
+    )
+    if not has_qkv_payload:
+        return False
+
+    missing = [layer for layer, key in enumerate(marker_keys) if key not in sd]
+    if missing:
+        raise ValueError(f"DiffusionGemma fused QKV requires all 30 layer markers; missing layers: {missing}")
+
+    for layer, key in enumerate(marker_keys):
+        marker = sd[key]
+        if not isinstance(marker, torch.Tensor) or marker.device.type != "cpu" or marker.dtype != torch.uint8 or marker.ndim != 1:
+            raise ValueError(f"Invalid DiffusionGemma fused QKV marker tensor for layer {layer}")
+        try:
+            config = json.loads(marker.numpy().tobytes())
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid DiffusionGemma fused QKV marker JSON for layer {layer}") from error
+
+        global_layer = layer % 6 == 5
+        expected = {
+            "format": "mxfp8",
+            "full_precision_matrix_mult": False,
+            "artifact_contract": _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT,
+            "projection_order": ["q_proj", "k_proj"] if global_layer else ["q_proj", "k_proj", "v_proj"],
+            "projection_splits": [8192, 1024] if global_layer else [4096, 2048, 2048],
+        }
+        mismatches = {
+            name: (config.get(name), value)
+            for name, value in expected.items()
+            if not isinstance(config, dict) or config.get(name) != value
+        }
+        if mismatches:
+            raise ValueError(f"Invalid DiffusionGemma fused QKV contract for layer {layer}: {mismatches}")
+    return True
+
+
 def diffusion_gemma_detect(clip_data):
     sd = clip_data[0]
     out = {}
@@ -1873,12 +1969,14 @@ def diffusion_gemma_detect(clip_data):
         out["llama_quantization_metadata"] = quantization_metadata
     if "model.decoder.layers.0.experts.gate_proj.weight" in sd:
         out["unfused_experts"] = True
+    if _detect_diffusion_gemma_fused_qkv(sd):
+        out["fused_qkv"] = True
     return out
 
 
-def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfused_experts=False):
+def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfused_experts=False, fused_qkv=False):
     class DiffusionGemmaClipModel_(DiffusionGemmaClipModel):
-        config_overrides = {"unfused_experts": unfused_experts}
+        config_overrides = {"unfused_experts": unfused_experts, "fused_qkv": fused_qkv}
 
     class DiffusionGemmaTEModel_(sd1_clip.SD1ClipModel):
         supports_native_quantized_compute = llama_quantization_metadata is not None
