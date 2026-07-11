@@ -1319,6 +1319,8 @@ class _ConditionedDecoderGraph:
                 dtype=self.execution_dtype,
                 freqs_cis=self.freqs_cis,
             )
+        with torch.cuda.stream(self.stream):
+            self.graph.replay()
         torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
 
     def replay(self, current_canvas, self_conditioning_logits):
