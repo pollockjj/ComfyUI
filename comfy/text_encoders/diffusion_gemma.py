@@ -1108,7 +1108,7 @@ class DiffusionGenerate:
                 pbar.update_absolute(estimated_output_tokens, max_length)
                 tq.n = estimated_output_tokens
                 tq.refresh()
-                should_stop = torch.all(finished_denoising)
+                should_stop = bool(torch.all(finished_denoising))
                 if should_stop:
                     del next_self_conditioning_logits
                 else:
