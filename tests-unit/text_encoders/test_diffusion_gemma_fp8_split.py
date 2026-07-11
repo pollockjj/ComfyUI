@@ -14,6 +14,7 @@ if not torch.cuda.is_available():
 
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
+    DiffusionGenerate,
     DiffusionGemmaExperts,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
@@ -42,6 +43,23 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         quantized_source = quantize.call_args.args[0]
         self.assertEqual(quantized_source.shape, (32, 32))
         self.assertEqual(quantized_source.data_ptr(), x.data_ptr())
+
+    def test_decoder_graph_requires_resident_weights_and_static_vram(self):
+        generate = DiffusionGenerate()
+        resident = types.SimpleNamespace(
+            parameters=lambda: [types.SimpleNamespace(device=torch.device("cuda:0"))],
+            modules=lambda: [],
+        )
+        generate.model = types.SimpleNamespace(decoder=resident)
+
+        with (
+            mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
+            mock.patch.object(args, "disable_dynamic_vram", True),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "release_cuda_stream_workspaces", create=True),
+        ):
+            self.assertTrue(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
+            resident.parameters = lambda: [types.SimpleNamespace(device=torch.device("cpu"))]
+            self.assertFalse(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
