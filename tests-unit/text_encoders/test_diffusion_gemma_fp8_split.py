@@ -363,5 +363,30 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INT8 ConvRot expert bank contract mismatch"):
             experts._configure_loaded_banks(experts, None)
 
+    def test_int8_convrot_experts_dispatch_only_packed_routes(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.num_experts = 2
+        gate_up = self._int8_bank((2, 4, 2), (2, 4, 1), 256, device="cpu").weight
+        down = self._int8_bank((2, 2, 2), (2, 2, 1), 64, device="cpu").weight
+        experts.gate_up_proj = types.SimpleNamespace(
+            bank_resident=lambda hidden: contextlib.nullcontext(types.SimpleNamespace(_resident_bank=(gate_up, None))))
+        experts.down_proj = types.SimpleNamespace(
+            bank_resident=lambda hidden: contextlib.nullcontext(types.SimpleNamespace(_resident_bank=(down, None))))
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16)
+        indices = torch.tensor([[1], [0]])
+        weights = torch.ones((2, 1), dtype=torch.float32)
+        packed_outputs = [torch.zeros((2, 4), dtype=torch.bfloat16),
+                          torch.tensor([[3.0, 4.0], [1.0, 2.0]], dtype=torch.bfloat16)]
+
+        with mock.patch.object(sys.modules["comfy.quant_ops"].ck, "grouped_int8_convrot_linear_packed",
+                               create=True, side_effect=packed_outputs) as packed:
+            output = experts._forward_grouped_int8_convrot(hidden, indices, weights)
+
+        self.assertEqual(packed.call_count, 2)
+        self.assertTrue(torch.equal(packed.call_args_list[0].args[0], hidden.flip(0)))
+        self.assertTrue(torch.equal(packed.call_args_list[0].args[1], torch.tensor([0, 1, 2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(output, hidden))
+
 if __name__ == "__main__":
     unittest.main()

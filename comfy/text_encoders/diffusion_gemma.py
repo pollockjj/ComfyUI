@@ -430,7 +430,6 @@ def _bank_bmm(module, x):
 
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
-    grouped_int8_graph_bucket = 256
     grouped_nvfp4_bucket = 128
     grouped_mxfp8_bucket = 128
     grouped_min_tokens = 64
@@ -675,8 +674,8 @@ class DiffusionGemmaExperts(nn.Module):
         if self._bank_mode == "fused_int8_convrot":
             if not self._grouped_int8_convrot_compatible:
                 raise RuntimeError("DiffusionGemma INT8 ConvRot does not support patched expert banks")
-            if not callable(getattr(comfy.quant_ops.ck, "grouped_int8_convrot_linear", None)):
-                raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen grouped expert support")
+            if not callable(getattr(comfy.quant_ops.ck, "grouped_int8_convrot_linear_packed", None)):
+                raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
             return self._forward_grouped_int8_convrot(hidden_states, top_k_index, top_k_weights)
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
@@ -1114,25 +1113,15 @@ class DiffusionGemmaExperts(nn.Module):
         K = top_k_index.shape[-1]
 
         flat_experts = top_k_index.reshape(-1)
-        capturing = torch.cuda.is_current_stream_capturing()
         order = torch.argsort(flat_experts)
         sorted_experts = flat_experts[order]
         positions = torch.arange(N * K, device=flat_experts.device)
-        if capturing:
-            C = self.grouped_int8_graph_bucket
-            starts = torch.full((E,), N * K, dtype=torch.long, device=flat_experts.device)
-            starts.scatter_reduce_(0, sorted_experts, positions, reduce="amin")
-            rank = positions - starts[sorted_experts]
-            torch._assert_async(rank.max() < C, "DiffusionGemma INT8 expert route exceeds graph bucket")
-        else:
-            counts = torch.bincount(flat_experts, minlength=E)
-            C = -(-int(counts.max()) // self.grouped_bucket) * self.grouped_bucket
-            rank = positions - (counts.cumsum(0) - counts)[sorted_experts]
-        slot = sorted_experts * C + rank
-
-        gather_tok = torch.zeros(E * C, dtype=torch.long, device=flat_experts.device)
-        gather_tok[slot] = order // K
-        x = hidden_states[gather_tok].view(E, C, H)
+        counts = torch.zeros(E, dtype=torch.int32, device=flat_experts.device)
+        counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
+        expert_indptr = torch.empty(E + 1, dtype=torch.int32, device=flat_experts.device)
+        expert_indptr[0] = 0
+        torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
+        x = hidden_states[order // K]
 
         with contextlib.ExitStack() as stack:
             modules = (self.gate_up_proj, self.down_proj)
@@ -1148,8 +1137,9 @@ class DiffusionGemmaExperts(nn.Module):
                     raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
                 weights.append(weight)
 
-            gate_up = comfy.quant_ops.ck.grouped_int8_convrot_linear(
+            gate_up = comfy.quant_ops.ck.grouped_int8_convrot_linear_packed(
                 x,
+                expert_indptr,
                 weights[0]._qdata,
                 weights[0]._params.scale,
                 weights[0]._params.convrot_groupsize,
@@ -1157,8 +1147,9 @@ class DiffusionGemmaExperts(nn.Module):
             )
             gate, up = gate_up.chunk(2, dim=-1)
             intermediate = _gelu_tanh(gate) * up
-            y = comfy.quant_ops.ck.grouped_int8_convrot_linear(
+            y = comfy.quant_ops.ck.grouped_int8_convrot_linear_packed(
                 intermediate,
+                expert_indptr,
                 weights[1]._qdata,
                 weights[1]._params.scale,
                 weights[1]._params.convrot_groupsize,
@@ -1166,8 +1157,8 @@ class DiffusionGemmaExperts(nn.Module):
             )
 
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
-        pair_order[order] = slot
-        y = y.reshape(E * C, H)[pair_order]
+        pair_order[order] = positions
+        y = y[pair_order]
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
