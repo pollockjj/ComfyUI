@@ -428,16 +428,6 @@ def _bank_bmm(module, x):
         comfy.ops.uncast_bias_weight(module, weight, bias, offload_stream)
 
 
-def _bank_grouped_mm(module, x, group_ends):
-    weight, bias, offload_stream = comfy.ops.cast_bias_weight(module, x, offloadable=True)
-    try:
-        if isinstance(weight, QuantizedTensor) or bias is not None or weight.dtype != x.dtype:
-            raise RuntimeError("grouped DiffusionGemma BF16 requires complete unbiased BF16 banks")
-        return torch.nn.functional.grouped_mm(x, weight.transpose(1, 2), offs=group_ends)
-    finally:
-        comfy.ops.uncast_bias_weight(module, weight, bias, offload_stream)
-
-
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
     grouped_nvfp4_bucket = 128
@@ -684,14 +674,6 @@ class DiffusionGemmaExperts(nn.Module):
             and hidden_states.is_contiguous()
         )
 
-    def _supports_grouped_bf16(self, hidden_states):
-        return (
-            hasattr(torch.nn.functional, "grouped_mm")
-            and hidden_states.is_cuda
-            and hidden_states.dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(hidden_states.device)[0] >= 8
-        )
-
     def forward(self, hidden_states, top_k_index, top_k_weights):
         if self._bank_mode is None:
             raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
@@ -740,12 +722,6 @@ class DiffusionGemmaExperts(nn.Module):
                 return self._forward_grouped_mxfp8(hidden_states, top_k_index, top_k_weights)
             except comfy.quant_ops.ck.NoCapableBackendError:
                 pass
-        if (
-            hidden_states.shape[0] >= self.grouped_min_tokens
-            and self._bank_mode == "unquantized"
-            and self._supports_grouped_bf16(hidden_states)
-        ):
-            return self._forward_grouped_bf16(hidden_states, top_k_index, top_k_weights)
         if hidden_states.shape[0] >= self.grouped_min_tokens and self._bank_mode == "unquantized":
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
@@ -1182,33 +1158,6 @@ class DiffusionGemmaExperts(nn.Module):
                 weights[1]._params.convrot_groupsize,
                 out_dtype=hidden_states.dtype,
             )
-
-        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
-        pair_order[order] = positions
-        y = y[pair_order]
-        y = y * top_k_weights.reshape(-1, 1)
-        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
-
-    def _forward_grouped_bf16(self, hidden_states, top_k_index, top_k_weights):
-        N, H = hidden_states.shape
-        E = self.num_experts
-        K = top_k_index.shape[-1]
-
-        flat_experts = top_k_index.reshape(-1)
-        order = torch.argsort(flat_experts)
-        sorted_experts = flat_experts[order]
-        positions = torch.arange(N * K, device=flat_experts.device)
-        counts = torch.zeros(E, dtype=torch.int32, device=flat_experts.device)
-        counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
-        group_ends = counts.cumsum(0, dtype=torch.int32)
-        x = hidden_states[order // K]
-
-        if self.unfused:
-            gate = _bank_grouped_mm(self.gate_proj, x, group_ends)
-            up = _bank_grouped_mm(self.up_proj, x, group_ends)
-        else:
-            gate, up = _bank_grouped_mm(self.gate_up_proj, x, group_ends).chunk(2, dim=-1)
-        y = _bank_grouped_mm(self.down_proj, _gelu_tanh(gate) * up, group_ends)
 
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
         pair_order[order] = positions
