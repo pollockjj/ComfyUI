@@ -662,6 +662,17 @@ class DiffusionGemmaExperts(nn.Module):
                     down._params.scale.numel() * down._params.scale.element_size(),
                     flush=True,
                 )
+            capture_weights_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE_WEIGHTS")
+            if capture_weights_path and _mxfp8_debug_compare_calls == 0:
+                torch.save(
+                    {
+                        "gate_up_qdata": gate_up._qdata.detach().cpu(),
+                        "gate_up_scale": gate_up._params.scale.detach().cpu(),
+                        "down_qdata": down._qdata.detach().cpu(),
+                        "down_scale": down._params.scale.detach().cpu(),
+                    },
+                    capture_weights_path,
+                )
             return ck.fused_moe_mxfp8(
                 hidden_states,
                 top_k_index,
