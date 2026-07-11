@@ -68,6 +68,8 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
     def test_conditioned_decoder_graph_defers_first_replay(self):
         static_canvas = torch.empty((1, 4), dtype=torch.long)
         static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)
+        position_ids = torch.arange(4).unsqueeze(0)
+        freqs_cis = torch.ones((1, 4, 2), dtype=torch.bfloat16)
         output = torch.empty((1, 4, 2), dtype=torch.bfloat16)
         owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
         stream = mock.Mock()
@@ -81,13 +83,18 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
         ):
             decoder_graph = _ConditionedDecoderGraph(
-                owner, static_canvas, static_logits, [], None, None, torch.bfloat16, stream)
+                owner, static_canvas, static_logits, [], position_ids, freqs_cis,
+                torch.bfloat16, stream)
             graph.replay.assert_not_called()
-            self.assertIs(decoder_graph.replay(torch.ones_like(static_canvas), torch.ones_like(static_logits)), output)
+            self.assertIs(decoder_graph.replay(
+                torch.ones_like(static_canvas), torch.ones_like(static_logits),
+                position_ids + 4, freqs_cis * 2), output)
 
         graph.replay.assert_called_once_with()
         self.assertTrue(torch.equal(static_canvas, torch.ones_like(static_canvas)))
         self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
+        self.assertTrue(torch.equal(decoder_graph.position_ids, position_ids + 4))
+        self.assertTrue(torch.equal(decoder_graph.freqs_cis, freqs_cis * 2))
         current_stream.wait_stream.assert_called_once_with(stream)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
