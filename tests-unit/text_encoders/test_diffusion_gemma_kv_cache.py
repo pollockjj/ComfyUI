@@ -44,9 +44,8 @@ class TestDiffusionGemmaKVCache(unittest.TestCase):
                     config, head_dim=8, num_kv_heads=1, has_v_proj=True,
                     dtype=torch.float32, ops=torch.nn,
                 ).eval()
-                with torch.no_grad():
-                    for i, parameter in enumerate(attention.parameters()):
-                        parameter.fill_((i + 1) / 100)
+                for i, parameter in enumerate(attention.parameters()):
+                    parameter.detach().fill_((i + 1) / 100)
                 _, legacy = attention(prefix, freqs_cis=freqs(3), past_key_value=(),
                                       sliding_window=sliding_window, update_cache=True)
                 layer = SimpleNamespace(sliding_window=sliding_window)
