@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import sys
 import types
@@ -16,6 +17,8 @@ if not torch.cuda.is_available():
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
+    DiffusionGemmaAttention,
+    DiffusionGemmaConfig,
     DiffusionGemmaExperts,
     _ConditionedDecoderGraph,
     _mxfp8_self_conditioning,
@@ -28,6 +31,18 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
 
 
 class TestDiffusionGemmaFp8Split(unittest.TestCase):
+    @staticmethod
+    def _qkv_marker(layer):
+        global_layer = layer % 6 == 5
+        config = {
+            "format": "mxfp8",
+            "full_precision_matrix_mult": False,
+            "artifact_contract": "diffusiongemma_mxfp8_qkv_fused.v1",
+            "projection_order": ["q_proj", "k_proj"] if global_layer else ["q_proj", "k_proj", "v_proj"],
+            "projection_splits": [8192, 1024] if global_layer else [4096, 2048, 2048],
+        }
+        return torch.tensor(list(json.dumps(config).encode()), dtype=torch.uint8)
+
     def test_mxfp8_self_conditioning_uses_one_bf16_chunk(self):
         weight = self._mxfp8_bank((262144, 32), (262144, 4), device="cpu").weight
         probabilities = torch.ones((1, 262144), dtype=torch.bfloat16)
@@ -184,6 +199,48 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         }
 
         self.assertTrue(diffusion_gemma_detect((sd,))["unfused_experts"])
+
+    def test_fused_qkv_detection_requires_all_exact_markers(self):
+        sd = {
+            f"model.decoder.layers.{layer}.self_attn.qkv_proj.comfy_quant": self._qkv_marker(layer)
+            for layer in range(30)
+        }
+        self.assertTrue(diffusion_gemma_detect((sd,))["fused_qkv"])
+        sd["model.decoder.layers.5.self_attn.qkv_proj.comfy_quant"] = self._qkv_marker(0)
+        with self.assertRaisesRegex(ValueError, "contract for layer 5"):
+            diffusion_gemma_detect((sd,))
+        del sd["model.decoder.layers.0.self_attn.qkv_proj.comfy_quant"]
+        with self.assertRaisesRegex(ValueError, "requires all 30 layer markers"):
+            diffusion_gemma_detect((sd,))
+
+    def test_fused_global_qkv_projects_once_and_rejects_patches(self):
+        linear = mock.Mock(side_effect=lambda *args, **kwargs: torch.nn.Module())
+        attention = DiffusionGemmaAttention(
+            DiffusionGemmaConfig(fused_qkv=True), head_dim=512, num_kv_heads=2,
+            has_v_proj=False, device="meta", dtype=torch.bfloat16,
+            ops=types.SimpleNamespace(Linear=linear),
+        )
+        self.assertEqual(linear.call_args_list[0].args[:2], (2816, 9216))
+        self.assertEqual(linear.call_count, 2)
+        self.assertFalse(any(hasattr(attention, name) for name in ("q_proj", "k_proj", "v_proj")))
+
+        module = attention.qkv_proj
+        for name, value in vars(self._mxfp8_bank((9216, 2816), (9216, 88))).items():
+            setattr(module, name, value)
+        module.layout_type = "TensorCoreMXFP8Layout"
+        projection = torch.empty((1, 1, 9216), dtype=torch.bfloat16)
+        module.forward = mock.Mock(return_value=projection)
+        hidden_states = torch.empty((1, 1, 2816), dtype=torch.bfloat16)
+
+        q, k, v = attention._project_fused_qkv(hidden_states)
+
+        module.forward.assert_called_once()
+        self.assertIs(k, v)
+        self.assertEqual((q.shape[-1], k.shape[-1]), (8192, 1024))
+        self.assertEqual(q.untyped_storage().data_ptr(), projection.untyped_storage().data_ptr())
+        module.weight_function = [lambda weight: weight]
+        with self.assertRaisesRegex(RuntimeError, "requires an unpatched MXFP8"):
+            attention._project_fused_qkv(hidden_states)
 
     @staticmethod
     def _mxfp8_bank(qdata_shape, scale_shape, quant_format="mxfp8", device="meta"):
