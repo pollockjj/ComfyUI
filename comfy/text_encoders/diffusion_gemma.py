@@ -872,27 +872,32 @@ class DiffusionGemmaModel(nn.Module):
             masks = {k: v + pad for k, v in masks.items()}
         return masks
 
+    def self_conditioning_embeds(self, probabilities, dtype):
+        embed_module = self.decoder.embed_tokens
+        if embed_module.comfy_cast_weights:
+            weight, _, offload_stream = comfy.ops.cast_bias_weight(embed_module, probabilities, offloadable=True)
+        else:
+            weight, offload_stream = embed_module.weight.to(device=probabilities.device), None
+        scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight.dtype).item()
+        soft_embeddings = torch.matmul(probabilities.to(weight.dtype), weight) * scale
+        comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
+        return soft_embeddings.to(dtype)
+
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=None,
                 past_key_values=None, input_ids=None, mode="encoder", self_conditioning_logits=None,
-                mm_spans=None, freqs_cis=None):
+                self_conditioning_embeds=None, mm_spans=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
             x = self.decoder.embed_tokens(x, out_dtype=dtype)
 
         if mode == "decoder":
-            embed_module = self.decoder.embed_tokens
-            if self_conditioning_logits is not None:
-                if embed_module.comfy_cast_weights:
-                    weight, _, offload_stream = comfy.ops.cast_bias_weight(embed_module, x, offloadable=True)
-                else:
-                    weight, offload_stream = embed_module.weight.to(device=x.device), None
-                scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight.dtype).item()
-                soft_embeddings = torch.matmul(
-                    self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(weight.dtype), weight) * scale
-                comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
-                soft_embeddings = soft_embeddings.to(x.dtype)
+            if self_conditioning_embeds is not None:
+                soft_embeddings = self_conditioning_embeds.to(x.dtype)
+            elif self_conditioning_logits is not None:
+                probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32)
+                soft_embeddings = self.self_conditioning_embeds(probabilities, x.dtype)
             else:
                 soft_embeddings = torch.zeros_like(x)
             x = self.decoder.self_conditioning(x, soft_embeddings)
@@ -1066,7 +1071,7 @@ class DiffusionGenerate:
 
             current_canvas = torch.randint(low=0, high=vocab_size, size=(1, canvas_length),
                                            device=device, generator=generator)
-            self_conditioning_logits = None
+            self_conditioning_embeds = None
             argmax_canvas = current_canvas
             decoder_position_ids = torch.arange(cur_len, cur_len + canvas_length, device=device).unsqueeze(0)
             decoder_freqs_cis = self.model.decoder.compute_freqs_cis(
@@ -1077,7 +1082,7 @@ class DiffusionGenerate:
             for cur_step in reversed(range(1, max_denoising_steps + 1)):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
-                                     self_conditioning_logits=self_conditioning_logits,
+                                     self_conditioning_embeds=self_conditioning_embeds,
                                      position_ids=decoder_position_ids, dtype=execution_dtype,
                                      freqs_cis=decoder_freqs_cis)
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
@@ -1096,12 +1101,12 @@ class DiffusionGenerate:
                 finished_denoising = stopping(argmax_canvas, token_entropy)
                 should_stop = bool(torch.all(finished_denoising))
                 if not should_stop:
-                    self_conditioning_logits = processed_logits.to(execution_dtype)
+                    self_conditioning_embeds = self.model.self_conditioning_embeds(probs, execution_dtype)
                 del processed_logits, probs, token_entropy
                 if should_stop:
                     break
 
-            del self_conditioning_logits
+            del self_conditioning_embeds
             canvas_ids = argmax_canvas[0].tolist()
             remaining = max_length - len(generated_token_ids)
             first_eos = next((i for i, token_id in enumerate(canvas_ids) if token_id in stop_token_ids), None)
