@@ -95,6 +95,41 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
     return output
 
 
+_MXFP8_SELF_CONDITIONING_CHUNK = 16384
+
+
+def _native_mxfp8_embedding(module):
+    return (
+        getattr(module, "quant_format", None) == "mxfp8"
+        and isinstance(module.weight, QuantizedTensor)
+        and module.weight._layout_cls == "TensorCoreMXFP8Layout"
+        and len(module.weight_function) == 0
+        and module.weight_lowvram_function is None
+        and not getattr(module, "comfy_force_cast_weights", False)
+    )
+
+
+def _mxfp8_self_conditioning(probabilities, weight):
+    if probabilities.dtype != torch.bfloat16 or weight._layout_cls != "TensorCoreMXFP8Layout":
+        raise ValueError("DiffusionGemma MXFP8 self-conditioning requires BF16 probabilities and MXFP8 weights")
+    qdata = weight._qdata
+    block_scales = weight._params.scale
+    if qdata.shape[0] % _MXFP8_SELF_CONDITIONING_CHUNK != 0:
+        raise ValueError("DiffusionGemma MXFP8 vocabulary must be divisible by 16384")
+
+    flat = probabilities.reshape(-1, probabilities.shape[-1])
+    row_indices = torch.arange(qdata.shape[0], device=qdata.device, dtype=torch.int64)
+    output = torch.zeros((flat.shape[0], qdata.shape[1]), device=qdata.device, dtype=torch.float32)
+    for start in range(0, qdata.shape[0], _MXFP8_SELF_CONDITIONING_CHUNK):
+        end = start + _MXFP8_SELF_CONDITIONING_CHUNK
+        dequantized = comfy.quant_ops.ck.mxfp8_embedding(
+            qdata, block_scales, row_indices[start:end], torch.bfloat16)
+        partial = torch.mm(flat[:, start:end], dequantized, out_dtype=torch.float32)
+        output.add_(partial)
+        del dequantized, partial
+    return output.reshape(*probabilities.shape[:-1], qdata.shape[1])
+
+
 class DiffusionGemmaMLP(MLP):
     def forward(self, x):
         quantized_input = _shared_mxfp8_input(x, (self.gate_proj, self.up_proj))
@@ -110,7 +145,8 @@ def _make_dg_scaled_embedding(ops, vocab_size, hidden_size, device, dtype):
     class ScaledEmbedding(ops.Embedding):
         def forward(self, input_ids, out_dtype=None):
             out = super().forward(input_ids, out_dtype=out_dtype)
-            scale = torch.tensor(hidden_size ** 0.5, dtype=self.weight.dtype).item()
+            scale_dtype = self.weight._params.orig_dtype if isinstance(self.weight, QuantizedTensor) else self.weight.dtype
+            scale = torch.tensor(hidden_size ** 0.5, dtype=scale_dtype).item()
             return out * scale
     return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
 
@@ -1200,13 +1236,26 @@ class DiffusionGemmaModel(nn.Module):
         if mode == "decoder":
             embed_module = self.decoder.embed_tokens
             if self_conditioning_logits is not None:
-                if embed_module.comfy_cast_weights:
+                native_mxfp8 = _native_mxfp8_embedding(embed_module)
+                if native_mxfp8:
+                    weight, _, offload_stream = comfy.ops.cast_bias_weight(
+                        embed_module, device=x.device, dtype=embed_module.weight.dtype, offloadable=True)
+                    if not isinstance(weight, QuantizedTensor):
+                        raise RuntimeError("DiffusionGemma MXFP8 embedding did not remain quantized after device cast")
+                elif embed_module.comfy_cast_weights:
                     weight, _, offload_stream = comfy.ops.cast_bias_weight(embed_module, x, offloadable=True)
                 else:
                     weight, offload_stream = embed_module.weight.to(device=x.device), None
-                scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight.dtype).item()
-                soft_embeddings = torch.matmul(
-                    self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(weight.dtype), weight) * scale
+                if native_mxfp8:
+                    probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
+                    soft_embeddings = _mxfp8_self_conditioning(probabilities, weight)
+                    scale_dtype = weight._params.orig_dtype
+                else:
+                    soft_embeddings = torch.matmul(
+                        self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(weight.dtype), weight)
+                    scale_dtype = weight.dtype
+                scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=scale_dtype).item()
+                soft_embeddings = soft_embeddings * scale
                 comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
                 soft_embeddings = soft_embeddings.to(x.dtype)
             else:
@@ -1346,11 +1395,22 @@ class DiffusionGenerate:
     def _raw_logits(self, x):
         module = self.model.decoder.embed_tokens
         offload_stream = None
-        if module.comfy_cast_weights:
+        native_mxfp8 = _native_mxfp8_embedding(module)
+        if native_mxfp8:
+            weight, _, offload_stream = comfy.ops.cast_bias_weight(
+                module, device=x.device, dtype=module.weight.dtype, offloadable=True)
+            if not isinstance(weight, QuantizedTensor):
+                raise RuntimeError("DiffusionGemma MXFP8 embedding did not remain quantized after device cast")
+        elif module.comfy_cast_weights:
             weight, _, offload_stream = comfy.ops.cast_bias_weight(module, x, offloadable=True)
         else:
             weight = module.weight.to(x)
-        logits = torch.nn.functional.linear(x, weight, None)
+        if native_mxfp8:
+            input_shape = x.shape
+            quantized = QuantizedTensor.from_float(x.reshape(-1, input_shape[-1]), weight._layout_cls)
+            logits = torch.nn.functional.linear(quantized, weight, None).reshape(*input_shape[:-1], weight.shape[0])
+        else:
+            logits = torch.nn.functional.linear(x, weight, None)
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
         return logits
 

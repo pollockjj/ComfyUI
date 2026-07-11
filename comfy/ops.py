@@ -1507,11 +1507,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if layer_conf is not None:
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
-                # FP8 and tensor-wise INT8 dequantize per selected row; block-scaled NVFP4 and MXFP8 cannot.
+                # FP8, tensor-wise INT8, and MXFP8 dequantize per selected row.
                 quant_format = layer_conf.get("format") if layer_conf is not None else None
                 manually_loaded_keys = []
 
-                if quant_format in ("float8_e4m3fn", "float8_e5m2", "int8_tensorwise") and weight_key in state_dict:
+                if quant_format in ("float8_e4m3fn", "float8_e5m2", "int8_tensorwise", "mxfp8") and weight_key in state_dict:
+                    if quant_format == "mxfp8" and not callable(getattr(ck, "mxfp8_embedding", None)):
+                        raise ValueError("MXFP8 embeddings require comfy-kitchen mxfp8_embedding support")
                     self.quant_format = quant_format
                     qconfig = QUANT_ALGOS[quant_format]
                     self.layout_type = qconfig["comfy_tensor_layout"]
@@ -1522,10 +1524,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     scale_key = f"{prefix}weight_scale"
                     scale = state_dict.pop(scale_key, None)
                     if scale is not None:
-                        scale = scale.float()
+                        scale = scale.view(torch.float8_e8m0fnu) if quant_format == "mxfp8" else scale.float()
                         manually_loaded_keys.append(scale_key)
-                    elif quant_format == "int8_tensorwise":
-                        raise ValueError(f"Missing INT8 weight scale for layer {prefix.rstrip('.')}")
+                    elif quant_format in ("int8_tensorwise", "mxfp8"):
+                        raise ValueError(f"Missing {quant_format} weight scale for layer {prefix.rstrip('.')}")
 
                     scales = {"scale": scale if scale is not None else torch.ones((), dtype=torch.float32)}
                     if quant_format == "int8_tensorwise" and layer_conf.get("convrot", False):
@@ -1568,11 +1570,18 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         qparams = None
                         scale = None
 
+                    target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
+                    if getattr(self, "quant_format", None) == "mxfp8":
+                        if qparams is None or scale is None:
+                            raise RuntimeError("Invalid resident MXFP8 embedding state")
+                        x = ck.mxfp8_embedding(qdata, scale, input, target_dtype)
+                        uncast_bias_weight(self, qdata, None, offload_stream)
+                        return x
+
                     x = torch.nn.functional.embedding(
                         input, qdata, self.padding_idx, self.max_norm,
                         self.norm_type, self.scale_grad_by_freq, self.sparse)
                     uncast_bias_weight(self, qdata, None, offload_stream)
-                    target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
                     if getattr(self, "quant_format", None) == "int8_tensorwise" and qparams is not None:
                         # Per-row scales and row-local convrot inverse rotation let selected rows dequantize as a batch.
                         layout_cls = get_layout_class(self.layout_type)
