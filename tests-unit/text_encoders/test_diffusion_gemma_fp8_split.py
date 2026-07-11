@@ -21,6 +21,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaConfig,
     DiffusionGemmaExperts,
     _ConditionedDecoderGraph,
+    _int8_self_conditioning,
     _mxfp8_self_conditioning,
     _ConditionedDecoderGraphCache,
     _append_preallocated_kv,
@@ -56,6 +57,20 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual(dequantize.call_count, 1)
         self.assertEqual(output.dtype, torch.float32)
         self.assertTrue(torch.equal(output, torch.full((1, 32), 262144.0)))
+
+    def test_int8_self_conditioning_dequantizes_bounded_rows(self):
+        weight = self._int8_bank((2, 64), (2, 1), 64, device="cpu").weight
+        probabilities = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
+        dequantized = torch.arange(128, dtype=torch.bfloat16).reshape(2, 64)
+
+        with (
+            mock.patch.object(QuantizedTensor, "dequantize", return_value=dequantized) as dequantize,
+            mock.patch.object(torch, "mm", side_effect=lambda a, b, out_dtype: a.float() @ b.float()),
+        ):
+            output = _int8_self_conditioning(probabilities, weight)
+
+        dequantize.assert_called_once_with()
+        self.assertTrue(torch.equal(output, probabilities.float() @ dequantized.float()))
 
     def test_quantized_diffusion_gemma_enables_native_compute(self):
         self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
