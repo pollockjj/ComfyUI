@@ -156,6 +156,27 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         graph.close.assert_called_once_with()
         release.assert_called_once_with(stream)
 
+    def test_graph_cache_key_mismatch_closes_stale_cache(self):
+        generate = DiffusionGenerate()
+        parameter = torch.nn.Parameter(torch.ones(1))
+        generate.model = types.SimpleNamespace(
+            decoder=types.SimpleNamespace(parameters=lambda: [parameter], buffers=lambda: []),
+            config=types.SimpleNamespace(canvas_length=4, vocab_size=8),
+        )
+        stale = mock.Mock(key="stale")
+        replacement = mock.Mock()
+        generate._conditioned_decoder_graph_cache = stale
+        embeds = torch.empty((1, 3, 2))
+
+        with mock.patch(
+            "comfy.text_encoders.diffusion_gemma._ConditionedDecoderGraphCache",
+            return_value=replacement,
+        ):
+            self.assertIs(generate._get_decoder_graph_cache(embeds, 2, torch.bfloat16), replacement)
+
+        stale.close.assert_called_once_with()
+        self.assertIs(generate._conditioned_decoder_graph_cache, replacement)
+
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
             "model.decoder.norm.weight": torch.ones(4, dtype=torch.bfloat16),
