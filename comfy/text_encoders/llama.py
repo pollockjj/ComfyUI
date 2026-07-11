@@ -1028,13 +1028,22 @@ class BaseGenerate:
         device_tokens = []
         SYNC_EVERY = 8
         current_input_ids = initial_input_ids
+        cur_bucket = 0
         for step in tqdm(range(max_length), desc="Generating tokens"):
+            if compiled_fused is not None or compiled_step is not None:
+                nb = min(-(-(prompt_len + step + 1) // 512) * 512, max_cache_len)
+                if nb != cur_bucket:
+                    for _kv in past_key_values:
+                        if hasattr(_kv, "slots"):
+                            _kv.bucket = nb
+                    cur_bucket = nb
             if static_kv and step == 1:
                 # convert to fixed-shape caches; step 1 runs eagerly so every
                 # module-level M=1 weight cache warms at a stable address
                 # outside the cudagraph pool
                 past_key_values = self.convert_kv_to_static(past_key_values, max_cache_len)
                 position_ids = torch.tensor([[prompt_len]], device=device)
+                torch._dynamo.config.recompile_limit = 64  # one variant per attention bucket
             if static_kv and step == 2:
                 frozen_weights.extend(_freeze_resident_weights(self.model, embeds.reshape(-1)[:1]))
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)

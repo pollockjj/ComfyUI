@@ -188,9 +188,13 @@ class Gemma4Attention(nn.Module):
             xq = _apply_rotary_pos_emb(xq, freqs_cis)
             xk = _apply_rotary_pos_emb(xk, freqs_cis)
             past_key_value.append(xk, xv)
-            xk = past_key_value.k
-            xv = past_key_value.v
-            static_mask = past_key_value.mask
+            # bucket is a python int stamped by the generate loop; each new value
+            # is a fresh dynamo variant, so attention reads only the rounded-up
+            # valid region instead of the whole padded buffer
+            bucket = min(getattr(past_key_value, "bucket", past_key_value.slots), past_key_value.slots)
+            xk = past_key_value.k[:, :, :bucket]
+            xv = past_key_value.v[:, :, :bucket]
+            static_mask = past_key_value.mask[..., :bucket]
             present_key_value = past_key_value
             shareable_kv = (xk, xv, static_mask)
         else:
