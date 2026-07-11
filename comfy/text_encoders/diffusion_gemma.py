@@ -28,6 +28,7 @@ from comfy.text_encoders.gemma4 import (
 
 
 _mxfp8_debug_compare_calls = 0
+_mxfp8_debug_weights_captured = False
 
 
 @dataclass
@@ -604,6 +605,7 @@ class DiffusionGemmaExperts(nn.Module):
             )
 
     def _forward_native_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
+        global _mxfp8_debug_weights_captured
         ck = comfy.quant_ops.ck
         num_tokens = hidden_states.shape[0]
         if (
@@ -663,7 +665,7 @@ class DiffusionGemmaExperts(nn.Module):
                     flush=True,
                 )
             capture_weights_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE_WEIGHTS")
-            if capture_weights_path and _mxfp8_debug_compare_calls == 0:
+            if capture_weights_path and not _mxfp8_debug_weights_captured:
                 torch.save(
                     {
                         "gate_up_qdata": gate_up._qdata.detach().cpu(),
@@ -673,6 +675,7 @@ class DiffusionGemmaExperts(nn.Module):
                     },
                     capture_weights_path,
                 )
+                _mxfp8_debug_weights_captured = True
             return ck.fused_moe_mxfp8(
                 hidden_states,
                 top_k_index,
