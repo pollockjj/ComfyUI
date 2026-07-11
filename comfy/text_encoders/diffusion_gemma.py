@@ -1,6 +1,5 @@
 import contextlib
 import math
-import os
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -25,11 +24,6 @@ from comfy.text_encoders.gemma4 import (
     ClippedLinear,
     _apply_rotary_pos_emb,
 )
-
-
-_mxfp8_debug_compare_calls = 0
-_mxfp8_debug_weights_captured = False
-
 
 @dataclass
 class DiffusionGemmaConfig:
@@ -466,10 +460,6 @@ class DiffusionGemmaExperts(nn.Module):
             if not self._fused_mxfp8_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused MXFP8 does not support patched expert banks")
             if self._supports_native_fused_mxfp8(hidden_states):
-                if os.environ.get("COMFY_DG_MXFP8_COMPARE") == "1":
-                    return self._forward_debug_fused_mxfp8(
-                        hidden_states, top_k_index, top_k_weights
-                    )
                 try:
                     return self._forward_native_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
                 except comfy.quant_ops.ck.NoCapableBackendError:
@@ -605,7 +595,6 @@ class DiffusionGemmaExperts(nn.Module):
             )
 
     def _forward_native_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
-        global _mxfp8_debug_weights_captured
         ck = comfy.quant_ops.ck
         num_tokens = hidden_states.shape[0]
         if (
@@ -648,129 +637,15 @@ class DiffusionGemmaExperts(nn.Module):
                 or tuple(down._params.scale.shape) != (128, 2816, 24)
             ):
                 raise RuntimeError("DiffusionGemma native fused MXFP8 bank shape mismatch")
-            if (
-                os.environ.get("COMFY_DG_MXFP8_POINTERS") == "1"
-                and _mxfp8_debug_compare_calls == 0
-            ):
-                print(
-                    "DG_MXFP8_POINTERS",
-                    gate_up._qdata.data_ptr(),
-                    gate_up._qdata.numel() * gate_up._qdata.element_size(),
-                    gate_up._params.scale.data_ptr(),
-                    gate_up._params.scale.numel() * gate_up._params.scale.element_size(),
-                    down._qdata.data_ptr(),
-                    down._qdata.numel() * down._qdata.element_size(),
-                    down._params.scale.data_ptr(),
-                    down._params.scale.numel() * down._params.scale.element_size(),
-                    flush=True,
-                )
-            capture_weights_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE_WEIGHTS")
-            if capture_weights_path and not _mxfp8_debug_weights_captured:
-                torch.save(
-                    {
-                        "gate_up_qdata": gate_up._qdata.detach().cpu(),
-                        "gate_up_scale": gate_up._params.scale.detach().cpu(),
-                        "down_qdata": down._qdata.detach().cpu(),
-                        "down_scale": down._params.scale.detach().cpu(),
-                    },
-                    capture_weights_path,
-                )
-                _mxfp8_debug_weights_captured = True
-            clone_resident = (
-                os.environ.get("COMFY_DG_MXFP8_CLONE_RESIDENT") == "1"
-                and _mxfp8_debug_compare_calls == 0
-            )
-            gate_up_qdata = gate_up._qdata.clone() if clone_resident else gate_up._qdata
-            gate_up_scale = (
-                gate_up._params.scale.clone() if clone_resident else gate_up._params.scale
-            )
-            down_qdata = down._qdata.clone() if clone_resident else down._qdata
-            down_scale = down._params.scale.clone() if clone_resident else down._params.scale
-            native_input = hidden_states.clone() if clone_resident else hidden_states
-            native_indices = top_k_index.clone() if clone_resident else top_k_index
-            native_weights = top_k_weights.clone() if clone_resident else top_k_weights
             return ck.fused_moe_mxfp8(
-                native_input,
-                native_indices,
-                native_weights,
-                gate_up_qdata,
-                gate_up_scale,
-                down_qdata,
-                down_scale,
+                hidden_states,
+                top_k_index,
+                top_k_weights,
+                gate_up._qdata,
+                gate_up._params.scale,
+                down._qdata,
+                down._params.scale,
             )
-
-    def _forward_debug_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
-        global _mxfp8_debug_compare_calls
-        if _mxfp8_debug_compare_calls >= 30:
-            return self._forward_grouped_fused_mxfp8(
-                hidden_states, top_k_index, top_k_weights
-            )
-        native = self._forward_native_fused_mxfp8(
-            hidden_states, top_k_index, top_k_weights
-        )
-        native_finite_before = bool(torch.isfinite(native).all().item())
-        native_absmax_before = native.float().abs().max().item()
-        native_second = self._forward_native_fused_mxfp8(
-            hidden_states, top_k_index, top_k_weights
-        )
-        native_second_finite = bool(torch.isfinite(native_second).all().item())
-        native_second_absmax = native_second.float().abs().max().item()
-        capture_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE")
-        if capture_path and _mxfp8_debug_compare_calls == 0:
-            torch.save(
-                {
-                    "hidden_states": hidden_states.detach().cpu(),
-                    "top_k_index": top_k_index.detach().cpu(),
-                    "top_k_weights": top_k_weights.detach().cpu(),
-                },
-                capture_path,
-            )
-        reference = self._forward_grouped_fused_mxfp8(
-            hidden_states, top_k_index, top_k_weights
-        )
-        native_after_reference = self._forward_native_fused_mxfp8(
-            hidden_states, top_k_index, top_k_weights
-        )
-        native_after_reference_finite = bool(
-            torch.isfinite(native_after_reference).all().item()
-        )
-        native_after_reference_absmax = native_after_reference.float().abs().max().item()
-        delta = native.float() - reference.float()
-        relative_rmse = (
-            delta.square().mean().sqrt()
-            / reference.float().square().mean().sqrt()
-        )
-        print(
-            "DG_MXFP8_COMPARE",
-            _mxfp8_debug_compare_calls,
-            "finite",
-            bool(torch.isfinite(native).all().item()),
-            "finite_before_reference",
-            native_finite_before,
-            "second_finite",
-            native_second_finite,
-            "post_reference_finite",
-            native_after_reference_finite,
-            "input_absmax",
-            hidden_states.float().abs().max().item(),
-            "native_absmax",
-            native.float().abs().max().item(),
-            "native_absmax_before_reference",
-            native_absmax_before,
-            "second_absmax",
-            native_second_absmax,
-            "post_reference_absmax",
-            native_after_reference_absmax,
-            "reference_absmax",
-            reference.float().abs().max().item(),
-            "max_abs_delta",
-            delta.abs().max().item(),
-            "relative_rmse",
-            relative_rmse.item(),
-            flush=True,
-        )
-        _mxfp8_debug_compare_calls += 1
-        return reference
 
     def _forward_grouped_nvfp4(self, hidden_states, top_k_index, top_k_weights):
         ck = comfy.quant_ops.ck
