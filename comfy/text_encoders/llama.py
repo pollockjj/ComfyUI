@@ -10,6 +10,7 @@ import comfy.utils
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() not in {"0", "false", "no", "off"}
 
 
 def _dequant_qt_chunked(weight, dtype, step=65535):
@@ -48,7 +49,11 @@ def _freeze_resident_weights(root, ref_input):
         if len(getattr(m, "weight_function", ())) or len(getattr(m, "bias_function", ())):
             continue
         is_qt = isinstance(w, _QT) or isinstance(getattr(w, "data", None), _QT)
-        keep_qt = (is_qt and getattr(m, "quant_format", None) == "int8_tensorwise"
+        # keeping big weights quantized routes them through the fused int8 kernel
+        # in-graph, whose per-call cost loses to plain bf16 GEMV at M=1 (measured:
+        # 49 vs 112 tok/s) — default is probe-identical full bf16 adoption
+        keep_qt = (STATIC_KV_KEEP_INT8 and is_qt
+                   and getattr(m, "quant_format", None) == "int8_tensorwise"
                    and w.dim() == 2 and min(w.shape) >= 1536
                    and not isinstance(m, torch.nn.Embedding)
                    and getattr(m, "bias", None) is None
@@ -59,8 +64,13 @@ def _freeze_resident_weights(root, ref_input):
             continue
         warm_cache = getattr(m, "_int8_dequant_weight_cache", None)
         if warm_cache is not None and getattr(m, "bias", None) is None:
-            # adopt the warm step's cached dequant: resident, stable, zero new allocation
-            frozen.append((m, m._parameters.get("weight"), None, True))
+            # adopt the warm step's cached dequant: resident, stable, zero new
+            # allocation; displaced quantized originals move to host so the bf16
+            # working set fits VRAM (restored host-side; next cast re-stages)
+            old = m._parameters.get("weight")
+            if is_qt and old is not None:
+                old = torch.nn.Parameter(old.data.to("cpu"), requires_grad=False)
+            frozen.append((m, old, None, True))
             m._parameters["weight"] = torch.nn.Parameter(warm_cache[1], requires_grad=False)
             m.comfy_cast_weights = False
             continue
