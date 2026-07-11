@@ -431,7 +431,8 @@ class DiffusionGemmaExperts(nn.Module):
 
     def _supports_native_fused_mxfp8(self, hidden_states):
         return (
-            hidden_states.is_cuda
+            hasattr(comfy.quant_ops.ck, "fused_moe_mxfp8")
+            and hidden_states.is_cuda
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
             and hidden_states.dtype in (torch.float16, torch.bfloat16)
             and hidden_states.ndim == 2
