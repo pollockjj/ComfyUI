@@ -6,22 +6,6 @@ class TextGenerate(io.ComfyNode):
     def define_schema(cls):
         sampling_options = [
             io.DynamicCombo.Option(
-                key="diffusion",
-                inputs=[
-                    io.Int.Input("max_denoising_steps", default=48, min=1, max=256, tooltip="Maximum denoising steps per 256 token canvas."),
-                    io.Float.Input("entropy_bound", default=0.1, min=0.001, max=10.0, step=0.001, tooltip="Maximum cumulative entropy accepted per denoising step; higher values accept more tokens."),
-                    io.Float.Input("t_min", default=0.4, min=0.0, max=2.0, step=0.01, tooltip="Minimum sampling temperature at the end of the denoising schedule."),
-                    io.Float.Input("t_max", default=0.8, min=0.0, max=2.0, step=0.01, tooltip="Maximum sampling temperature at the start of the denoising schedule."),
-                    io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, tooltip="Seed used to initialize the diffusion sampler."),
-                    io.Int.Input("stability_threshold", optional=True, default=1, min=0, max=16, advanced=True, tooltip="Consecutive unchanged denoising steps required before stopping; 0 disables stability checking."),
-                    io.Float.Input("confidence_threshold", optional=True, default=0.005, min=0.0001, max=1.0, step=0.0001, advanced=True, tooltip="Maximum mean token entropy required before stopping."),
-                ]
-            ),
-            io.DynamicCombo.Option(
-                key="off",
-                inputs=[]
-            ),
-            io.DynamicCombo.Option(
                 key="on",
                 inputs=[
                     io.Float.Input("temperature", default=0.7, min=0.01, max=2.0, step=0.000001, tooltip="Controls sampling randomness; higher values produce more varied text."),
@@ -32,6 +16,10 @@ class TextGenerate(io.ComfyNode):
                     io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, tooltip="Seed used to initialize the sampler."),
                     io.Float.Input("presence_penalty", optional=True, default=0.0, min=0.0, max=5.0, step=0.01, tooltip="Penalizes tokens based on whether they have already appeared."),
                 ]
+            ),
+            io.DynamicCombo.Option(
+                key="off",
+                inputs=[]
             ),
         ]
 
@@ -62,36 +50,77 @@ class TextGenerate(io.ComfyNode):
 
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
 
-        mode = sampling_mode.get("sampling_mode")
-        if mode == "diffusion":
-            generated_ids = clip.generate(
-                tokens,
-                max_length=max_length,
-                seed=sampling_mode.get("seed", 0),
-                max_denoising_steps=sampling_mode.get("max_denoising_steps", 48),
-                entropy_bound=sampling_mode.get("entropy_bound", 0.1),
-                t_min=sampling_mode.get("t_min", 0.4),
-                t_max=sampling_mode.get("t_max", 0.8),
-                stability_threshold=sampling_mode.get("stability_threshold", 1),
-                confidence_threshold=sampling_mode.get("confidence_threshold", 0.005),
-            )
-        else:
-            generated_ids = clip.generate(
-                tokens,
-                do_sample=mode == "on",
-                max_length=max_length,
-                temperature=sampling_mode.get("temperature", 1.0),
-                top_k=sampling_mode.get("top_k", 50),
-                top_p=sampling_mode.get("top_p", 1.0),
-                min_p=sampling_mode.get("min_p", 0.0),
-                repetition_penalty=sampling_mode.get("repetition_penalty", 1.0),
-                presence_penalty=sampling_mode.get("presence_penalty", 0.0),
-                seed=sampling_mode.get("seed", None),
-            )
+        generated_ids = clip.generate(
+            tokens,
+            do_sample=sampling_mode.get("sampling_mode") == "on",
+            max_length=max_length,
+            temperature=sampling_mode.get("temperature", 1.0),
+            top_k=sampling_mode.get("top_k", 50),
+            top_p=sampling_mode.get("top_p", 1.0),
+            min_p=sampling_mode.get("min_p", 0.0),
+            repetition_penalty=sampling_mode.get("repetition_penalty", 1.0),
+            presence_penalty=sampling_mode.get("presence_penalty", 0.0),
+            seed=sampling_mode.get("seed", None),
+        )
 
         generated_text = clip.decode(generated_ids)
 
         return io.NodeOutput(generated_text)
+
+
+class DiffusionTextGenerate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="DiffusionTextGenerate",
+            display_name="Generate Diffusion Text",
+            category="text",
+            description="Generates text with a DiffusionGemma language model.",
+            search_aliases=["DiffusionGemma", "LLM", "gemma"],
+            inputs=[
+                io.Clip.Input("clip", tooltip="DiffusionGemma language model used to generate text."),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True, default="", tooltip="Text prompt sent to DiffusionGemma."),
+                io.Image.Input("image", optional=True, tooltip="Optional image supplied with the prompt."),
+                io.Int.Input("max_length", default=512, min=1, max=32768, tooltip="Maximum number of tokens to generate."),
+                io.Int.Input("max_denoising_steps", default=48, min=1, max=256, tooltip="Maximum denoising steps per 256 token canvas."),
+                io.Float.Input("entropy_bound", default=0.1, min=0.001, max=10.0, step=0.001, tooltip="Maximum cumulative entropy accepted per denoising step; higher values accept more tokens."),
+                io.Float.Input("t_min", default=0.4, min=0.01, max=2.0, step=0.01, tooltip="Minimum sampling temperature at the end of the denoising schedule."),
+                io.Float.Input("t_max", default=0.8, min=0.01, max=2.0, step=0.01, tooltip="Maximum sampling temperature at the start of the denoising schedule."),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, tooltip="Seed used to initialize the diffusion sampler."),
+                io.Int.Input("stability_threshold", optional=True, default=1, min=0, max=16, advanced=True, tooltip="Consecutive unchanged denoising steps required before stopping; 0 disables stability checking."),
+                io.Float.Input("confidence_threshold", optional=True, default=0.005, min=0.0001, max=1.0, step=0.0001, advanced=True, tooltip="Maximum mean token entropy required before stopping."),
+                io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode."),
+                io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built-in system prompt and template.", advanced=True),
+            ],
+            outputs=[
+                io.String.Output(display_name="generated_text", tooltip="Text generated by DiffusionGemma."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, max_length, max_denoising_steps, entropy_bound, t_min, t_max, seed,
+                image=None, stability_threshold=1, confidence_threshold=0.005, thinking=False,
+                use_default_template=True) -> io.NodeOutput:
+        tokens = clip.tokenize(
+            prompt,
+            image=image,
+            skip_template=not use_default_template,
+            min_length=1,
+            thinking=thinking,
+        )
+        generated_ids = clip.generate(
+            tokens,
+            generation_mode="diffusion",
+            max_length=max_length,
+            seed=seed,
+            max_denoising_steps=max_denoising_steps,
+            entropy_bound=entropy_bound,
+            t_min=t_min,
+            t_max=t_max,
+            stability_threshold=stability_threshold,
+            confidence_threshold=confidence_threshold,
+        )
+        return io.NodeOutput(clip.decode(generated_ids))
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -195,6 +224,7 @@ class TextgenExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             TextGenerate,
+            DiffusionTextGenerate,
             TextGenerateLTX2Prompt,
         ]
 
