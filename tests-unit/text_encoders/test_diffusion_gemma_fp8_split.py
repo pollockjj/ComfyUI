@@ -2,6 +2,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 import torch
 
@@ -14,6 +15,7 @@ if not torch.cuda.is_available():
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaExperts,
+    _shared_mxfp8_input,
     diffusion_gemma_detect,
     diffusion_gemma_te,
 )
@@ -23,6 +25,20 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
     def test_quantized_diffusion_gemma_enables_native_compute(self):
         self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
         self.assertFalse(diffusion_gemma_te().supports_native_quantized_compute)
+
+    def test_dense_mxfp8_projections_share_one_activation_quantization(self):
+        modules = tuple(self._mxfp8_bank((32, 32), (128, 4)) for _ in range(3))
+        for module in modules:
+            module.layout_type = "TensorCoreMXFP8Layout"
+            module.input_scale = None
+            module.comfy_force_cast_weights = False
+        x = torch.empty((1, 32, 32), dtype=torch.bfloat16)
+        sentinel = object()
+
+        with mock.patch.object(QuantizedTensor, "from_float", return_value=sentinel) as quantize:
+            self.assertIs(_shared_mxfp8_input(x, modules), sentinel)
+
+        quantize.assert_called_once_with(x.reshape(32, 32), "TensorCoreMXFP8Layout", scale=None)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {

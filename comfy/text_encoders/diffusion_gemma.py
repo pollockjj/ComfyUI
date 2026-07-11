@@ -59,6 +59,49 @@ def _gelu_tanh(x):
     return torch.nn.functional.gelu(x, approximate="tanh")
 
 
+def _shared_mxfp8_input(x, modules):
+    """Quantize a shared dense input once when every projection can consume MXFP8."""
+    if x.requires_grad or x.ndim < 2 or x.dtype not in (torch.float16, torch.bfloat16):
+        return None
+    for module in modules:
+        weight = getattr(module, "weight", None)
+        if (
+            getattr(module, "quant_format", None) != "mxfp8"
+            or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
+            or not isinstance(weight, QuantizedTensor)
+            or weight.device != x.device
+            or getattr(module, "_full_precision_mm", False)
+            or getattr(module, "comfy_force_cast_weights", False)
+            or getattr(module, "weight_function", None)
+            or getattr(module, "bias_function", None)
+            or getattr(module, "weight_lowvram_function", None) is not None
+            or getattr(module, "bias_lowvram_function", None) is not None
+        ):
+            return None
+    x_2d = x.reshape(-1, x.shape[-1]) if x.ndim >= 3 else x
+    scale = getattr(modules[0], "input_scale", None)
+    if scale is not None:
+        scale = comfy.model_management.cast_to_device(scale, x.device, None)
+    return QuantizedTensor.from_float(x_2d, modules[0].layout_type, scale=scale)
+
+
+def _linear_from_shared_input(module, quantized_input, original_shape):
+    output = module(quantized_input)
+    if len(original_shape) >= 3:
+        output = output.reshape((*original_shape[:-1], module.weight.shape[0]))
+    return output
+
+
+class DiffusionGemmaMLP(MLP):
+    def forward(self, x):
+        quantized_input = _shared_mxfp8_input(x, (self.gate_proj, self.up_proj))
+        if quantized_input is None:
+            return super().forward(x)
+        gate = _linear_from_shared_input(self.gate_proj, quantized_input, x.shape)
+        up = _linear_from_shared_input(self.up_proj, quantized_input, x.shape)
+        return self.down_proj(self.activation(gate) * up)
+
+
 def _make_dg_scaled_embedding(ops, vocab_size, hidden_size, device, dtype):
     # Reference casts sqrt(hidden_size) to the weight dtype before multiplying.
     class ScaledEmbedding(ops.Embedding):
@@ -92,14 +135,22 @@ class DiffusionGemmaAttention(nn.Module):
                 sliding_window=None, update_cache=True):
         batch_size, seq_length, _ = hidden_states.shape
 
-        xq = self.q_proj(hidden_states)
+        qkv_modules = (self.q_proj, self.k_proj) if self.v_proj is None else (self.q_proj, self.k_proj, self.v_proj)
+        quantized_input = _shared_mxfp8_input(hidden_states, qkv_modules)
+
+        def project(module):
+            if quantized_input is None:
+                return module(hidden_states)
+            return _linear_from_shared_input(module, quantized_input, hidden_states.shape)
+
+        xq = project(self.q_proj)
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xq = self.q_norm(xq)
         xq = _apply_rotary_pos_emb(xq, freqs_cis)
 
-        xk = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+        xk = project(self.k_proj).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
         if self.v_proj is not None:
-            xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            xv = project(self.v_proj).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
         else:
             xv = xk
         xk = self.k_norm(xk)
@@ -956,7 +1007,7 @@ class DiffusionGemmaBlock(nn.Module):
 
         self.self_attn = DiffusionGemmaAttention(config, head_dim=head_dim, num_kv_heads=num_kv_heads,
                                                  has_v_proj=is_sliding, device=device, dtype=dtype, ops=ops)
-        self.mlp = MLP(config, device=device, dtype=dtype, ops=ops)
+        self.mlp = DiffusionGemmaMLP(config, device=device, dtype=dtype, ops=ops)
         self.router = DiffusionGemmaRouter(config, device=device, dtype=dtype, ops=ops)
         self.experts = DiffusionGemmaExperts(config, device=device, dtype=dtype, ops=ops)
 
