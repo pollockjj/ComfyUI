@@ -1010,6 +1010,11 @@ class BaseGenerate:
         compiled_step = None
         static_pos = None
         generated_token_ids = []
+        # penalties need per-token history on host; without them the token chain
+        # stays on device and syncs once per SYNC_EVERY steps
+        batched_sync = repetition_penalty == 1.0 and not presence_penalty
+        device_tokens = []
+        SYNC_EVERY = 8
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if static_kv and step == 1:
@@ -1033,6 +1038,23 @@ class BaseGenerate:
                 # buffer is rewritten by the next replay
                 logits = compiled_step(embeds, current_input_ids, static_pos).clone()
                 static_pos = static_pos + 1
+                if batched_sync:
+                    # device-side token chain: one host sync per SYNC_EVERY steps
+                    # instead of per token; post-stop tokens are truncated below
+                    next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                    device_tokens.append(next_token)
+                    embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+                    current_input_ids = next_token if initial_input_ids is not None else None
+                    if len(device_tokens) >= SYNC_EVERY or step == max_length - 1:
+                        ids = torch.cat(device_tokens, dim=1)[0].tolist()
+                        device_tokens.clear()
+                        pbar.update(len(ids))
+                        hit = next((j for j, t in enumerate(ids) if t in stop_tokens), None)
+                        if hit is not None:
+                            generated_token_ids.extend(ids[:hit + 1])
+                            break
+                        generated_token_ids.extend(ids)
+                    continue
                 x = None
             else:
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
