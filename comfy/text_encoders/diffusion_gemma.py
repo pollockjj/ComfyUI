@@ -208,14 +208,19 @@ class DiffusionGemmaAttention(nn.Module):
             or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
             or not isinstance(weight, QuantizedTensor)
             or getattr(weight, "_layout_cls", None) != "TensorCoreMXFP8Layout"
+            or weight.device != hidden_states.device
             or not isinstance(qdata, torch.Tensor)
             or qdata.dtype != torch.float8_e4m3fn
+            or qdata.device != hidden_states.device
             or tuple(qdata.shape) != expected_shape
             or tuple(getattr(params, "orig_shape", ())) != expected_shape
             or not isinstance(scale, torch.Tensor)
             or scale.dtype != torch.float8_e8m0fnu
+            or scale.device != hidden_states.device
             or tuple(scale.shape) != expected_scale_shape
             or getattr(module, "bias", None) is not None
+            or getattr(module, "_full_precision_mm", False)
+            or getattr(module, "comfy_force_cast_weights", False)
             or patched
         ):
             raise RuntimeError(
@@ -1939,6 +1944,8 @@ def _detect_diffusion_gemma_fused_qkv(sd):
             config = json.loads(marker.numpy().tobytes())
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError(f"Invalid DiffusionGemma fused QKV marker JSON for layer {layer}") from error
+        if not isinstance(config, dict):
+            raise ValueError(f"Invalid DiffusionGemma fused QKV contract for layer {layer}: expected object")
 
         global_layer = layer % 6 == 5
         expected = {
@@ -1951,7 +1958,7 @@ def _detect_diffusion_gemma_fused_qkv(sd):
         mismatches = {
             name: (config.get(name), value)
             for name, value in expected.items()
-            if not isinstance(config, dict) or config.get(name) != value
+            if config.get(name) != value
         }
         if mismatches:
             raise ValueError(f"Invalid DiffusionGemma fused QKV contract for layer {layer}: {mismatches}")
