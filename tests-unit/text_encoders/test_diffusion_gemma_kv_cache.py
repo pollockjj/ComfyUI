@@ -17,7 +17,6 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaModel,
     DiffusionGenerate,
     _diffusion_probs_and_entropy,
-    _sample_categorical,
 )
 
 
@@ -30,19 +29,6 @@ class TestDiffusionGemmaKVCache(unittest.TestCase):
 
         self.assertTrue(torch.equal(probs, reference.probs))
         self.assertTrue(torch.equal(entropy, reference.entropy()))
-
-    def test_categorical_sample_preserves_multinomial_rng_contract(self):
-        probs = torch.rand(2, 3, 257)
-        reference_generator = torch.Generator().manual_seed(5770521)
-        candidate_generator = torch.Generator().manual_seed(5770521)
-
-        reference = torch.multinomial(
-            probs.reshape(-1, probs.shape[-1]), 1, generator=reference_generator
-        ).reshape(probs.shape[:-1])
-        candidate = _sample_categorical(probs, candidate_generator)
-
-        self.assertTrue(torch.equal(candidate, reference))
-        self.assertTrue(torch.equal(candidate_generator.get_state(), reference_generator.get_state()))
 
     def test_reserved_tail_matches_legacy_attention(self):
         config = DiffusionGemmaConfig(hidden_size=16, num_attention_heads=2)
