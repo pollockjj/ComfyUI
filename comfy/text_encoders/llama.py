@@ -11,6 +11,25 @@ import comfy.utils
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 
 
+def _dequant_qt_chunked(weight, dtype, step=65535):
+    # CUDA convrot dequant kernel caps rows per launch at gridDim.y; row scales
+    # and rotation groups are row-local so row slices are exact
+    qdata = weight._qdata
+    if qdata.dim() != 2 or qdata.shape[0] <= step:
+        return weight.dequantize().to(dtype)
+    params = weight._params
+    rows, cols = qdata.shape
+    scale = params.scale
+    w = torch.empty((rows, cols), dtype=dtype, device=qdata.device)
+    for i in range(0, rows, step):
+        n = min(step, rows - i)
+        p = type(params)(scale=scale[i:i + n], orig_dtype=dtype, orig_shape=(n, cols),
+                         convrot=getattr(params, "convrot", False),
+                         convrot_groupsize=getattr(params, "convrot_groupsize", 256))
+        w[i:i + n] = weight.layout_cls.dequantize(qdata[i:i + n], p)
+    return w
+
+
 def _freeze_resident_weights(root, ref_input):
     """Resolve each cast-managed module's effective (weight, bias) once, install
     them as plain on-device parameters and disable per-call cast so a captured
@@ -39,7 +58,7 @@ def _freeze_resident_weights(root, ref_input):
             continue
         rw, rb = _ops.cast_bias_weight(m, input=ref_input, offloadable=False)
         if isinstance(rw, _QT):
-            rw = rw.dequantize().to(ref_input.dtype)
+            rw = _dequant_qt_chunked(rw, ref_input.dtype)
         frozen.append((m, m._parameters.get("weight"), m._parameters.get("bias"), True))
         m._parameters["weight"] = torch.nn.Parameter(rw.contiguous(), requires_grad=False)
         if rb is not None:
