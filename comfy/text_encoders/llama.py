@@ -10,6 +10,52 @@ import comfy.utils
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 
+
+def _freeze_resident_weights(root, ref_input):
+    """Resolve each cast-managed module's effective (weight, bias) once, install
+    them as plain on-device parameters and disable per-call cast so a captured
+    decode step is pure tensor compute. Big 2D int8 weights stay quantized —
+    F.linear dispatches them to the fused kernel. Returns a restore list."""
+    import comfy.ops as _ops
+    from comfy.quant_ops import QuantizedTensor as _QT
+    frozen = []
+    for m in root.modules():
+        if not getattr(m, "comfy_cast_weights", False):
+            continue
+        w = getattr(m, "weight", None)
+        if w is None:
+            continue
+        if len(getattr(m, "weight_function", ())) or len(getattr(m, "bias_function", ())):
+            continue
+        is_qt = isinstance(w, _QT) or isinstance(getattr(w, "data", None), _QT)
+        keep_qt = (is_qt and getattr(m, "quant_format", None) == "int8_tensorwise"
+                   and w.dim() == 2 and min(w.shape) >= 1536
+                   and not isinstance(m, torch.nn.Embedding)
+                   and getattr(m, "bias", None) is None
+                   and w.device == ref_input.device)
+        if keep_qt:
+            frozen.append((m, None, None, True))
+            m.comfy_cast_weights = False
+            continue
+        rw, rb = _ops.cast_bias_weight(m, input=ref_input, offloadable=False)
+        if isinstance(rw, _QT):
+            rw = rw.dequantize().to(ref_input.dtype)
+        frozen.append((m, m._parameters.get("weight"), m._parameters.get("bias"), True))
+        m._parameters["weight"] = torch.nn.Parameter(rw.contiguous(), requires_grad=False)
+        if rb is not None:
+            m._parameters["bias"] = torch.nn.Parameter(rb.contiguous(), requires_grad=False)
+        m.comfy_cast_weights = False
+    return frozen
+
+
+def _restore_frozen_weights(frozen):
+    for m, w, b, flag in frozen:
+        if w is not None:
+            m._parameters["weight"] = w
+        if b is not None:
+            m._parameters["bias"] = b
+        m.comfy_cast_weights = flag
+
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
 import comfy.ops
@@ -916,8 +962,28 @@ class BaseGenerate:
         prompt_len = embeds.shape[1]
         compiled_step = None
         static_pos = None
+        frozen_weights = []
 
         # Generation loop
+        current_input_ids = initial_input_ids
+        try:
+            return self._generate_loop(embeds, do_sample, max_length, temperature, top_k, top_p, min_p,
+                                       repetition_penalty, seed, stop_tokens, initial_tokens, execution_dtype,
+                                       presence_penalty, initial_input_ids, position_ids, deepstack_embeds,
+                                       visual_pos_masks, past_key_values, generator, pbar, next_pos, device,
+                                       static_kv, prompt_len, max_cache_len, frozen_weights)
+        finally:
+            if frozen_weights:
+                _restore_frozen_weights(frozen_weights)
+
+    def _generate_loop(self, embeds, do_sample, max_length, temperature, top_k, top_p, min_p,
+                       repetition_penalty, seed, stop_tokens, initial_tokens, execution_dtype,
+                       presence_penalty, initial_input_ids, position_ids, deepstack_embeds,
+                       visual_pos_masks, past_key_values, generator, pbar, next_pos, device,
+                       static_kv, prompt_len, max_cache_len, frozen_weights):
+        compiled_step = None
+        static_pos = None
+        generated_token_ids = []
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if static_kv and step == 1:
@@ -927,6 +993,7 @@ class BaseGenerate:
                 past_key_values = self.convert_kv_to_static(past_key_values, max_cache_len)
                 position_ids = torch.tensor([[prompt_len]], device=device)
             if static_kv and step == 2:
+                frozen_weights.extend(_freeze_resident_weights(self.model, embeds.reshape(-1)[:1]))
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
                 static_past = past_key_values
 
