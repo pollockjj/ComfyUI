@@ -1,5 +1,6 @@
 import contextlib
 import math
+import os
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from comfy.text_encoders.gemma4 import (
     ClippedLinear,
     _apply_rotary_pos_emb,
 )
+
+
+_mxfp8_debug_compare_calls = 0
 
 
 @dataclass
@@ -461,6 +465,10 @@ class DiffusionGemmaExperts(nn.Module):
             if not self._fused_mxfp8_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused MXFP8 does not support patched expert banks")
             if self._supports_native_fused_mxfp8(hidden_states):
+                if os.environ.get("COMFY_DG_MXFP8_COMPARE") == "1":
+                    return self._forward_debug_fused_mxfp8(
+                        hidden_states, top_k_index, top_k_weights
+                    )
                 try:
                     return self._forward_native_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
                 except comfy.quant_ops.ck.NoCapableBackendError:
@@ -647,6 +655,42 @@ class DiffusionGemmaExperts(nn.Module):
                 down._qdata,
                 down._params.scale,
             )
+
+    def _forward_debug_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
+        global _mxfp8_debug_compare_calls
+        if _mxfp8_debug_compare_calls >= 30:
+            return self._forward_grouped_fused_mxfp8(
+                hidden_states, top_k_index, top_k_weights
+            )
+        native = self._forward_native_fused_mxfp8(
+            hidden_states, top_k_index, top_k_weights
+        )
+        reference = self._forward_grouped_fused_mxfp8(
+            hidden_states, top_k_index, top_k_weights
+        )
+        delta = native.float() - reference.float()
+        relative_rmse = (
+            delta.square().mean().sqrt()
+            / reference.float().square().mean().sqrt()
+        )
+        print(
+            "DG_MXFP8_COMPARE",
+            _mxfp8_debug_compare_calls,
+            "finite",
+            bool(torch.isfinite(native).all().item()),
+            "input_absmax",
+            hidden_states.float().abs().max().item(),
+            "native_absmax",
+            native.float().abs().max().item(),
+            "reference_absmax",
+            reference.float().abs().max().item(),
+            "max_abs_delta",
+            delta.abs().max().item(),
+            "relative_rmse",
+            relative_rmse.item(),
+        )
+        _mxfp8_debug_compare_calls += 1
+        return reference
 
     def _forward_grouped_nvfp4(self, hidden_states, top_k_index, top_k_weights):
         ck = comfy.quant_ops.ck
