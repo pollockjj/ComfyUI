@@ -1468,26 +1468,24 @@ class DiffusionGenerate:
             )
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
             decoder_graph = None
-            conditioned_eager_complete = False
             try:
                 for cur_step in reversed(range(1, max_denoising_steps + 1)):
                     comfy.model_management.throw_exception_if_processing_interrupted()
-                    if self_conditioning_logits is None or capture_stream is None:
-                        x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
-                                             self_conditioning_logits=self_conditioning_logits,
-                                             position_ids=decoder_position_ids, dtype=execution_dtype,
-                                             freqs_cis=decoder_freqs_cis)
-                    elif not conditioned_eager_complete:
+                    if self_conditioning_logits is None and capture_stream is not None:
                         capture_stream.wait_stream(torch.cuda.current_stream(device))
                         with torch.cuda.stream(capture_stream):
                             x, _, _ = self.model(
                                 current_canvas, past_key_values=past_key_values, mode="decoder",
-                                self_conditioning_logits=self_conditioning_logits,
+                                self_conditioning_logits=None,
                                 position_ids=decoder_position_ids, dtype=execution_dtype,
                                 freqs_cis=decoder_freqs_cis,
                             )
                         torch.cuda.current_stream(device).wait_stream(capture_stream)
-                        conditioned_eager_complete = True
+                    elif self_conditioning_logits is None or capture_stream is None:
+                        x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
+                                             self_conditioning_logits=self_conditioning_logits,
+                                             position_ids=decoder_position_ids, dtype=execution_dtype,
+                                             freqs_cis=decoder_freqs_cis)
                     elif decoder_graph is None:
                         decoder_graph = _ConditionedDecoderGraph(
                             self, current_canvas, self_conditioning_logits, past_key_values,
