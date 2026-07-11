@@ -688,6 +688,7 @@ class DiffusionGemmaExperts(nn.Module):
             delta.abs().max().item(),
             "relative_rmse",
             relative_rmse.item(),
+            flush=True,
         )
         _mxfp8_debug_compare_calls += 1
         return reference
