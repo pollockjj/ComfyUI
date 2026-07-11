@@ -1393,6 +1393,11 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 self._full_precision_mm = MixedPrecisionOps._full_precision_mm
                 self._full_precision_mm_config = False
                 self._resident_bank = None
+                self.weight_function = []
+                self.bias_function = []
+                self.weight_lowvram_function = None
+                self.bias_lowvram_function = None
+                self.register_parameter("input_scale", None)
 
             def reset_parameters(self):
                 return None
@@ -1509,6 +1514,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     if scale is not None:
                         scale = scale.float()
                         manually_loaded_keys.append(scale_key)
+                    elif quant_format == "int8_tensorwise":
+                        raise ValueError(f"Missing INT8 weight scale for layer {prefix.rstrip('.')}")
 
                     scales = {"scale": scale if scale is not None else torch.ones((), dtype=torch.float32)}
                     if quant_format == "int8_tensorwise" and layer_conf.get("convrot", False):

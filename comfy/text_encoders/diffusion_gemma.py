@@ -249,6 +249,8 @@ class DiffusionGemmaExperts(nn.Module):
         self.unfused = config.unfused_experts
         self._weight_patches_uuid = None
         self._native_nvfp4_alpha_cache = None
+        self._bank_mode = None
+        self._fused_banks_compatible = False
         E = config.num_experts
         H = config.hidden_size
         I = config.moe_intermediate_size
@@ -258,18 +260,61 @@ class DiffusionGemmaExperts(nn.Module):
         else:
             self.gate_up_proj = ops.MoEExperts(num_experts=E, in_features=H, out_features=2 * I, bias=False, device=device, dtype=dtype)
         self.down_proj = ops.MoEExperts(num_experts=E, in_features=I, out_features=H, bias=False, device=device, dtype=dtype)
+        self._banks = (
+            (self.gate_proj, self.up_proj, self.down_proj)
+            if self.unfused else (self.gate_up_proj, self.down_proj)
+        )
+        self.register_load_state_dict_post_hook(self._configure_loaded_banks)
 
-    def _has_quantized_unfused_banks(self):
-        if not self.unfused:
-            return False
-        return any(getattr(bank, "layout_type", None) is not None for bank in (self.gate_proj, self.up_proj, self.down_proj))
-
-    def _has_fused_nvfp4_banks(self):
+    def _configure_loaded_banks(self, module, incompatible_keys):
+        formats = tuple(bank.quant_format for bank in self._banks)
         if self.unfused:
-            return False
-        return any(
-            getattr(bank, "quant_format", None) == self.fused_nvfp4_format
-            for bank in (self.gate_up_proj, self.down_proj)
+            if all(quant_format == "nvfp4" for quant_format in formats):
+                if not all(isinstance(bank.weight, QuantizedTensor) and bank.bias is None for bank in self._banks):
+                    raise ValueError("DiffusionGemma NVFP4 expert banks are incomplete")
+                self._bank_mode = "unfused_nvfp4"
+            elif any(quant_format is not None for quant_format in formats):
+                self._bank_mode = "quantized"
+            else:
+                self._bank_mode = "unquantized"
+            return
+
+        if any(quant_format == self.fused_nvfp4_format for quant_format in formats):
+            if not all(quant_format == self.fused_nvfp4_format for quant_format in formats):
+                raise ValueError("DiffusionGemma fused NVFP4 requires both expert banks")
+            gate_up, down = self._banks
+            if not all(
+                isinstance(bank.weight, QuantizedTensor)
+                and bank.bias is None
+                and isinstance(bank.input_scale, torch.Tensor)
+                and bank.input_scale.numel() == 1
+                for bank in self._banks
+            ):
+                raise ValueError("DiffusionGemma fused NVFP4 banks are incomplete")
+            if (
+                tuple(gate_up.weight._qdata.shape) != (128, 1408, 1408)
+                or tuple(down.weight._qdata.shape) != (128, 2816, 352)
+            ):
+                raise ValueError("DiffusionGemma fused NVFP4 bank shape mismatch")
+            self._bank_mode = "fused_nvfp4"
+        elif any(quant_format is not None for quant_format in formats):
+            self._bank_mode = "quantized"
+        else:
+            self._bank_mode = "unquantized"
+        self._refresh_fused_bank_compatibility()
+
+    def set_weight_patches_uuid(self, patches_uuid):
+        self._weight_patches_uuid = patches_uuid
+        self._refresh_fused_bank_compatibility()
+
+    def _refresh_fused_bank_compatibility(self):
+        self._fused_banks_compatible = self._bank_mode == "fused_nvfp4" and all(
+            isinstance(bank.weight, QuantizedTensor)
+            and not bank.weight_function
+            and not bank.bias_function
+            and bank.weight_lowvram_function is None
+            and bank.bias_lowvram_function is None
+            for bank in self._banks
         )
 
     @staticmethod
@@ -295,44 +340,15 @@ class DiffusionGemmaExperts(nn.Module):
             out_dtype=out_dtype,
         )
 
-    def _supports_grouped_nvfp4(self, hidden_states):
+    def _supports_sm120_nvfp4(self, hidden_states):
         return (
-            self.unfused
-            and hidden_states.is_cuda
+            hidden_states.is_cuda
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
-            and all(
-                getattr(bank, "quant_format", None) == "nvfp4"
-                and isinstance(getattr(bank, "weight", None), QuantizedTensor)
-                and bank.bias is None
-                for bank in (self.gate_proj, self.up_proj, self.down_proj)
-            )
-        )
-
-    def _supports_grouped_fused_nvfp4(self, hidden_states):
-        if self.unfused or not hidden_states.is_cuda:
-            return False
-        if torch.cuda.get_device_capability(hidden_states.device) != (12, 0):
-            return False
-        banks = (self.gate_up_proj, self.down_proj)
-        if not all(
-            getattr(bank, "quant_format", None) == self.fused_nvfp4_format
-            and isinstance(getattr(bank, "weight", None), QuantizedTensor)
-            and bank.bias is None
-            and isinstance(getattr(bank, "input_scale", None), torch.Tensor)
-            and bank.input_scale.numel() == 1
-            for bank in banks
-        ):
-            return False
-        gate_up_qdata = self.gate_up_proj.weight._qdata
-        down_qdata = self.down_proj.weight._qdata
-        return (
-            tuple(gate_up_qdata.shape) == (self.num_experts, 1408, 1408)
-            and tuple(down_qdata.shape) == (self.num_experts, 2816, 352)
         )
 
     def _supports_native_fused_nvfp4(self, hidden_states):
         return (
-            self._supports_grouped_fused_nvfp4(hidden_states)
+            self._supports_sm120_nvfp4(hidden_states)
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.ndim == 2
             and hidden_states.shape[0] in (256, 340)
@@ -341,23 +357,31 @@ class DiffusionGemmaExperts(nn.Module):
         )
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        if self._has_fused_nvfp4_banks():
+        if self._bank_mode is None:
+            raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
+        if self._bank_mode == "fused_nvfp4":
+            if not self._fused_banks_compatible:
+                raise RuntimeError("DiffusionGemma fused NVFP4 does not support patched expert banks")
             if self._supports_native_fused_nvfp4(hidden_states):
                 try:
                     return self._forward_native_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
                 except comfy.quant_ops.ck.NoCapableBackendError:
                     pass
-            if not self._supports_grouped_fused_nvfp4(hidden_states):
+            if not self._supports_sm120_nvfp4(hidden_states):
                 raise RuntimeError(
                     "DiffusionGemma fused NVFP4 v1 requires complete calibrated banks and the SM120 grouped kernel"
                 )
             return self._forward_grouped_fused_nvfp4(hidden_states, top_k_index, top_k_weights)
-        if hidden_states.shape[0] >= self.grouped_min_tokens and self._supports_grouped_nvfp4(hidden_states):
+        if (
+            self._bank_mode == "unfused_nvfp4"
+            and hidden_states.shape[0] >= self.grouped_min_tokens
+            and self._supports_sm120_nvfp4(hidden_states)
+        ):
             try:
                 return self._forward_grouped_nvfp4(hidden_states, top_k_index, top_k_weights)
             except comfy.quant_ops.ck.NoCapableBackendError:
                 pass
-        if hidden_states.shape[0] >= self.grouped_min_tokens and not self._has_quantized_unfused_banks():
+        if hidden_states.shape[0] >= self.grouped_min_tokens and self._bank_mode == "unquantized":
             return self._forward_grouped(hidden_states, top_k_index, top_k_weights)
         return self._forward_loop(hidden_states, top_k_index, top_k_weights)
 
@@ -1200,7 +1224,7 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
         def generate(self, tokens, **kwargs):
             transformer = self.gemma4.transformer
             for layer in transformer.model.decoder.layers:
-                layer.experts._weight_patches_uuid = self.current_weight_patches_uuid
+                layer.experts.set_weight_patches_uuid(self.current_weight_patches_uuid)
             return super().generate(tokens, **kwargs)
 
         def memory_estimation_function(self, tokens, device=None):
