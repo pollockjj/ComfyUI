@@ -665,6 +665,8 @@ class DiffusionGemmaExperts(nn.Module):
         native = self._forward_native_fused_mxfp8(
             hidden_states, top_k_index, top_k_weights
         )
+        native_finite_before = bool(torch.isfinite(native).all().item())
+        native_absmax_before = native.float().abs().max().item()
         capture_path = os.environ.get("COMFY_DG_MXFP8_CAPTURE")
         if capture_path and _mxfp8_debug_compare_calls == 0:
             torch.save(
@@ -688,10 +690,14 @@ class DiffusionGemmaExperts(nn.Module):
             _mxfp8_debug_compare_calls,
             "finite",
             bool(torch.isfinite(native).all().item()),
+            "finite_before_reference",
+            native_finite_before,
             "input_absmax",
             hidden_states.float().abs().max().item(),
             "native_absmax",
             native.float().abs().max().item(),
+            "native_absmax_before_reference",
+            native_absmax_before,
             "reference_absmax",
             reference.float().abs().max().item(),
             "max_abs_delta",
