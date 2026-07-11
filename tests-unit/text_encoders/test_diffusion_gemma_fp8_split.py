@@ -64,12 +64,13 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         dequantized = torch.arange(128, dtype=torch.bfloat16).reshape(2, 64)
 
         with (
-            mock.patch.object(QuantizedTensor, "dequantize", return_value=dequantized) as dequantize,
+            mock.patch("comfy.text_encoders.diffusion_gemma._INT8_SELF_CONDITIONING_CHUNK", 1),
+            mock.patch.object(QuantizedTensor, "dequantize", side_effect=[dequantized[:1], dequantized[1:]]) as dequantize,
             mock.patch.object(torch, "mm", side_effect=lambda a, b, out_dtype: a.float() @ b.float()),
         ):
             output = _int8_self_conditioning(probabilities, weight)
 
-        dequantize.assert_called_once_with()
+        self.assertEqual(dequantize.call_count, 2)
         self.assertTrue(torch.equal(output, probabilities.float() @ dequantized.float()))
 
     def test_quantized_diffusion_gemma_enables_native_compute(self):
@@ -280,10 +281,10 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         )
 
     @staticmethod
-    def _int8_bank(qdata_shape, scale_shape, group_size, device="meta"):
+    def _int8_bank(qdata_shape, scale_shape, group_size, device="meta", convrot=True):
         params = TensorWiseINT8Layout.Params(
             scale=torch.empty(scale_shape, dtype=torch.float32, device=device),
-            convrot=True,
+            convrot=convrot,
             convrot_groupsize=group_size,
             orig_dtype=torch.bfloat16,
             orig_shape=qdata_shape,
@@ -359,7 +360,17 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual(experts._bank_mode, "fused_int8_convrot")
         self.assertTrue(experts._grouped_int8_convrot_compatible)
 
-        experts._banks = (self._int8_bank((128, 1408, 2816), (128, 1408, 1), 64), experts._banks[1])
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 256, convrot=False),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64, convrot=False),
+        )
+        experts._configure_loaded_banks(experts, None)
+        self.assertEqual(experts._bank_mode, "quantized")
+
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 64),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64),
+        )
         with self.assertRaisesRegex(ValueError, "INT8 ConvRot expert bank contract mismatch"):
             experts._configure_loaded_banks(experts, None)
 
@@ -372,8 +383,8 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         down = self._int8_bank((2, 2, 2), (2, 2, 1), 64, device="cpu").weight
         experts.gate_up_proj, experts.down_proj = resident(gate_up), resident(down)
         hidden, indices, weights = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16), torch.tensor([[1], [0]]), torch.ones((2, 1), dtype=torch.float32)
-        with mock.patch.object(sys.modules["comfy.quant_ops"].ck, "grouped_int8_convrot_linear_packed",
-                               create=True, side_effect=[torch.zeros((2, 4), dtype=torch.bfloat16), hidden.flip(0)]) as packed:
+        with mock.patch.object(sys.modules["comfy.quant_ops"], "grouped_int8_convrot_linear_packed",
+                               side_effect=[torch.zeros((2, 4), dtype=torch.bfloat16), hidden.flip(0)]) as packed:
             output = experts._forward_grouped_int8_convrot(hidden, indices, weights)
 
         self.assertEqual((packed.call_count, packed.call_args_list[0].args[1].tolist()), (2, [0, 1, 2]))

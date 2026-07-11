@@ -97,7 +97,7 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
 
 
 _MXFP8_SELF_CONDITIONING_CHUNK = 262144
-_INT8_SELF_CONDITIONING_CHUNK = 65504
+_INT8_SELF_CONDITIONING_CHUNK = 65504  # Largest 32-row multiple below CUDA's 65,535 grid-y limit.
 
 
 def _native_mxfp8_embedding(module):
@@ -464,6 +464,12 @@ class DiffusionGemmaExperts(nn.Module):
 
     def _configure_loaded_banks(self, module, incompatible_keys):
         formats = tuple(bank.quant_format for bank in self._banks)
+        int8_convrot = tuple(
+            quant_format == "int8_tensorwise"
+            and isinstance(bank.weight, QuantizedTensor)
+            and getattr(getattr(bank.weight, "_params", None), "convrot", False) is True
+            for bank, quant_format in zip(self._banks, formats)
+        )
         if self.unfused:
             if all(quant_format == "nvfp4" for quant_format in formats):
                 if not all(isinstance(bank.weight, QuantizedTensor) and bank.bias is None for bank in self._banks):
@@ -535,8 +541,8 @@ class DiffusionGemmaExperts(nn.Module):
                 ):
                     raise ValueError("DiffusionGemma fused MXFP8 expert bank contract mismatch")
             self._bank_mode = "fused_mxfp8"
-        elif any(quant_format == "int8_tensorwise" for quant_format in formats):
-            if not all(quant_format == "int8_tensorwise" for quant_format in formats):
+        elif any(int8_convrot):
+            if not all(int8_convrot):
                 raise ValueError("DiffusionGemma INT8 ConvRot requires both expert banks")
             expected = (
                 ((128, 1408, 2816), (128, 1408, 1), 256),
@@ -674,8 +680,6 @@ class DiffusionGemmaExperts(nn.Module):
         if self._bank_mode == "fused_int8_convrot":
             if not self._grouped_int8_convrot_compatible:
                 raise RuntimeError("DiffusionGemma INT8 ConvRot does not support patched expert banks")
-            if not callable(getattr(comfy.quant_ops.ck, "grouped_int8_convrot_linear_packed", None)):
-                raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
             return self._forward_grouped_int8_convrot(hidden_states, top_k_index, top_k_weights)
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
@@ -1136,7 +1140,7 @@ class DiffusionGemmaExperts(nn.Module):
                     raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
                 weights.append(weight)
 
-            gate_up = comfy.quant_ops.ck.grouped_int8_convrot_linear_packed(
+            gate_up = comfy.quant_ops.grouped_int8_convrot_linear_packed(
                 x,
                 expert_indptr,
                 weights[0]._qdata,
@@ -1146,7 +1150,7 @@ class DiffusionGemmaExperts(nn.Module):
             )
             gate, up = gate_up.chunk(2, dim=-1)
             intermediate = _gelu_tanh(gate) * up
-            y = comfy.quant_ops.ck.grouped_int8_convrot_linear_packed(
+            y = comfy.quant_ops.grouped_int8_convrot_linear_packed(
                 intermediate,
                 expert_indptr,
                 weights[1]._qdata,

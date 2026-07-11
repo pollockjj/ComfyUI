@@ -222,6 +222,15 @@ TensorWiseINT8Layout = _CKTensorWiseINT8Layout
 TensorCoreConvRotW4A4Layout = _CKTensorCoreConvRotW4A4Layout
 
 
+def grouped_int8_convrot_linear_packed(*args, **kwargs):
+    if not _CK_AVAILABLE:
+        raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
+    operation = getattr(ck, "grouped_int8_convrot_linear_packed", None)
+    if not callable(operation):
+        raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
+    return operation(*args, **kwargs)
+
+
 # ==============================================================================
 # Registry
 # ==============================================================================
@@ -346,6 +355,7 @@ __all__ = [
     "TensorCoreNVFP4Layout",
     "TensorCoreConvRotW4A4Layout",
     "TensorWiseINT8Layout",
+    "grouped_int8_convrot_linear_packed",
     "QUANT_ALGOS",
     "NVFP4_FUSED_MOE_FORMAT",
     "NVFP4_FUSED_MOE_V1_FIELDS",
