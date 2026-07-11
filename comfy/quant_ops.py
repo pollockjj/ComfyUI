@@ -222,13 +222,28 @@ TensorWiseINT8Layout = _CKTensorWiseINT8Layout
 TensorCoreConvRotW4A4Layout = _CKTensorCoreConvRotW4A4Layout
 
 
-def grouped_int8_convrot_linear_packed(*args, **kwargs):
+def grouped_int8_convrot_linear_packed(
+    x,
+    expert_indptr,
+    weight,
+    weight_scale,
+    convrot_groupsize,
+    *,
+    out_dtype,
+):
     if not _CK_AVAILABLE:
         raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
     operation = getattr(ck, "grouped_int8_convrot_linear_packed", None)
     if not callable(operation):
         raise RuntimeError("DiffusionGemma INT8 ConvRot requires comfy-kitchen packed expert support")
-    return operation(*args, **kwargs)
+    return operation(
+        x,
+        expert_indptr,
+        weight,
+        weight_scale,
+        convrot_groupsize,
+        out_dtype=out_dtype,
+    )
 
 
 # ==============================================================================
