@@ -430,6 +430,7 @@ def _bank_bmm(module, x):
 
 class DiffusionGemmaExperts(nn.Module):
     grouped_bucket = 64
+    grouped_int8_graph_bucket = 128
     grouped_nvfp4_bucket = 128
     grouped_mxfp8_bucket = 128
     grouped_min_tokens = 64
@@ -1118,7 +1119,7 @@ class DiffusionGemmaExperts(nn.Module):
         sorted_experts = flat_experts[order]
         positions = torch.arange(N * K, device=flat_experts.device)
         if capturing:
-            C = self.grouped_bucket
+            C = self.grouped_int8_graph_bucket
             starts = torch.full((E,), N * K, dtype=torch.long, device=flat_experts.device)
             starts.scatter_reduce_(0, sorted_experts, positions, reduce="amin")
             rank = positions - starts[sorted_experts]
