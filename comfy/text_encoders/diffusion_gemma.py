@@ -999,6 +999,21 @@ class DiffusionGenerate:
         cap = self.model.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap
 
+    def _native_categorical_stats(self, device):
+        ck = comfy.quant_ops.ck
+        cuda_backend = ck.list_backends().get("cuda", {})
+        if (
+            not hasattr(ck, "categorical_stats")
+            or not cuda_backend.get("available", False)
+            or cuda_backend.get("disabled", False)
+            or "categorical_stats" not in cuda_backend.get("capabilities", ())
+            or device.type != "cuda"
+            or torch.cuda.get_device_capability(device) != (12, 0)
+            or not all(layer.experts._bank_mode == "fused_nvfp4" for layer in self.model.decoder.layers)
+        ):
+            return None
+        return ck.categorical_stats
+
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
 
@@ -1056,6 +1071,7 @@ class DiffusionGenerate:
         max_new_canvases = math.ceil(max_length / canvas_length)
         generated_token_ids = []
         commit_canvas = None
+        categorical_stats = self._native_categorical_stats(device)
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:
@@ -1082,10 +1098,13 @@ class DiffusionGenerate:
                                      freqs_cis=decoder_freqs_cis)
                 temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                 processed_logits = self.logits(x) / temperature
-                probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
+                if categorical_stats is None:
+                    probs, token_entropy = _diffusion_probs_and_entropy(processed_logits)
+                    argmax_canvas = torch.argmax(processed_logits, dim=-1)
+                else:
+                    probs, token_entropy, argmax_canvas = categorical_stats(processed_logits)
                 denoiser_canvas = torch.multinomial(probs.view(-1, vocab_size), num_samples=1, generator=generator)
                 denoiser_canvas = denoiser_canvas.squeeze(-1).view(1, canvas_length)
-                argmax_canvas = torch.argmax(processed_logits, dim=-1)
 
                 accepted_canvas, accepted_mask, token_entropy = _entropy_bound_accept(
                     current_canvas, denoiser_canvas, entropy_bound, token_entropy)
