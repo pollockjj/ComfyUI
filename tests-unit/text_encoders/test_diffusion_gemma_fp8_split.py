@@ -230,7 +230,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         module.layout_type = "TensorCoreMXFP8Layout"
         projection = torch.empty((1, 1, 9216), dtype=torch.bfloat16)
         module.forward = mock.Mock(return_value=projection)
-        hidden_states = torch.empty((1, 1, 2816), dtype=torch.bfloat16)
+        hidden_states = torch.empty((1, 1, 2816), dtype=torch.bfloat16, device="meta")
 
         q, k, v = attention._project_fused_qkv(hidden_states)
 
