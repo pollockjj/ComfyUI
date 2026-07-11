@@ -676,14 +676,24 @@ class DiffusionGemmaExperts(nn.Module):
                     capture_weights_path,
                 )
                 _mxfp8_debug_weights_captured = True
+            clone_resident = (
+                os.environ.get("COMFY_DG_MXFP8_CLONE_RESIDENT") == "1"
+                and _mxfp8_debug_compare_calls == 0
+            )
+            gate_up_qdata = gate_up._qdata.clone() if clone_resident else gate_up._qdata
+            gate_up_scale = (
+                gate_up._params.scale.clone() if clone_resident else gate_up._params.scale
+            )
+            down_qdata = down._qdata.clone() if clone_resident else down._qdata
+            down_scale = down._params.scale.clone() if clone_resident else down._params.scale
             return ck.fused_moe_mxfp8(
                 hidden_states,
                 top_k_index,
                 top_k_weights,
-                gate_up._qdata,
-                gate_up._params.scale,
-                down._qdata,
-                down._params.scale,
+                gate_up_qdata,
+                gate_up_scale,
+                down_qdata,
+                down_scale,
             )
 
     def _forward_debug_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
