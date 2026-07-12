@@ -14,6 +14,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+from comfy.ops import mixed_precision_ops  # noqa: E402
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
@@ -22,7 +23,6 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaExperts,
     DiffusionGemmaMLP,
     _ConditionedDecoderGraph,
-    _mxfp8_self_conditioning,
     _ConditionedDecoderGraphCache,
     _append_preallocated_kv,
     _shared_mxfp8_input,
@@ -44,19 +44,29 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         }
         return torch.tensor(list(json.dumps(config).encode()), dtype=torch.uint8)
 
-    def test_mxfp8_self_conditioning_uses_one_bf16_chunk(self):
-        weight = self._mxfp8_bank((262144, 32), (262144, 4), device="cpu").weight
-        probabilities = torch.ones((1, 262144), dtype=torch.bfloat16)
+    def test_mxfp8_self_conditioning_cleans_up_failed_resident_weight(self):
+        embedding = mixed_precision_ops().Embedding(128, 128, device="cpu", dtype=torch.bfloat16)
+        for name, value in vars(self._mxfp8_bank((128, 128), (128, 4), device="cpu")).items():
+            setattr(embedding, name, value)
+        embedding.layout_type = "TensorCoreMXFP8Layout"
+        embedding.comfy_force_cast_weights = False
+        resident = embedding.weight
+        probabilities = torch.ones((1, 128), dtype=torch.float32)
+        offload_token = object()
 
         with (
-            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "mxfp8_embedding", create=True, return_value=torch.ones((262144, 32), dtype=torch.bfloat16)) as dequantize,
-            mock.patch.object(torch, "mm", side_effect=lambda a, b, out_dtype: a.float() @ b.float()),
+            mock.patch("comfy.ops.cast_bias_weight", return_value=(resident, None, offload_token)),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "mxfp8_weighted_embedding", create=True, side_effect=RuntimeError("sentinel")) as weighted,
+            mock.patch("comfy.ops.uncast_bias_weight") as uncast,
+            self.assertRaisesRegex(RuntimeError, "sentinel"),
         ):
-            output = _mxfp8_self_conditioning(probabilities, weight)
+            embedding.weighted_embedding(probabilities)
 
-        self.assertEqual(dequantize.call_count, 1)
-        self.assertEqual(output.dtype, torch.float32)
-        self.assertTrue(torch.equal(output, torch.full((1, 32), 262144.0)))
+        qdata, scales, actual_probabilities = weighted.call_args.args
+        self.assertIs(qdata, resident._qdata)
+        self.assertIs(scales, resident._params.scale)
+        self.assertEqual(actual_probabilities.dtype, torch.bfloat16)
+        uncast.assert_called_once_with(embedding, resident, None, offload_token)
 
     def test_quantized_diffusion_gemma_enables_native_compute(self):
         self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)

@@ -749,6 +749,20 @@ class disable_weight_init:
             self.bias = None
             return None
 
+        def weighted_embedding(self, probabilities):
+            params = getattr(self.weight, "_params", None)
+            weight_dtype = getattr(params, "orig_dtype", self.weight.dtype)
+            weight, bias, offload_stream = cast_bias_weight(
+                self,
+                device=probabilities.device,
+                dtype=weight_dtype,
+                offloadable=True,
+            )
+            try:
+                return torch.matmul(probabilities.to(dtype=weight.dtype), weight)
+            finally:
+                uncast_bias_weight(self, weight, bias, offload_stream)
+
         def forward_comfy_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
@@ -1556,6 +1570,38 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def state_dict(self, *args, destination=None, prefix="", **kwargs):
                 sd = destination if destination is not None else {}
                 return _quantized_weight_state_dict(self, sd, prefix)
+
+            def weighted_embedding(self, probabilities):
+                weight = self.weight
+                native_mxfp8 = (
+                    getattr(self, "quant_format", None) == "mxfp8"
+                    and isinstance(weight, QuantizedTensor)
+                    and weight._layout_cls == "TensorCoreMXFP8Layout"
+                    and not getattr(self, "_full_precision_mm", False)
+                    and not getattr(self, "comfy_force_cast_weights", False)
+                    and len(self.weight_function) == 0
+                    and len(self.bias_function) == 0
+                    and getattr(self, "weight_lowvram_function", None) is None
+                    and getattr(self, "bias_lowvram_function", None) is None
+                )
+                if not native_mxfp8:
+                    return super().weighted_embedding(probabilities)
+
+                resident, bias, offload_stream = cast_bias_weight(
+                    self,
+                    device=probabilities.device,
+                    dtype=weight.dtype,
+                    offloadable=True,
+                )
+                try:
+                    if not isinstance(resident, QuantizedTensor):
+                        raise RuntimeError("MXFP8 embedding did not remain quantized after device cast")
+                    flat = probabilities.reshape(-1, probabilities.shape[-1]).to(torch.bfloat16)
+                    output = quant_ops.ck.mxfp8_weighted_embedding(
+                        resident._qdata, resident._params.scale, flat)
+                    return output.reshape(*probabilities.shape[:-1], resident.shape[1])
+                finally:
+                    uncast_bias_weight(self, resident, bias, offload_stream)
 
             def forward_comfy_cast_weights(self, input, out_dtype=None):
                 weight = self.weight
