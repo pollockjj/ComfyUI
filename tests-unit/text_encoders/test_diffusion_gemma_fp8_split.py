@@ -82,19 +82,25 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
     def test_dense_mxfp8_fuses_activation_quantization(self):
         x = torch.zeros((1, 32, 32), dtype=torch.bfloat16)
         gate, up = torch.ones_like(x), torch.full_like(x, 2)
+        paired_output = torch.stack((gate, up))
         qdata = torch.empty((32, 32), dtype=torch.float8_e4m3fn)
         scales = torch.empty((128, 4), dtype=torch.float8_e8m0fnu)
-        mlp = types.SimpleNamespace(gate_proj=object(), up_proj=object(), down_proj=object())
-        linear = mock.Mock(side_effect=[gate, up, "output"])
+        gate_proj = self._mxfp8_bank((32, 32), (128, 4), device="cpu")
+        up_proj = self._mxfp8_bank((32, 32), (128, 4), device="cpu")
+        mlp = types.SimpleNamespace(gate_proj=gate_proj, up_proj=up_proj, down_proj=object())
+        linear = mock.Mock(return_value="output")
         with (
-            mock.patch("comfy.text_encoders.diffusion_gemma._shared_mxfp8_input", return_value=object()),
+            mock.patch("comfy.text_encoders.diffusion_gemma._shared_mxfp8_input", return_value=gate_proj.weight),
             mock.patch("comfy.text_encoders.diffusion_gemma._linear_from_shared_input", linear),
             mock.patch("comfy.text_encoders.diffusion_gemma._native_mxfp8_linear", return_value=True),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "paired_scaled_mm_mxfp8", return_value=paired_output) as paired,
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "gelu_tanh_multiply_quantize_mxfp8", return_value=(qdata, scales)) as fused,
         ):
             self.assertEqual(DiffusionGemmaMLP.forward(mlp, x), "output")
+        paired.assert_called_once()
         self.assertEqual((fused.call_count, fused.call_args.kwargs), (1, {"pad_32x": False}))
-        self.assertIsInstance(linear.call_args_list[2].args[1], QuantizedTensor)
+        self.assertEqual(linear.call_count, 1)
+        self.assertIsInstance(linear.call_args.args[1], QuantizedTensor)
 
     def test_decoder_graph_requires_resident_weights_and_static_vram(self):
         generate = DiffusionGenerate()
