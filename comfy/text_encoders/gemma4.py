@@ -47,10 +47,43 @@ class StaticLayerKV:
     def append(self, xk, xv):
         # single-token in-place write; graph-safe (static addresses, tensor index,
         # no python-side state — cum_len advances in the generate loop)
-        self.k.index_copy_(2, self.idx, xk)
-        self.v.index_copy_(2, self.idx, xv)
-        self.mask.index_fill_(3, self.idx, 0.0)
-        self.idx.add_(1).remainder_(self.slots)
+        n = xk.shape[2]
+        if n == 1:
+            self.k.index_copy_(2, self.idx, xk)
+            self.v.index_copy_(2, self.idx, xv)
+            self.mask.index_fill_(3, self.idx, 0.0)
+            self.idx.add_(1).remainder_(self.slots)
+            self.row_mask = None
+            return
+        # batched write (speculative verify): save the overwritten slots so rejected
+        # drafts can be rolled back (for a wrapped sliding ring the slots held live
+        # old tokens; for an unfilled buffer they were empty — same restore either way),
+        # and build a per-row mask so draft token j cannot attend drafts j+1..n-1.
+        idxs = (self.idx + torch.arange(n, device=xk.device)) % self.slots
+        self._saved = (idxs, self.k[:, :, idxs].clone(), self.v[:, :, idxs].clone(),
+                       self.mask[..., idxs].clone())
+        self.k.index_copy_(2, idxs, xk)
+        self.v.index_copy_(2, idxs, xv)
+        self.mask.index_fill_(3, idxs, 0.0)
+        fmin = torch.finfo(self.mask.dtype).min
+        rm = self.mask.expand(-1, -1, n, -1).clone()
+        for j in range(n - 1):
+            rm[:, :, j, idxs[j + 1:]] = fmin
+        self.row_mask = rm
+        self.idx.add_(n).remainder_(self.slots)
+
+    def rollback(self, r):
+        # erase the r newest appended slots by restoring what the batched append
+        # overwrote, and rewind the write cursor
+        self.row_mask = None
+        if r <= 0:
+            return
+        idxs, sk, sv, sm = self._saved
+        tail = idxs[-r:]
+        self.k[:, :, tail] = sk[:, :, -r:]
+        self.v[:, :, tail] = sv[:, :, -r:]
+        self.mask[..., tail] = sm[..., -r:]
+        self.idx.add_(-r).remainder_(self.slots)
 
     def reset(self, past):
         # refill in place from a fresh prefill tuple so persistent buffers (and the
@@ -207,7 +240,10 @@ class Gemma4Attention(nn.Module):
             bucket = min(getattr(past_key_value, "bucket", past_key_value.slots), past_key_value.slots)
             xk = past_key_value.k[:, :, :bucket]
             xv = past_key_value.v[:, :, :bucket]
-            static_mask = past_key_value.mask[..., :bucket]
+            if seq_length > 1 and getattr(past_key_value, "row_mask", None) is not None:
+                static_mask = past_key_value.row_mask[..., :bucket]
+            else:
+                static_mask = past_key_value.mask[..., :bucket]
             present_key_value = past_key_value
             shareable_kv = (xk, xv, static_mask)
         else:
@@ -300,8 +336,9 @@ class TransformerBlockGemma4(nn.Module):
                 sw_mask = torch.zeros(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device)
                 sw_mask.masked_fill_(torch.ones_like(sw_mask, dtype=torch.bool).tril_(-self.sliding_attention), torch.finfo(x.dtype).min)
                 attention_mask = attention_mask + sw_mask if attention_mask is not None else sw_mask
-            elif x.shape[1] > 1 and attention_mask is not None and (
-                    (past_key_value is not None and len(past_key_value) == 3) or shared_kv is not None):
+            elif x.shape[1] > 1 and attention_mask is not None and not isinstance(past_key_value, StaticLayerKV) and (
+                    (past_key_value is not None and not isinstance(past_key_value, StaticLayerKV) and len(past_key_value) == 3)
+                    or (shared_kv is not None and len(shared_kv) == 2)):
                 # Multi-token decode over a window-truncated cache (speculative verify):
                 # the shared causal mask is sized past_len+seq, but this layer's KV is
                 # cache_len+seq (kv-shared layers read the source layer's full xk, which
@@ -556,9 +593,16 @@ class Gemma4MTPDrafter:
             q = qf.reshape(1, 1, nqh, hd)
             q = self._rms(q, w[p + "self_attn.q_norm.weight"]).transpose(1, 2)
             q = _apply_rotary_pos_emb(q, fr_glob if is_glob else fr_slide)
-            k, v = past[self.src_global if is_glob else self.src_sliding][:2]
-            attn = optimized_attention_for_device(q.device, mask=False, small_input=True)(
-                q, k.to(cur.dtype), v.to(cur.dtype), nqh, mask=None, skip_reshape=True, scale=1.0, enable_gqa=True)
+            src = past[self.src_global if is_glob else self.src_sliding]
+            if isinstance(src, StaticLayerKV):
+                bucket = min(getattr(src, "bucket", src.slots), src.slots)
+                k, v = src.k[:, :, :bucket], src.v[:, :, :bucket]
+                mask = src.mask[..., :bucket]
+            else:
+                k, v = src[:2]
+                mask = None
+            attn = optimized_attention_for_device(q.device, mask=mask is not None, small_input=True)(
+                q, k.to(cur.dtype), v.to(cur.dtype), nqh, mask=mask, skip_reshape=True, scale=1.0, enable_gqa=True)
             o = torch.nn.functional.linear(attn, w[p + "self_attn.o_proj.weight"])
             o = self._rms(o, w[p + "post_attention_layernorm.weight"])
             attn_out = inp + o
