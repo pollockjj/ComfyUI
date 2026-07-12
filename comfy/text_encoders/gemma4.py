@@ -300,6 +300,26 @@ class TransformerBlockGemma4(nn.Module):
                 sw_mask = torch.zeros(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device)
                 sw_mask.masked_fill_(torch.ones_like(sw_mask, dtype=torch.bool).tril_(-self.sliding_attention), torch.finfo(x.dtype).min)
                 attention_mask = attention_mask + sw_mask if attention_mask is not None else sw_mask
+            elif x.shape[1] > 1 and attention_mask is not None and (
+                    (past_key_value is not None and len(past_key_value) == 3) or shared_kv is not None):
+                # Multi-token decode over a window-truncated cache (speculative verify):
+                # the shared causal mask is sized past_len+seq, but this layer's KV is
+                # cache_len+seq (kv-shared layers read the source layer's full xk, which
+                # already includes the seq new positions). Slice to the layer's width and
+                # re-impose the window across the cache (the cache holds the last
+                # cache_len positions, so query row j sits at kv index cache_len+j).
+                q_len = x.shape[1]
+                if past_key_value is not None and len(past_key_value) == 3:
+                    kv_len = past_key_value[0].shape[2] + q_len
+                else:
+                    kv_len = shared_kv[0].shape[2]
+                if attention_mask.shape[-1] != kv_len:
+                    attention_mask = attention_mask[..., -kv_len:]
+                qpos = torch.arange(kv_len - q_len, kv_len, device=x.device).unsqueeze(1)
+                kpos = torch.arange(kv_len, device=x.device).unsqueeze(0)
+                sw_mask = torch.zeros(q_len, kv_len, dtype=x.dtype, device=x.device)
+                sw_mask.masked_fill_(qpos - kpos >= self.sliding_attention, torch.finfo(x.dtype).min)
+                attention_mask = attention_mask + sw_mask
             freqs_cis = freqs_cis[1]
         else:
             freqs_cis = freqs_cis[0]
