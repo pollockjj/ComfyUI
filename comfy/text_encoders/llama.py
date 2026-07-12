@@ -1445,7 +1445,10 @@ class BaseGenerate:
                 kv.bucket = nb0
             dts, pk, acc, last_tok, h_last, pos_t = [t.clone() for t in runner["cycle"](last_tok, h_last, pos_t)]
             records.append((dts, pk, acc))
-            runner["compiled"] = torch.compile(runner["cycle"], mode="reduce-overhead", dynamic=False)
+            _mode = os.environ.get("COMFY_MTP_COMPILE_MODE", "reduce-overhead")
+            if stats:
+                print(f"[MTP-CAP] compile mode={_mode} stream={torch.cuda.current_stream(device)}")
+            runner["compiled"] = torch.compile(runner["cycle"], mode=_mode if _mode != "none" else None, dynamic=False)
             runner["warm"] = True
             p_upper = p + gamma + 1
             cycles = 1
