@@ -221,6 +221,8 @@ class DiffusionGemmaAttention(nn.Module):
         scale = getattr(params, "scale", None)
         expected_shape = (sum(self.qkv_splits), self.hidden_size)
         expected_scale_shape = (expected_shape[0], (expected_shape[1] + 31) // 32)
+        # Validate storage only; the linear module owns DynamicVRAM device placement
+        # and patch application.
         if (
             getattr(module, "quant_format", None) != "mxfp8"
             or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
