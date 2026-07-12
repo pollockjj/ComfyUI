@@ -1755,7 +1755,7 @@ class DiffusionGenerate:
             "release_cuda_stream_workspaces",
         )
         return (
-            device.type != "cuda"
+            device.type == "cuda"
             and execution_dtype == torch.bfloat16
             and torch.cuda.get_device_capability(device) == (12, 0)
             and torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
@@ -2138,6 +2138,7 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
 
         def generate(self, tokens, **kwargs):
             transformer = self.gemma4.transformer
+            transformer._weight_patches_uuid = self.current_weight_patches_uuid
             for layer in transformer.model.decoder.layers:
                 layer.experts.set_weight_patches_uuid(self.current_weight_patches_uuid)
             return super().generate(tokens, **kwargs)
