@@ -100,6 +100,29 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
     return output
 
 
+def _paired_mxfp8_linear(first, second, quantized_input, original_shape):
+    paired_mm = getattr(comfy.quant_ops.ck, "paired_scaled_mm_mxfp8", None)
+    if paired_mm is None or first.bias is not None or second.bias is not None:
+        return None
+    first_weight = first.weight
+    second_weight = second.weight
+    output = paired_mm(
+        quantized_input._qdata,
+        first_weight._qdata,
+        second_weight._qdata,
+        quantized_input._params.scale,
+        first_weight._params.scale,
+        second_weight._params.scale,
+        out_dtype=quantized_input._params.orig_dtype,
+    )
+    rows = quantized_input._params.orig_shape[0]
+    columns = first_weight._params.orig_shape[0]
+    output = output[:, :rows, :columns]
+    if len(original_shape) >= 3:
+        output = output.reshape(2, *original_shape[:-1], columns)
+    return output[0], output[1]
+
+
 _MXFP8_SELF_CONDITIONING_CHUNK = 262144
 
 
@@ -140,8 +163,13 @@ class DiffusionGemmaMLP(MLP):
         quantized_input = _shared_mxfp8_input(x, (self.gate_proj, self.up_proj))
         if quantized_input is None:
             return super().forward(x)
-        gate = _linear_from_shared_input(self.gate_proj, quantized_input, x.shape)
-        up = _linear_from_shared_input(self.up_proj, quantized_input, x.shape)
+        paired = _paired_mxfp8_linear(
+            self.gate_proj, self.up_proj, quantized_input, x.shape)
+        if paired is None:
+            gate = _linear_from_shared_input(self.gate_proj, quantized_input, x.shape)
+            up = _linear_from_shared_input(self.up_proj, quantized_input, x.shape)
+        else:
+            gate, up = paired
         fused_quantize = getattr(
             comfy.quant_ops.ck, "gelu_tanh_multiply_quantize_mxfp8", None)
         if fused_quantize is None or not _native_mxfp8_linear(self.down_proj, gate):
