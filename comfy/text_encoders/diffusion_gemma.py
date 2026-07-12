@@ -221,33 +221,24 @@ class DiffusionGemmaAttention(nn.Module):
         scale = getattr(params, "scale", None)
         expected_shape = (sum(self.qkv_splits), self.hidden_size)
         expected_scale_shape = (expected_shape[0], (expected_shape[1] + 31) // 32)
-        patched = (
-            any(getattr(module, name, None) for name in ("weight_function", "bias_function"))
-            or getattr(module, "weight_lowvram_function", None) is not None
-            or getattr(module, "bias_lowvram_function", None) is not None
-        )
         if (
             getattr(module, "quant_format", None) != "mxfp8"
             or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
             or not isinstance(weight, QuantizedTensor)
             or getattr(weight, "_layout_cls", None) != "TensorCoreMXFP8Layout"
-            or weight.device != hidden_states.device
             or not isinstance(qdata, torch.Tensor)
             or qdata.dtype != torch.float8_e4m3fn
-            or qdata.device != hidden_states.device
             or tuple(qdata.shape) != expected_shape
             or tuple(getattr(params, "orig_shape", ())) != expected_shape
             or not isinstance(scale, torch.Tensor)
             or scale.dtype != torch.float8_e8m0fnu
-            or scale.device != hidden_states.device
             or tuple(scale.shape) != expected_scale_shape
             or getattr(module, "bias", None) is not None
             or getattr(module, "_full_precision_mm", False)
             or getattr(module, "comfy_force_cast_weights", False)
-            or patched
         ):
             raise RuntimeError(
-                f"DiffusionGemma fused QKV requires an unpatched MXFP8 "
+                f"DiffusionGemma fused QKV requires an MXFP8 "
                 f"TensorCoreMXFP8Layout weight with shape {expected_shape}"
             )
 

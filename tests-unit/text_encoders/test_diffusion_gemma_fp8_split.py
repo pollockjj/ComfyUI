@@ -231,7 +231,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires all 30 layer markers"):
             diffusion_gemma_detect((sd,))
 
-    def test_fused_global_qkv_projects_once_and_rejects_patches(self):
+    def test_fused_global_qkv_projects_once_with_dynamic_weights(self):
         linear = mock.Mock(side_effect=lambda *args, **kwargs: torch.nn.Module())
         attention = DiffusionGemmaAttention(
             DiffusionGemmaConfig(fused_qkv=True), head_dim=512, num_kv_heads=2,
@@ -256,9 +256,10 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertIs(k, v)
         self.assertEqual((q.shape[-1], k.shape[-1]), (8192, 1024))
         self.assertEqual(q.untyped_storage().data_ptr(), projection.untyped_storage().data_ptr())
+        module.weight_lowvram_function = object()
         module.weight_function = [lambda weight: weight]
-        with self.assertRaisesRegex(RuntimeError, "requires an unpatched MXFP8"):
-            attention._project_fused_qkv(hidden_states)
+        attention._project_fused_qkv(hidden_states)
+        self.assertEqual(module.forward.call_count, 2)
 
     @staticmethod
     def _mxfp8_bank(qdata_shape, scale_shape, quant_format="mxfp8", device="meta"):
