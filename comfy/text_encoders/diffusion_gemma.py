@@ -319,7 +319,7 @@ class DiffusionGemmaRouter(nn.Module):
         self.scale = nn.Parameter(torch.empty(config.hidden_size, device=device, dtype=dtype))
         self.per_expert_scale = nn.Parameter(torch.empty(config.num_experts, device=device, dtype=dtype))
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, apply_expert_scale=True):
         hidden_states = rms_norm(hidden_states)
         scale = comfy.ops.cast_to_input(self.scale, hidden_states, copy=False)
         hidden_states = hidden_states * scale * self.scalar_root_size
@@ -328,8 +328,9 @@ class DiffusionGemmaRouter(nn.Module):
         router_probabilities = torch.nn.functional.softmax(expert_scores, dim=-1, dtype=torch.float32)
         top_k_weights, top_k_index = torch.topk(router_probabilities, k=self.top_k, dim=-1)
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
-        per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
-        top_k_weights = top_k_weights * per_expert_scale[top_k_index]
+        if apply_expert_scale:
+            per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
+            top_k_weights = top_k_weights * per_expert_scale[top_k_index]
         return top_k_weights, top_k_index
 
 
@@ -592,7 +593,16 @@ class DiffusionGemmaExperts(nn.Module):
             and hidden_states.is_contiguous()
         )
 
-    def forward(self, hidden_states, top_k_index, top_k_weights):
+    def _supports_native_fused_mxfp8_scaled(self, hidden_states):
+        return (
+            self._bank_mode == "fused_mxfp8"
+            and self._fused_mxfp8_banks_compatible
+            and callable(getattr(comfy.quant_ops.ck, "fused_moe_mxfp8_scaled", None))
+            and hidden_states.dtype == torch.bfloat16
+            and self._supports_native_fused_mxfp8(hidden_states)
+        )
+
+    def forward(self, hidden_states, top_k_index, top_k_weights, expert_scale=None):
         if self._bank_mode is None:
             raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
         if self._bank_mode == "fused_nvfp4":
@@ -613,9 +623,13 @@ class DiffusionGemmaExperts(nn.Module):
                 raise RuntimeError("DiffusionGemma fused MXFP8 does not support patched expert banks")
             if self._supports_native_fused_mxfp8(hidden_states):
                 try:
-                    return self._forward_native_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
+                    return self._forward_native_fused_mxfp8(
+                        hidden_states, top_k_index, top_k_weights, expert_scale=expert_scale
+                    )
                 except comfy.quant_ops.ck.NoCapableBackendError:
                     pass
+            if expert_scale is not None:
+                top_k_weights = top_k_weights * expert_scale[top_k_index]
             if not self._supports_sm120_nvfp4(hidden_states):
                 raise RuntimeError("DiffusionGemma fused MXFP8 v1 requires the SM120 grouped kernel")
             return self._forward_grouped_fused_mxfp8(hidden_states, top_k_index, top_k_weights)
@@ -746,7 +760,9 @@ class DiffusionGemmaExperts(nn.Module):
                 alphas[1],
             )
 
-    def _forward_native_fused_mxfp8(self, hidden_states, top_k_index, top_k_weights):
+    def _forward_native_fused_mxfp8(
+        self, hidden_states, top_k_index, top_k_weights, expert_scale=None
+    ):
         ck = comfy.quant_ops.ck
         num_tokens = hidden_states.shape[0]
         if (
@@ -789,6 +805,24 @@ class DiffusionGemmaExperts(nn.Module):
                 or tuple(down._params.scale.shape) != (128, 2816, 24)
             ):
                 raise RuntimeError("DiffusionGemma native fused MXFP8 bank shape mismatch")
+            if expert_scale is not None:
+                if (
+                    expert_scale.dtype != torch.bfloat16
+                    or expert_scale.shape != (128,)
+                    or expert_scale.device != hidden_states.device
+                    or not expert_scale.is_contiguous()
+                ):
+                    raise RuntimeError("DiffusionGemma native MXFP8 expert scale must be contiguous BF16 [128]")
+                return ck.fused_moe_mxfp8_scaled(
+                    hidden_states,
+                    top_k_index,
+                    top_k_weights,
+                    expert_scale,
+                    gate_up._qdata,
+                    gate_up._params.scale,
+                    down._qdata,
+                    down._params.scale,
+                )
             return ck.fused_moe_mxfp8(
                 hidden_states,
                 top_k_index,
@@ -1140,8 +1174,18 @@ class DiffusionGemmaBlock(nn.Module):
         hidden_states_1 = self.post_feedforward_layernorm_1(h)
 
         flat = residual.reshape(-1, residual.shape[-1])
-        top_k_weights, top_k_index = self.router(flat)
-        hidden_states_2 = self.experts(self.pre_feedforward_layernorm_2(flat), top_k_index, top_k_weights)
+        defer_expert_scale = self.experts._supports_native_fused_mxfp8_scaled(flat)
+        top_k_weights, top_k_index = self.router(flat, apply_expert_scale=not defer_expert_scale)
+        expert_scale = (
+            comfy.ops.cast_to_input(self.router.per_expert_scale, flat, copy=False)
+            if defer_expert_scale else None
+        )
+        hidden_states_2 = self.experts(
+            self.pre_feedforward_layernorm_2(flat),
+            top_k_index,
+            top_k_weights,
+            expert_scale=expert_scale,
+        )
         hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2.reshape(residual.shape))
 
         x = self.post_feedforward_layernorm(hidden_states_1 + hidden_states_2)
