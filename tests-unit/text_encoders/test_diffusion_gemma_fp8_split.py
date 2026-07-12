@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import json
 import os
 import sys
@@ -23,7 +24,8 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaExperts,
     DiffusionGemmaMLP,
     _ConditionedDecoderGraph,
-    _ConditionedDecoderGraphCache,
+    _ConditionedDecoderGraphExecution,
+    _DecoderAIMDOSnapshot,
     _append_preallocated_kv,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
@@ -109,48 +111,75 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual((fused.call_count, fused.call_args.kwargs), (1, {"pad_32x": False}))
         self.assertIsInstance(linear.call_args_list[2].args[1], QuantizedTensor)
 
-    def test_decoder_graph_requires_resident_weights_and_static_vram(self):
-        generate = DiffusionGenerate()
-        resident = types.SimpleNamespace(
-            parameters=lambda: [types.SimpleNamespace(device=torch.device("cuda:0"))],
-            modules=lambda: [],
+    def test_aimdo_snapshot_rejects_missing_page_before_fault(self):
+        residency = [1]
+        vbar = types.SimpleNamespace(
+            base_addr=4096,
+            get_watermark=lambda: 1,
+            get_residency=lambda: residency,
+            loaded_size=lambda: 32 * 1024 * 1024,
         )
-        generate.model = types.SimpleNamespace(decoder=resident)
+        module = torch.nn.Linear(1, 1, bias=False)
+        signature = (ctypes.c_uint32 * 1)(7)
+        module._v = (vbar, 4096, 1024)
+        module._v_signature = signature
+        module._v_weight = torch.ones(1)
+        module._v_bias = None
+        owner = types.SimpleNamespace(
+            _weight_patches_uuid="patch",
+            model=types.SimpleNamespace(decoder=types.SimpleNamespace(modules=lambda: [module])),
+        )
+        current_signature = (ctypes.c_uint32 * 1)(7)
 
         with (
-            mock.patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
-            mock.patch.object(torch.cuda.memory, "get_allocator_backend", return_value="native"),
-            mock.patch.object(args, "disable_dynamic_vram", True),
-            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "reserve_cuda_stream_workspaces", create=True),
-            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "release_cuda_stream_workspaces", create=True),
+            mock.patch("comfy_aimdo.model_vbar.vbar_fault", return_value=current_signature) as fault,
+            mock.patch("comfy_aimdo.model_vbar.vbar_unpin") as unpin,
         ):
-            self.assertTrue(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
-            resident.parameters = lambda: [types.SimpleNamespace(device=torch.device("cpu"))]
-            self.assertFalse(generate._use_conditioned_decoder_graph(torch.device("cuda:0"), torch.bfloat16))
+            snapshot = _DecoderAIMDOSnapshot.capture(owner)
+            self.assertIsNotNone(snapshot)
+            residency[0] = 0
+            self.assertFalse(snapshot.valid(owner))
+            residency[0] = 1
+            module._v_signature = (ctypes.c_uint32 * 1)(7)
+            self.assertFalse(snapshot.valid(owner))
 
-    def test_conditioned_decoder_graph_defers_first_replay(self):
+        fault.assert_called_once_with(module._v)
+        unpin.assert_called_once_with(module._v)
+
+    def test_kitchen_graph_replays_then_retires_on_invalid_snapshot(self):
         static_canvas = torch.empty((1, 4), dtype=torch.long)
         static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)
         output = torch.empty((1, 4, 2), dtype=torch.bfloat16)
         owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
+        execution = types.SimpleNamespace(
+            stream=mock.Mock(), static_canvas=static_canvas, static_logits=static_logits)
         stream = mock.Mock()
         current_stream = mock.Mock()
-        graph = mock.Mock()
+        graph_exec = mock.Mock()
+        snapshot = mock.Mock()
+        snapshot.valid.side_effect = [True, True, False]
+        canvas = torch.ones_like(static_canvas)
+        logits = torch.ones_like(static_logits)
+        position_ids = torch.arange(4).unsqueeze(0)
+        freqs = (torch.ones(1), torch.zeros(1))
 
         with (
-            mock.patch.object(torch.cuda, "CUDAGraph", return_value=graph),
-            mock.patch.object(torch.cuda, "graph", return_value=contextlib.nullcontext()),
+            mock.patch("comfy.text_encoders.diffusion_gemma._DecoderAIMDOSnapshot.capture", return_value=snapshot),
             mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
             mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "begin_cuda_graph_capture", create=True),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "end_cuda_graph_capture", create=True, return_value=graph_exec),
         ):
-            decoder_graph = _ConditionedDecoderGraph(
-                owner, static_canvas, static_logits, [], None, None, torch.bfloat16, stream)
-            graph.replay.assert_not_called()
-            self.assertIs(decoder_graph.replay(torch.ones_like(static_canvas), torch.ones_like(static_logits)), output)
+            decoder_graph = _ConditionedDecoderGraph.capture(
+                owner, execution, canvas, logits, [], position_ids, freqs, torch.bfloat16)
+            graph_exec.replay.assert_not_called()
+            self.assertIs(decoder_graph.replay(canvas, logits, [], position_ids, freqs), output)
+            self.assertIsNone(decoder_graph.replay(canvas, logits, [], position_ids, freqs))
 
-        graph.replay.assert_called_once_with()
-        self.assertTrue(torch.equal(static_canvas, torch.ones_like(static_canvas)))
-        self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
+        graph_exec.replay.assert_called_once_with(execution.stream)
+        graph_exec.reset.assert_called_once_with()
+        self.assertTrue(torch.equal(static_canvas, canvas))
+        self.assertTrue(torch.equal(static_logits, logits))
         current_stream.wait_stream.assert_called_once_with(stream)
 
     def test_preallocated_kv_uses_capacity_prefix_without_reallocation(self):
@@ -183,45 +212,38 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertTrue(torch.equal(reserved[0][0, 0, :4, 0], torch.arange(4.0, 8.0)))
         self.assertTrue(torch.equal(reserved[1][0, 0, :4, 0], torch.arange(14.0, 18.0)))
 
-    def test_graph_cache_releases_workspace_and_graphs(self):
+    def test_graph_capture_abort_releases_execution_scope(self):
         stream = mock.Mock()
-        graph = mock.Mock()
+        snapshot = mock.Mock()
+        owner = types.SimpleNamespace(model=mock.Mock(side_effect=RuntimeError("sentinel")))
         ck = sys.modules["comfy.quant_ops"].ck
         with (
             mock.patch.object(torch.cuda, "Stream", return_value=stream),
-            mock.patch.object(torch.cuda, "device", return_value=contextlib.nullcontext()),
-            mock.patch.object(torch.cuda, "graph_pool_handle", return_value="pool"),
+            mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "current_stream", return_value=mock.Mock()),
+            mock.patch("comfy.text_encoders.diffusion_gemma._DecoderAIMDOSnapshot.capture", return_value=snapshot),
             mock.patch.object(ck, "reserve_cuda_stream_workspaces", create=True) as reserve,
             mock.patch.object(ck, "release_cuda_stream_workspaces", create=True) as release,
+            mock.patch.object(ck, "begin_cuda_graph_capture", create=True) as begin,
+            mock.patch.object(ck, "end_cuda_graph_capture", create=True) as end,
+            mock.patch.object(ck, "abort_cuda_graph_capture", create=True) as abort,
         ):
-            cache = _ConditionedDecoderGraphCache("key", torch.device("cpu"), 1, 4, 8, torch.bfloat16)
-            cache.graphs["geometry"] = graph
-            cache.close()
+            reserve.return_value = True
+            release.return_value = True
+            execution = _ConditionedDecoderGraphExecution(
+                torch.device("cpu"), 1, 4, 8, torch.bfloat16)
+            with self.assertRaisesRegex(RuntimeError, "sentinel"):
+                execution.capture(
+                    owner, torch.ones(1, 4, dtype=torch.long),
+                    torch.ones(1, 4, 8, dtype=torch.bfloat16), [],
+                    torch.arange(4).unsqueeze(0), (torch.ones(1), torch.zeros(1)), torch.bfloat16)
+            execution.close()
 
         reserve.assert_called_once_with(stream)
-        graph.close.assert_called_once_with()
+        begin.assert_called_once_with(stream)
+        abort.assert_called_once_with(stream)
+        end.assert_not_called()
         release.assert_called_once_with(stream)
-
-    def test_graph_cache_key_mismatch_closes_stale_cache(self):
-        generate = DiffusionGenerate()
-        parameter = torch.nn.Parameter(torch.ones(1))
-        generate.model = types.SimpleNamespace(
-            decoder=types.SimpleNamespace(parameters=lambda: [parameter], buffers=lambda: []),
-            config=types.SimpleNamespace(canvas_length=4, vocab_size=8),
-        )
-        stale = mock.Mock(key="stale")
-        replacement = mock.Mock()
-        generate._conditioned_decoder_graph_cache = stale
-        embeds = torch.empty((1, 3, 2))
-
-        with mock.patch(
-            "comfy.text_encoders.diffusion_gemma._ConditionedDecoderGraphCache",
-            return_value=replacement,
-        ):
-            self.assertIs(generate._get_decoder_graph_cache(embeds, 2, torch.bfloat16), replacement)
-
-        stale.close.assert_called_once_with()
-        self.assertIs(generate._conditioned_decoder_graph_cache, replacement)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):
         sd = {
