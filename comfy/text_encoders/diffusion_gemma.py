@@ -325,9 +325,8 @@ class DiffusionGemmaRouter(nn.Module):
         hidden_states = hidden_states * scale * self.scalar_root_size
 
         expert_scores = self.proj(hidden_states)
-        router_probabilities = torch.nn.functional.softmax(expert_scores, dim=-1, dtype=torch.float32)
-        top_k_weights, top_k_index = torch.topk(router_probabilities, k=self.top_k, dim=-1)
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        top_k_weights, top_k_index = torch.topk(expert_scores, k=self.top_k, dim=-1)
+        top_k_weights = torch.nn.functional.softmax(top_k_weights, dim=-1, dtype=torch.float32)
         per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
         top_k_weights = top_k_weights * per_expert_scale[top_k_index]
         return top_k_weights, top_k_index
