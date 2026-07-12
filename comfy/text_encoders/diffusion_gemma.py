@@ -1735,6 +1735,9 @@ class DiffusionGenerate:
         use_fused_native_sampling = use_native_sampling and callable(
             getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample", None)
         )
+        use_compact_native_sampling = use_native_sampling and callable(
+            getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample_bf16", None)
+        )
         capture_stream = graph_cache.stream if graph_cache is not None else None
         timing_path = os.environ.get("COMFY_DG_CAPTURE_TIMING_PATH")
         capture_timings_ns = []
@@ -1795,6 +1798,7 @@ class DiffusionGenerate:
                         x = decoder_graph.replay(current_canvas, self_conditioning_logits)
 
                     temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
+                    processed_logits = None
                     next_self_conditioning_logits = None
                     if not use_native_sampling:
                         processed_logits = self.logits(x) / temperature
@@ -1806,7 +1810,22 @@ class DiffusionGenerate:
                         del probs
                     else:
                         raw_logits = self._raw_logits(x)
-                        if use_fused_native_sampling:
+                        if use_compact_native_sampling:
+                            sampling_noise = torch.empty(
+                                raw_logits.shape, dtype=torch.float32, device=raw_logits.device
+                            ).exponential_(generator=generator)
+                            (
+                                next_self_conditioning_logits,
+                                token_entropy,
+                                argmax_canvas,
+                                denoiser_canvas,
+                            ) = comfy.quant_ops.ck.softcap_categorical_stats_sample_bf16(
+                                raw_logits,
+                                sampling_noise,
+                                self.model.config.final_logit_softcapping,
+                                1.0 / temperature,
+                            )
+                        elif use_fused_native_sampling:
                             sampling_noise = torch.empty(
                                 raw_logits.shape, dtype=torch.float32, device=raw_logits.device
                             ).exponential_(generator=generator)
