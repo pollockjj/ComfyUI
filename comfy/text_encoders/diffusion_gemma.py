@@ -1460,6 +1460,7 @@ class _ConditionedDecoderGraphCache:
         self.stream = torch.cuda.Stream(device=device)
         with torch.cuda.device(device):
             self.pool = torch.cuda.graph_pool_handle()
+            self.unconditioned_pool = torch.cuda.graph_pool_handle()
         self.static_canvas = torch.empty((batch, canvas_length), dtype=torch.long, device=device)
         self.static_logits = torch.empty(
             (batch, canvas_length, vocab_size), dtype=execution_dtype, device=device)
@@ -1475,6 +1476,7 @@ class _ConditionedDecoderGraphCache:
         self.kv_backing = None
         self.static_canvas = None
         self.static_logits = None
+        self.unconditioned_pool = None
         self.pool = None
         self.stream = None
 
@@ -1741,7 +1743,7 @@ class DiffusionGenerate:
                                 decoder_freqs_cis,
                                 execution_dtype,
                                 capture_stream,
-                                pool=graph_cache.pool,
+                                pool=graph_cache.unconditioned_pool,
                             )
                             graph_cache.graphs[(graph_geometry, False)] = unconditioned_graph
                             capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
