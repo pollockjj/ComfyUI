@@ -15,6 +15,7 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
+import comfy.model_management  # noqa: E402
 from comfy.ops import mixed_precision_ops  # noqa: E402
 from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
@@ -25,7 +26,6 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaMLP,
     _ConditionedDecoderGraph,
     _ConditionedDecoderGraphExecution,
-    _DecoderAIMDOSnapshot,
     _append_preallocated_kv,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
@@ -112,7 +112,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertIsInstance(linear.call_args_list[2].args[1], QuantizedTensor)
 
     def test_aimdo_snapshot_rejects_missing_page_before_fault(self):
-        residency = [1]
+        residency = [0]
         vbar = types.SimpleNamespace(
             base_addr=4096,
             get_watermark=lambda: 1,
@@ -125,45 +125,91 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         module._v_signature = signature
         module._v_weight = torch.ones(1)
         module._v_bias = None
-        owner = types.SimpleNamespace(
-            _weight_patches_uuid="patch",
-            model=types.SimpleNamespace(decoder=types.SimpleNamespace(modules=lambda: [module])),
-        )
+        root_module = types.SimpleNamespace(modules=lambda: [module])
         current_signature = (ctypes.c_uint32 * 1)(7)
 
+        def fault_resident(allocation):
+            residency[0] = 3
+            return current_signature
+
         with (
-            mock.patch("comfy_aimdo.model_vbar.vbar_fault", return_value=current_signature) as fault,
+            mock.patch("comfy.memory_management.aimdo_enabled", True),
+            mock.patch("comfy_aimdo.model_vbar.vbar_fault", side_effect=fault_resident) as fault,
             mock.patch("comfy_aimdo.model_vbar.vbar_unpin") as unpin,
         ):
-            snapshot = _DecoderAIMDOSnapshot.capture(owner)
-            self.assertIsNotNone(snapshot)
-            residency[0] = 0
-            self.assertFalse(snapshot.valid(owner))
+            self.assertIsNone(comfy.model_management.acquire_dynamic_vram_graph_lease(
+                root_module, "patch"
+            ))
+            fault.assert_not_called()
             residency[0] = 1
+            lease = comfy.model_management.acquire_dynamic_vram_graph_lease(
+                root_module, "patch"
+            )
+            self.assertIsNotNone(lease)
+            residency[0] = 3
+            self.assertTrue(lease.valid("patch"))
+            residency[0] = 0
+            self.assertFalse(lease.valid("patch"))
+            residency[0] = 3
             module._v_signature = (ctypes.c_uint32 * 1)(7)
-            self.assertFalse(snapshot.valid(owner))
+            self.assertFalse(lease.valid("patch"))
+            lease.release()
+            lease.release()
 
         fault.assert_called_once_with(module._v)
         unpin.assert_called_once_with(module._v)
 
-    def test_kitchen_graph_replays_then_retires_on_invalid_snapshot(self):
+    def test_aimdo_lease_unwinds_signature_mismatch(self):
+        vbar = types.SimpleNamespace(
+            base_addr=4096,
+            get_watermark=lambda: 1,
+            get_residency=lambda: [1],
+            loaded_size=lambda: 32 * 1024 * 1024,
+        )
+        module = torch.nn.Linear(1, 1, bias=False)
+        module._v = (vbar, 4096, 1024)
+        module._v_signature = (ctypes.c_uint32 * 1)(7)
+        module._v_weight = torch.ones(1)
+        module._v_bias = None
+        root_module = types.SimpleNamespace(modules=lambda: [module])
+
+        with (
+            mock.patch("comfy.memory_management.aimdo_enabled", True),
+            mock.patch(
+                "comfy_aimdo.model_vbar.vbar_fault",
+                return_value=(ctypes.c_uint32 * 1)(8),
+            ),
+            mock.patch("comfy_aimdo.model_vbar.vbar_unpin") as unpin,
+        ):
+            self.assertIsNone(comfy.model_management.acquire_dynamic_vram_graph_lease(
+                root_module, "patch"
+            ))
+
+        unpin.assert_called_once_with(module._v)
+
+    def test_kitchen_graph_replays_then_retires_on_invalid_lease(self):
         static_canvas = torch.empty((1, 4), dtype=torch.long)
         static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)
         output = torch.empty((1, 4, 2), dtype=torch.bfloat16)
-        owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
+        owner = types.SimpleNamespace(
+            model=mock.Mock(return_value=(output, None, None)), _weight_patches_uuid="patch"
+        )
         execution = types.SimpleNamespace(
             stream=mock.Mock(), static_canvas=static_canvas, static_logits=static_logits)
         current_stream = mock.Mock()
         graph_exec = mock.Mock()
-        snapshot = mock.Mock()
-        snapshot.valid.side_effect = [True, True, False]
+        residency_lease = mock.Mock()
+        residency_lease.valid.side_effect = [True, True, False]
         canvas = torch.ones_like(static_canvas)
         logits = torch.ones_like(static_logits)
         position_ids = torch.arange(4).unsqueeze(0)
         freqs = (torch.ones(1), torch.zeros(1))
 
         with (
-            mock.patch("comfy.text_encoders.diffusion_gemma._DecoderAIMDOSnapshot.capture", return_value=snapshot),
+            mock.patch(
+                "comfy.model_management.acquire_dynamic_vram_graph_lease",
+                return_value=residency_lease,
+            ),
             mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
             mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "begin_cuda_graph_capture", create=True),
@@ -177,6 +223,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         graph_exec.replay.assert_called_once_with(execution.stream)
         graph_exec.reset.assert_called_once_with()
+        residency_lease.release.assert_called_once_with()
         self.assertTrue(torch.equal(static_canvas, canvas))
         self.assertTrue(torch.equal(static_logits, logits))
         current_stream.wait_stream.assert_called_once_with(execution.stream)
@@ -213,14 +260,19 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
     def test_graph_capture_abort_releases_execution_scope(self):
         stream = mock.Mock()
-        snapshot = mock.Mock()
-        owner = types.SimpleNamespace(model=mock.Mock(side_effect=RuntimeError("sentinel")))
+        residency_lease = mock.Mock()
+        owner = types.SimpleNamespace(
+            model=mock.Mock(side_effect=RuntimeError("sentinel")), _weight_patches_uuid="patch"
+        )
         ck = sys.modules["comfy.quant_ops"].ck
         with (
             mock.patch.object(torch.cuda, "Stream", return_value=stream),
             mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
             mock.patch.object(torch.cuda, "current_stream", return_value=mock.Mock()),
-            mock.patch("comfy.text_encoders.diffusion_gemma._DecoderAIMDOSnapshot.capture", return_value=snapshot),
+            mock.patch(
+                "comfy.model_management.acquire_dynamic_vram_graph_lease",
+                return_value=residency_lease,
+            ),
             mock.patch.object(ck, "reserve_cuda_stream_workspaces", create=True) as reserve,
             mock.patch.object(ck, "release_cuda_stream_workspaces", create=True) as release,
             mock.patch.object(ck, "begin_cuda_graph_capture", create=True) as begin,
@@ -242,6 +294,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         begin.assert_called_once_with(stream)
         abort.assert_called_once_with(stream)
         end.assert_not_called()
+        residency_lease.release.assert_called_once_with()
         release.assert_called_once_with(stream)
 
     def test_split_expert_state_dict_detects_unfused_runtime(self):

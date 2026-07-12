@@ -12,7 +12,6 @@ import comfy.quant_ops
 import comfy.utils
 import comfy.model_management
 import comfy.memory_management
-import comfy_aimdo.model_vbar
 from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
@@ -1430,19 +1429,9 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
     return accepted_canvas, accepted_token_mask, token_entropy
 
 
-_VBAR_PAGE_SIZE = 32 * 1024 * 1024
-
-
 def _graph_tensor_fingerprint(tensor):
     if tensor is None:
         return None
-    if isinstance(tensor, QuantizedTensor):
-        inner_tensors, context = tensor.__tensor_flatten__()
-        return (
-            type(tensor),
-            repr(context),
-            tuple((name, _graph_tensor_fingerprint(getattr(tensor, name))) for name in inner_tensors),
-        )
     version = None if tensor.is_inference() else tensor._version
     return (
         tensor.data_ptr(), tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()),
@@ -1458,124 +1447,9 @@ def _graph_value_fingerprint(value):
     return value
 
 
-class _DecoderAIMDOSnapshot:
-    def __init__(self, owner, modules, other_tensors, vbar_pages):
-        self.patch_uuid = owner._weight_patches_uuid
-        self.modules = modules
-        self.other_tensors = other_tensors
-        self.vbar_pages = vbar_pages
-
-    @staticmethod
-    def _resident(vbar_pages):
-        for vbar, pages in vbar_pages:
-            watermark = vbar.get_watermark()
-            residency = vbar.get_residency()
-            if any(page >= watermark or page >= len(residency) or residency[page] != 1 for page in pages):
-                return False
-        return True
-
-    @classmethod
-    def capture(cls, owner):
-        modules = []
-        other_tensors = []
-        page_sets = {}
-        loaded_sizes = {}
-
-        for module in owner.model.decoder.modules():
-            allocation = getattr(module, "_v", None)
-            if (
-                hasattr(module, "_prefetch")
-                or getattr(module, "weight_function", None)
-                or getattr(module, "bias_function", None)
-                or getattr(module, "weight_lowvram_function", None) is not None
-                or getattr(module, "bias_lowvram_function", None) is not None
-            ):
-                return None
-
-            if allocation is not None:
-                vbar, address, size = allocation
-                signature = getattr(module, "_v_signature", None)
-                resident_weight = getattr(module, "_v_weight", None)
-                if signature is None or resident_weight is None:
-                    return None
-                start = (address - vbar.base_addr) // _VBAR_PAGE_SIZE
-                end = (address + size - vbar.base_addr + _VBAR_PAGE_SIZE - 1) // _VBAR_PAGE_SIZE
-                if start < 0 or end <= start:
-                    return None
-                key = id(vbar)
-                if key not in page_sets:
-                    page_sets[key] = (vbar, set())
-                    loaded_sizes[key] = vbar.loaded_size()
-                page_sets[key][1].update(range(start, end))
-                modules.append((
-                    module, vbar, address, size, signature, resident_weight,
-                    getattr(module, "_v_bias", None),
-                    _graph_tensor_fingerprint(getattr(module, "weight", None)),
-                    _graph_tensor_fingerprint(getattr(module, "bias", None)),
-                    _graph_tensor_fingerprint(resident_weight),
-                    _graph_tensor_fingerprint(getattr(module, "_v_bias", None)),
-                ))
-
-            for name, tensor in tuple(module.named_parameters(recurse=False)) + tuple(module.named_buffers(recurse=False)):
-                if allocation is not None and name in ("weight", "bias"):
-                    continue
-                other_tensors.append((module, name, tensor, _graph_tensor_fingerprint(tensor)))
-
-        if not modules:
-            return None
-        vbar_pages = tuple((vbar, tuple(sorted(pages))) for vbar, pages in page_sets.values())
-        if not cls._resident(vbar_pages):
-            return None
-
-        for module, _, _, _, signature, _, _, *_ in modules:
-            current_signature = comfy_aimdo.model_vbar.vbar_fault(module._v)
-            if current_signature is None:
-                return None
-            try:
-                if not comfy_aimdo.model_vbar.vbar_signature_compare(current_signature, signature):
-                    return None
-            finally:
-                comfy_aimdo.model_vbar.vbar_unpin(module._v)
-
-        if (
-            not cls._resident(vbar_pages)
-            or any(vbar.loaded_size() != loaded_sizes[id(vbar)] for vbar, _ in vbar_pages)
-        ):
-            return None
-        return cls(owner, tuple(modules), tuple(other_tensors), vbar_pages)
-
-    def valid(self, owner, full=False):
-        if owner._weight_patches_uuid != self.patch_uuid or not self._resident(self.vbar_pages):
-            return False
-        for module, vbar, address, size, signature, resident_weight, resident_bias, *fingerprints in self.modules:
-            allocation = getattr(module, "_v", None)
-            if (
-                allocation is None
-                or allocation[0] is not vbar
-                or allocation[1:] != (address, size)
-                or getattr(module, "_v_signature", None) is not signature
-                or getattr(module, "_v_weight", None) is not resident_weight
-                or getattr(module, "_v_bias", None) is not resident_bias
-                or hasattr(module, "_prefetch")
-            ):
-                return False
-            if full and fingerprints != [
-                _graph_tensor_fingerprint(getattr(module, "weight", None)),
-                _graph_tensor_fingerprint(getattr(module, "bias", None)),
-                _graph_tensor_fingerprint(resident_weight),
-                _graph_tensor_fingerprint(resident_bias),
-            ]:
-                return False
-        if full:
-            for module, name, tensor, fingerprint in self.other_tensors:
-                if getattr(module, name, None) is not tensor or _graph_tensor_fingerprint(tensor) != fingerprint:
-                    return False
-        return True
-
-
 class _ConditionedDecoderGraph:
     def __init__(self, owner, execution, current_canvas, self_conditioning_logits, past_key_values,
-                 position_ids, freqs_cis, execution_dtype, snapshot):
+                 position_ids, freqs_cis, execution_dtype, residency_lease):
         self.owner = owner
         self.stream = execution.stream
         self.current_canvas = execution.static_canvas
@@ -1584,7 +1458,7 @@ class _ConditionedDecoderGraph:
         self.position_ids = position_ids
         self.freqs_cis = freqs_cis
         self.execution_dtype = execution_dtype
-        self.snapshot = snapshot
+        self.residency_lease = residency_lease
         self.geometry = self._geometry(past_key_values, position_ids, freqs_cis)
         self.graph = None
         self.output = None
@@ -1625,14 +1499,20 @@ class _ConditionedDecoderGraph:
     @classmethod
     def capture(cls, owner, execution, current_canvas, self_conditioning_logits, past_key_values,
                 position_ids, freqs_cis, execution_dtype):
-        snapshot = _DecoderAIMDOSnapshot.capture(owner)
-        if snapshot is None:
-            return None
-        graph = cls(
-            owner, execution, current_canvas, self_conditioning_logits, past_key_values,
-            position_ids, freqs_cis, execution_dtype, snapshot,
+        residency_lease = comfy.model_management.acquire_dynamic_vram_graph_lease(
+            owner.model.decoder, owner._weight_patches_uuid
         )
-        if not snapshot.valid(owner, full=True) or graph.geometry != graph._geometry(
+        if residency_lease is None:
+            return None
+        try:
+            graph = cls(
+                owner, execution, current_canvas, self_conditioning_logits, past_key_values,
+                position_ids, freqs_cis, execution_dtype, residency_lease,
+            )
+        except BaseException:
+            residency_lease.release()
+            raise
+        if not residency_lease.valid(owner._weight_patches_uuid, full=True) or graph.geometry != graph._geometry(
             past_key_values, position_ids, freqs_cis
         ):
             graph.close()
@@ -1641,7 +1521,7 @@ class _ConditionedDecoderGraph:
 
     def replay(self, current_canvas, self_conditioning_logits, past_key_values, position_ids, freqs_cis):
         if (
-            not self.snapshot.valid(self.owner)
+            not self.residency_lease.valid(self.owner._weight_patches_uuid)
             or self.geometry != self._geometry(past_key_values, position_ids, freqs_cis)
         ):
             self.close()
@@ -1655,19 +1535,22 @@ class _ConditionedDecoderGraph:
         return self.output
 
     def close(self):
-        if self.graph is None:
-            return
-        self.stream.synchronize()
-        self.graph.reset()
-        self.graph = None
-        self.output = None
-        self.owner = None
-        self.current_canvas = None
-        self.self_conditioning_logits = None
-        self.past_key_values = None
-        self.position_ids = None
-        self.freqs_cis = None
-        self.snapshot = None
+        try:
+            if self.graph is not None:
+                self.stream.synchronize()
+                self.graph.reset()
+                self.graph = None
+        finally:
+            if self.residency_lease is not None:
+                self.residency_lease.release()
+                self.residency_lease = None
+            self.output = None
+            self.owner = None
+            self.current_canvas = None
+            self.self_conditioning_logits = None
+            self.past_key_values = None
+            self.position_ids = None
+            self.freqs_cis = None
 
 
 class _ConditionedDecoderGraphExecution:
@@ -1891,18 +1774,25 @@ class DiffusionGenerate:
                             and not graph_capture_attempted
                         ):
                             graph_capture_attempted = True
-                            if not graph_execution.capture(
-                                self,
-                                current_canvas,
-                                self_conditioning_logits,
-                                past_key_values,
-                                decoder_position_ids,
-                                decoder_freqs_cis,
-                                execution_dtype,
-                            ):
+                            try:
+                                graph_captured = graph_execution.capture(
+                                    self,
+                                    current_canvas,
+                                    self_conditioning_logits,
+                                    past_key_values,
+                                    decoder_position_ids,
+                                    decoder_freqs_cis,
+                                    execution_dtype,
+                                )
+                            except torch.OutOfMemoryError:
                                 graph_execution.close()
                                 graph_execution = None
                                 use_decoder_graph = False
+                            else:
+                                if not graph_captured:
+                                    graph_execution.close()
+                                    graph_execution = None
+                                    use_decoder_graph = False
 
                     temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                     next_self_conditioning_logits = None
