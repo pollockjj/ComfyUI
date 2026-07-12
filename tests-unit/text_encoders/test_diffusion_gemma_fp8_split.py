@@ -153,7 +153,6 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         owner = types.SimpleNamespace(model=mock.Mock(return_value=(output, None, None)))
         execution = types.SimpleNamespace(
             stream=mock.Mock(), static_canvas=static_canvas, static_logits=static_logits)
-        stream = mock.Mock()
         current_stream = mock.Mock()
         graph_exec = mock.Mock()
         snapshot = mock.Mock()
@@ -180,7 +179,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         graph_exec.reset.assert_called_once_with()
         self.assertTrue(torch.equal(static_canvas, canvas))
         self.assertTrue(torch.equal(static_logits, logits))
-        current_stream.wait_stream.assert_called_once_with(stream)
+        current_stream.wait_stream.assert_called_once_with(execution.stream)
 
     def test_preallocated_kv_uses_capacity_prefix_without_reallocation(self):
         past_key = torch.full((1, 1, 6, 2), -1.0)
