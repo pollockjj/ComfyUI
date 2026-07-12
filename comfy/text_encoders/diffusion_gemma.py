@@ -1630,13 +1630,6 @@ class DiffusionGenerate:
         )
 
     def _use_conditioned_decoder_graph(self, device, execution_dtype):
-        graph_api = (
-            "begin_cuda_graph_capture",
-            "end_cuda_graph_capture",
-            "abort_cuda_graph_capture",
-            "reserve_cuda_stream_workspaces",
-            "release_cuda_stream_workspaces",
-        )
         return (
             device.type == "cuda"
             and execution_dtype == torch.bfloat16
@@ -1644,7 +1637,6 @@ class DiffusionGenerate:
             and torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
             and comfy.memory_management.aimdo_enabled
             and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
-            and all(callable(getattr(comfy.quant_ops.ck, name, None)) for name in graph_api)
         )
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
