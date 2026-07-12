@@ -68,25 +68,29 @@ def _shared_mxfp8_input(x, modules):
     if x.requires_grad or x.ndim < 2 or x.dtype not in (torch.float16, torch.bfloat16):
         return None
     for module in modules:
-        weight = getattr(module, "weight", None)
-        if (
-            getattr(module, "quant_format", None) != "mxfp8"
-            or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
-            or not isinstance(weight, QuantizedTensor)
-            or weight.device != x.device
-            or getattr(module, "_full_precision_mm", False)
-            or getattr(module, "comfy_force_cast_weights", False)
-            or getattr(module, "weight_function", None)
-            or getattr(module, "bias_function", None)
-            or getattr(module, "weight_lowvram_function", None) is not None
-            or getattr(module, "bias_lowvram_function", None) is not None
-        ):
+        if not _native_mxfp8_linear(module, x):
             return None
     x_2d = x.reshape(-1, x.shape[-1]) if x.ndim >= 3 else x
     scale = getattr(modules[0], "input_scale", None)
     if scale is not None:
         scale = comfy.model_management.cast_to_device(scale, x.device, None)
     return QuantizedTensor.from_float(x_2d, modules[0].layout_type, scale=scale)
+
+
+def _native_mxfp8_linear(module, x):
+    weight = getattr(module, "weight", None)
+    return (
+        getattr(module, "quant_format", None) == "mxfp8"
+        and getattr(module, "layout_type", None) == "TensorCoreMXFP8Layout"
+        and isinstance(weight, QuantizedTensor)
+        and weight.device == x.device
+        and not getattr(module, "_full_precision_mm", False)
+        and not getattr(module, "comfy_force_cast_weights", False)
+        and not getattr(module, "weight_function", None)
+        and not getattr(module, "bias_function", None)
+        and getattr(module, "weight_lowvram_function", None) is None
+        and getattr(module, "bias_lowvram_function", None) is None
+    )
 
 
 def _linear_from_shared_input(module, quantized_input, original_shape):
@@ -138,7 +142,26 @@ class DiffusionGemmaMLP(MLP):
             return super().forward(x)
         gate = _linear_from_shared_input(self.gate_proj, quantized_input, x.shape)
         up = _linear_from_shared_input(self.up_proj, quantized_input, x.shape)
-        return self.down_proj(self.activation(gate) * up)
+        fused_quantize = getattr(
+            comfy.quant_ops.ck, "gelu_tanh_multiply_quantize_mxfp8", None)
+        if fused_quantize is None or not _native_mxfp8_linear(self.down_proj, gate):
+            return self.down_proj(self.activation(gate) * up)
+
+        gate_2d = gate.reshape(-1, gate.shape[-1])
+        up_2d = up.reshape(-1, up.shape[-1])
+        padded_shape = comfy.quant_ops.TensorCoreMXFP8Layout.get_padded_shape(
+            tuple(gate_2d.shape))
+        qdata, block_scale = fused_quantize(
+            gate_2d, up_2d, pad_32x=padded_shape != tuple(gate_2d.shape))
+        params = comfy.quant_ops.TensorCoreMXFP8Layout.Params(
+            scale=block_scale,
+            orig_dtype=gate.dtype,
+            orig_shape=tuple(gate_2d.shape),
+        )
+        quantized_product = QuantizedTensor(
+            qdata, "TensorCoreMXFP8Layout", params)
+        return _linear_from_shared_input(
+            self.down_proj, quantized_product, gate.shape)
 
 
 def _make_dg_scaled_embedding(ops, vocab_size, hidden_size, device, dtype):
