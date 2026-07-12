@@ -93,11 +93,14 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             mock.patch("comfy.text_encoders.diffusion_gemma._shared_mxfp8_input", return_value=gate_proj.weight),
             mock.patch("comfy.text_encoders.diffusion_gemma._linear_from_shared_input", linear),
             mock.patch("comfy.text_encoders.diffusion_gemma._native_mxfp8_linear", return_value=True),
-            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "paired_scaled_mm_mxfp8", return_value=paired_output) as paired,
+            mock.patch("comfy.ops.cast_bias_weight", side_effect=[(gate_proj.weight, None, None), (up_proj.weight, None, None)]) as cast,
+            mock.patch("comfy.ops.uncast_bias_weight") as uncast,
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "paired_scaled_mm_mxfp8", create=True, return_value=paired_output) as paired,
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "gelu_tanh_multiply_quantize_mxfp8", return_value=(qdata, scales)) as fused,
         ):
             self.assertEqual(DiffusionGemmaMLP.forward(mlp, x), "output")
         paired.assert_called_once()
+        self.assertEqual((cast.call_count, uncast.call_count), (2, 2))
         self.assertEqual((fused.call_count, fused.call_args.kwargs), (1, {"pad_32x": False}))
         self.assertEqual(linear.call_count, 1)
         self.assertIsInstance(linear.call_args.args[1], QuantizedTensor)
@@ -237,7 +240,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires all 30 layer markers"):
             diffusion_gemma_detect((sd,))
 
-    def test_fused_global_qkv_projects_once_and_rejects_patches(self):
+    def test_fused_global_qkv_projects_once_with_dynamic_weights(self):
         linear = mock.Mock(side_effect=lambda *args, **kwargs: torch.nn.Module())
         attention = DiffusionGemmaAttention(
             DiffusionGemmaConfig(fused_qkv=True), head_dim=512, num_kv_heads=2,
@@ -262,9 +265,10 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertIs(k, v)
         self.assertEqual((q.shape[-1], k.shape[-1]), (8192, 1024))
         self.assertEqual(q.untyped_storage().data_ptr(), projection.untyped_storage().data_ptr())
+        module.weight_lowvram_function = object()
         module.weight_function = [lambda weight: weight]
-        with self.assertRaisesRegex(RuntimeError, "requires an unpatched MXFP8"):
-            attention._project_fused_qkv(hidden_states)
+        attention._project_fused_qkv(hidden_states)
+        self.assertEqual(module.forward.call_count, 2)
 
     @staticmethod
     def _mxfp8_bank(qdata_shape, scale_shape, quant_format="mxfp8", device="meta"):
