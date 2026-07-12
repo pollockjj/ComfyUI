@@ -485,6 +485,75 @@ class Gemma4Transformer(nn.Module):
         return x, intermediate
 
 
+MTP_PATH = os.environ.get("COMFY_MTP", "")
+
+
+class Gemma4MTPDrafter:
+    """Gemma-4 MTP assistant head: a 4-layer single-token drafter for speculative decode.
+
+    Weights come from a sidecar safetensors extracted from the official gemma4 assistant.
+    The head has no K/V projections — it cross-attends the backbone's shared KV (the last
+    non-shared sliding and global layers). Assistant RMSNorm is plain `normed * weight`
+    (not the backbone's 1+weight), the input is the backbone's SCALED token embedding
+    concatenated with the backbone's post-final-norm hidden, and logits are tied to the
+    assistant's own 256-dim embedding table.
+    """
+
+    def __init__(self, path, base, device, dtype):
+        import comfy.utils
+        self.base = base
+        self.dtype = dtype
+        self.w = {k: v.to(device=device, dtype=dtype) for k, v in comfy.utils.load_torch_file(path, safe_load=True).items()}
+        cfg = base.model.config
+        first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers
+        self.src_global = self.src_sliding = None
+        for i in range(first_shared):
+            if getattr(base.model.layers[i], "sliding_attention", False):
+                self.src_sliding = i
+            else:
+                self.src_global = i
+
+    def _rms(self, x, w):
+        return rms_norm(x, eps=1e-6) * w.float().to(x.dtype)
+
+    def draft(self, tok, hidden, past, pos):
+        """One draft step: (token [1,1], backbone-or-chained hidden [1,1,H], backbone KV,
+        position of `tok`) -> (next greedy token [1,1], chained hidden for the next step)."""
+        w = self.w
+        model = self.base.model
+        emb = model.embed_tokens(tok).to(self.dtype)
+        cur = torch.nn.functional.linear(torch.cat([emb, hidden.reshape(1, 1, -1)], dim=-1), w["mtp.pre_projection.weight"])
+        fc = model.compute_freqs_cis(torch.tensor([[pos]], device=cur.device), cur.device, dtype=cur.dtype)
+        fr_glob, fr_slide = fc[0], fc[1]
+        for il in range(4):
+            p = f"mtp.layers.{il}."
+            inp = cur
+            xn = self._rms(cur, w[p + "input_layernorm.weight"])
+            hd = w[p + "self_attn.q_norm.weight"].shape[0]
+            is_glob = hd == 512
+            qf = torch.nn.functional.linear(xn, w[p + "self_attn.q_proj.weight"])
+            nqh = qf.shape[-1] // hd
+            q = qf.reshape(1, 1, nqh, hd)
+            q = self._rms(q, w[p + "self_attn.q_norm.weight"]).transpose(1, 2)
+            q = _apply_rotary_pos_emb(q, fr_glob if is_glob else fr_slide)
+            k, v = past[self.src_global if is_glob else self.src_sliding][:2]
+            attn = optimized_attention_for_device(q.device, mask=False, small_input=True)(
+                q, k.to(cur.dtype), v.to(cur.dtype), nqh, mask=None, skip_reshape=True, scale=1.0, enable_gqa=True)
+            o = torch.nn.functional.linear(attn, w[p + "self_attn.o_proj.weight"])
+            o = self._rms(o, w[p + "post_attention_layernorm.weight"])
+            attn_out = inp + o
+            xn = self._rms(attn_out, w[p + "pre_feedforward_layernorm.weight"])
+            gate = torch.nn.functional.linear(xn, w[p + "mlp.gate_proj.weight"])
+            up = torch.nn.functional.linear(xn, w[p + "mlp.up_proj.weight"])
+            ff = torch.nn.functional.linear(torch.nn.functional.gelu(gate, approximate="tanh") * up, w[p + "mlp.down_proj.weight"])
+            ff = self._rms(ff, w[p + "post_feedforward_layernorm.weight"])
+            cur = (attn_out + ff) * w[p + "layer_scalar"]
+        cur = self._rms(cur, w["mtp.norm.weight"])
+        nxt = torch.nn.functional.linear(cur, w["mtp.embed_tokens.weight"])[:, -1].argmax(-1, keepdim=True)
+        chained = torch.nn.functional.linear(cur, w["mtp.post_projection.weight"])
+        return nxt, chained
+
+
 class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
     """Common base for all Gemma4 variants: text model + vision."""
     def _init_model(self, config, dtype, device, operations):
@@ -493,6 +562,15 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         self.dtype = dtype
         self.multi_modal_projector = Gemma4MultiModalProjector(config, dtype=dtype, device=device, ops=operations)
         self.vision_model = Gemma4VisionEncoder(config.vision_config, dtype=dtype, device=device, ops=operations)
+
+    def _load_mtp_drafter(self, device, dtype):
+        if not MTP_PATH:
+            return None
+        d = getattr(self, "_mtp_drafter", None)
+        if d is None:
+            d = Gemma4MTPDrafter(MTP_PATH, self, device, dtype)
+            self._mtp_drafter = d
+        return d
 
     def logits(self, x):
         logits = super().logits(x)

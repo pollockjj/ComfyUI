@@ -1027,6 +1027,18 @@ class BaseGenerate:
         # penalties need per-token history on host; without them the token chain
         # stays on device and syncs once per SYNC_EVERY steps
         batched_sync = repetition_penalty == 1.0 and not presence_penalty
+        # MTP speculative decode: greedy-exact only, dynamic-KV only (a verify step is
+        # M=gamma+1 tokens over the live cache, which the captured single-token graphs
+        # cannot replay), batch 1, standard positions. Anything else falls through to
+        # the normal loop.
+        if (not static_kv and batched_sync and (not do_sample or temperature == 0.0)
+                and position_ids is None and deepstack_embeds is None and embeds.shape[0] == 1):
+            loader = getattr(self, "_load_mtp_drafter", None)
+            drafter = loader(device, execution_dtype) if loader is not None else None
+            if drafter is not None:
+                return self._generate_speculative(drafter, embeds, max_length, stop_tokens,
+                                                  execution_dtype, initial_input_ids,
+                                                  past_key_values, pbar, device)
         device_tokens = []
         SYNC_EVERY = 8
         current_input_ids = initial_input_ids
@@ -1155,6 +1167,106 @@ class BaseGenerate:
                 break
 
         return generated_token_ids
+
+    def _spec_sliding_margins(self, past, windows, gamma):
+        # Sliding caches evict their oldest entries when a verify batch lands; if drafts
+        # are then rejected, the tail rollback alone leaves the window short. Snapshot the
+        # slice of pre-verify entries that any rollback could need to re-prepend.
+        margins = {}
+        for i, w in enumerate(windows):
+            kv = past[i]
+            if w is None or not kv or len(kv) != 3:
+                continue
+            k, v, c = kv
+            lp = k.shape[2]
+            if lp + gamma + 1 <= w - 1:
+                continue
+            ms = max(0, lp + 1 - (w - 1))
+            me = max(0, lp + gamma + 1 - (w - 1))
+            margins[i] = (k[:, :, ms:me].clone(), v[:, :, ms:me].clone(), lp, c, ms)
+        return margins
+
+    def _spec_rollback(self, vpast, windows, margins, gamma, acc):
+        # Exact post-acceptance cache: keep the acc accepted drafts + the correction,
+        # drop the gamma-acc rejected tail, and re-prepend evicted sliding entries.
+        rej = gamma - acc
+        out = []
+        for i, w in enumerate(windows):
+            kv = vpast[i]
+            if not kv or len(kv) != 3:
+                out.append(kv)
+                continue
+            k, v, c = kv
+            if w is None or i not in margins:
+                n = k.shape[2] - rej
+                out.append((k[:, :, :n].contiguous(), v[:, :, :n].contiguous(), c - rej) if rej else kv)
+                continue
+            mk, mv, lp, c_pre, ms = margins[i]
+            ld = min(w - 1, lp + acc + 1)
+            head_start = max(0, lp + acc + 1 - ld)
+            keep = k.shape[2] - rej
+            nk = torch.cat([mk[:, :, head_start - ms:], k[:, :, :keep]], dim=2).contiguous()
+            nv = torch.cat([mv[:, :, head_start - ms:], v[:, :, :keep]], dim=2).contiguous()
+            out.append((nk, nv, c_pre + acc + 1))
+        return out
+
+    def _generate_speculative(self, drafter, embeds, max_length, stop_tokens, execution_dtype,
+                              initial_input_ids, past_key_values, pbar, device):
+        # Greedy speculative decode: draft gamma tokens with the MTP head, verify all of
+        # them plus the last confirmed token in ONE backbone forward, emit the accepted
+        # prefix and the backbone's own correction token. One backbone forward per cycle.
+        gamma = int(os.environ.get("COMFY_MTP_GAMMA", "4"))
+        stats = os.environ.get("COMFY_MTP_STATS", "0") not in {"0", "false", "no"}
+        windows = [ly.sliding_attention if getattr(ly, "sliding_attention", False) else None
+                   for ly in self.model.layers]
+        x, _, past = self.model.forward(None, embeds=embeds, attention_mask=None,
+                                        past_key_values=past_key_values, input_ids=initial_input_ids)
+        h_last = x[:, -1:]
+        last_tok = self.logits(x)[:, -1].argmax(-1, keepdim=True)
+        p = embeds.shape[1]
+        out = [int(last_tok.item())]
+        pbar.update(1)
+        if out[-1] in stop_tokens:
+            return out
+        accepted = cycles = 0
+        while len(out) < max_length:
+            cycles += 1
+            drafts = []
+            d_tok, d_hid, d_pos = last_tok, h_last, p
+            for _ in range(gamma):
+                d_tok, d_hid = drafter.draft(d_tok, d_hid, past, d_pos)
+                d_pos += 1
+                drafts.append(d_tok)
+            batch = torch.cat([last_tok] + drafts, dim=1)
+            vpos = torch.arange(p, p + gamma + 1, device=device).unsqueeze(0)
+            margins = self._spec_sliding_margins(past, windows, gamma)
+            vx, _, vpast = self.model.forward(None, embeds=self.model.embed_tokens(batch).to(execution_dtype),
+                                              attention_mask=None, past_key_values=past,
+                                              position_ids=vpos, input_ids=batch)
+            vgreedy = [int(self.logits(vx[:, i:i + 1])[:, -1].argmax(-1).item()) for i in range(gamma + 1)]
+            acc = gamma
+            for i in range(gamma):
+                if int(drafts[i].item()) != vgreedy[i]:
+                    acc = i
+                    break
+            accepted += acc
+            past = self._spec_rollback(vpast, windows, margins, gamma, acc)
+            h_last = vx[:, acc:acc + 1]
+            emit = [int(drafts[i].item()) for i in range(acc)] + [vgreedy[acc]]
+            last_tok = torch.tensor([[emit[-1]]], device=device)
+            p += acc + 1
+            for t in emit:
+                out.append(t)
+                pbar.update(1)
+                if t in stop_tokens or len(out) >= max_length:
+                    if stats:
+                        print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
+                              f"tokens/forward={len(out) / (cycles + 1):.3f}")
+                    return out
+        if stats:
+            print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
+                  f"tokens/forward={len(out) / (cycles + 1):.3f}")
+        return out
 
     def _sample_in_graph(self, logits, temperature, top_k, top_p, min_p, do_sample):
         # sample_token minus history penalties and the Generator object, so the whole
