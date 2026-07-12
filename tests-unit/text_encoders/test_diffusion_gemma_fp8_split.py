@@ -46,8 +46,11 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
     def test_mxfp8_self_conditioning_cleans_up_failed_resident_weight(self):
         embedding = mixed_precision_ops().Embedding(128, 128, device="cpu", dtype=torch.bfloat16)
-        for name, value in vars(self._mxfp8_bank((128, 128), (128, 4), device="cpu")).items():
-            setattr(embedding, name, value)
+        bank = self._mxfp8_bank((128, 128), (128, 4), device="cpu")
+        embedding.weight = torch.nn.Parameter(bank.weight, requires_grad=False)
+        for name, value in vars(bank).items():
+            if name != "weight":
+                setattr(embedding, name, value)
         embedding.layout_type = "TensorCoreMXFP8Layout"
         embedding.comfy_force_cast_weights = False
         resident = embedding.weight
