@@ -954,6 +954,27 @@ class BaseGenerate:
         else:
             weight = self.model.embed_tokens.weight.to(x)
 
+        params = getattr(weight, "_params", None)
+        if params is not None and getattr(params, "convrot", False) and weight.is_cuda and weight.shape[0] > 32768:
+            # A vocab-sized convrot table cannot be dequantized in one kernel call
+            # (the CUDA dequant rejects row counts this large); dequantize once in
+            # row chunks (the rotation runs along k, rows are independent) and keep
+            # the compute-dtype table for every subsequent logits call.
+            cache = getattr(module, "_logits_dequant_cache", None)
+            key = (weight.device, input.dtype)
+            if cache is None or cache[0] != key:
+                from comfy_kitchen.backends.cuda import DTYPE_TO_CODE
+                q, sc, gs = weight._qdata, params.scale, params.convrot_groupsize
+                code = DTYPE_TO_CODE[input.dtype]
+                dq = torch.cat([torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
+                    q[i:i + 32768].contiguous(), sc[i:i + 32768].contiguous(), gs, code)
+                    for i in range(0, q.shape[0], 32768)], dim=0)
+                module._logits_dequant_cache = (key, dq)
+                cache = module._logits_dequant_cache
+            out = torch.nn.functional.linear(input, cache[1], None)
+            comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
+            return out
+
         x = torch.nn.functional.linear(input, weight, None)
 
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
