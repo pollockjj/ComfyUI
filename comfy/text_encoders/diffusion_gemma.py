@@ -1410,7 +1410,7 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
 
 
 class _ConditionedDecoderGraph:
-    """One-canvas CUDA graph with caller-owned static buffers and deferred first replay."""
+    """One-canvas CUDA graph with optional self-conditioning and deferred first replay."""
     def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
                  position_ids, freqs_cis, execution_dtype, stream, pool=None):
         self.stream = stream
@@ -1436,7 +1436,8 @@ class _ConditionedDecoderGraph:
     def replay(self, current_canvas, self_conditioning_logits):
         with torch.cuda.stream(self.stream):
             self.current_canvas.copy_(current_canvas)
-            self.self_conditioning_logits.copy_(self_conditioning_logits)
+            if self.self_conditioning_logits is not None:
+                self.self_conditioning_logits.copy_(self_conditioning_logits)
             self.graph.replay()
         torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
         return self.output
@@ -1713,23 +1714,42 @@ class DiffusionGenerate:
             )
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
             graph_geometry = None
-            decoder_graph = None
+            unconditioned_graph = None
+            conditioned_graph = None
             if graph_cache is not None:
                 graph_geometry = (cur_len, tuple(kv[3] for kv in past_key_values))
-                decoder_graph = graph_cache.graphs.get(graph_geometry)
+                unconditioned_graph = graph_cache.graphs.get((graph_geometry, False))
+                conditioned_graph = graph_cache.graphs.get((graph_geometry, True))
             try:
                 for cur_step in reversed(range(1, max_denoising_steps + 1)):
                     comfy.model_management.throw_exception_if_processing_interrupted()
                     if self_conditioning_logits is None and capture_stream is not None:
-                        x, _, _ = self.model(
-                            current_canvas, past_key_values=past_key_values, mode="decoder",
-                            self_conditioning_logits=None,
-                            position_ids=decoder_position_ids, dtype=execution_dtype,
-                            freqs_cis=decoder_freqs_cis,
-                        )
-                        if decoder_graph is None:
+                        if unconditioned_graph is None:
+                            x, _, _ = self.model(
+                                current_canvas, past_key_values=past_key_values, mode="decoder",
+                                self_conditioning_logits=None,
+                                position_ids=decoder_position_ids, dtype=execution_dtype,
+                                freqs_cis=decoder_freqs_cis,
+                            )
                             capture_started_ns = time.perf_counter_ns()
-                            decoder_graph = _ConditionedDecoderGraph(
+                            unconditioned_graph = _ConditionedDecoderGraph(
+                                self,
+                                graph_cache.static_canvas,
+                                None,
+                                past_key_values,
+                                decoder_position_ids,
+                                decoder_freqs_cis,
+                                execution_dtype,
+                                capture_stream,
+                                pool=graph_cache.pool,
+                            )
+                            graph_cache.graphs[(graph_geometry, False)] = unconditioned_graph
+                            capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
+                        else:
+                            x = unconditioned_graph.replay(current_canvas, None)
+                        if conditioned_graph is None:
+                            capture_started_ns = time.perf_counter_ns()
+                            conditioned_graph = _ConditionedDecoderGraph(
                                 self,
                                 graph_cache.static_canvas,
                                 graph_cache.static_logits,
@@ -1740,7 +1760,7 @@ class DiffusionGenerate:
                                 capture_stream,
                                 pool=graph_cache.pool,
                             )
-                            graph_cache.graphs[graph_geometry] = decoder_graph
+                            graph_cache.graphs[(graph_geometry, True)] = conditioned_graph
                             capture_timings_ns.append(time.perf_counter_ns() - capture_started_ns)
                     elif self_conditioning_logits is None or capture_stream is None:
                         x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
@@ -1748,7 +1768,7 @@ class DiffusionGenerate:
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
                     else:
-                        x = decoder_graph.replay(current_canvas, self_conditioning_logits)
+                        x = conditioned_graph.replay(current_canvas, self_conditioning_logits)
 
                     temperature = t_min + ((t_max - t_min) * (cur_step / max_denoising_steps))
                     next_self_conditioning_logits = None

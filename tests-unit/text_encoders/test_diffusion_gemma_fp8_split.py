@@ -122,6 +122,22 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertTrue(torch.equal(static_logits, torch.ones_like(static_logits)))
         current_stream.wait_stream.assert_called_once_with(stream)
 
+        graph.reset_mock()
+        current_stream.reset_mock()
+        with (
+            mock.patch.object(torch.cuda, "CUDAGraph", return_value=graph),
+            mock.patch.object(torch.cuda, "graph", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "stream", return_value=contextlib.nullcontext()),
+            mock.patch.object(torch.cuda, "current_stream", return_value=current_stream),
+        ):
+            unconditioned_graph = _ConditionedDecoderGraph(
+                owner, static_canvas, None, [], None, None, torch.bfloat16, stream)
+            self.assertIs(unconditioned_graph.replay(torch.zeros_like(static_canvas), None), output)
+
+        graph.replay.assert_called_once_with()
+        self.assertTrue(torch.equal(static_canvas, torch.zeros_like(static_canvas)))
+        current_stream.wait_stream.assert_called_once_with(stream)
+
     def test_preallocated_kv_uses_capacity_prefix_without_reallocation(self):
         past_key = torch.full((1, 1, 6, 2), -1.0)
         past_value = torch.full_like(past_key, -2.0)
