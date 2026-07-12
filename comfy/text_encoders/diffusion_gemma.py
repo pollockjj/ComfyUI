@@ -329,7 +329,14 @@ class DiffusionGemmaRouter(nn.Module):
         top_k_weights, top_k_index = torch.topk(router_probabilities, k=self.top_k, dim=-1)
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
         per_expert_scale = comfy.ops.cast_to_input(self.per_expert_scale, expert_scores, copy=False)
-        top_k_weights = top_k_weights * per_expert_scale[top_k_index]
+        scale_routing_weights = getattr(comfy.quant_ops.ck, "scale_moe_routing_weights", None)
+        if callable(scale_routing_weights) and expert_scores.is_cuda and per_expert_scale.dtype == torch.bfloat16:
+            try:
+                top_k_weights = scale_routing_weights(top_k_weights, top_k_index, per_expert_scale)
+            except comfy.quant_ops.ck.NoCapableBackendError:
+                top_k_weights = top_k_weights * per_expert_scale[top_k_index]
+        else:
+            top_k_weights = top_k_weights * per_expert_scale[top_k_index]
         return top_k_weights, top_k_index
 
 
