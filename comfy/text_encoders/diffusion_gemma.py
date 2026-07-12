@@ -1,8 +1,6 @@
 import contextlib
 import json
 import math
-import os
-import time
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -13,6 +11,8 @@ import comfy.ops
 import comfy.quant_ops
 import comfy.utils
 import comfy.model_management
+import comfy.memory_management
+import comfy_aimdo.model_vbar
 from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
@@ -1430,72 +1430,284 @@ def _entropy_bound_accept(current_canvas, denoiser_canvas, entropy_bound, token_
     return accepted_canvas, accepted_token_mask, token_entropy
 
 
+_VBAR_PAGE_SIZE = 32 * 1024 * 1024
+
+
+def _graph_tensor_fingerprint(tensor):
+    if tensor is None:
+        return None
+    if isinstance(tensor, QuantizedTensor):
+        inner_tensors, context = tensor.__tensor_flatten__()
+        return (
+            type(tensor),
+            repr(context),
+            tuple((name, _graph_tensor_fingerprint(getattr(tensor, name))) for name in inner_tensors),
+        )
+    version = None if tensor.is_inference() else tensor._version
+    return (
+        tensor.data_ptr(), tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()),
+        tensor.dtype, tensor.device, version,
+    )
+
+
+def _graph_value_fingerprint(value):
+    if isinstance(value, torch.Tensor):
+        return _graph_tensor_fingerprint(value)
+    if isinstance(value, (tuple, list)):
+        return tuple(_graph_value_fingerprint(item) for item in value)
+    return value
+
+
+class _DecoderAIMDOSnapshot:
+    def __init__(self, owner, modules, other_tensors, vbar_pages):
+        self.patch_uuid = owner._weight_patches_uuid
+        self.modules = modules
+        self.other_tensors = other_tensors
+        self.vbar_pages = vbar_pages
+
+    @staticmethod
+    def _resident(vbar_pages):
+        for vbar, pages in vbar_pages:
+            watermark = vbar.get_watermark()
+            residency = vbar.get_residency()
+            if any(page >= watermark or page >= len(residency) or residency[page] != 1 for page in pages):
+                return False
+        return True
+
+    @classmethod
+    def capture(cls, owner):
+        modules = []
+        other_tensors = []
+        page_sets = {}
+        loaded_sizes = {}
+
+        for module in owner.model.decoder.modules():
+            allocation = getattr(module, "_v", None)
+            if (
+                hasattr(module, "_prefetch")
+                or getattr(module, "weight_function", None)
+                or getattr(module, "bias_function", None)
+                or getattr(module, "weight_lowvram_function", None) is not None
+                or getattr(module, "bias_lowvram_function", None) is not None
+            ):
+                return None
+
+            if allocation is not None:
+                vbar, address, size = allocation
+                signature = getattr(module, "_v_signature", None)
+                resident_weight = getattr(module, "_v_weight", None)
+                if signature is None or resident_weight is None:
+                    return None
+                start = (address - vbar.base_addr) // _VBAR_PAGE_SIZE
+                end = (address + size - vbar.base_addr + _VBAR_PAGE_SIZE - 1) // _VBAR_PAGE_SIZE
+                if start < 0 or end <= start:
+                    return None
+                key = id(vbar)
+                if key not in page_sets:
+                    page_sets[key] = (vbar, set())
+                    loaded_sizes[key] = vbar.loaded_size()
+                page_sets[key][1].update(range(start, end))
+                modules.append((
+                    module, vbar, address, size, signature, resident_weight,
+                    getattr(module, "_v_bias", None),
+                    _graph_tensor_fingerprint(getattr(module, "weight", None)),
+                    _graph_tensor_fingerprint(getattr(module, "bias", None)),
+                    _graph_tensor_fingerprint(resident_weight),
+                    _graph_tensor_fingerprint(getattr(module, "_v_bias", None)),
+                ))
+
+            for name, tensor in tuple(module.named_parameters(recurse=False)) + tuple(module.named_buffers(recurse=False)):
+                if allocation is not None and name in ("weight", "bias"):
+                    continue
+                other_tensors.append((module, name, tensor, _graph_tensor_fingerprint(tensor)))
+
+        if not modules:
+            return None
+        vbar_pages = tuple((vbar, tuple(sorted(pages))) for vbar, pages in page_sets.values())
+        if not cls._resident(vbar_pages):
+            return None
+
+        for module, _, _, _, signature, _, _, *_ in modules:
+            current_signature = comfy_aimdo.model_vbar.vbar_fault(module._v)
+            if current_signature is None:
+                return None
+            try:
+                if not comfy_aimdo.model_vbar.vbar_signature_compare(current_signature, signature):
+                    return None
+            finally:
+                comfy_aimdo.model_vbar.vbar_unpin(module._v)
+
+        if (
+            not cls._resident(vbar_pages)
+            or any(vbar.loaded_size() != loaded_sizes[id(vbar)] for vbar, _ in vbar_pages)
+        ):
+            return None
+        return cls(owner, tuple(modules), tuple(other_tensors), vbar_pages)
+
+    def valid(self, owner, full=False):
+        if owner._weight_patches_uuid != self.patch_uuid or not self._resident(self.vbar_pages):
+            return False
+        for module, vbar, address, size, signature, resident_weight, resident_bias, *fingerprints in self.modules:
+            allocation = getattr(module, "_v", None)
+            if (
+                allocation is None
+                or allocation[0] is not vbar
+                or allocation[1:] != (address, size)
+                or getattr(module, "_v_signature", None) is not signature
+                or getattr(module, "_v_weight", None) is not resident_weight
+                or getattr(module, "_v_bias", None) is not resident_bias
+                or hasattr(module, "_prefetch")
+            ):
+                return False
+            if full and fingerprints != [
+                _graph_tensor_fingerprint(getattr(module, "weight", None)),
+                _graph_tensor_fingerprint(getattr(module, "bias", None)),
+                _graph_tensor_fingerprint(resident_weight),
+                _graph_tensor_fingerprint(resident_bias),
+            ]:
+                return False
+        if full:
+            for module, name, tensor, fingerprint in self.other_tensors:
+                if getattr(module, name, None) is not tensor or _graph_tensor_fingerprint(tensor) != fingerprint:
+                    return False
+        return True
+
+
 class _ConditionedDecoderGraph:
-    """One-canvas CUDA graph with caller-owned static buffers and deferred first replay."""
-    def __init__(self, owner, static_canvas, static_self_conditioning_logits, past_key_values,
-                 position_ids, freqs_cis, execution_dtype, stream, pool=None):
-        self.stream = stream
-        self.current_canvas = static_canvas
-        self.self_conditioning_logits = static_self_conditioning_logits
+    def __init__(self, owner, execution, current_canvas, self_conditioning_logits, past_key_values,
+                 position_ids, freqs_cis, execution_dtype, snapshot):
+        self.owner = owner
+        self.stream = execution.stream
+        self.current_canvas = execution.static_canvas
+        self.self_conditioning_logits = execution.static_logits
         self.past_key_values = past_key_values
         self.position_ids = position_ids
         self.freqs_cis = freqs_cis
         self.execution_dtype = execution_dtype
-        self.graph = torch.cuda.CUDAGraph()
+        self.snapshot = snapshot
+        self.geometry = self._geometry(past_key_values, position_ids, freqs_cis)
+        self.graph = None
+        self.output = None
 
-        with torch.cuda.graph(self.graph, stream=self.stream, pool=pool):
-            self.output, _, _ = owner.model(
-                self.current_canvas,
-                past_key_values=self.past_key_values,
-                mode="decoder",
-                self_conditioning_logits=self.self_conditioning_logits,
-                position_ids=self.position_ids,
-                dtype=self.execution_dtype,
-                freqs_cis=self.freqs_cis,
-            )
-
-    def replay(self, current_canvas, self_conditioning_logits):
+        self.stream.wait_stream(torch.cuda.current_stream(current_canvas.device))
         with torch.cuda.stream(self.stream):
             self.current_canvas.copy_(current_canvas)
             self.self_conditioning_logits.copy_(self_conditioning_logits)
-            self.graph.replay()
+            comfy.quant_ops.ck.begin_cuda_graph_capture(self.stream)
+            try:
+                self.output, _, _ = owner.model(
+                    self.current_canvas,
+                    past_key_values=self.past_key_values,
+                    mode="decoder",
+                    self_conditioning_logits=self.self_conditioning_logits,
+                    position_ids=self.position_ids,
+                    dtype=self.execution_dtype,
+                    freqs_cis=self.freqs_cis,
+                )
+            except BaseException:
+                comfy.quant_ops.ck.abort_cuda_graph_capture(self.stream)
+                raise
+            self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
+                self.stream,
+                self.output,
+                self.current_canvas,
+                self.self_conditioning_logits,
+                self.past_key_values,
+                self.position_ids,
+                self.freqs_cis,
+            )
+        self.stream.synchronize()
+
+    @staticmethod
+    def _geometry(past_key_values, position_ids, freqs_cis):
+        return _graph_value_fingerprint((past_key_values, position_ids, freqs_cis))
+
+    @classmethod
+    def capture(cls, owner, execution, current_canvas, self_conditioning_logits, past_key_values,
+                position_ids, freqs_cis, execution_dtype):
+        snapshot = _DecoderAIMDOSnapshot.capture(owner)
+        if snapshot is None:
+            return None
+        graph = cls(
+            owner, execution, current_canvas, self_conditioning_logits, past_key_values,
+            position_ids, freqs_cis, execution_dtype, snapshot,
+        )
+        if not snapshot.valid(owner, full=True) or graph.geometry != graph._geometry(
+            past_key_values, position_ids, freqs_cis
+        ):
+            graph.close()
+            return None
+        return graph
+
+    def replay(self, current_canvas, self_conditioning_logits, past_key_values, position_ids, freqs_cis):
+        if (
+            not self.snapshot.valid(self.owner)
+            or self.geometry != self._geometry(past_key_values, position_ids, freqs_cis)
+        ):
+            self.close()
+            return None
+        self.stream.wait_stream(torch.cuda.current_stream(current_canvas.device))
+        with torch.cuda.stream(self.stream):
+            self.current_canvas.copy_(current_canvas)
+            self.self_conditioning_logits.copy_(self_conditioning_logits)
+            self.graph.replay(self.stream)
         torch.cuda.current_stream(current_canvas.device).wait_stream(self.stream)
         return self.output
 
     def close(self):
+        if self.graph is None:
+            return
         self.stream.synchronize()
         self.graph.reset()
         self.graph = None
         self.output = None
+        self.owner = None
         self.current_canvas = None
         self.self_conditioning_logits = None
         self.past_key_values = None
         self.position_ids = None
         self.freqs_cis = None
+        self.snapshot = None
 
 
-class _ConditionedDecoderGraphCache:
-    def __init__(self, key, device, batch, canvas_length, vocab_size, execution_dtype):
-        self.key = key
+class _ConditionedDecoderGraphExecution:
+    def __init__(self, device, batch, canvas_length, vocab_size, execution_dtype):
         self.stream = torch.cuda.Stream(device=device)
-        with torch.cuda.device(device):
-            self.pool = torch.cuda.graph_pool_handle()
         self.static_canvas = torch.empty((batch, canvas_length), dtype=torch.long, device=device)
         self.static_logits = torch.empty(
             (batch, canvas_length, vocab_size), dtype=execution_dtype, device=device)
-        self.graphs = {}
-        self.kv_backing = None
-        comfy.quant_ops.ck.reserve_cuda_stream_workspaces(self.stream)
+        self.graph = None
+        self.workspace_reserved = comfy.quant_ops.ck.reserve_cuda_stream_workspaces(self.stream)
+        if not self.workspace_reserved:
+            raise RuntimeError("DiffusionGemma CUDA graph stream already owns Kitchen workspaces")
+
+    def capture(self, owner, current_canvas, self_conditioning_logits, past_key_values,
+                position_ids, freqs_cis, execution_dtype):
+        self.graph = _ConditionedDecoderGraph.capture(
+            owner, self, current_canvas, self_conditioning_logits, past_key_values,
+            position_ids, freqs_cis, execution_dtype,
+        )
+        return self.graph is not None
+
+    def replay(self, current_canvas, self_conditioning_logits, past_key_values, position_ids, freqs_cis):
+        output = self.graph.replay(
+            current_canvas, self_conditioning_logits, past_key_values, position_ids, freqs_cis)
+        if output is None:
+            self.graph = None
+        return output
 
     def close(self):
-        for graph in self.graphs.values():
-            graph.close()
-        self.graphs.clear()
-        comfy.quant_ops.ck.release_cuda_stream_workspaces(self.stream)
-        self.kv_backing = None
+        if self.graph is not None:
+            self.graph.close()
+            self.graph = None
+        if self.stream is not None:
+            self.stream.synchronize()
+        if self.workspace_reserved:
+            if not comfy.quant_ops.ck.release_cuda_stream_workspaces(self.stream):
+                raise RuntimeError("DiffusionGemma CUDA graph Kitchen workspaces were not reserved")
+            self.workspace_reserved = False
         self.static_canvas = None
         self.static_logits = None
-        self.pool = None
         self.stream = None
 
 
