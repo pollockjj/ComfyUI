@@ -1476,6 +1476,10 @@ class BaseGenerate:
                 print(f"[MTP-CAP] cycle {cycles}: {(_time.time() - _t0) * 1000:.1f} ms")
             last_tok, h_last, pos_t = nt.clone(), nh.clone(), np_.clone()
             records.append((dts.clone(), pk.clone(), acc.clone()))
+            # drop the pool-aliasing output refs before the next call: a bucket change
+            # triggers a fresh capture, and cudagraph trees require no live allocations
+            # from the pool at capture time (check_memory_pool fails otherwise)
+            del dts, pk, acc, nt, nh, np_
             p_upper += gamma + 1
 
     def _sample_in_graph(self, logits, temperature, top_k, top_p, min_p, do_sample):
