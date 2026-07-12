@@ -1048,18 +1048,22 @@ class BaseGenerate:
         # penalties need per-token history on host; without them the token chain
         # stays on device and syncs once per SYNC_EVERY steps
         batched_sync = repetition_penalty == 1.0 and not presence_penalty
-        # MTP speculative decode: greedy-exact only, dynamic-KV only (a verify step is
-        # M=gamma+1 tokens over the live cache, which the captured single-token graphs
-        # cannot replay), batch 1, standard positions. Anything else falls through to
-        # the normal loop.
-        if (not static_kv and batched_sync and (not do_sample or temperature == 0.0)
-                and position_ids is None and deepstack_embeds is None and embeds.shape[0] == 1):
+        # MTP speculative decode: dynamic-KV only (a verify step is M=gamma+1 tokens
+        # over the live cache, which the captured single-token graphs cannot replay),
+        # batch 1, no history penalties, standard positions. Sampling is supported:
+        # each verify position is sampled with the normal sampler and a draft is
+        # accepted only if it equals the sampled token, so the output distribution is
+        # exactly the backbone sampler's. Anything else falls through to the normal loop.
+        if (not static_kv and batched_sync and position_ids is None
+                and deepstack_embeds is None and embeds.shape[0] == 1):
             loader = getattr(self, "_load_mtp_drafter", None)
             drafter = loader(device, execution_dtype) if loader is not None else None
             if drafter is not None:
                 return self._generate_speculative(drafter, embeds, max_length, stop_tokens,
                                                   execution_dtype, initial_input_ids,
-                                                  past_key_values, pbar, device)
+                                                  past_key_values, pbar, device,
+                                                  do_sample, temperature, top_k, top_p,
+                                                  min_p, generator)
         device_tokens = []
         SYNC_EVERY = 8
         current_input_ids = initial_input_ids
@@ -1232,18 +1236,29 @@ class BaseGenerate:
         return out
 
     def _generate_speculative(self, drafter, embeds, max_length, stop_tokens, execution_dtype,
-                              initial_input_ids, past_key_values, pbar, device):
-        # Greedy speculative decode: draft gamma tokens with the MTP head, verify all of
-        # them plus the last confirmed token in ONE backbone forward, emit the accepted
-        # prefix and the backbone's own correction token. One backbone forward per cycle.
+                              initial_input_ids, past_key_values, pbar, device,
+                              do_sample=False, temperature=1.0, top_k=50, top_p=0.9,
+                              min_p=0.0, generator=None):
+        # Speculative decode: draft gamma tokens with the MTP head, verify all of them
+        # plus the last confirmed token in ONE backbone forward, emit the accepted
+        # prefix and the backbone's own next token. One backbone forward per cycle.
+        # Under sampling, each verify position is sampled with the normal sampler and a
+        # draft survives only if it equals the sample, so outputs follow the backbone
+        # sampler's distribution exactly (per-seed streams differ from the sequential
+        # loop because rejected positions also consumed RNG).
         gamma = int(os.environ.get("COMFY_MTP_GAMMA", "4"))
         stats = os.environ.get("COMFY_MTP_STATS", "0") not in {"0", "false", "no"}
+
+        def pick(logits):
+            return self.sample_token(logits, temperature, top_k, top_p, min_p, 1.0, [],
+                                     generator, do_sample=do_sample, presence_penalty=0.0)
+
         windows = [ly.sliding_attention if getattr(ly, "sliding_attention", False) else None
                    for ly in self.model.layers]
         x, _, past = self.model.forward(None, embeds=embeds, attention_mask=None,
                                         past_key_values=past_key_values, input_ids=initial_input_ids)
         h_last = x[:, -1:]
-        last_tok = self.logits(x)[:, -1].argmax(-1, keepdim=True)
+        last_tok = pick(self.logits(x)[:, -1])
         p = embeds.shape[1]
         out = [int(last_tok.item())]
         pbar.update(1)
@@ -1264,16 +1279,16 @@ class BaseGenerate:
             vx, _, vpast = self.model.forward(None, embeds=self.model.embed_tokens(batch).to(execution_dtype),
                                               attention_mask=None, past_key_values=past,
                                               position_ids=vpos, input_ids=batch)
-            vgreedy = [int(self.logits(vx[:, i:i + 1])[:, -1].argmax(-1).item()) for i in range(gamma + 1)]
+            vpicked = [int(pick(self.logits(vx[:, i:i + 1])[:, -1]).item()) for i in range(gamma + 1)]
             acc = gamma
             for i in range(gamma):
-                if int(drafts[i].item()) != vgreedy[i]:
+                if int(drafts[i].item()) != vpicked[i]:
                     acc = i
                     break
             accepted += acc
             past = self._spec_rollback(vpast, windows, margins, gamma, acc)
             h_last = vx[:, acc:acc + 1]
-            emit = [int(drafts[i].item()) for i in range(acc)] + [vgreedy[acc]]
+            emit = [int(drafts[i].item()) for i in range(acc)] + [vpicked[acc]]
             last_tok = torch.tensor([[emit[-1]]], device=device)
             p += acc + 1
             for t in emit:
