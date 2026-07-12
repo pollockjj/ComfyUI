@@ -1414,6 +1414,10 @@ class BaseGenerate:
                 new_h = vx.index_select(1, acc.view(1))
                 return drafts_t, picked, acc, new_tok, new_h, pos_t + acc + 1
 
+            # per-graph memory pools: cudagraph trees' shared-pool liveness checks
+            # (check_memory_pool) fail under the full ComfyUI runtime allocator,
+            # which holds cross-item allocations the tree does not know about
+            torch._inductor.config.triton.cudagraph_trees = False
             runner = {"key": (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype),
                       "past": past, "statics": statics, "max_len": statics[0].slots if statics else 0,
                       "cycle": _cycle, "compiled": None, "warm": False}
