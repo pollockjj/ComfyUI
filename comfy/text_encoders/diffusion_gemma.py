@@ -68,7 +68,7 @@ def _shared_mxfp8_input(x, modules):
     if x.requires_grad or x.ndim < 2 or x.dtype not in (torch.float16, torch.bfloat16):
         return None
     for module in modules:
-        if not _native_mxfp8_linear(module, x):
+        if not _mxfp8_linear_compatible(module):
             return None
     x_2d = x.reshape(-1, x.shape[-1]) if x.ndim >= 3 else x
     scale = getattr(modules[0], "input_scale", None)
@@ -77,17 +77,24 @@ def _shared_mxfp8_input(x, modules):
     return QuantizedTensor.from_float(x_2d, modules[0].layout_type, scale=scale)
 
 
-def _native_mxfp8_linear(module, x):
+def _mxfp8_linear_compatible(module):
     weight = getattr(module, "weight", None)
     return (
         getattr(module, "quant_format", None) == "mxfp8"
         and getattr(module, "layout_type", None) == "TensorCoreMXFP8Layout"
         and isinstance(weight, QuantizedTensor)
-        and weight.device == x.device
         and not getattr(module, "_full_precision_mm", False)
         and not getattr(module, "comfy_force_cast_weights", False)
         and not getattr(module, "weight_function", None)
         and not getattr(module, "bias_function", None)
+    )
+
+
+def _native_mxfp8_linear(module, x):
+    weight = getattr(module, "weight", None)
+    return (
+        _mxfp8_linear_compatible(module)
+        and weight.device == x.device
         and getattr(module, "weight_lowvram_function", None) is None
         and getattr(module, "bias_lowvram_function", None) is None
     )
@@ -104,23 +111,41 @@ def _paired_mxfp8_linear(first, second, quantized_input, original_shape):
     paired_mm = getattr(comfy.quant_ops.ck, "paired_scaled_mm_mxfp8", None)
     if paired_mm is None or first.bias is not None or second.bias is not None:
         return None
-    first_weight = first.weight
-    second_weight = second.weight
-    output = paired_mm(
-        quantized_input._qdata,
-        first_weight._qdata,
-        second_weight._qdata,
-        quantized_input._params.scale,
-        first_weight._params.scale,
-        second_weight._params.scale,
-        out_dtype=quantized_input._params.orig_dtype,
-    )
-    rows = quantized_input._params.orig_shape[0]
-    columns = first_weight._params.orig_shape[0]
-    output = output[:, :rows, :columns]
-    if len(original_shape) >= 3:
-        output = output.reshape(2, *original_shape[:-1], columns)
-    return output[0], output[1]
+    loaded = []
+    try:
+        for module in (first, second):
+            loaded.append((module, *comfy.ops.cast_bias_weight(
+                module, quantized_input, offloadable=True,
+                compute_dtype=quantized_input._params.orig_dtype,
+                want_requant=True)))
+        first_weight, first_bias = loaded[0][1:3]
+        second_weight, second_bias = loaded[1][1:3]
+        if (
+            first_bias is not None
+            or second_bias is not None
+            or not isinstance(first_weight, QuantizedTensor)
+            or not isinstance(second_weight, QuantizedTensor)
+        ):
+            return None
+        output = paired_mm(
+            quantized_input._qdata,
+            first_weight._qdata,
+            second_weight._qdata,
+            quantized_input._params.scale,
+            first_weight._params.scale,
+            second_weight._params.scale,
+            out_dtype=quantized_input._params.orig_dtype,
+        )
+        rows = quantized_input._params.orig_shape[0]
+        columns = first_weight._params.orig_shape[0]
+        output = output[:, :rows, :columns]
+        if len(original_shape) >= 3:
+            output = output.reshape(2, *original_shape[:-1], columns)
+        return output[0], output[1]
+    finally:
+        for module, weight, bias, offload_stream in reversed(loaded):
+            comfy.ops.uncast_bias_weight(
+                module, weight, bias, offload_stream)
 
 
 _MXFP8_SELF_CONDITIONING_CHUNK = 262144
@@ -172,7 +197,7 @@ class DiffusionGemmaMLP(MLP):
             gate, up = paired
         fused_quantize = getattr(
             comfy.quant_ops.ck, "gelu_tanh_multiply_quantize_mxfp8", None)
-        if fused_quantize is None or not _native_mxfp8_linear(self.down_proj, gate):
+        if fused_quantize is None or not _mxfp8_linear_compatible(self.down_proj):
             return self.down_proj(self.activation(gate) * up)
 
         gate_2d = gate.reshape(-1, gate.shape[-1])
@@ -249,30 +274,21 @@ class DiffusionGemmaAttention(nn.Module):
         scale = getattr(params, "scale", None)
         expected_shape = (sum(self.qkv_splits), self.hidden_size)
         expected_scale_shape = (expected_shape[0], (expected_shape[1] + 31) // 32)
-        patched = (
-            any(getattr(module, name, None) for name in ("weight_function", "bias_function"))
-            or getattr(module, "weight_lowvram_function", None) is not None
-            or getattr(module, "bias_lowvram_function", None) is not None
-        )
         if (
             getattr(module, "quant_format", None) != "mxfp8"
             or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
             or not isinstance(weight, QuantizedTensor)
             or getattr(weight, "_layout_cls", None) != "TensorCoreMXFP8Layout"
-            or weight.device != hidden_states.device
             or not isinstance(qdata, torch.Tensor)
             or qdata.dtype != torch.float8_e4m3fn
-            or qdata.device != hidden_states.device
             or tuple(qdata.shape) != expected_shape
             or tuple(getattr(params, "orig_shape", ())) != expected_shape
             or not isinstance(scale, torch.Tensor)
             or scale.dtype != torch.float8_e8m0fnu
-            or scale.device != hidden_states.device
             or tuple(scale.shape) != expected_scale_shape
             or getattr(module, "bias", None) is not None
             or getattr(module, "_full_precision_mm", False)
             or getattr(module, "comfy_force_cast_weights", False)
-            or patched
         ):
             raise RuntimeError(
                 f"DiffusionGemma fused QKV requires an unpatched MXFP8 "
