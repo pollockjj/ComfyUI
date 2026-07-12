@@ -948,8 +948,9 @@ def _use_int8_resident_linear(module, input):
 
 
 def _use_int8_fast_linear(module, input, weight):
-    # kitchen's fused W8A16 convrot linear beats dequant/cached-bf16 matmul when the
-    # call is large enough to amortize its ~35us launch floor (3090-measured):
+    # kitchen's fused W8A8 convrot linear (int8_linear quantizes the activation to int8
+    # on the fly; int8xint8 compute) beats dequant/cached-bf16 matmul when the call is
+    # large enough to amortize its ~35us launch floor (3090-measured):
     # every multi-row call on non-tiny layers, and M=1 decode only on mlp-class weights.
     if not INT8_FAST_LINEAR_ENABLED:
         return False
