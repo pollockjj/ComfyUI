@@ -20,6 +20,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaAttention,
     DiffusionGemmaConfig,
     DiffusionGemmaExperts,
+    DiffusionGemmaMLP,
     _ConditionedDecoderGraph,
     _mxfp8_self_conditioning,
     _ConditionedDecoderGraphCache,
@@ -77,6 +78,23 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         quantized_source = quantize.call_args.args[0]
         self.assertEqual(quantized_source.shape, (32, 32))
         self.assertEqual(quantized_source.data_ptr(), x.data_ptr())
+
+    def test_dense_mxfp8_fuses_activation_quantization(self):
+        x = torch.zeros((1, 32, 32), dtype=torch.bfloat16)
+        gate, up = torch.ones_like(x), torch.full_like(x, 2)
+        qdata = torch.empty((32, 32), dtype=torch.float8_e4m3fn)
+        scales = torch.empty((128, 4), dtype=torch.float8_e8m0fnu)
+        mlp = types.SimpleNamespace(gate_proj=object(), up_proj=object(), down_proj=object())
+        linear = mock.Mock(side_effect=[gate, up, "output"])
+        with (
+            mock.patch("comfy.text_encoders.diffusion_gemma._shared_mxfp8_input", return_value=object()),
+            mock.patch("comfy.text_encoders.diffusion_gemma._linear_from_shared_input", linear),
+            mock.patch("comfy.text_encoders.diffusion_gemma._native_mxfp8_linear", return_value=True),
+            mock.patch.object(sys.modules["comfy.quant_ops"].ck, "gelu_tanh_multiply_quantize_mxfp8", return_value=(qdata, scales)) as fused,
+        ):
+            self.assertEqual(DiffusionGemmaMLP.forward(mlp, x), "output")
+        fused.assert_called_once_with(gate.reshape(32, 32), up.reshape(32, 32), pad_32x=False)
+        self.assertIsInstance(linear.call_args_list[2].args[1], QuantizedTensor)
 
     def test_decoder_graph_requires_resident_weights_and_static_vram(self):
         generate = DiffusionGenerate()
