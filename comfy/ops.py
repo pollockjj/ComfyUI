@@ -1557,6 +1557,21 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 sd = destination if destination is not None else {}
                 return _quantized_weight_state_dict(self, sd, prefix)
 
+            def prepare_mxfp8_transpose(self, device):
+                weight, _, offload_stream = cast_bias_weight(
+                    self, device=device, dtype=self.weight.dtype, offloadable=True)
+                try:
+                    if (
+                        getattr(self, "quant_format", None) != "mxfp8"
+                        or not isinstance(weight, QuantizedTensor)
+                    ):
+                        raise RuntimeError("MXFP8 transpose preparation requires a resident MXFP8 embedding")
+                    params = weight._params
+                    return quant_ops.ck.requantize_mxfp8_transpose(
+                        weight._qdata, params.scale, params.orig_dtype)
+                finally:
+                    uncast_bias_weight(self, weight, None, offload_stream)
+
             def forward_comfy_cast_weights(self, input, out_dtype=None):
                 weight = self.weight
 

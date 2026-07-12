@@ -114,15 +114,26 @@ def _native_mxfp8_embedding(module):
     )
 
 
-def _mxfp8_self_conditioning(probabilities, weight):
+def _mxfp8_self_conditioning(probabilities, weight, transposed_weight=None):
     if probabilities.dtype != torch.bfloat16 or weight._layout_cls != "TensorCoreMXFP8Layout":
         raise ValueError("DiffusionGemma MXFP8 self-conditioning requires BF16 probabilities and MXFP8 weights")
     qdata = weight._qdata
     block_scales = weight._params.scale
+    flat = probabilities.reshape(-1, probabilities.shape[-1])
+    if transposed_weight is not None:
+        transposed_qdata, transposed_scales = transposed_weight
+        quantized, probability_scales = comfy.quant_ops.ck.quantize_mxfp8(flat)
+        output = comfy.quant_ops.ck.scaled_mm_mxfp8(
+            quantized,
+            transposed_qdata,
+            probability_scales,
+            transposed_scales,
+            out_dtype=torch.float32,
+        )
+        return output.reshape(*probabilities.shape[:-1], qdata.shape[1])
     if qdata.shape[0] % _MXFP8_SELF_CONDITIONING_CHUNK != 0:
         raise ValueError("DiffusionGemma MXFP8 vocabulary must be divisible by 16384")
 
-    flat = probabilities.reshape(-1, probabilities.shape[-1])
     row_indices = torch.arange(qdata.shape[0], device=qdata.device, dtype=torch.int64)
     output = torch.zeros((flat.shape[0], qdata.shape[1]), device=qdata.device, dtype=torch.float32)
     for start in range(0, qdata.shape[0], _MXFP8_SELF_CONDITIONING_CHUNK):
@@ -1349,7 +1360,7 @@ class DiffusionGemmaModel(nn.Module):
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=None,
                 past_key_values=None, input_ids=None, mode="encoder", self_conditioning_logits=None,
-                mm_spans=None, freqs_cis=None):
+                self_conditioning_mxfp8=None, mm_spans=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -1359,7 +1370,9 @@ class DiffusionGemmaModel(nn.Module):
             embed_module = self.decoder.embed_tokens
             if self_conditioning_logits is not None:
                 native_mxfp8 = _native_mxfp8_embedding(embed_module)
-                if native_mxfp8:
+                if native_mxfp8 and self_conditioning_mxfp8 is not None:
+                    weight, offload_stream = embed_module.weight, None
+                elif native_mxfp8:
                     weight, _, offload_stream = comfy.ops.cast_bias_weight(
                         embed_module, device=x.device, dtype=embed_module.weight.dtype, offloadable=True)
                     if not isinstance(weight, QuantizedTensor):
@@ -1370,7 +1383,8 @@ class DiffusionGemmaModel(nn.Module):
                     weight, offload_stream = embed_module.weight.to(device=x.device), None
                 if native_mxfp8:
                     probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
-                    soft_embeddings = _mxfp8_self_conditioning(probabilities, weight)
+                    soft_embeddings = _mxfp8_self_conditioning(
+                        probabilities, weight, self_conditioning_mxfp8)
                     scale_dtype = weight._params.orig_dtype
                 else:
                     soft_embeddings = torch.matmul(
@@ -1745,6 +1759,14 @@ class DiffusionGenerate:
                 graph_cache, past_key_values, max_new_canvases, canvas_length)
         past_key_values = self._reserve_kv_cache(past_key_values, canvas_length)
         cur_len = embeds.shape[1]
+        self_conditioning_mxfp8 = None
+        embed_module = self.model.decoder.embed_tokens
+        if (
+            not use_decoder_graph
+            and _native_mxfp8_embedding(embed_module)
+            and callable(getattr(comfy.quant_ops.ck, "requantize_mxfp8_transpose", None))
+        ):
+            self_conditioning_mxfp8 = embed_module.prepare_mxfp8_transpose(device)
 
         generated_token_ids = []
         commit_canvas = None
@@ -1805,6 +1827,7 @@ class DiffusionGenerate:
                     elif self_conditioning_logits is None or capture_stream is None:
                         x, _, _ = self.model(current_canvas, past_key_values=past_key_values, mode="decoder",
                                              self_conditioning_logits=self_conditioning_logits,
+                                             self_conditioning_mxfp8=self_conditioning_mxfp8,
                                              position_ids=decoder_position_ids, dtype=execution_dtype,
                                              freqs_cis=decoder_freqs_cis)
                     else:

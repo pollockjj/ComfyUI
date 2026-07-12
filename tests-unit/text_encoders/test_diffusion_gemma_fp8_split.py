@@ -58,6 +58,22 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual(output.dtype, torch.float32)
         self.assertTrue(torch.equal(output, torch.full((1, 32), 262144.0)))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA MXFP8 scaled MM required")
+    def test_mxfp8_self_conditioning_transposed_path_matches_composed_path(self):
+        ck = sys.modules["comfy.quant_ops"].ck
+        generator = torch.Generator(device="cuda:0").manual_seed(31)
+        source = torch.randn((128, 64), generator=generator, device="cuda:0", dtype=torch.bfloat16).mul_(2**-5)
+        probabilities = torch.softmax(
+            torch.randn((32, 128), generator=generator, device="cuda:0"), dim=-1).to(torch.bfloat16)
+        qdata, scales = ck.quantize_mxfp8(source)
+        params = TensorCoreMXFP8Layout.Params(
+            scale=scales, orig_dtype=torch.bfloat16, orig_shape=tuple(source.shape))
+        weight = QuantizedTensor(qdata, "TensorCoreMXFP8Layout", params)
+        transposed = ck.requantize_mxfp8_transpose(qdata, scales)
+        candidate = _mxfp8_self_conditioning(probabilities, weight, transposed)
+        reference = torch.mm(probabilities, ck.dequantize_mxfp8(qdata, scales), out_dtype=torch.float32)
+        torch.testing.assert_close(candidate, reference, rtol=0.02, atol=0.001)
+
     def test_quantized_diffusion_gemma_enables_native_compute(self):
         self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
         self.assertFalse(diffusion_gemma_te().supports_native_quantized_compute)
