@@ -423,6 +423,10 @@ class Gemma4Transformer(nn.Module):
             past_len = _past_len()
             causal_mask = torch.zeros(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device)
             causal_mask.masked_fill_(torch.ones_like(causal_mask, dtype=torch.bool).triu_(1), min_val)
+            # keep only the query rows for this step: [seq_len, past_len+seq_len]. For prefill
+            # (past_len == 0) this is a no-op; it enables multi-token decode over an existing
+            # cache (speculative verify), where q has seq_len rows but k spans past_len+seq_len.
+            causal_mask = causal_mask[past_len:]
             mask = mask + causal_mask if mask is not None else causal_mask
 
         # Per-layer inputs
