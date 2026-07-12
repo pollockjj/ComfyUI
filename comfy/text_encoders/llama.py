@@ -1445,7 +1445,11 @@ class BaseGenerate:
                 kv.bucket = nb0
             dts, pk, acc, last_tok, h_last, pos_t = [t.clone() for t in runner["cycle"](last_tok, h_last, pos_t)]
             records.append((dts, pk, acc))
-            _mode = os.environ.get("COMFY_MTP_COMPILE_MODE", "reduce-overhead")
+            # default compile mode: cudagraph capture of the partitioned cycle aborts
+            # (CUDA invalid argument) under the ComfyUI server's greenlet execution,
+            # while plain inductor runs everywhere at ~85% of the cudagraph rate.
+            # reduce-overhead stays available for standalone benchmarking.
+            _mode = os.environ.get("COMFY_MTP_COMPILE_MODE", "default")
             if stats:
                 print(f"[MTP-CAP] compile mode={_mode} stream={torch.cuda.current_stream(device)}")
             runner["compiled"] = torch.compile(runner["cycle"], mode=_mode if _mode != "none" else None, dynamic=False)
