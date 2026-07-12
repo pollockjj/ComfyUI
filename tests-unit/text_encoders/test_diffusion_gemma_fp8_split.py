@@ -92,7 +92,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         with (
             mock.patch("comfy.text_encoders.diffusion_gemma._shared_mxfp8_input", return_value=gate_proj.weight),
             mock.patch("comfy.text_encoders.diffusion_gemma._linear_from_shared_input", linear),
-            mock.patch("comfy.text_encoders.diffusion_gemma._native_mxfp8_linear", return_value=True),
+            mock.patch("comfy.text_encoders.diffusion_gemma._mxfp8_linear_compatible", return_value=True),
             mock.patch("comfy.ops.cast_bias_weight", side_effect=[(gate_proj.weight, None, None), (up_proj.weight, None, None)]) as cast,
             mock.patch("comfy.ops.uncast_bias_weight") as uncast,
             mock.patch.object(sys.modules["comfy.quant_ops"].ck, "paired_scaled_mm_mxfp8", create=True, return_value=paired_output) as paired,
