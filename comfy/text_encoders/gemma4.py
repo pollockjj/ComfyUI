@@ -59,35 +59,65 @@ class StaticLayerKV:
         # drafts can be rolled back (for a wrapped sliding ring the slots held live
         # old tokens; for an unfilled buffer they were empty — same restore either way),
         # and build a per-row mask so draft token j cannot attend drafts j+1..n-1.
+        # All state lives in pre-allocated static-address buffers so the whole verify
+        # step is graph-capturable.
+        if getattr(self, "_save_n", 0) != n:
+            b, h, _, d = self.k.shape
+            self.widx = torch.zeros(n, dtype=torch.long, device=xk.device)
+            self.save_k = torch.zeros(b, h, n, d, dtype=self.k.dtype, device=xk.device)
+            self.save_v = torch.zeros_like(self.save_k)
+            self.save_m = torch.zeros(1, 1, 1, n, dtype=self.mask.dtype, device=xk.device)
+            self._row_mask = torch.zeros(1, 1, n, self.slots, dtype=self.mask.dtype, device=xk.device)
+            self._save_n = n
+            for t in (self.widx, self.save_k, self.save_v, self.save_m, self._row_mask):
+                torch._dynamo.mark_static_address(t)
         idxs = (self.idx + torch.arange(n, device=xk.device)) % self.slots
-        self._saved = (idxs, self.k[:, :, idxs].clone(), self.v[:, :, idxs].clone(),
-                       self.mask[..., idxs].clone())
+        self.widx.copy_(idxs)
+        self.save_k.copy_(self.k.index_select(2, idxs))
+        self.save_v.copy_(self.v.index_select(2, idxs))
+        self.save_m.copy_(self.mask.index_select(3, idxs))
         self.k.index_copy_(2, idxs, xk)
         self.v.index_copy_(2, idxs, xv)
         self.mask.index_fill_(3, idxs, 0.0)
         fmin = torch.finfo(self.mask.dtype).min
-        rm = self.mask.expand(-1, -1, n, -1).clone()
+        self._row_mask.copy_(self.mask.expand(-1, -1, n, -1))
         for j in range(n - 1):
-            rm[:, :, j, idxs[j + 1:]] = fmin
-        self.row_mask = rm
+            self._row_mask[0, 0, j].index_fill_(0, idxs[j + 1:], fmin)
+        self.row_mask = self._row_mask
         self.idx.add_(n).remainder_(self.slots)
 
     def rollback(self, r):
         # erase the r newest appended slots by restoring what the batched append
-        # overwrote, and rewind the write cursor
+        # overwrote, and rewind the write cursor (host-side eager path)
         self.row_mask = None
         if r <= 0:
             return
-        idxs, sk, sv, sm = self._saved
-        tail = idxs[-r:]
-        self.k[:, :, tail] = sk[:, :, -r:]
-        self.v[:, :, tail] = sv[:, :, -r:]
-        self.mask[..., tail] = sm[..., -r:]
+        n = self._save_n
+        tail = self.widx[n - r:]
+        self.k[:, :, tail] = self.save_k[:, :, n - r:]
+        self.v[:, :, tail] = self.save_v[:, :, n - r:]
+        self.mask[..., tail] = self.save_m[..., n - r:]
         self.idx.add_(-r).remainder_(self.slots)
+
+    def commit(self, acc):
+        # graph-safe rollback: keep the first acc+1 written slots (last confirmed
+        # token + acc accepted drafts), restore the rest from the saved state, and
+        # place the cursor after the kept slots. `acc` is a device scalar, so there
+        # is no data-dependent control flow — a captured graph replays this as-is.
+        n = self._save_n
+        keep = (torch.arange(n, device=self.k.device) < (acc + 1))
+        cur_k = self.k.index_select(2, self.widx)
+        cur_v = self.v.index_select(2, self.widx)
+        cur_m = self.mask.index_select(3, self.widx)
+        self.k[:, :, self.widx] = torch.where(keep.view(1, 1, n, 1), cur_k, self.save_k)
+        self.v[:, :, self.widx] = torch.where(keep.view(1, 1, n, 1), cur_v, self.save_v)
+        self.mask[..., self.widx] = torch.where(keep.view(1, 1, 1, n), cur_m, self.save_m)
+        self.idx.add_(-n).add_(acc + 1).remainder_(self.slots)
 
     def reset(self, past):
         # refill in place from a fresh prefill tuple so persistent buffers (and the
         # graphs captured over them) are reused across generate calls
+        self.row_mask = None
         k, v, self.cum_len = past
         n = min(k.shape[2], self.slots)
         self.k.zero_()
@@ -580,7 +610,8 @@ class Gemma4MTPDrafter:
         model = self.base.model
         emb = model.embed_tokens(tok).to(self.dtype)
         cur = torch.nn.functional.linear(torch.cat([emb, hidden.reshape(1, 1, -1)], dim=-1), w["mtp.pre_projection.weight"])
-        fc = model.compute_freqs_cis(torch.tensor([[pos]], device=cur.device), cur.device, dtype=cur.dtype)
+        pos_t = pos if torch.is_tensor(pos) else torch.tensor([[pos]], device=cur.device)
+        fc = model.compute_freqs_cis(pos_t, cur.device, dtype=cur.dtype)
         fr_glob, fr_slide = fc[0], fc[1]
         for il in range(4):
             p = f"mtp.layers.{il}."

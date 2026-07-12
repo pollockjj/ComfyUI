@@ -1,4 +1,5 @@
 import os
+import time as _time
 
 import torch
 import torch.nn as nn
@@ -1265,9 +1266,28 @@ class BaseGenerate:
         last_tok = pick(self.logits(x)[:, -1])
         p = embeds.shape[1]
         statics = []
+        capture = (static_kv and embeds.is_cuda
+                   and os.environ.get("COMFY_MTP_CAPTURE", "0") not in {"0", "false", "no"})
         if static_kv:
-            past = self.convert_kv_to_static(past, max(max_cache_len, 12288))
-            statics = [kv for kv in past if hasattr(kv, "rollback")]
+            runner = getattr(self, "_mtp_cap_runner", None)
+            rkey = (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype)
+            if capture and runner is not None and runner["key"] == rkey and p + max_length <= runner["max_len"]:
+                if os.environ.get("COMFY_MTP_STATS", "0") not in {"0", "false", "no"}:
+                    print("[MTP-CAP] runner reused")
+                for kv_new, kv_p in zip(past, runner["past"]):
+                    if hasattr(kv_p, "reset"):
+                        kv_p.reset(kv_new)
+                past = runner["past"]
+                statics = runner["statics"]
+            else:
+                past = self.convert_kv_to_static(past, max(max_cache_len, 12288))
+                statics = [kv for kv in past if hasattr(kv, "rollback")]
+                runner = None
+        if capture and statics:
+            return self._generate_speculative_captured(
+                drafter, max_length, stop_tokens, execution_dtype, past, statics, pbar,
+                device, do_sample, temperature, top_k, top_p, min_p, generator,
+                h_last, last_tok, p, gamma, stats, runner)
         out = [int(last_tok.item())]
         pbar.update(1)
         if out[-1] in stop_tokens:
@@ -1321,6 +1341,142 @@ class BaseGenerate:
             print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
                   f"tokens/forward={len(out) / (cycles + 1):.3f}")
         return out
+
+    def _generate_speculative_captured(self, drafter, max_length, stop_tokens, execution_dtype,
+                                       past, statics, pbar, device, do_sample, temperature,
+                                       top_k, top_p, min_p, generator, h_last, last_tok, p,
+                                       gamma, stats, runner=None):
+        # The whole speculative cycle — drafter x gamma, one M=gamma+1 backbone verify,
+        # in-graph sampling, cumprod acceptance, where-based KV commit — runs as a single
+        # reduce-overhead graph over the static caches. No data-dependent control flow:
+        # `acc` stays a device scalar and state (pos, hidden, token) hands off in tensors.
+        # Host syncs once per SYNC_EVERY cycles to emit tokens and check stops.
+        if runner is None:
+            # the tied logits weight must be a plain tensor for the in-graph linear:
+            # bf16 models expose the Parameter directly; quantized convrot models have
+            # the chunk-dequant cache warmed by the eager prefill logits call
+            mod = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
+            lw = getattr(mod, "_logits_dequant_cache", None)
+            logits_w = lw[1] if lw is not None else mod.weight
+            cap = getattr(self.model.config, "final_logit_softcapping", None)
+            for t in drafter.w.values():
+                torch._dynamo.mark_static_address(t)
+            # frozen weights stay installed for the life of the runner (Phase-A pattern)
+            frozen = _freeze_resident_weights(self.model, h_last.reshape(-1)[:1])
+
+            def _pick_batch(lg):
+                # sampler over the top-k slice only: with top_k active this is exactly
+                # _sample_in_graph (topk output is sorted, so the top-p cumsum order
+                # matches), and it avoids the vocab-wide scan inductor cannot codegen
+                # at these row counts
+                if not do_sample or temperature == 0.0:
+                    return lg.argmax(-1)
+                if temperature != 1.0:
+                    lg = lg / temperature
+                if top_k <= 0:
+                    return self._sample_in_graph(lg, 1.0, 0, top_p, min_p, do_sample).view(-1)
+                vals, idx = torch.topk(lg, min(top_k, lg.shape[-1]))
+                if min_p > 0.0:
+                    probs_bf = torch.softmax(vals, dim=-1)
+                    vals = vals.masked_fill(probs_bf < min_p * probs_bf[..., :1], float("-inf"))
+                if top_p < 1.0:
+                    cum = torch.cumsum(torch.softmax(vals, dim=-1), dim=-1)
+                    rm = cum > top_p
+                    rm[..., 0] = False
+                    vals = vals.masked_fill(rm, float("-inf"))
+                # gumbel-argmax instead of multinomial: rand_like is philox-managed
+                # under cudagraph replay, multinomial's generator state is not
+                u = torch.rand_like(vals).clamp_min(1e-20)
+                g = -torch.log((-torch.log(u)).clamp_min(1e-20))
+                ch = (torch.log_softmax(vals, dim=-1) + g).argmax(-1, keepdim=True)
+                return idx.gather(-1, ch).view(-1)
+
+            def _cycle(lt, hl, pos_t):
+                vpos = pos_t + torch.arange(gamma + 1, device=device).view(1, -1)
+                drafts = []
+                d_tok, d_hid = lt, hl
+                for j in range(gamma):
+                    d_tok, d_hid = drafter.draft(d_tok, d_hid, past, pos_t + j)
+                    drafts.append(d_tok)
+                drafts_t = torch.cat(drafts, dim=1)
+                batch = torch.cat([lt, drafts_t], dim=1)
+                e = self.model.embed_tokens(batch).to(execution_dtype)
+                vx, _, _ = self.model.forward(None, embeds=e, attention_mask=None,
+                                              past_key_values=past, position_ids=vpos, input_ids=batch)
+                logits = torch.nn.functional.linear(vx, logits_w)
+                if cap:
+                    logits = cap * torch.tanh(logits / cap)
+                picked = _pick_batch(logits[0].float())
+                acc = (drafts_t[0] == picked[:gamma]).long().cumprod(0).sum()
+                for kv in statics:
+                    kv.commit(acc)
+                new_tok = picked.index_select(0, acc.view(1)).view(1, 1)
+                new_h = vx.index_select(1, acc.view(1))
+                return drafts_t, picked, acc, new_tok, new_h, pos_t + acc + 1
+
+            runner = {"key": (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype),
+                      "past": past, "statics": statics, "max_len": statics[0].slots if statics else 0,
+                      "cycle": _cycle, "compiled": None, "warm": False}
+            for kv in statics:
+                if kv.window is None:
+                    runner["max_len"] = kv.slots
+            self._mtp_cap_runner = runner
+
+        out = [int(last_tok.item())]
+        pbar.update(1)
+        if out[-1] in stop_tokens:
+            return out
+        torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
+        torch._dynamo.config.recompile_limit = 64
+        pos_t = torch.tensor([[p]], device=device, dtype=torch.long)
+        p_upper = p
+        records = []
+        accepted = 0
+        cycles = 0
+        if not runner["warm"]:
+            # one eager cycle first: allocates the per-cache save buffers and warms
+            # module caches at stable addresses before capture
+            nb0 = -(-(p + gamma + 1) // 512) * 512
+            for kv in statics:
+                kv.bucket = nb0
+            dts, pk, acc, last_tok, h_last, pos_t = [t.clone() for t in runner["cycle"](last_tok, h_last, pos_t)]
+            records.append((dts, pk, acc))
+            runner["compiled"] = torch.compile(runner["cycle"], mode="reduce-overhead", dynamic=False)
+            runner["warm"] = True
+            p_upper = p + gamma + 1
+            cycles = 1
+        compiled = runner["compiled"]
+        SYNC_EVERY = 8
+        while True:
+            pending = len(records) * (gamma + 1)
+            if len(out) + pending >= max_length or len(records) >= SYNC_EVERY:
+                for dts, pk, a in records:
+                    a = int(a.item())
+                    accepted += a
+                    emit = dts[0].tolist()[:a] + [int(pk[a].item())]
+                    for t in emit:
+                        out.append(t)
+                        pbar.update(1)
+                        if t in stop_tokens or len(out) >= max_length:
+                            if stats:
+                                print(f"[MTP-CAP] gamma={gamma} cycles={cycles} accepted={accepted} "
+                                      f"tokens/forward={len(out) / (cycles + 1):.3f}")
+                            return out
+                records.clear()
+            cycles += 1
+            nb = -(-(p_upper + gamma + 1) // 512) * 512
+            for kv in statics:
+                kv.bucket = nb
+            if stats and cycles % 16 == 0:
+                torch.cuda.synchronize()
+                _t0 = _time.time()
+            dts, pk, acc, nt, nh, np_ = compiled(last_tok, h_last, pos_t)
+            if stats and cycles % 16 == 0:
+                torch.cuda.synchronize()
+                print(f"[MTP-CAP] cycle {cycles}: {(_time.time() - _t0) * 1000:.1f} ms")
+            last_tok, h_last, pos_t = nt.clone(), nh.clone(), np_.clone()
+            records.append((dts.clone(), pk.clone(), acc.clone()))
+            p_upper += gamma + 1
 
     def _sample_in_graph(self, logits, temperature, top_k, top_p, min_p, do_sample):
         # sample_token minus history penalties and the Generator object, so the whole
