@@ -1516,7 +1516,7 @@ class Gemma4Model(sd1_clip.SDClipModel):
         embeds, _, _, _ = super().process_tokens(tokens, device)
         return embeds
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, stop_tokens=None):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
@@ -1536,7 +1536,7 @@ class Gemma4Model(sd1_clip.SDClipModel):
                 expanded_idx += 1
         initial_token_ids = [ids]
         input_ids = torch.tensor(initial_token_ids, device=self.execution_device)
-        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, initial_tokens=initial_token_ids[0], presence_penalty=presence_penalty, initial_input_ids=input_ids)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, stop_tokens=stop_tokens, initial_tokens=initial_token_ids[0], presence_penalty=presence_penalty, initial_input_ids=input_ids)
 
 
 def gemma4_te(dtype_llama=None, llama_quantization_metadata=None, model_class=None):
