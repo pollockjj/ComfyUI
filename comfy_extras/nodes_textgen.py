@@ -18,6 +18,18 @@ class TextGenerate(io.ComfyNode):
                 ]
             ),
             io.DynamicCombo.Option(
+                key="diffusion",
+                inputs=[
+                    io.Int.Input("max_denoising_steps", default=48, min=1, max=256, tooltip="Maximum denoising steps per 256 token canvas."),
+                    io.Float.Input("entropy_bound", default=0.1, min=0.001, max=10.0, step=0.001, tooltip="Maximum cumulative entropy accepted per denoising step; higher values accept more tokens."),
+                    io.Float.Input("t_min", default=0.4, min=0.0, max=2.0, step=0.01, tooltip="Minimum sampling temperature at the end of the denoising schedule."),
+                    io.Float.Input("t_max", default=0.8, min=0.0, max=2.0, step=0.01, tooltip="Maximum sampling temperature at the start of the denoising schedule."),
+                    io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, tooltip="Seed used to initialize the diffusion sampler."),
+                    io.Int.Input("stability_threshold", optional=True, default=1, min=0, max=16, advanced=True, tooltip="Consecutive unchanged denoising steps required before stopping; 0 disables stability checking."),
+                    io.Float.Input("confidence_threshold", optional=True, default=0.005, min=0.0001, max=1.0, step=0.0001, advanced=True, tooltip="Maximum mean token entropy required before stopping."),
+                ]
+            ),
+            io.DynamicCombo.Option(
                 key="off",
                 inputs=[]
             ),
@@ -50,18 +62,32 @@ class TextGenerate(io.ComfyNode):
 
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
 
-        generated_ids = clip.generate(
-            tokens,
-            do_sample=sampling_mode.get("sampling_mode") == "on",
-            max_length=max_length,
-            temperature=sampling_mode.get("temperature", 1.0),
-            top_k=sampling_mode.get("top_k", 50),
-            top_p=sampling_mode.get("top_p", 1.0),
-            min_p=sampling_mode.get("min_p", 0.0),
-            repetition_penalty=sampling_mode.get("repetition_penalty", 1.0),
-            presence_penalty=sampling_mode.get("presence_penalty", 0.0),
-            seed=sampling_mode.get("seed", None),
-        )
+        if sampling_mode.get("sampling_mode") == "diffusion":
+            generated_ids = clip.generate(
+                tokens,
+                generation_mode="diffusion",
+                max_length=max_length,
+                seed=sampling_mode.get("seed", 0),
+                max_denoising_steps=sampling_mode.get("max_denoising_steps", 48),
+                entropy_bound=sampling_mode.get("entropy_bound", 0.1),
+                t_min=sampling_mode.get("t_min", 0.4),
+                t_max=sampling_mode.get("t_max", 0.8),
+                stability_threshold=sampling_mode.get("stability_threshold", 1),
+                confidence_threshold=sampling_mode.get("confidence_threshold", 0.005),
+            )
+        else:
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=sampling_mode.get("sampling_mode") == "on",
+                max_length=max_length,
+                temperature=sampling_mode.get("temperature", 1.0),
+                top_k=sampling_mode.get("top_k", 50),
+                top_p=sampling_mode.get("top_p", 1.0),
+                min_p=sampling_mode.get("min_p", 0.0),
+                repetition_penalty=sampling_mode.get("repetition_penalty", 1.0),
+                presence_penalty=sampling_mode.get("presence_penalty", 0.0),
+                seed=sampling_mode.get("seed", None),
+            )
 
         generated_text = clip.decode(generated_ids)
 
