@@ -33,6 +33,7 @@ import comfy.memory_management
 import comfy.utils
 import comfy.quant_ops
 import comfy_aimdo.host_buffer
+import comfy_aimdo.model_vbar
 import comfy_aimdo.vram_buffer
 
 from typing import TYPE_CHECKING
@@ -1357,6 +1358,199 @@ def get_aimdo_cast_buffer(offload_stream, device):
         cast_buffer = comfy_aimdo.vram_buffer.VRAMBuffer(DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE, device.index)
         STREAM_AIMDO_CAST_BUFFERS[offload_stream] = cast_buffer
     return cast_buffer
+
+
+_DYNAMIC_VRAM_PAGE_SIZE = 32 * 1024 * 1024
+
+
+def _dynamic_vram_tensor_fingerprint(tensor):
+    if tensor is None:
+        return None
+    if isinstance(tensor, comfy.quant_ops.QuantizedTensor):
+        inner_tensors, context = tensor.__tensor_flatten__()
+        return (
+            type(tensor),
+            repr(context),
+            tuple(
+                (name, _dynamic_vram_tensor_fingerprint(getattr(tensor, name)))
+                for name in inner_tensors
+            ),
+        )
+    version = None if tensor.is_inference() else tensor._version
+    return (
+        tensor.data_ptr(), tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()),
+        tensor.dtype, tensor.device, version,
+    )
+
+
+class _DynamicVRAMGraphLease:
+    def __init__(self, state_token, modules, other_tensors, vbar_pages, pinned_allocations):
+        self.state_token = state_token
+        self.modules = modules
+        self.other_tensors = other_tensors
+        self.vbar_pages = vbar_pages
+        self.pinned_allocations = pinned_allocations
+
+    @staticmethod
+    def _resident(vbar_pages, pinned):
+        expected = 3 if pinned else 1
+        for vbar, pages in vbar_pages:
+            watermark = vbar.get_watermark()
+            residency = vbar.get_residency()
+            if any(
+                page >= watermark
+                or page >= len(residency)
+                or (residency[page] & 3) != expected
+                for page in pages
+            ):
+                return False
+        return True
+
+    @classmethod
+    def capture(cls, root_module, state_token):
+        modules = []
+        other_tensors = []
+        page_sets = {}
+        loaded_sizes = {}
+        pinned_allocations = []
+        lease = None
+
+        for module in root_module.modules():
+            allocation = getattr(module, "_v", None)
+            if (
+                hasattr(module, "_prefetch")
+                or getattr(module, "weight_function", None)
+                or getattr(module, "bias_function", None)
+                or getattr(module, "weight_lowvram_function", None) is not None
+                or getattr(module, "bias_lowvram_function", None) is not None
+            ):
+                return None
+
+            if allocation is not None:
+                vbar, address, size = allocation
+                signature = getattr(module, "_v_signature", None)
+                resident_weight = getattr(module, "_v_weight", None)
+                if signature is None or resident_weight is None:
+                    return None
+                start = (address - vbar.base_addr) // _DYNAMIC_VRAM_PAGE_SIZE
+                end = (
+                    address + size - vbar.base_addr + _DYNAMIC_VRAM_PAGE_SIZE - 1
+                ) // _DYNAMIC_VRAM_PAGE_SIZE
+                if start < 0 or end <= start:
+                    return None
+                key = id(vbar)
+                if key not in page_sets:
+                    page_sets[key] = (vbar, set())
+                    loaded_sizes[key] = vbar.loaded_size()
+                page_sets[key][1].update(range(start, end))
+                modules.append((
+                    module, vbar, address, size, signature, resident_weight,
+                    getattr(module, "_v_bias", None),
+                    _dynamic_vram_tensor_fingerprint(getattr(module, "weight", None)),
+                    _dynamic_vram_tensor_fingerprint(getattr(module, "bias", None)),
+                    _dynamic_vram_tensor_fingerprint(resident_weight),
+                    _dynamic_vram_tensor_fingerprint(getattr(module, "_v_bias", None)),
+                ))
+
+            tensors = tuple(module.named_parameters(recurse=False)) + tuple(
+                module.named_buffers(recurse=False)
+            )
+            for name, tensor in tensors:
+                if allocation is not None and name in ("weight", "bias"):
+                    continue
+                other_tensors.append((
+                    module, name, tensor, _dynamic_vram_tensor_fingerprint(tensor)
+                ))
+
+        if not modules:
+            return None
+        vbar_pages = tuple((vbar, tuple(sorted(pages))) for vbar, pages in page_sets.values())
+        if not cls._resident(vbar_pages, pinned=False):
+            return None
+
+        try:
+            for module, _, _, _, signature, _, _, *_ in modules:
+                allocation = module._v
+                current_signature = comfy_aimdo.model_vbar.vbar_fault(allocation)
+                if current_signature is None:
+                    return None
+                pinned_allocations.append(allocation)
+                if not comfy_aimdo.model_vbar.vbar_signature_compare(current_signature, signature):
+                    return None
+
+            if (
+                not cls._resident(vbar_pages, pinned=True)
+                or any(vbar.loaded_size() != loaded_sizes[id(vbar)] for vbar, _ in vbar_pages)
+            ):
+                return None
+            lease = cls(
+                state_token,
+                tuple(modules),
+                tuple(other_tensors),
+                vbar_pages,
+                tuple(pinned_allocations),
+            )
+            return lease
+        finally:
+            if lease is None:
+                for allocation in reversed(pinned_allocations):
+                    comfy_aimdo.model_vbar.vbar_unpin(allocation)
+
+    def valid(self, state_token, full=False):
+        if (
+            not self.pinned_allocations
+            or state_token != self.state_token
+            or not self._resident(self.vbar_pages, pinned=True)
+        ):
+            return False
+        for module, vbar, address, size, signature, resident_weight, resident_bias, *fingerprints in self.modules:
+            allocation = getattr(module, "_v", None)
+            if (
+                allocation is None
+                or allocation[0] is not vbar
+                or allocation[1:] != (address, size)
+                or getattr(module, "_v_signature", None) is not signature
+                or getattr(module, "_v_weight", None) is not resident_weight
+                or getattr(module, "_v_bias", None) is not resident_bias
+                or hasattr(module, "_prefetch")
+            ):
+                return False
+            if full and fingerprints != [
+                _dynamic_vram_tensor_fingerprint(getattr(module, "weight", None)),
+                _dynamic_vram_tensor_fingerprint(getattr(module, "bias", None)),
+                _dynamic_vram_tensor_fingerprint(resident_weight),
+                _dynamic_vram_tensor_fingerprint(resident_bias),
+            ]:
+                return False
+        if full:
+            for module, name, tensor, fingerprint in self.other_tensors:
+                if (
+                    getattr(module, name, None) is not tensor
+                    or _dynamic_vram_tensor_fingerprint(tensor) != fingerprint
+                ):
+                    return False
+        return True
+
+    def release(self):
+        pinned_allocations = self.pinned_allocations
+        if not pinned_allocations:
+            return
+        self.pinned_allocations = ()
+        for allocation in reversed(pinned_allocations):
+            comfy_aimdo.model_vbar.vbar_unpin(allocation)
+        self.modules = ()
+        self.other_tensors = ()
+        self.vbar_pages = ()
+
+    def __del__(self):
+        self.release()
+
+
+def acquire_dynamic_vram_graph_lease(root_module, state_token):
+    if not comfy.memory_management.aimdo_enabled:
+        return None
+    return _DynamicVRAMGraphLease.capture(root_module, state_token)
+
 
 def reset_cast_buffers():
     global LARGEST_CASTED_WEIGHT

@@ -28,10 +28,12 @@ try:
         TensorCoreNVFP4Layout as _CKNvfp4Layout,
         TensorCoreConvRotW4A4Layout as _CKTensorCoreConvRotW4A4Layout,
         TensorWiseINT8Layout as _CKTensorWiseINT8Layout,
+        dequantize_args,
         register_layout_op,
         register_layout_class,
         get_layout_class,
     )
+    from comfy_kitchen.tensor.fp8 import _handle_fp8_linear as _ck_handle_fp8_linear
     _CK_AVAILABLE = True
     if torch.version.cuda is None:
         ck.registry.disable("cuda")
@@ -88,6 +90,12 @@ except ImportError as e:
 
     def get_layout_class(name):
         return None
+
+    def dequantize_args(args):
+        return args
+
+    def _ck_handle_fp8_linear(qt, args, kwargs):
+        return torch.nn.functional.linear(*args, **kwargs)
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -227,6 +235,48 @@ register_layout_class("TensorCoreConvRotW4A4Layout", _CKTensorCoreConvRotW4A4Lay
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
 
+
+def _handle_comfy_fp8_linear(qt, args, kwargs):
+    input_tensor, weight = args[0], args[1]
+    bias = args[2] if len(args) > 2 else None
+    if (
+        isinstance(input_tensor, QuantizedTensor)
+        and isinstance(weight, QuantizedTensor)
+        and (
+            not input_tensor.layout_cls.supports_fast_matmul()
+            or not weight.layout_cls.supports_fast_matmul()
+        )
+    ):
+        return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
+    return _ck_handle_fp8_linear(qt, args, kwargs)
+
+
+if _CK_AVAILABLE:
+    register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E4M3Layout)(_handle_comfy_fp8_linear)
+    register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8E5M2Layout)(_handle_comfy_fp8_linear)
+
+NVFP4_FUSED_MOE_FORMAT = "nvfp4_cutlass_fused_moe_v1"
+NVFP4_FUSED_MOE_V1_FIELDS = {
+    "artifact_contract": "diffusiongemma_nvfp4_cutlass_fused_moe.v1",
+    "group_size": 16,
+    "nibble_order": "low_first",
+    "block_scale_layout": "cutlass_128x4",
+    "projection_order": "up_gate",
+    "activation_scale": "static",
+    "full_precision_matrix_mult": False,
+}
+MXFP8_FUSED_MOE_FORMAT = "mxfp8_cutlass_fused_moe_v1"
+MXFP8_FUSED_MOE_V1_FIELDS = {
+    "artifact_contract": "diffusiongemma_mxfp8_cutlass_fused_moe.v1",
+    "group_size": 32,
+    "weight_dtype": "float8_e4m3fn",
+    "block_scale_dtype": "ue8m0",
+    "block_scale_layout": "cutlass_128x4",
+    "projection_order": "gate_up",
+    "activation_scale": "dynamic_e8m0_1x32",
+    "full_precision_matrix_mult": False,
+}
+
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -244,12 +294,26 @@ QUANT_ALGOS = {
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
     },
+    NVFP4_FUSED_MOE_FORMAT: {
+        "storage_t": torch.uint8,
+        "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
+        # This layout is storage-only; DiffusionGemma consumes its low-first qdata without high-first generic ops.
+        "comfy_tensor_layout": "TensorCoreNVFP4Layout",
+        "group_size": 16,
+    },
 }
 
 if _CK_MXFP8_AVAILABLE:
     QUANT_ALGOS["mxfp8"] = {
         "storage_t": torch.float8_e4m3fn,
         "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "TensorCoreMXFP8Layout",
+        "group_size": 32,
+    }
+    QUANT_ALGOS[MXFP8_FUSED_MOE_FORMAT] = {
+        "storage_t": torch.float8_e4m3fn,
+        "parameters": {"weight_scale"},
+        # Storage-only layout; DiffusionGemma consumes both complete banks together.
         "comfy_tensor_layout": "TensorCoreMXFP8Layout",
         "group_size": 32,
     }
@@ -283,5 +347,9 @@ __all__ = [
     "TensorCoreConvRotW4A4Layout",
     "TensorWiseINT8Layout",
     "QUANT_ALGOS",
+    "NVFP4_FUSED_MOE_FORMAT",
+    "NVFP4_FUSED_MOE_V1_FIELDS",
+    "MXFP8_FUSED_MOE_FORMAT",
+    "MXFP8_FUSED_MOE_V1_FIELDS",
     "register_layout_op",
 ]

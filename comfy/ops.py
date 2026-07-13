@@ -250,7 +250,8 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
                 tensor = tensor.dequantize()
             return tensor
 
-        if orig.dtype != dtype or len(fns) > 0:
+        force_dequant = getattr(s, "_full_precision_mm", False) and isinstance(x, QuantizedTensor)
+        if orig.dtype != dtype or len(fns) > 0 or force_dequant:
             x = to_dequant(x, dtype)
         if not resident and lowvram_fn is not None:
             x = to_dequant(x, dtype if compute_dtype is None else compute_dtype)
@@ -374,7 +375,8 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         for f in s.bias_function:
             bias = f(bias)
 
-    if weight_has_function or weight.dtype != dtype:
+    force_dequant = getattr(s, "_full_precision_mm", False) and isinstance(weight, QuantizedTensor)
+    if weight_has_function or weight.dtype != dtype or force_dequant:
         weight = weight.to(dtype=dtype)
         if isinstance(weight, QuantizedTensor):
             weight = weight.dequantize()
@@ -747,6 +749,20 @@ class disable_weight_init:
             self.bias = None
             return None
 
+        def weighted_embedding(self, probabilities):
+            params = getattr(self.weight, "_params", None)
+            weight_dtype = getattr(params, "orig_dtype", self.weight.dtype)
+            weight, bias, offload_stream = cast_bias_weight(
+                self,
+                device=probabilities.device,
+                dtype=weight_dtype,
+                offloadable=True,
+            )
+            try:
+                return torch.matmul(probabilities.to(dtype=weight.dtype), weight)
+            finally:
+                uncast_bias_weight(self, weight, bias, offload_stream)
+
         def forward_comfy_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
@@ -901,13 +917,17 @@ if CUBLAS_IS_AVAILABLE:
 # ==============================================================================
 # Mixed Precision Operations
 # ==============================================================================
+from . import quant_ops
 from .quant_ops import (
+    MXFP8_FUSED_MOE_FORMAT,
+    MXFP8_FUSED_MOE_V1_FIELDS,
+    NVFP4_FUSED_MOE_FORMAT,
+    NVFP4_FUSED_MOE_V1_FIELDS,
     QuantizedTensor,
     QUANT_ALGOS,
     TensorCoreFP8Layout,
     get_layout_class,
 )
-
 
 class QuantLinearFunc(torch.autograd.Function):
     """Custom autograd function for quantized linear: quantized forward, optionally FP8 backward.
@@ -1065,6 +1085,23 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         module.weight = torch.nn.Parameter(weight.to(device=device, dtype=compute_dtype), requires_grad=False)
     else:
         module.quant_format = layer_conf.get("format", None)
+        fused_contract = None
+        if module.quant_format == NVFP4_FUSED_MOE_FORMAT:
+            fused_contract = ("NVFP4", NVFP4_FUSED_MOE_V1_FIELDS)
+        elif module.quant_format == MXFP8_FUSED_MOE_FORMAT:
+            fused_contract = ("MXFP8", MXFP8_FUSED_MOE_V1_FIELDS)
+        if fused_contract is not None:
+            format_name, expected_fields = fused_contract
+            mismatches = {
+                name: (layer_conf.get(name), expected)
+                for name, expected in expected_fields.items()
+                if layer_conf.get(name) != expected
+            }
+            expected_experts = getattr(module, "num_experts", None)
+            if layer_conf.get("num_experts") != expected_experts:
+                mismatches["num_experts"] = (layer_conf.get("num_experts"), expected_experts)
+            if mismatches:
+                raise ValueError(f"Invalid fused {format_name} v1 contract for layer {layer_name}: {mismatches}")
         module._full_precision_mm_config = layer_conf.get("full_precision_matrix_mult", False)
         if not module._full_precision_mm:
             module._full_precision_mm = module._full_precision_mm_config
@@ -1080,12 +1117,12 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
         # Per-format scales; fp8 dtype views handle both legacy uint8-on-disk and native fp8.
         if module.quant_format in ("float8_e4m3fn", "float8_e5m2"):
             scales = {"scale": pop_scale("weight_scale")}
-        elif module.quant_format == "mxfp8":
+        elif module.quant_format in ("mxfp8", MXFP8_FUSED_MOE_FORMAT):
             bs = pop_scale("weight_scale", torch.float8_e8m0fnu)
             if bs is None:
                 raise ValueError(f"Missing MXFP8 block scales for layer {layer_name}")
             scales = {"scale": bs}
-        elif module.quant_format == "nvfp4":
+        elif module.quant_format in ("nvfp4", NVFP4_FUSED_MOE_FORMAT):
             ts = pop_scale("weight_scale_2")
             bs = pop_scale("weight_scale", torch.float8_e4m3fn)
             if ts is None or bs is None:
@@ -1379,6 +1416,11 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 self._full_precision_mm = MixedPrecisionOps._full_precision_mm
                 self._full_precision_mm_config = False
                 self._resident_bank = None
+                self.weight_function = []
+                self.bias_function = []
+                self.weight_lowvram_function = None
+                self.bias_lowvram_function = None
+                self.register_parameter("input_scale", None)
 
             def reset_parameters(self):
                 return None
@@ -1387,7 +1429,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return _quantized_apply(self, fn, recurse)
 
             def _load_from_state_dict(self, *args):
-                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=False)
+                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=True)
 
             def expert_weight(self, i: int):
                 """Expert i's weight (Tensor or per-expert QuantizedTensor view)."""
@@ -1460,7 +1502,18 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             def state_dict(self, *args, destination=None, prefix="", **kwargs):
                 sd = destination if destination is not None else {}
-                return _quantized_weight_state_dict(self, sd, prefix, extra_quant_conf={"num_experts": self.num_experts})
+                extra_quant_conf = {"num_experts": self.num_experts}
+                if self.quant_format == NVFP4_FUSED_MOE_FORMAT:
+                    extra_quant_conf.update(NVFP4_FUSED_MOE_V1_FIELDS)
+                elif self.quant_format == MXFP8_FUSED_MOE_FORMAT:
+                    extra_quant_conf.update(MXFP8_FUSED_MOE_V1_FIELDS)
+                return _quantized_weight_state_dict(
+                    self,
+                    sd,
+                    prefix,
+                    extra_quant_conf=extra_quant_conf,
+                    extra_quant_params=("input_scale",),
+                )
 
         class Embedding(manual_cast.Embedding):
             def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
@@ -1469,12 +1522,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if layer_conf is not None:
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
-                # Only fp8 makes sense for embeddings (per-row dequant via index select).
-                # Block-scaled formats (NVFP4, MXFP8) can't do per-row lookup efficiently.
+                # FP8, tensor-wise INT8, and MXFP8 dequantize per selected row.
                 quant_format = layer_conf.get("format") if layer_conf is not None else None
                 manually_loaded_keys = []
 
-                if quant_format in ("float8_e4m3fn", "float8_e5m2") and weight_key in state_dict:
+                if quant_format in ("float8_e4m3fn", "float8_e5m2", "int8_tensorwise", "mxfp8") and weight_key in state_dict:
+                    if quant_format == "mxfp8" and not callable(getattr(getattr(quant_ops, "ck", None), "mxfp8_embedding", None)):
+                        raise ValueError("MXFP8 embeddings require comfy-kitchen mxfp8_embedding support")
                     self.quant_format = quant_format
                     qconfig = QUANT_ALGOS[quant_format]
                     self.layout_type = qconfig["comfy_tensor_layout"]
@@ -1485,11 +1539,18 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     scale_key = f"{prefix}weight_scale"
                     scale = state_dict.pop(scale_key, None)
                     if scale is not None:
-                        scale = scale.float()
+                        scale = scale.view(torch.float8_e8m0fnu) if quant_format == "mxfp8" else scale.float()
                         manually_loaded_keys.append(scale_key)
+                    elif quant_format in ("int8_tensorwise", "mxfp8"):
+                        raise ValueError(f"Missing {quant_format} weight scale for layer {prefix.rstrip('.')}")
+
+                    scales = {"scale": scale if scale is not None else torch.ones((), dtype=torch.float32)}
+                    if quant_format == "int8_tensorwise" and layer_conf.get("convrot", False):
+                        scales["convrot"] = True
+                        scales["convrot_groupsize"] = int(layer_conf.get("convrot_groupsize", 256))
 
                     params = layout_cls.Params(
-                        scale=scale if scale is not None else torch.ones((), dtype=torch.float32),
+                        **scales,
                         orig_dtype=MixedPrecisionOps._compute_dtype,
                         orig_shape=(self.num_embeddings, self.embedding_dim),
                     )
@@ -1510,23 +1571,77 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 sd = destination if destination is not None else {}
                 return _quantized_weight_state_dict(self, sd, prefix)
 
+            def weighted_embedding(self, probabilities):
+                weight = self.weight
+                native_mxfp8 = (
+                    getattr(self, "quant_format", None) == "mxfp8"
+                    and isinstance(weight, QuantizedTensor)
+                    and weight._layout_cls == "TensorCoreMXFP8Layout"
+                    and not getattr(self, "_full_precision_mm", False)
+                    and not getattr(self, "comfy_force_cast_weights", False)
+                    and len(self.weight_function) == 0
+                    and len(self.bias_function) == 0
+                    and getattr(self, "weight_lowvram_function", None) is None
+                    and getattr(self, "bias_lowvram_function", None) is None
+                )
+                if not native_mxfp8:
+                    return super().weighted_embedding(probabilities)
+
+                resident, bias, offload_stream = cast_bias_weight(
+                    self,
+                    device=probabilities.device,
+                    dtype=weight.dtype,
+                    offloadable=True,
+                )
+                try:
+                    if not isinstance(resident, QuantizedTensor):
+                        raise RuntimeError("MXFP8 embedding did not remain quantized after device cast")
+                    flat = probabilities.reshape(-1, probabilities.shape[-1]).to(torch.bfloat16)
+                    output = quant_ops.ck.mxfp8_weighted_embedding(
+                        resident._qdata, resident._params.scale, flat)
+                    return output.reshape(*probabilities.shape[:-1], resident.shape[1])
+                finally:
+                    uncast_bias_weight(self, resident, bias, offload_stream)
+
             def forward_comfy_cast_weights(self, input, out_dtype=None):
                 weight = self.weight
 
-                # Optimized path: lookup in fp8, dequantize only the selected rows.
+                # Optimized path: lookup in the storage dtype, dequantize only the selected rows.
                 if isinstance(weight, QuantizedTensor) and len(self.weight_function) == 0:
                     qdata, _, offload_stream = cast_bias_weight(self, device=input.device, dtype=weight.dtype, offloadable=True)
                     if isinstance(qdata, QuantizedTensor):
-                        scale = qdata._params.scale
+                        qparams = qdata._params
+                        scale = qparams.scale
                         qdata = qdata._qdata
                     else:
+                        qparams = None
                         scale = None
+
+                    target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
+                    if getattr(self, "quant_format", None) == "mxfp8":
+                        if qparams is None or scale is None:
+                            raise RuntimeError("Invalid resident MXFP8 embedding state")
+                        x = quant_ops.ck.mxfp8_embedding(qdata, scale, input, target_dtype)
+                        uncast_bias_weight(self, qdata, None, offload_stream)
+                        return x
 
                     x = torch.nn.functional.embedding(
                         input, qdata, self.padding_idx, self.max_norm,
                         self.norm_type, self.scale_grad_by_freq, self.sparse)
                     uncast_bias_weight(self, qdata, None, offload_stream)
-                    target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
+                    if getattr(self, "quant_format", None) == "int8_tensorwise" and qparams is not None:
+                        # Per-row scales and row-local convrot inverse rotation let selected rows dequantize as a batch.
+                        layout_cls = get_layout_class(self.layout_type)
+                        row_scale = torch.nn.functional.embedding(input, scale.to(device=x.device))
+                        flat = x.reshape(-1, x.shape[-1])
+                        dq = layout_cls.dequantize(flat, type(qparams)(
+                            scale=row_scale.reshape(-1, 1),
+                            convrot=qparams.convrot,
+                            convrot_groupsize=qparams.convrot_groupsize,
+                            orig_dtype=target_dtype,
+                            orig_shape=tuple(flat.shape),
+                        ))
+                        return dq.reshape(x.shape)
                     x = x.to(dtype=target_dtype)
                     if scale is not None and scale != 1.0:
                         x = x * scale.to(dtype=target_dtype)
