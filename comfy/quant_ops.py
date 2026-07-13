@@ -32,8 +32,8 @@ try:
         register_layout_op,
         register_layout_class,
         get_layout_class,
+        fp8_linear as _ck_fp8_linear,
     )
-    from comfy_kitchen.tensor.fp8 import _handle_fp8_linear as _ck_handle_fp8_linear
     _CK_AVAILABLE = True
     if torch.version.cuda is None:
         ck.registry.disable("cuda")
@@ -94,8 +94,8 @@ except ImportError as e:
     def dequantize_args(args):
         return args
 
-    def _ck_handle_fp8_linear(qt, args, kwargs):
-        return torch.nn.functional.linear(*args, **kwargs)
+    def _ck_fp8_linear(input_tensor, weight, bias=None, out_dtype=None):
+        return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
 
 _CK_MXFP8_AVAILABLE = False
 if _CK_AVAILABLE:
@@ -269,7 +269,7 @@ def _handle_comfy_fp8_linear(qt, args, kwargs):
         )
     ):
         return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
-    return _ck_handle_fp8_linear(qt, args, kwargs)
+    return _ck_fp8_linear(input_tensor, weight, bias, kwargs.get("out_dtype"))
 
 
 if _CK_AVAILABLE:

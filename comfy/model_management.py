@@ -1546,8 +1546,12 @@ class _DynamicVRAMGraphLease:
         self.release()
 
 
+def dynamic_vram_graph_capture_enabled():
+    return comfy.memory_management.aimdo_enabled
+
+
 def acquire_dynamic_vram_graph_lease(root_module, state_token):
-    if not comfy.memory_management.aimdo_enabled:
+    if not dynamic_vram_graph_capture_enabled():
         return None
     return _DynamicVRAMGraphLease.capture(root_module, state_token)
 

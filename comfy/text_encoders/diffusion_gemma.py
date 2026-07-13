@@ -159,16 +159,14 @@ class DiffusionGemmaMLP(MLP):
             return super().forward(x)
         gate = _linear_from_shared_input(self.gate_proj, quantized_input, x.shape)
         up = _linear_from_shared_input(self.up_proj, quantized_input, x.shape)
-        fused_quantize = getattr(
-            comfy.quant_ops.ck, "gelu_tanh_multiply_quantize_mxfp8", None)
-        if fused_quantize is None or not _native_mxfp8_linear(self.down_proj, gate):
+        if not _native_mxfp8_linear(self.down_proj, gate):
             return self.down_proj(self.activation(gate) * up)
 
         gate_2d = gate.reshape(-1, gate.shape[-1])
         up_2d = up.reshape(-1, up.shape[-1])
         padded_shape = comfy.quant_ops.TensorCoreMXFP8Layout.get_padded_shape(
             tuple(gate_2d.shape))
-        qdata, block_scale = fused_quantize(
+        qdata, block_scale = comfy.quant_ops.ck.gelu_tanh_multiply_quantize_mxfp8(
             gate_2d, up_2d, pad_32x=padded_shape != tuple(gate_2d.shape))
         params = comfy.quant_ops.TensorCoreMXFP8Layout.Params(
             scale=block_scale,
@@ -663,8 +661,7 @@ class DiffusionGemmaExperts(nn.Module):
 
     def _supports_native_fused_mxfp8(self, hidden_states):
         return (
-            hasattr(comfy.quant_ops.ck, "fused_moe_mxfp8")
-            and hidden_states.is_cuda
+            hidden_states.is_cuda
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
             and hidden_states.dtype in (torch.float16, torch.bfloat16)
             and hidden_states.ndim == 2
@@ -677,7 +674,6 @@ class DiffusionGemmaExperts(nn.Module):
         return (
             self._bank_mode == "fused_mxfp8"
             and self._fused_mxfp8_banks_compatible
-            and callable(getattr(comfy.quant_ops.ck, "fused_moe_mxfp8_scaled", None))
             and hidden_states.dtype == torch.bfloat16
             and self._supports_native_fused_mxfp8(hidden_states)
         )
@@ -1793,7 +1789,7 @@ class DiffusionGenerate:
             and execution_dtype == torch.bfloat16
             and torch.cuda.get_device_capability(device) == (12, 0)
             and torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
-            and comfy.memory_management.aimdo_enabled
+            and comfy.model_management.dynamic_vram_graph_capture_enabled()
             and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
         )
 
@@ -1866,9 +1862,7 @@ class DiffusionGenerate:
 
         generated_token_ids = []
         commit_canvas = None
-        use_fused_native_sampling = use_native_sampling and callable(
-            getattr(comfy.quant_ops.ck, "softcap_categorical_stats_sample", None)
-        )
+        use_fused_native_sampling = use_native_sampling
 
         for canvas_idx in range(max_new_canvases):
             if commit_canvas is not None:

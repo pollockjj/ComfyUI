@@ -241,6 +241,7 @@ class CLIP:
         params['device'] = model_options.get("initial_device", model_management.text_encoder_initial_device(load_device, offload_device, parameters * model_management.dtype_size(dtype)))
         params['model_options'] = model_options
 
+        self.supports_native_quantized_compute = target.supports_native_quantized_compute
         self.cond_stage_model = clip(**(params))
 
         for dt in self.cond_stage_model.dtypes:
@@ -258,7 +259,7 @@ class CLIP:
         self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
         #Match torch.float32 hardcode upcast in TE implemention
         self.patcher.set_model_compute_dtype(torch.float32)
-        if getattr(self.cond_stage_model, "supports_native_quantized_compute", False):
+        if self.supports_native_quantized_compute:
             self.patcher.force_cast_weights = False
         self.patcher.hook_mode = comfy.hooks.EnumHookMode.MinVram
         self.patcher.is_clip = True
@@ -1677,6 +1678,7 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif te_model == TEModel.DIFFUSION_GEMMA_26B:
             clip_target.clip = comfy.text_encoders.diffusion_gemma.diffusion_gemma_te(**comfy.text_encoders.diffusion_gemma.diffusion_gemma_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.diffusion_gemma.DiffusionGemmaTokenizer
+            clip_target.supports_native_quantized_compute = clip_target.clip.supports_native_quantized_compute
             tokenizer_data["tokenizer_json"] = clip_data[0].get("tokenizer_json", None)
         elif te_model == TEModel.QWEN3_4B:
             if clip_type == CLIPType.FLUX or clip_type == CLIPType.FLUX2:

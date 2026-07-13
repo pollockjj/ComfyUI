@@ -27,6 +27,7 @@ class ClipTarget:
         self.clip = clip
         self.tokenizer = tokenizer
         self.params = {}
+        self.supports_native_quantized_compute = False
 
 class BASE:
     unet_config = {}
