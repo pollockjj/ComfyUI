@@ -222,6 +222,27 @@ TensorWiseINT8Layout = _CKTensorWiseINT8Layout
 TensorCoreConvRotW4A4Layout = _CKTensorCoreConvRotW4A4Layout
 
 
+def grouped_int8_convrot_linear_packed(
+    x,
+    expert_indptr,
+    weight,
+    weight_scale,
+    convrot_groupsize,
+    *,
+    out_dtype,
+):
+    if not _CK_AVAILABLE:
+        raise RuntimeError("Packed INT8 ConvRot expert operations require comfy-kitchen")
+    return ck.grouped_int8_convrot_linear_packed(
+        x,
+        expert_indptr,
+        weight,
+        weight_scale,
+        convrot_groupsize,
+        out_dtype=out_dtype,
+    )
+
+
 # ==============================================================================
 # Registry
 # ==============================================================================
@@ -346,6 +367,7 @@ __all__ = [
     "TensorCoreNVFP4Layout",
     "TensorCoreConvRotW4A4Layout",
     "TensorWiseINT8Layout",
+    "grouped_int8_convrot_linear_packed",
     "QUANT_ALGOS",
     "NVFP4_FUSED_MOE_FORMAT",
     "NVFP4_FUSED_MOE_V1_FIELDS",

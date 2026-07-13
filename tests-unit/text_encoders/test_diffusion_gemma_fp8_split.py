@@ -17,7 +17,7 @@ if not torch.cuda.is_available():
 
 import comfy.model_management  # noqa: E402
 from comfy.ops import mixed_precision_ops  # noqa: E402
-from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout  # noqa: E402
+from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout, TensorWiseINT8Layout  # noqa: E402
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaAttention,
@@ -26,6 +26,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaMLP,
     _ConditionedDecoderGraph,
     _ConditionedDecoderGraphExecution,
+    _int8_self_conditioning,
     _append_preallocated_kv,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
@@ -72,6 +73,21 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertIs(scales, resident._params.scale)
         self.assertEqual(actual_probabilities.dtype, torch.bfloat16)
         uncast.assert_called_once_with(embedding, resident, None, offload_token)
+
+    def test_int8_self_conditioning_dequantizes_bounded_rows(self):
+        weight = self._int8_bank((2, 64), (2, 1), 64, device="cpu").weight
+        probabilities = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
+        dequantized = torch.arange(128, dtype=torch.bfloat16).reshape(2, 64)
+
+        with (
+            mock.patch("comfy.text_encoders.diffusion_gemma._INT8_SELF_CONDITIONING_CHUNK", 1),
+            mock.patch.object(QuantizedTensor, "dequantize", side_effect=[dequantized[:1], dequantized[1:]]) as dequantize,
+            mock.patch.object(torch, "mm", side_effect=lambda a, b, out_dtype: a.float() @ b.float()),
+        ):
+            output = _int8_self_conditioning(probabilities, weight)
+
+        self.assertEqual(dequantize.call_count, 2)
+        self.assertTrue(torch.equal(output, probabilities.float() @ dequantized.float()))
 
     def test_quantized_diffusion_gemma_enables_native_compute(self):
         self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
@@ -365,6 +381,30 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             bias_lowvram_function=None,
         )
 
+    @staticmethod
+    def _int8_bank(qdata_shape, scale_shape, group_size, device="meta", convrot=True):
+        params = TensorWiseINT8Layout.Params(
+            scale=torch.empty(scale_shape, dtype=torch.float32, device=device),
+            convrot=convrot,
+            convrot_groupsize=group_size,
+            orig_dtype=torch.bfloat16,
+            orig_shape=qdata_shape,
+        )
+        return types.SimpleNamespace(
+            quant_format="int8_tensorwise",
+            weight=QuantizedTensor(
+                torch.empty(qdata_shape, dtype=torch.int8, device=device),
+                "TensorWiseINT8Layout",
+                params,
+            ),
+            bias=None,
+            _full_precision_mm=False,
+            weight_function=[],
+            bias_function=[],
+            weight_lowvram_function=None,
+            bias_lowvram_function=None,
+        )
+
     def test_mxfp8_expert_bank_contract(self):
         experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
         torch.nn.Module.__init__(experts)
@@ -406,6 +446,50 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         experts._banks = (self._mxfp8_bank((128, 1408, 2816), (128, 1408, 84), experts.fused_mxfp8_format), experts._banks[1])
         with self.assertRaisesRegex(ValueError, "fused MXFP8 expert bank contract mismatch"):
             experts._configure_loaded_banks(experts, None)
+
+    def test_fused_int8_convrot_expert_bank_contract(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.unfused = False
+        experts._bank_mode = None
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 256),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64),
+        )
+
+        experts._configure_loaded_banks(experts, None)
+        self.assertEqual(experts._bank_mode, "fused_int8_convrot")
+        self.assertTrue(experts._grouped_int8_convrot_compatible)
+
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 256, convrot=False),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64, convrot=False),
+        )
+        experts._configure_loaded_banks(experts, None)
+        self.assertEqual(experts._bank_mode, "quantized")
+
+        experts._banks = (
+            self._int8_bank((128, 1408, 2816), (128, 1408, 1), 64),
+            self._int8_bank((128, 2816, 704), (128, 2816, 1), 64),
+        )
+        with self.assertRaisesRegex(ValueError, "INT8 ConvRot expert bank contract mismatch"):
+            experts._configure_loaded_banks(experts, None)
+
+    def test_int8_convrot_experts_dispatch_only_packed_routes(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.num_experts = 2
+        resident = lambda weight: types.SimpleNamespace(bank_resident=lambda hidden: contextlib.nullcontext(types.SimpleNamespace(_resident_bank=(weight, None))))  # noqa: E731
+        gate_up = self._int8_bank((2, 4, 2), (2, 4, 1), 256, device="cpu").weight
+        down = self._int8_bank((2, 2, 2), (2, 2, 1), 64, device="cpu").weight
+        experts.gate_up_proj, experts.down_proj = resident(gate_up), resident(down)
+        hidden, indices, weights = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16), torch.tensor([[1], [0]]), torch.ones((2, 1), dtype=torch.float32)
+        with mock.patch.object(sys.modules["comfy.quant_ops"], "grouped_int8_convrot_linear_packed",
+                               side_effect=[torch.zeros((2, 4), dtype=torch.bfloat16), hidden.flip(0)]) as packed:
+            output = experts._forward_grouped_int8_convrot(hidden, indices, weights)
+
+        self.assertEqual((packed.call_count, packed.call_args_list[0].args[1].tolist()), (2, [0, 1, 2]))
+        self.assertTrue(torch.equal(output, hidden))
 
 if __name__ == "__main__":
     unittest.main()

@@ -99,6 +99,9 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
     return output
 
 
+_INT8_SELF_CONDITIONING_CHUNK = 65504  # Largest 32-row multiple below CUDA's 65,535 grid-y limit.
+
+
 def _native_mxfp8_embedding(module):
     return (
         getattr(module, "quant_format", None) == "mxfp8"
@@ -108,6 +111,45 @@ def _native_mxfp8_embedding(module):
         and getattr(module, "weight_lowvram_function", None) is None
         and not getattr(module, "comfy_force_cast_weights", False)
     )
+
+
+def _native_int8_embedding(module):
+    weight = module.weight
+    return (
+        getattr(module, "quant_format", None) == "int8_tensorwise"
+        and isinstance(weight, QuantizedTensor)
+        and weight._layout_cls == "TensorWiseINT8Layout"
+        and weight._params.convrot is True
+        and len(module.weight_function) == 0
+        and getattr(module, "weight_lowvram_function", None) is None
+        and not getattr(module, "comfy_force_cast_weights", False)
+    )
+
+
+def _int8_self_conditioning(probabilities, weight):
+    if probabilities.dtype != torch.bfloat16 or weight._layout_cls != "TensorWiseINT8Layout":
+        raise ValueError("DiffusionGemma INT8 self-conditioning requires BF16 probabilities and INT8 weights")
+    params = weight._params
+    if params.convrot is not True:
+        raise ValueError("DiffusionGemma INT8 self-conditioning requires ConvRot weights")
+
+    qdata = weight._qdata
+    flat = probabilities.reshape(-1, probabilities.shape[-1])
+    output = torch.zeros((flat.shape[0], qdata.shape[1]), device=qdata.device, dtype=torch.float32)
+    for start in range(0, qdata.shape[0], _INT8_SELF_CONDITIONING_CHUNK):
+        end = min(start + _INT8_SELF_CONDITIONING_CHUNK, qdata.shape[0])
+        chunk_params = type(params)(
+            scale=params.scale[start:end],
+            convrot=True,
+            convrot_groupsize=params.convrot_groupsize,
+            orig_dtype=params.orig_dtype,
+            orig_shape=(end - start, qdata.shape[1]),
+        )
+        chunk = QuantizedTensor(qdata[start:end], weight._layout_cls, chunk_params).dequantize()
+        partial = torch.mm(flat[:, start:end], chunk, out_dtype=torch.float32)
+        output.add_(partial)
+        del chunk, partial
+    return output.reshape(*probabilities.shape[:-1], qdata.shape[1])
 
 
 class DiffusionGemmaMLP(MLP):
@@ -403,6 +445,7 @@ class DiffusionGemmaExperts(nn.Module):
         self._fused_banks_compatible = False
         self._fused_mxfp8_banks_compatible = False
         self._grouped_mxfp8_compatible = False
+        self._grouped_int8_convrot_compatible = False
         E = config.num_experts
         H = config.hidden_size
         I = config.moe_intermediate_size
@@ -420,6 +463,12 @@ class DiffusionGemmaExperts(nn.Module):
 
     def _configure_loaded_banks(self, module, incompatible_keys):
         formats = tuple(bank.quant_format for bank in self._banks)
+        int8_convrot = tuple(
+            quant_format == "int8_tensorwise"
+            and isinstance(bank.weight, QuantizedTensor)
+            and getattr(getattr(bank.weight, "_params", None), "convrot", False) is True
+            for bank, quant_format in zip(self._banks, formats)
+        )
         if self.unfused:
             if all(quant_format == "nvfp4" for quant_format in formats):
                 if not all(isinstance(bank.weight, QuantizedTensor) and bank.bias is None for bank in self._banks):
@@ -491,6 +540,32 @@ class DiffusionGemmaExperts(nn.Module):
                 ):
                     raise ValueError("DiffusionGemma fused MXFP8 expert bank contract mismatch")
             self._bank_mode = "fused_mxfp8"
+        elif any(int8_convrot):
+            if not all(int8_convrot):
+                raise ValueError("DiffusionGemma INT8 ConvRot requires both expert banks")
+            expected = (
+                ((128, 1408, 2816), (128, 1408, 1), 256),
+                ((128, 2816, 704), (128, 2816, 1), 64),
+            )
+            for bank, (qdata_shape, scale_shape, group_size) in zip(self._banks, expected):
+                weight = bank.weight
+                params = getattr(weight, "_params", None)
+                if (
+                    not isinstance(weight, QuantizedTensor)
+                    or weight._layout_cls != "TensorWiseINT8Layout"
+                    or bank.bias is not None
+                    or weight._qdata.dtype != torch.int8
+                    or tuple(weight._qdata.shape) != qdata_shape
+                    or not weight._qdata.is_contiguous()
+                    or params.scale.dtype != torch.float32
+                    or tuple(params.scale.shape) != scale_shape
+                    or not params.scale.is_contiguous()
+                    or params.convrot is not True
+                    or params.convrot_groupsize != group_size
+                    or tuple(params.orig_shape) != qdata_shape
+                ):
+                    raise ValueError("DiffusionGemma INT8 ConvRot expert bank contract mismatch")
+            self._bank_mode = "fused_int8_convrot"
         elif any(quant_format is not None for quant_format in formats):
             self._bank_mode = "quantized"
         else:
@@ -520,6 +595,15 @@ class DiffusionGemmaExperts(nn.Module):
         )
         self._grouped_mxfp8_compatible = self._bank_mode == "unfused_mxfp8" and all(
             bank._full_precision_mm is False
+            and not bank.weight_function
+            and not bank.bias_function
+            and bank.weight_lowvram_function is None
+            and bank.bias_lowvram_function is None
+            for bank in self._banks
+        )
+        self._grouped_int8_convrot_compatible = self._bank_mode == "fused_int8_convrot" and all(
+            isinstance(bank.weight, QuantizedTensor)
+            and bank._full_precision_mm is False
             and not bank.weight_function
             and not bank.bias_function
             and bank.weight_lowvram_function is None
@@ -601,6 +685,10 @@ class DiffusionGemmaExperts(nn.Module):
     def forward(self, hidden_states, top_k_index, top_k_weights, expert_scale=None):
         if self._bank_mode is None:
             raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
+        if self._bank_mode == "fused_int8_convrot":
+            if not self._grouped_int8_convrot_compatible:
+                raise RuntimeError("DiffusionGemma INT8 ConvRot does not support patched expert banks")
+            return self._forward_grouped_int8_convrot(hidden_states, top_k_index, top_k_weights)
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused NVFP4 does not support patched expert banks")
@@ -1055,6 +1143,60 @@ class DiffusionGemmaExperts(nn.Module):
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
+    def _forward_grouped_int8_convrot(self, hidden_states, top_k_index, top_k_weights):
+        N, H = hidden_states.shape
+        E = self.num_experts
+        K = top_k_index.shape[-1]
+
+        flat_experts = top_k_index.reshape(-1)
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        positions = torch.arange(N * K, device=flat_experts.device)
+        counts = torch.zeros(E, dtype=torch.int32, device=flat_experts.device)
+        counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
+        expert_indptr = torch.zeros(E + 1, dtype=torch.int32, device=flat_experts.device)
+        torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
+        x = hidden_states[order // K]
+
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for bank in banks:
+                weight, bias = bank._resident_bank
+                if (
+                    not isinstance(weight, QuantizedTensor)
+                    or weight._layout_cls != "TensorWiseINT8Layout"
+                    or bias is not None
+                ):
+                    raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
+                weights.append(weight)
+
+            gate_up = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                x,
+                expert_indptr,
+                weights[0]._qdata,
+                weights[0]._params.scale,
+                weights[0]._params.convrot_groupsize,
+                out_dtype=hidden_states.dtype,
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+            intermediate = _gelu_tanh(gate) * up
+            y = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                intermediate,
+                expert_indptr,
+                weights[1]._qdata,
+                weights[1]._params.scale,
+                weights[1]._params.convrot_groupsize,
+                out_dtype=hidden_states.dtype,
+            )
+
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = positions
+        y = y[pair_order]
+        y = y * top_k_weights.reshape(-1, 1)
+        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
+
     def _forward_grouped(self, hidden_states, top_k_index, top_k_weights):
         N, H = hidden_states.shape
         E = self.num_experts
@@ -1338,8 +1480,21 @@ class DiffusionGemmaModel(nn.Module):
         if mode == "decoder":
             embed_module = self.decoder.embed_tokens
             if self_conditioning_logits is not None:
-                probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32)
-                soft_embeddings = embed_module.weighted_embedding(probabilities).to(x.dtype)
+                if _native_int8_embedding(embed_module):
+                    weight, _, offload_stream = comfy.ops.cast_bias_weight(
+                        embed_module, device=x.device, dtype=embed_module.weight.dtype, offloadable=True)
+                    try:
+                        if not isinstance(weight, QuantizedTensor):
+                            raise RuntimeError("DiffusionGemma INT8 embedding did not remain quantized after device cast")
+                        probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
+                        soft_embeddings = _int8_self_conditioning(probabilities, weight)
+                        scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight._params.orig_dtype).item()
+                        soft_embeddings = (soft_embeddings * scale).to(x.dtype)
+                    finally:
+                        comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
+                else:
+                    probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32)
+                    soft_embeddings = embed_module.weighted_embedding(probabilities).to(x.dtype)
             else:
                 soft_embeddings = torch.zeros_like(x)
             x = self.decoder.self_conditioning(x, soft_embeddings)
@@ -1599,11 +1754,12 @@ class DiffusionGenerate:
         module = self.model.decoder.embed_tokens
         offload_stream = None
         native_mxfp8 = _native_mxfp8_embedding(module)
-        if native_mxfp8:
+        native_int8 = _native_int8_embedding(module)
+        if native_mxfp8 or native_int8:
             weight, _, offload_stream = comfy.ops.cast_bias_weight(
                 module, device=x.device, dtype=module.weight.dtype, offloadable=True)
             if not isinstance(weight, QuantizedTensor):
-                raise RuntimeError("DiffusionGemma MXFP8 embedding did not remain quantized after device cast")
+                raise RuntimeError("DiffusionGemma quantized embedding did not remain quantized after device cast")
         elif module.comfy_cast_weights:
             weight, _, offload_stream = comfy.ops.cast_bias_weight(module, x, offloadable=True)
         else:
@@ -1612,6 +1768,8 @@ class DiffusionGenerate:
             input_shape = x.shape
             quantized = QuantizedTensor.from_float(x.reshape(-1, input_shape[-1]), weight._layout_cls)
             logits = torch.nn.functional.linear(quantized, weight, None).reshape(*input_shape[:-1], weight.shape[0])
+        elif native_int8:
+            logits = torch.nn.functional.linear(x, weight, None)
         else:
             logits = torch.nn.functional.linear(x, weight, None)
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
