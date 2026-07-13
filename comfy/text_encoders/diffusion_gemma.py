@@ -181,16 +181,17 @@ class DiffusionGemmaMLP(MLP):
 def _make_dg_scaled_embedding(ops, vocab_size, hidden_size, device, dtype):
     # Reference casts sqrt(hidden_size) to the weight dtype before multiplying.
     class ScaledEmbedding(ops.Embedding):
-        def _embedding_scale(self):
+        def _embedding_scale(self, output):
             scale_dtype = self.weight._params.orig_dtype if isinstance(self.weight, QuantizedTensor) else self.weight.dtype
-            return torch.tensor(hidden_size ** 0.5, dtype=scale_dtype).item()
+            return torch.tensor(hidden_size ** 0.5, dtype=scale_dtype, device=output.device)
 
         def forward(self, input_ids, out_dtype=None):
             out = super().forward(input_ids, out_dtype=out_dtype)
-            return out * self._embedding_scale()
+            return out * self._embedding_scale(out)
 
         def weighted_embedding(self, probabilities):
-            return super().weighted_embedding(probabilities) * self._embedding_scale()
+            out = super().weighted_embedding(probabilities)
+            return out * self._embedding_scale(out)
     return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
 
 
