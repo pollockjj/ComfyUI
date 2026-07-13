@@ -26,6 +26,7 @@ try:
         QuantizedLayout,
         TensorCoreFP8Layout as _CKFp8Layout,
         TensorCoreNVFP4Layout as _CKNvfp4Layout,
+        TensorCoreMXFP8Layout as _CKMxfp8Layout,
         TensorCoreConvRotW4A4Layout as _CKTensorCoreConvRotW4A4Layout,
         TensorWiseINT8Layout as _CKTensorWiseINT8Layout,
         dequantize_args,
@@ -79,6 +80,9 @@ except ImportError as e:
     class _CKNvfp4Layout:
         pass
 
+    class _CKMxfp8Layout:
+        pass
+
     class _CKTensorWiseINT8Layout:
         pass
 
@@ -96,18 +100,6 @@ except ImportError as e:
 
     def _ck_fp8_linear(input_tensor, weight, bias=None, out_dtype=None):
         return torch.nn.functional.linear(*dequantize_args((input_tensor, weight, bias)))
-
-_CK_MXFP8_AVAILABLE = False
-if _CK_AVAILABLE:
-    try:
-        from comfy_kitchen.tensor import TensorCoreMXFP8Layout as _CKMxfp8Layout
-        _CK_MXFP8_AVAILABLE = True
-    except ImportError:
-        logging.warning("comfy_kitchen does not support MXFP8, please update comfy_kitchen.")
-
-if not _CK_MXFP8_AVAILABLE:
-    class _CKMxfp8Layout:
-        pass
 
 import comfy.float
 
@@ -253,7 +245,7 @@ register_layout_class("TensorCoreFP8E5M2Layout", TensorCoreFP8E5M2Layout)
 register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
 register_layout_class("TensorWiseINT8Layout", _CKTensorWiseINT8Layout)
 register_layout_class("TensorCoreConvRotW4A4Layout", _CKTensorCoreConvRotW4A4Layout)
-if _CK_MXFP8_AVAILABLE:
+if _CK_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
 
 
@@ -324,7 +316,7 @@ QUANT_ALGOS = {
     },
 }
 
-if _CK_MXFP8_AVAILABLE:
+if _CK_AVAILABLE:
     QUANT_ALGOS["mxfp8"] = {
         "storage_t": torch.float8_e4m3fn,
         "parameters": {"weight_scale", "input_scale"},
