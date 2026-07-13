@@ -1484,7 +1484,11 @@ class DiffusionGemmaModel(nn.Module):
                             raise RuntimeError("DiffusionGemma INT8 embedding did not remain quantized after device cast")
                         probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
                         soft_embeddings = _int8_self_conditioning(probabilities, weight)
-                        scale = torch.tensor(self.config.hidden_size ** 0.5, dtype=weight._params.orig_dtype).item()
+                        scale = torch.tensor(
+                            self.config.hidden_size ** 0.5,
+                            dtype=weight._params.orig_dtype,
+                            device=soft_embeddings.device,
+                        )
                         soft_embeddings = (soft_embeddings * scale).to(x.dtype)
                     finally:
                         comfy.ops.uncast_bias_weight(embed_module, weight, None, offload_stream)
