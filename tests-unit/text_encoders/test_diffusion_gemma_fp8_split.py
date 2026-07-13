@@ -28,6 +28,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     _ConditionedDecoderGraphExecution,
     _int8_self_conditioning,
     _append_preallocated_kv,
+    _make_dg_scaled_embedding,
     _shared_mxfp8_input,
     diffusion_gemma_detect,
     diffusion_gemma_te,
@@ -35,6 +36,25 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
 
 
 class TestDiffusionGemmaFp8Split(unittest.TestCase):
+    def test_embedding_scale_matches_weight_dtype_on_output_device(self):
+        class Ops:
+            class Embedding(torch.nn.Embedding):
+                def forward(self, input_ids, out_dtype=None):
+                    return super().forward(input_ids).to(out_dtype or self.weight.dtype)
+
+                def weighted_embedding(self, probabilities):
+                    return probabilities @ self.weight
+
+        embedding = _make_dg_scaled_embedding(Ops, 2, 3, "cpu", torch.bfloat16)
+        embedding.weight.detach().fill_(1)
+        expected_scale = torch.tensor(3 ** 0.5, dtype=torch.bfloat16)
+
+        output = embedding(torch.tensor([0]), out_dtype=torch.bfloat16)
+        weighted = embedding.weighted_embedding(torch.tensor([[1.0, 0.0]], dtype=torch.bfloat16))
+
+        self.assertTrue(torch.equal(output, torch.ones_like(output) * expected_scale))
+        self.assertTrue(torch.equal(weighted, torch.ones_like(weighted) * expected_scale))
+
     @staticmethod
     def _qkv_marker(layer):
         global_layer = layer % 6 == 5
