@@ -11,7 +11,6 @@ import comfy.ops
 import comfy.quant_ops
 import comfy.utils
 import comfy.model_management
-import comfy.memory_management
 from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
