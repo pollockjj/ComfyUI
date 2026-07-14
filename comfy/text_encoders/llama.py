@@ -29,8 +29,8 @@ else:
     _comfy_kitchen = None
 
 
-def _bf16_small_m_linear(x, weight):
-    if (
+def _use_bf16_small_m_linear(x, weight):
+    return (
         STATIC_KV_SMALL_M_LINEAR
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -38,9 +38,28 @@ def _bf16_small_m_linear(x, weight):
         and weight.is_cuda
         and x.numel() == 3 * x.shape[-1]
         and (weight.shape[0], weight.shape[1]) in _E4B_SMALL_M_LINEAR_SHAPES
-    ):
+    )
+
+
+def _bf16_small_m_linear(x, weight):
+    if _use_bf16_small_m_linear(x, weight):
         return _comfy_kitchen.bf16_small_m_linear(x, weight)
     return torch.nn.functional.linear(x, weight)
+
+
+def _bf16_small_m_module(x, module):
+    weight = module.weight
+    if (
+        _use_bf16_small_m_linear(x, weight)
+        and getattr(module, "bias", None) is None
+        and not getattr(module, "comfy_cast_weights", False)
+        and not len(getattr(module, "weight_function", ()))
+        and not len(getattr(module, "bias_function", ()))
+        and not bool(getattr(module, "_forward_pre_hooks", None))
+        and not bool(getattr(module, "_forward_hooks", None))
+    ):
+        return _comfy_kitchen.bf16_small_m_linear(x, weight)
+    return module(x)
 
 _STATIC_DECODE_COMBO_OPTIONS = {
     "triton.cudagraphs": True,
