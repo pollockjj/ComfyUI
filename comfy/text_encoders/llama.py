@@ -1136,7 +1136,10 @@ class BaseGenerate:
                     runner["compiled_step"] = _compile_static_decode(_decode_step)
 
                 if STATIC_KV_FUSED_SAMPLER and batched_sync:
-                    torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
+                    if generator is not None:
+                        torch.cuda.set_rng_state(generator.get_state(), device=device)
+                    else:
+                        torch.cuda.manual_seed(0)
                     compiled_fused = runner["compiled_fused"]
                 else:
                     compiled_step = runner["compiled_step"]
