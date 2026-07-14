@@ -837,6 +837,14 @@ class Gemma4MTPDrafter:
             if isinstance(src, StaticLayerKV):
                 bucket = min(getattr(src, "bucket", src.slots), src.slots)
                 k, v = src.k[:, :, :bucket], src.v[:, :, :bucket]
+                if src.expand_gqa_2kv:
+                    # The E4B backbone keeps each of its two KV heads expanded four
+                    # times for the accepted direct-BMM path.  The MTP assistant has
+                    # four Q heads and was trained against the original two KV heads,
+                    # so expose the first alias from each expanded group (0 and 4).
+                    k, v = k[:, ::4], v[:, ::4]
+                    if k.shape[1] != 2 or v.shape[1] != 2:
+                        raise RuntimeError("E4B MTP assistant requires the original two-head KV view")
                 mask = src.mask[..., :bucket]
             else:
                 k, v = src[:2]
