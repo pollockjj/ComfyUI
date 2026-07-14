@@ -1482,7 +1482,7 @@ class DiffusionGemmaModel(nn.Module):
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None,
                 final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=None,
                 past_key_values=None, input_ids=None, mode="encoder", self_conditioning_logits=None,
-                mm_spans=None, freqs_cis=None):
+                self_conditioning_is_probabilities=False, mm_spans=None, freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -1497,7 +1497,9 @@ class DiffusionGemmaModel(nn.Module):
                     try:
                         if not isinstance(weight, QuantizedTensor):
                             raise RuntimeError("DiffusionGemma INT8 embedding did not remain quantized after device cast")
-                        probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
+                        probabilities = self_conditioning_logits
+                        if not self_conditioning_is_probabilities:
+                            probabilities = probabilities.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
                         soft_embeddings = _int8_self_conditioning(probabilities, weight)
                         scale = torch.tensor(
                             self.config.hidden_size ** 0.5,
@@ -1877,6 +1879,11 @@ class DiffusionGenerate:
         )
         max_new_canvases = math.ceil(max_length / canvas_length)
         use_native_sampling = self._use_native_sampling(device, execution_dtype)
+        precompute_int8_probabilities = (
+            use_native_sampling
+            and torch.cuda.get_device_capability(device) == (8, 6)
+            and _native_int8_embedding(self.model.decoder.embed_tokens)
+        )
         use_decoder_graph = self._use_conditioned_decoder_graph(device, execution_dtype)
 
         past_key_values = self.init_kv_cache(embeds.shape[0], 0, device, execution_dtype)
@@ -1934,6 +1941,7 @@ class DiffusionGenerate:
                         x, _, _ = self.model(
                             current_canvas, past_key_values=past_key_values, mode="decoder",
                             self_conditioning_logits=self_conditioning_logits,
+                            self_conditioning_is_probabilities=precompute_int8_probabilities,
                             position_ids=decoder_position_ids, dtype=execution_dtype,
                             freqs_cis=decoder_freqs_cis,
                         )
@@ -1990,6 +1998,7 @@ class DiffusionGenerate:
                                 sampling_noise,
                                 self.model.config.final_logit_softcapping,
                                 1.0 / temperature,
+                                precompute_int8_probabilities,
                             )
                         else:
                             processed_logits = comfy.quant_ops.ck.softcap_scale(
