@@ -19,7 +19,6 @@ _STATIC_DECODE_COMBO_OPTIONS = {
     "triton.cudagraphs": True,
     "combo_kernels": True,
     "benchmark_combo_kernel": True,
-    "max_autotune_gemm": True,
 }
 
 
