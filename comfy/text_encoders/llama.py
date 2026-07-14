@@ -1535,7 +1535,7 @@ class BaseGenerate:
             p_upper = p + gamma + 1
             cycles = 1
         compiled = runner["compiled"]
-        SYNC_EVERY = 8
+        SYNC_EVERY = max_length if not stop_tokens else 8
         while True:
             pending = len(records) * (gamma + 1)
             if len(out) + pending >= max_length or len(records) >= SYNC_EVERY:
