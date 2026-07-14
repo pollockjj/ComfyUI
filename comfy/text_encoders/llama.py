@@ -14,6 +14,46 @@ import comfy.clip_model
 
 from . import qwen_vl
 
+
+def _restore_resident_decode_weights(frozen):
+    for module, weight, bias, comfy_cast_weights in frozen:
+        module._parameters["weight"] = weight
+        if "bias" in module._parameters:
+            module._parameters["bias"] = bias
+        module.comfy_cast_weights = comfy_cast_weights
+
+
+def _freeze_resident_decode_weights(root, ref_input):
+    """Resolve patched weights once for an autoregressive decode lifetime."""
+    frozen = []
+    try:
+        for module in root.modules():
+            if not getattr(module, "comfy_cast_weights", False):
+                continue
+            if getattr(module, "weight", None) is None:
+                continue
+            if len(getattr(module, "weight_function", ())) or len(getattr(module, "bias_function", ())):
+                continue
+
+            weight, bias = comfy.ops.cast_bias_weight(module, input=ref_input, offloadable=False)
+            frozen.append(
+                (
+                    module,
+                    module._parameters.get("weight"),
+                    module._parameters.get("bias"),
+                    module.comfy_cast_weights,
+                )
+            )
+            module._parameters["weight"] = torch.nn.Parameter(weight.contiguous(), requires_grad=False)
+            if bias is not None:
+                module._parameters["bias"] = torch.nn.Parameter(bias.contiguous(), requires_grad=False)
+            module.comfy_cast_weights = False
+    except Exception:
+        _restore_resident_decode_weights(frozen)
+        raise
+    return frozen
+
+
 @dataclass
 class Llama2Config:
     vocab_size: int = 128320
@@ -905,29 +945,35 @@ class BaseGenerate:
 
         # Generation loop
         current_input_ids = initial_input_ids
-        for step in tqdm(range(max_length), desc="Generating tokens"):
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
-            logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
-            generated_token_ids.append(token_id)
+        frozen_weights = []
+        try:
+            for step in tqdm(range(max_length), desc="Generating tokens"):
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                if step == 0:
+                    frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
+                logits = self.logits(x)[:, -1]
+                next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                token_id = next_token[0].item()
+                generated_token_ids.append(token_id)
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
-                next_pos += 1
-            pbar.update(1)
+                embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+                current_input_ids = next_token if initial_input_ids is not None else None
+                if next_pos is not None:  # advance MRoPE position for the next (decode) step
+                    position_ids = torch.tensor([[next_pos]], device=device)
+                    next_pos += 1
+                pbar.update(1)
 
-            if token_id in stop_tokens:
-                break
+                if token_id in stop_tokens:
+                    break
 
-        return generated_token_ids
+            return generated_token_ids
+        finally:
+            _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
