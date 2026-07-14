@@ -235,32 +235,6 @@ def grouped_int8_convrot_linear_packed(
     )
 
 
-def fused_moe_int8_convrot(
-    x,
-    expert_ids,
-    router_weights,
-    fc1_qdata,
-    fc1_scales,
-    fc2_qdata,
-    fc2_scales,
-    fc1_group_size,
-    fc2_group_size,
-):
-    if not _CK_AVAILABLE:
-        raise RuntimeError("Fused INT8 ConvRot expert operations require comfy-kitchen")
-    return ck.fused_moe_int8_convrot(
-        x,
-        expert_ids,
-        router_weights,
-        fc1_qdata,
-        fc1_scales,
-        fc2_qdata,
-        fc2_scales,
-        fc1_group_size,
-        fc2_group_size,
-    )
-
-
 # ==============================================================================
 # Registry
 # ==============================================================================
@@ -386,7 +360,6 @@ __all__ = [
     "TensorCoreConvRotW4A4Layout",
     "TensorWiseINT8Layout",
     "grouped_int8_convrot_linear_packed",
-    "fused_moe_int8_convrot",
     "QUANT_ALGOS",
     "NVFP4_FUSED_MOE_FORMAT",
     "NVFP4_FUSED_MOE_V1_FIELDS",
