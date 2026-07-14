@@ -1476,7 +1476,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         and input.dim() == 2
                     )
                     if use_fast:
-                        qin = QuantizedTensor.from_float(input, self.layout_type)
+                        qin = qw.requantize_from_float(input)
                         return torch.nn.functional.linear(qin, qw, b)
                     out = input @ qw.dequantize().t()
                     return out + b if b is not None else out
