@@ -1418,6 +1418,11 @@ class BaseGenerate:
                 torch._dynamo.mark_static_address(t)
             # frozen weights stay installed for the life of the runner (Phase-A pattern)
             frozen = _freeze_resident_weights(self.model, h_last.reshape(-1)[:1])
+            prepare_static_weights = getattr(self, "_prepare_static_decode_weights", None)
+            if prepare_static_weights is not None:
+                prepare_static_weights(frozen)
+            if STATIC_KV_FUSED_MLP:
+                _fuse_mlp_gate_up_projections(self.model, frozen)
             lw = getattr(mod, "_logits_dequant_cache", None)
             logits_w = lw[1] if lw is not None else mod.weight
 
@@ -1477,7 +1482,7 @@ class BaseGenerate:
             torch._inductor.config.triton.cudagraph_trees = False
             runner = {"key": (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype),
                       "past": past, "statics": statics, "max_len": statics[0].slots if statics else 0,
-                      "cycle": _cycle, "compiled": None, "warm": False}
+                      "cycle": _cycle, "compiled": None, "warm": False, "frozen": frozen}
             for kv in statics:
                 if kv.window is None:
                     runner["max_len"] = kv.slots
