@@ -1140,6 +1140,20 @@ class DiffusionGemmaExperts(nn.Module):
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
     def _forward_grouped_int8_convrot(self, hidden_states, top_k_index, top_k_weights):
+        N, H = hidden_states.shape
+        E = self.num_experts
+        K = top_k_index.shape[-1]
+
+        flat_experts = top_k_index.reshape(-1)
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        positions = torch.arange(N * K, device=flat_experts.device)
+        counts = torch.zeros(E, dtype=torch.int32, device=flat_experts.device)
+        counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
+        expert_indptr = torch.zeros(E + 1, dtype=torch.int32, device=flat_experts.device)
+        torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
+        x = hidden_states[order // K]
+
         with contextlib.ExitStack() as stack:
             modules = (self.gate_up_proj, self.down_proj)
             banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
@@ -1154,17 +1168,30 @@ class DiffusionGemmaExperts(nn.Module):
                     raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
                 weights.append(weight)
 
-            return comfy.quant_ops.fused_moe_int8_convrot(
-                hidden_states,
-                top_k_index,
-                top_k_weights,
+            gate_up = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                x,
+                expert_indptr,
                 weights[0]._qdata,
                 weights[0]._params.scale,
+                weights[0]._params.convrot_groupsize,
+                out_dtype=hidden_states.dtype,
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+            intermediate = _gelu_tanh(gate) * up
+            y = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                intermediate,
+                expert_indptr,
                 weights[1]._qdata,
                 weights[1]._params.scale,
-                weights[0]._params.convrot_groupsize,
                 weights[1]._params.convrot_groupsize,
+                out_dtype=hidden_states.dtype,
             )
+
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = positions
+        y = y[pair_order]
+        y = y * top_k_weights.reshape(-1, 1)
+        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
     def _forward_grouped(self, hidden_states, top_k_index, top_k_weights):
         N, H = hidden_states.shape
