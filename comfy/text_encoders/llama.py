@@ -54,6 +54,38 @@ def _freeze_resident_decode_weights(root, ref_input):
     return frozen
 
 
+class _StaticLayerKV:
+    """Fixed-address KV storage for a graph-captured single-token decode."""
+
+    def __init__(self, past):
+        key, value, valid = past
+        self.key = torch.zeros_like(key)
+        self.value = torch.zeros_like(value)
+        self.mask = torch.empty(
+            (1, 1, 1, key.shape[2]), dtype=key.dtype, device=key.device
+        )
+        self.index = torch.empty(1, dtype=torch.long, device=key.device)
+        for tensor in (self.key, self.value, self.mask, self.index):
+            torch._dynamo.mark_static_address(tensor)
+        self.reset((key, value, valid))
+
+    def reset(self, past):
+        key, value, valid = past
+        if key.shape != self.key.shape or value.shape != self.value.shape:
+            raise RuntimeError("static decode KV shape changed")
+        self.key[:, :, :valid].copy_(key[:, :, :valid])
+        self.value[:, :, :valid].copy_(value[:, :, :valid])
+        self.mask.fill_(torch.finfo(self.mask.dtype).min)
+        self.mask[..., :valid] = 0.0
+        self.index.fill_(valid)
+
+    def append(self, key, value):
+        self.key.index_copy_(2, self.index, key)
+        self.value.index_copy_(2, self.index, value)
+        self.mask.index_fill_(3, self.index, 0.0)
+        self.index.add_(1)
+
+
 @dataclass
 class Llama2Config:
     vocab_size: int = 128320
@@ -303,6 +335,7 @@ class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     lm_head: bool = False  # 4B ties word embeddings
+    static_decode: bool = True
 
 @dataclass
 class Ovis25_2BConfig:
@@ -567,7 +600,14 @@ class Attention(nn.Module):
         xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
         present_key_value = None
-        if past_key_value is not None:
+        static_mask = None
+        if isinstance(past_key_value, _StaticLayerKV):
+            past_key_value.append(xk, xv)
+            xk = past_key_value.key
+            xv = past_key_value.value
+            static_mask = past_key_value.mask
+            present_key_value = past_key_value
+        elif past_key_value is not None:
             index = 0
             num_tokens = xk.shape[2]
             if len(past_key_value) > 0:
@@ -591,6 +631,8 @@ class Attention(nn.Module):
                 attention_mask = attention_mask[..., -sliding_window:] if attention_mask is not None else None
 
         gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+        if static_mask is not None:
+            attention_mask = static_mask
         output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
         return self.o_proj(output), present_key_value
 
@@ -783,7 +825,12 @@ class Llama2_(nn.Module):
             else:
                 mask = causal_mask
 
-        optimized_attention = optimized_attention_for_device(x.device, mask=mask is not None, small_input=True)
+        static_kv = past_key_values is not None and any(
+            isinstance(cache, _StaticLayerKV) for cache in past_key_values
+        )
+        optimized_attention = optimized_attention_for_device(
+            x.device, mask=mask is not None or static_kv, small_input=True
+        )
 
         intermediate = None
         all_intermediate = None
@@ -916,6 +963,13 @@ class BaseGenerate:
                                     torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype), 0))
         return past_key_values
 
+    def _static_decode_caches(self, past_key_values, existing=None):
+        if existing is None:
+            return [_StaticLayerKV(cache) for cache in past_key_values]
+        for target, source in zip(existing, past_key_values):
+            target.reset(source)
+        return existing
+
     def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None):
         device = embeds.device
 
@@ -946,6 +1000,17 @@ class BaseGenerate:
         # Generation loop
         current_input_ids = initial_input_ids
         frozen_weights = []
+        static_decode = bool(
+            getattr(self.model.config, "static_decode", False)
+            and embeds.is_cuda
+            and embeds.shape[0] == 1
+        )
+        runner = getattr(self, "_static_decode_runner", None) if static_decode else None
+        if runner is not None and max_cache_len > runner["max_cache_len"]:
+            _restore_resident_decode_weights(runner["frozen_weights"])
+            del self._static_decode_runner
+            runner = None
+        compiled_step = None
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
@@ -953,10 +1018,56 @@ class BaseGenerate:
                 if step == 0 and deepstack_embeds is not None:
                     extra["deepstack_embeds"] = deepstack_embeds
                     extra["visual_pos_masks"] = visual_pos_masks
-                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                if compiled_step is None:
+                    x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                else:
+                    x = None
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
-                logits = self.logits(x)[:, -1]
+                if static_decode and step == 1:
+                    if runner is None:
+                        static_caches = self._static_decode_caches(past_key_values)
+                        runner = {
+                            "caches": static_caches,
+                            "max_cache_len": max_cache_len,
+                            "frozen_weights": frozen_weights,
+                            "compiled_step": None,
+                        }
+                        self._static_decode_runner = runner
+                        frozen_weights = []
+                    else:
+                        static_caches = self._static_decode_caches(
+                            past_key_values, runner["caches"]
+                        )
+                    past_key_values = static_caches
+                    if runner["compiled_step"] is None:
+                        model = self.model
+                        static_caches = runner["caches"]
+
+                        def _decode_step(next_embed, next_ids, next_position):
+                            hidden, _, _ = model.forward(
+                                None,
+                                embeds=next_embed,
+                                attention_mask=None,
+                                past_key_values=static_caches,
+                                input_ids=next_ids,
+                                position_ids=next_position,
+                            )
+                            return torch.nn.functional.linear(
+                                hidden[:, -1:], model.embed_tokens.weight, None
+                            )[:, -1]
+
+                        runner["compiled_step"] = torch.compile(
+                            _decode_step, mode="reduce-overhead", dynamic=False
+                        )
+                    compiled_step = runner["compiled_step"]
+
+                if x is None:
+                    logits = compiled_step(
+                        embeds, current_input_ids, position_ids
+                    ).clone()
+                else:
+                    logits = self.logits(x)[:, -1]
                 next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
                 token_id = next_token[0].item()
                 generated_token_ids.append(token_id)
