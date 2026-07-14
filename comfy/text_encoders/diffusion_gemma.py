@@ -49,6 +49,7 @@ class DiffusionGemmaConfig:
     canvas_length: int = 256
     unfused_experts: bool = False
     fused_qkv: bool = False
+    fused_dense_mlp: bool = False
     mlp_activation = "gelu_pytorch_tanh"
     qkv_bias = False
     stop_tokens = [1, 106, 50]
@@ -152,7 +153,20 @@ def _int8_self_conditioning(probabilities, weight):
 
 
 class DiffusionGemmaMLP(MLP):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__(config, device=device, dtype=dtype, ops=ops)
+        self.fused_gate_up = config.fused_dense_mlp
+        if self.fused_gate_up:
+            del self.gate_proj, self.up_proj
+            self.gate_up_proj = ops.Linear(
+                config.hidden_size, 2 * config.intermediate_size,
+                bias=False, device=device, dtype=dtype)
+
     def forward(self, x):
+        if self.fused_gate_up:
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
+
         quantized_input = _shared_mxfp8_input(x, (self.gate_proj, self.up_proj))
         if quantized_input is None:
             return super().forward(x)
@@ -2116,6 +2130,7 @@ class DiffusionGemmaClipModel(Gemma4Model):
 
 _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT = "diffusiongemma_mxfp8_qkv_fused.v1"
 _DIFFUSION_GEMMA_INT8_QKV_CONTRACT = "diffusiongemma_int8_convrot_qkv_fused.v1"
+_DIFFUSION_GEMMA_INT8_DENSE_MLP_CONTRACT = "diffusiongemma_int8_convrot_dense_mlp_fused.v1"
 _DIFFUSION_GEMMA_QKV_LAYER_COUNT = 30
 
 
@@ -2182,6 +2197,59 @@ def _detect_diffusion_gemma_fused_qkv(sd):
     return True
 
 
+def _detect_diffusion_gemma_fused_dense_mlp(sd):
+    marker_keys = [
+        f"model.decoder.layers.{layer}.mlp.gate_up_proj.comfy_quant"
+        for layer in range(_DIFFUSION_GEMMA_QKV_LAYER_COUNT)
+    ]
+    has_payload = any(
+        key.startswith("model.decoder.layers.") and ".mlp.gate_up_proj." in key
+        for key in sd
+    )
+    if not has_payload:
+        return False
+
+    missing = [layer for layer, key in enumerate(marker_keys) if key not in sd]
+    if missing:
+        raise ValueError(
+            f"DiffusionGemma fused dense MLP requires all 30 layer markers; missing layers: {missing}"
+        )
+    stale = [
+        key for key in sd
+        if key.startswith("model.decoder.layers.")
+        and (".mlp.gate_proj." in key or ".mlp.up_proj." in key)
+    ]
+    if stale:
+        raise ValueError(f"DiffusionGemma fused dense MLP contains component payloads: {stale}")
+
+    expected = {
+        "format": "int8_tensorwise",
+        "convrot": True,
+        "convrot_groupsize": 256,
+        "artifact_contract": _DIFFUSION_GEMMA_INT8_DENSE_MLP_CONTRACT,
+        "projection_order": ["gate_proj", "up_proj"],
+        "projection_splits": [2112, 2112],
+    }
+    for layer, key in enumerate(marker_keys):
+        marker = sd[key]
+        if not isinstance(marker, torch.Tensor) or marker.device.type != "cpu" or marker.dtype != torch.uint8 or marker.ndim != 1:
+            raise ValueError(f"Invalid DiffusionGemma fused dense MLP marker tensor for layer {layer}")
+        try:
+            config = json.loads(marker.numpy().tobytes())
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid DiffusionGemma fused dense MLP marker JSON for layer {layer}") from error
+        mismatches = {
+            name: (config.get(name), value)
+            for name, value in expected.items()
+            if config.get(name) != value
+        }
+        if mismatches:
+            raise ValueError(
+                f"Invalid DiffusionGemma fused dense MLP contract for layer {layer}: {mismatches}"
+            )
+    return True
+
+
 def diffusion_gemma_detect(clip_data):
     sd = clip_data[0]
     out = {}
@@ -2195,12 +2263,19 @@ def diffusion_gemma_detect(clip_data):
         out["unfused_experts"] = True
     if _detect_diffusion_gemma_fused_qkv(sd):
         out["fused_qkv"] = True
+    if _detect_diffusion_gemma_fused_dense_mlp(sd):
+        out["fused_dense_mlp"] = True
     return out
 
 
-def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfused_experts=False, fused_qkv=False):
+def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfused_experts=False,
+                       fused_qkv=False, fused_dense_mlp=False):
     class DiffusionGemmaClipModel_(DiffusionGemmaClipModel):
-        config_overrides = {"unfused_experts": unfused_experts, "fused_qkv": fused_qkv}
+        config_overrides = {
+            "unfused_experts": unfused_experts,
+            "fused_qkv": fused_qkv,
+            "fused_dense_mlp": fused_dense_mlp,
+        }
 
     class DiffusionGemmaTEModel_(sd1_clip.SD1ClipModel):
         supports_native_quantized_compute = llama_quantization_metadata is not None
