@@ -36,8 +36,6 @@ def _use_bf16_small_m_linear(x, weight):
         and weight.dtype == torch.bfloat16
         and x.is_cuda
         and weight.is_cuda
-        and x.is_contiguous()
-        and weight.is_contiguous()
         and x.numel() == 3 * x.shape[-1]
         and (weight.shape[0], weight.shape[1]) in _E4B_SMALL_M_LINEAR_SHAPES
     )
