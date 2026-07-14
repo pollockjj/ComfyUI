@@ -1192,9 +1192,9 @@ class DiffusionGemmaExperts(nn.Module):
                 out_dtype=hidden_states.dtype,
             )
             gate, up = gate_up.chunk(2, dim=-1)
-            y = comfy.quant_ops.ck.grouped_int8_convrot_gelu_linear_packed(
-                gate,
-                up,
+            intermediate = _gelu_tanh(gate) * up
+            y = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                intermediate,
                 expert_indptr,
                 weights[1]._qdata,
                 weights[1]._params.scale,
