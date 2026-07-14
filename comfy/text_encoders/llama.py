@@ -11,6 +11,7 @@ import comfy.model_management
 import comfy.ops
 import comfy.ldm.common_dit
 import comfy.clip_model
+from comfy_kitchen.backends import cuda as comfy_kitchen_cuda
 
 from . import qwen_vl
 
@@ -606,11 +607,15 @@ class MLP(nn.Module):
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
         self._decode_gate_up_weight = None
+        self._decode_gate_up_output = None
 
     def forward(self, x):
         if self._decode_gate_up_weight is not None:
-            gate, up = torch.nn.functional.linear(
-                x, self._decode_gate_up_weight
+            gate, up = comfy_kitchen_cuda.bf16_cublaslt_linear(
+                x,
+                self._decode_gate_up_weight,
+                self._decode_gate_up_output,
+                algorithm_index=1,
             ).chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
@@ -652,6 +657,7 @@ def _fuse_resident_decode_mlps(root, frozen):
             gate_rows = gate_weight.shape[0]
             packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
             module._decode_gate_up_weight = packed
+            module._decode_gate_up_output = packed.new_empty((1, packed.shape[0]))
             module.gate_proj._parameters["weight"] = torch.nn.Parameter(
                 packed[:gate_rows], requires_grad=False
             )
@@ -662,6 +668,7 @@ def _fuse_resident_decode_mlps(root, frozen):
     except Exception:
         for module in fused:
             module._decode_gate_up_weight = None
+            module._decode_gate_up_output = None
         _restore_resident_decode_weights(frozen)
         raise
     return fused
@@ -1041,6 +1048,7 @@ class BaseGenerate:
         finally:
             for module in fused_mlps:
                 module._decode_gate_up_weight = None
+                module._decode_gate_up_output = None
             _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
