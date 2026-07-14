@@ -531,6 +531,7 @@ class Attention(nn.Module):
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
+        self._decode_qkv_weight = None
 
         self.q_norm = None
         self.k_norm = None
@@ -551,9 +552,15 @@ class Attention(nn.Module):
     ):
         batch_size, seq_length, _ = hidden_states.shape
 
-        xq = self.q_proj(hidden_states)
-        xk = self.k_proj(hidden_states)
-        xv = self.v_proj(hidden_states)
+        if self._decode_qkv_weight is not None:
+            kv_size = self.num_kv_heads * self.head_dim
+            xq, xk, xv = torch.nn.functional.linear(
+                hidden_states, self._decode_qkv_weight
+            ).split((self.inner_size, kv_size, kv_size), dim=-1)
+        else:
+            xq = self.q_proj(hidden_states)
+            xk = self.k_proj(hidden_states)
+            xv = self.v_proj(hidden_states)
 
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -662,6 +669,62 @@ def _fuse_resident_decode_mlps(root, frozen):
     except Exception:
         for module in fused:
             module._decode_gate_up_weight = None
+        _restore_resident_decode_weights(frozen)
+        raise
+    return fused
+
+
+def _fuse_resident_decode_qkv(root, frozen):
+    frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
+    fused = []
+    try:
+        for module in root.modules():
+            if not isinstance(module, Attention):
+                continue
+            projections = (module.q_proj, module.k_proj, module.v_proj)
+            weights = tuple(projection.weight for projection in projections)
+            if (
+                any(
+                    weight.ndim != 2
+                    or weight.shape[1] != module.hidden_size
+                    or weight.dtype != torch.bfloat16
+                    or not weight.is_cuda
+                    for weight in weights
+                )
+                or any(
+                    projection.bias is not None
+                    or projection.comfy_cast_weights
+                    or len(getattr(projection, "weight_function", ()))
+                    or len(getattr(projection, "bias_function", ()))
+                    for projection in projections
+                )
+                or any(
+                    getattr(frozen_weights.get(id(projection)), "is_cuda", False)
+                    for projection in projections
+                )
+            ):
+                raise RuntimeError(
+                    "fused decode QKV requires plain resident BF16 projection weights"
+                )
+
+            q_rows, k_rows, v_rows = (weight.shape[0] for weight in weights)
+            packed = torch.cat(weights, dim=0).contiguous()
+            module._decode_qkv_weight = packed
+            q_end = q_rows
+            k_end = q_end + k_rows
+            module.q_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[:q_end], requires_grad=False
+            )
+            module.k_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[q_end:k_end], requires_grad=False
+            )
+            module.v_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[k_end:k_end + v_rows], requires_grad=False
+            )
+            fused.append(module)
+    except Exception:
+        for module in fused:
+            module._decode_qkv_weight = None
         _restore_resident_decode_weights(frozen)
         raise
     return fused
@@ -1004,6 +1067,7 @@ class BaseGenerate:
         current_input_ids = initial_input_ids
         frozen_weights = []
         fused_mlps = []
+        fused_qkv = []
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
@@ -1014,6 +1078,7 @@ class BaseGenerate:
                 x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
+                    fused_qkv = _fuse_resident_decode_qkv(self.model, frozen_weights)
                     fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights)
                 logits = self.logits(x)[:, -1]
                 next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
@@ -1032,6 +1097,8 @@ class BaseGenerate:
 
             return generated_token_ids
         finally:
+            for module in fused_qkv:
+                module._decode_qkv_weight = None
             for module in fused_mlps:
                 module._decode_gate_up_weight = None
             _restore_resident_decode_weights(frozen_weights)
