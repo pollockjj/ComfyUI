@@ -1204,9 +1204,9 @@ class DiffusionGemmaExperts(nn.Module):
 
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
         pair_order[order] = positions
-        y = y[pair_order]
-        y = y * top_k_weights.reshape(-1, 1)
-        return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
+        return comfy.quant_ops.ck.restore_weighted_reduce_int8_moe_routes(
+            y, pair_order, top_k_weights.reshape(-1), K
+        )
 
     def _forward_grouped(self, hidden_states, top_k_index, top_k_weights):
         N, H = hidden_states.shape
