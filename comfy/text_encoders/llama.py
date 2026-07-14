@@ -812,7 +812,8 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None,
+                freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -823,10 +824,10 @@ class Llama2_(nn.Module):
         if past_key_values is not None and len(past_key_values) > 0:
             past_len = self.get_past_len(past_key_values)
 
-        if position_ids is None:
-            position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
-
-        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
+        if freqs_cis is None:
+            if position_ids is None:
+                position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
+            freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
@@ -999,6 +1000,10 @@ class BaseGenerate:
 
         # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
+        decode_freqs_cis = None
+        if next_pos is not None:
+            decode_positions = torch.arange(next_pos, next_pos + max_length, device=device).unsqueeze(0)
+            decode_freqs_cis = self.model.compute_freqs_cis(decode_positions, device)
 
         # Generation loop
         current_input_ids = initial_input_ids
@@ -1011,7 +1016,10 @@ class BaseGenerate:
                 if step == 0 and deepstack_embeds is not None:
                     extra["deepstack_embeds"] = deepstack_embeds
                     extra["visual_pos_masks"] = visual_pos_masks
-                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                step_freqs_cis = None
+                if step > 0 and decode_freqs_cis is not None:
+                    step_freqs_cis = tuple(freq[..., step - 1:step, :] for freq in decode_freqs_cis)
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, freqs_cis=step_freqs_cis, **extra)
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
                     fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights)
@@ -1022,9 +1030,8 @@ class BaseGenerate:
 
                 embeds = self.model.embed_tokens(next_token).to(execution_dtype)
                 current_input_ids = next_token if initial_input_ids is not None else None
-                if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                    position_ids = torch.tensor([[next_pos]], device=device)
-                    next_pos += 1
+                if step == 0:
+                    position_ids = None
                 pbar.update(1)
 
                 if token_id in stop_tokens:
