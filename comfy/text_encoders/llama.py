@@ -606,27 +606,17 @@ class MLP(nn.Module):
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
         self._decode_gate_up_weight = None
-        self._decode_gate_up_output = None
 
     def forward(self, x):
         if self._decode_gate_up_weight is not None:
-            output = self._decode_gate_up_output
-            if output is not None and output.shape[:-1] == x.shape[:-1]:
-                torch.mm(
-                    x.reshape(-1, x.shape[-1]),
-                    self._decode_gate_up_weight.t(),
-                    out=output.reshape(-1, output.shape[-1]),
-                )
-                gate, up = output.chunk(2, dim=-1)
-            else:
-                gate, up = torch.nn.functional.linear(
-                    x, self._decode_gate_up_weight
-                ).chunk(2, dim=-1)
+            gate, up = torch.nn.functional.linear(
+                x, self._decode_gate_up_weight
+            ).chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
 
-def _fuse_resident_decode_mlps(root, frozen, ref_input):
+def _fuse_resident_decode_mlps(root, frozen):
     frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
     fused = []
     try:
@@ -662,11 +652,6 @@ def _fuse_resident_decode_mlps(root, frozen, ref_input):
             gate_rows = gate_weight.shape[0]
             packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
             module._decode_gate_up_weight = packed
-            module._decode_gate_up_output = torch.empty(
-                (*ref_input.shape[:-1], packed.shape[0]),
-                device=ref_input.device,
-                dtype=ref_input.dtype,
-            )
             module.gate_proj._parameters["weight"] = torch.nn.Parameter(
                 packed[:gate_rows], requires_grad=False
             )
@@ -677,7 +662,6 @@ def _fuse_resident_decode_mlps(root, frozen, ref_input):
     except Exception:
         for module in fused:
             module._decode_gate_up_weight = None
-            module._decode_gate_up_output = None
         _restore_resident_decode_weights(frozen)
         raise
     return fused
@@ -1038,7 +1022,7 @@ class BaseGenerate:
                 x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, freqs_cis=step_freqs_cis, **extra)
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
-                    fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights, x[:, -1:])
+                    fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights)
                 logits = self.logits(x)[:, -1]
                 next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
                 token_id = next_token[0].item()
@@ -1057,7 +1041,6 @@ class BaseGenerate:
         finally:
             for module in fused_mlps:
                 module._decode_gate_up_weight = None
-                module._decode_gate_up_output = None
             _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
