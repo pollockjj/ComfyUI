@@ -1864,13 +1864,15 @@ class ModelPatcherDynamic(ModelPatcher):
                     m.seed_key = n
                     m._pin_state = pin_state
                     set_dirty(m, dirty)
+                    force_preload = getattr(m, "quant_format", None) in getattr(
+                        m, "comfy_force_preload_formats", ())
 
                     #Models that mix tiny and giant weights can causing lopsided stream buffer
                     #rotations and stall. force the tinys over.
                     if module_mem > 16 * 1024:
                         force_load, v_weight_size = setup_param(self, m, n, "weight")
                         force_load_bias, v_weight_bias = setup_param(self, m, n, "bias")
-                        force_load = force_load or force_load_bias
+                        force_load = force_preload or force_load or force_load_bias
                         v_weight_size += v_weight_bias
                         if force_load:
                             logging.info(f"Module {n} has resizing Lora - force loading")

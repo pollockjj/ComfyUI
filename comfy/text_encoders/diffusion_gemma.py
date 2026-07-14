@@ -1349,6 +1349,7 @@ class DiffusionGemmaDecoder(nn.Module):
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.embed_tokens = _make_dg_scaled_embedding(ops, config.vocab_size, config.hidden_size, device, dtype)
+        self.embed_tokens.comfy_force_preload_formats = ("int8_tensorwise",)
         self.layers = nn.ModuleList([
             DiffusionGemmaBlock(config, index=i, device=device, dtype=dtype, ops=ops)
             for i in range(config.num_hidden_layers)
