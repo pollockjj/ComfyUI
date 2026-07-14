@@ -1367,9 +1367,10 @@ class BaseGenerate:
                 for kv in statics:
                     kv.bucket = nb
             drafts = []
-            d_tok, d_hid = last_tok, h_last
+            d_tok, d_hid, d_pos = last_tok, h_last, p
             for _ in range(gamma):
-                d_tok, d_hid = drafter.draft(d_tok, d_hid, past, p)
+                d_tok, d_hid = drafter.draft(d_tok, d_hid, past, d_pos)
+                d_pos += 1
                 drafts.append(d_tok)
             batch = torch.cat([last_tok] + drafts, dim=1)
             vpos = torch.arange(p, p + gamma + 1, device=device).unsqueeze(0)
@@ -1463,8 +1464,8 @@ class BaseGenerate:
                 vpos = pos_t + torch.arange(gamma + 1, device=device).view(1, -1)
                 drafts = []
                 d_tok, d_hid = lt, hl
-                for _ in range(gamma):
-                    d_tok, d_hid = drafter.draft(d_tok, d_hid, past, pos_t)
+                for j in range(gamma):
+                    d_tok, d_hid = drafter.draft(d_tok, d_hid, past, pos_t + j)
                     drafts.append(d_tok)
                 drafts_t = torch.cat(drafts, dim=1)
                 batch = torch.cat([lt, drafts_t], dim=1)
