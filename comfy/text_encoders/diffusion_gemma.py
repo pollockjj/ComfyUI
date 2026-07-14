@@ -1497,7 +1497,7 @@ class DiffusionGemmaModel(nn.Module):
                     try:
                         if not isinstance(weight, QuantizedTensor):
                             raise RuntimeError("DiffusionGemma INT8 embedding did not remain quantized after device cast")
-                        probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.bfloat16)
+                        probabilities = self_conditioning_logits.softmax(dim=-1, dtype=torch.float32).to(torch.bfloat16)
                         soft_embeddings = _int8_self_conditioning(probabilities, weight)
                         scale = torch.tensor(
                             self.config.hidden_size ** 0.5,
