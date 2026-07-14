@@ -49,10 +49,10 @@ class StaticLayerKV:
         cache_heads = 8 if expand_gqa_2kv else h
         if expand_gqa_2kv:
             self._k_t = torch.zeros(b, cache_heads, d, self.slots, dtype=cache_dtype, device=k.device)
-            self.k = self._k_t.transpose(-2, -1)
+            self._k = None
         else:
             self._k_t = None
-            self.k = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
+            self._k = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
         self.v = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
         self.mask = torch.full((1, 1, 1, self.slots), fmin, dtype=k.dtype, device=k.device)
         n = min(prefill_len, self.slots)
@@ -64,16 +64,21 @@ class StaticLayerKV:
         self.v[:, :, :n] = self._cache_value(v[:, :, -n:])
         self.mask[..., :n] = 0.0
         self.idx = torch.tensor([n % self.slots], device=k.device)
-        static_tensors = (self.k, self.v, self.mask, self.idx)
-        if self._k_t is not None:
-            static_tensors = (self._k_t,) + static_tensors
+        k_storage = self._k_t if self._k_t is not None else self._k
+        static_tensors = (k_storage, self.v, self.mask, self.idx)
         for t in static_tensors:
             torch._dynamo.mark_static_address(t)
+
+    @property
+    def k(self):
+        if self._k_t is not None:
+            return self._k_t.transpose(-2, -1)
+        return self._k
 
     def _cache_value(self, value):
         if self.expand_gqa_2kv:
             value = value.repeat_interleave(4, dim=1)
-        return value.to(self.k.dtype)
+        return value.to(self.v.dtype)
 
     def append(self, xk, xv):
         # single-token in-place write; graph-safe (static addresses, tensor index,
