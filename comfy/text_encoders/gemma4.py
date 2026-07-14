@@ -14,6 +14,7 @@ from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _ma
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_GQA_BROADCAST = os.environ.get("COMFY_STATIC_KV_GQA_BROADCAST", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_FP32_CACHE = os.environ.get("COMFY_STATIC_KV_FP32_CACHE", "0").lower() not in {"0", "false", "no", "off"}
 
 if STATIC_KV_GQA_BROADCAST:
     # The direct static-GQA path accumulates BF16 inputs in FP32.  "high" keeps
@@ -39,7 +40,8 @@ class StaticLayerKV:
         self.window = window
         self.slots = window if window is not None else max_len
         fmin = torch.finfo(k.dtype).min
-        self.k = torch.zeros(b, h, self.slots, d, dtype=k.dtype, device=k.device)
+        cache_dtype = torch.float32 if STATIC_KV_FP32_CACHE and STATIC_KV_GQA_BROADCAST and h == 1 else k.dtype
+        self.k = torch.zeros(b, h, self.slots, d, dtype=cache_dtype, device=k.device)
         self.v = torch.zeros_like(self.k)
         self.mask = torch.full((1, 1, 1, self.slots), fmin, dtype=k.dtype, device=k.device)
         n = min(prefill_len, self.slots)
@@ -54,6 +56,8 @@ class StaticLayerKV:
         # single-token in-place write; graph-safe (static addresses, tensor index,
         # no python-side state — cum_len advances in the generate loop)
         n = xk.shape[2]
+        xk = xk.to(self.k.dtype)
+        xv = xv.to(self.v.dtype)
         if n == 1:
             self.k.index_copy_(2, self.idx, xk)
             self.v.index_copy_(2, self.idx, xv)
@@ -130,7 +134,7 @@ class StaticLayerKV:
         self.v.zero_()
         self.k[:, :, :n] = k[:, :, -n:]
         self.v[:, :, :n] = v[:, :, -n:]
-        self.mask.fill_(torch.finfo(self.k.dtype).min)
+        self.mask.fill_(torch.finfo(self.mask.dtype).min)
         self.mask[..., :n] = 0.0
         self.idx.fill_(n % self.slots)
 
