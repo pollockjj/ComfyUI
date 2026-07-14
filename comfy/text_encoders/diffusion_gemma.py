@@ -11,6 +11,7 @@ import comfy.ops
 import comfy.quant_ops
 import comfy.utils
 import comfy.model_management
+import comfy.model_prefetch
 from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
@@ -1543,7 +1544,10 @@ class DiffusionGemmaModel(nn.Module):
         update_cache = (mode == "encoder") and past_key_values is not None
         intermediate = None
         next_key_values = []
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(
+            list(self.decoder.layers), x.device, {"prefetch_dynamic_vbars": mode == "decoder"})
         for i, layer in enumerate(self.decoder.layers):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, layer)
             past_kv = past_key_values[i] if past_key_values is not None and len(past_key_values) > 0 else None
             layer_scalar = None
             if mode == "encoder":
@@ -1554,6 +1558,7 @@ class DiffusionGemmaModel(nn.Module):
             next_key_values.append(current_kv if current_kv is not None else ())
             if i == intermediate_output:
                 intermediate = x.clone()
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
 
         x = self.decoder.norm(x)
         return x, intermediate, next_key_values
