@@ -612,9 +612,6 @@ class MLP(nn.Module):
             gate, up = torch.nn.functional.linear(
                 x, self._decode_gate_up_weight
             ).chunk(2, dim=-1)
-            if self.activation is torch.nn.functional.silu:
-                torch.nn.functional.silu(gate, inplace=True)
-                return self.down_proj(gate.mul_(up))
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
