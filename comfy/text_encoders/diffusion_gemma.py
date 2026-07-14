@@ -91,65 +91,6 @@ def _native_mxfp8_linear(module, x):
     )
 
 
-def _native_int8_convrot_linear(module):
-    weight = getattr(module, "weight", None)
-    params = getattr(weight, "_params", None)
-    return (
-        getattr(module, "quant_format", None) == "int8_tensorwise"
-        and getattr(module, "layout_type", None) == "TensorWiseINT8Layout"
-        and isinstance(weight, QuantizedTensor)
-        and weight._layout_cls == "TensorWiseINT8Layout"
-        and weight._qdata.dtype == torch.int8
-        and getattr(params, "convrot", False) is True
-        and getattr(params, "convrot_groupsize", None) == 256
-        and not getattr(module, "_full_precision_mm", False)
-        and not getattr(module, "comfy_force_cast_weights", False)
-        and not getattr(module, "weight_function", None)
-        and not getattr(module, "bias_function", None)
-        and getattr(module, "weight_lowvram_function", None) is None
-        and getattr(module, "bias_lowvram_function", None) is None
-    )
-
-
-def _shared_int8_convrot_input(x, modules):
-    if (
-        x.requires_grad
-        or x.ndim < 2
-        or x.dtype not in (torch.float16, torch.bfloat16)
-        or not all(_native_int8_convrot_linear(module) for module in modules)
-    ):
-        return None
-    x_2d = x.reshape(-1, x.shape[-1]) if x.ndim >= 3 else x
-    return comfy.quant_ops.ck.quantize_int8_rowwise_convrot64(x_2d.contiguous(), 256)
-
-
-def _linear_from_shared_int8_input(module, qdata, scale, original_shape, out_dtype):
-    weight = module.weight
-    resident, bias, offload_stream = comfy.ops.cast_bias_weight(
-        module,
-        device=qdata.device,
-        dtype=weight.dtype,
-        bias_dtype=out_dtype,
-        offloadable=True,
-    )
-    try:
-        if not isinstance(resident, QuantizedTensor) or resident._layout_cls != "TensorWiseINT8Layout":
-            raise RuntimeError("DiffusionGemma shared INT8 input requires a resident INT8 weight")
-        output = comfy.quant_ops.ck.int8_linear_prequantized(
-            qdata,
-            scale,
-            resident._qdata,
-            resident._params.scale,
-            bias,
-            out_dtype,
-        )
-    finally:
-        comfy.ops.uncast_bias_weight(module, resident, bias, offload_stream)
-    if len(original_shape) >= 3:
-        output = output.reshape((*original_shape[:-1], resident.shape[0]))
-    return output
-
-
 def _linear_from_shared_input(module, quantized_input, original_shape):
     output = module(quantized_input)
     if len(original_shape) >= 3:
@@ -212,15 +153,6 @@ def _int8_self_conditioning(probabilities, weight):
 
 class DiffusionGemmaMLP(MLP):
     def forward(self, x):
-        int8_input = _shared_int8_convrot_input(x, (self.gate_proj, self.up_proj))
-        if int8_input is not None:
-            qdata, scale = int8_input
-            gate = _linear_from_shared_int8_input(
-                self.gate_proj, qdata, scale, x.shape, x.dtype)
-            up = _linear_from_shared_int8_input(
-                self.up_proj, qdata, scale, x.shape, x.dtype)
-            return self.down_proj(self.activation(gate) * up)
-
         quantized_input = _shared_mxfp8_input(x, (self.gate_proj, self.up_proj))
         if quantized_input is None:
             return super().forward(x)
