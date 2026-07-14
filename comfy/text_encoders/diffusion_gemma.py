@@ -1809,18 +1809,13 @@ class DiffusionGenerate:
         )
 
     def _use_conditioned_decoder_graph(self, device, execution_dtype):
-        capability = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
-        native_embedding = (
-            capability == (12, 0) and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
-        ) or (
-            capability == (8, 6) and _native_int8_embedding(self.model.decoder.embed_tokens)
-        )
         return (
             device.type == "cuda"
             and execution_dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(device) == (12, 0)
             and torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
             and comfy.model_management.dynamic_vram_graph_capture_enabled()
-            and native_embedding
+            and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
         )
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
