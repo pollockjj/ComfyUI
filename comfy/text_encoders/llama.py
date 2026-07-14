@@ -15,15 +15,23 @@ STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() n
 STATIC_KV_COMBO_KERNELS = os.environ.get("COMFY_STATIC_KV_COMBO_KERNELS", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_MLP = os.environ.get("COMFY_STATIC_KV_FUSED_MLP", "0").lower() not in {"0", "false", "no", "off"}
 
+_STATIC_DECODE_COMBO_OPTIONS = {
+    "triton.cudagraphs": True,
+    "combo_kernels": True,
+    "benchmark_combo_kernel": True,
+}
+
 
 def _compile_static_decode(fn):
     if STATIC_KV_COMBO_KERNELS:
-        return torch.compile(fn, dynamic=False, options={
-            "triton.cudagraphs": True,
-            "combo_kernels": True,
-            "benchmark_combo_kernel": True,
-        })
+        return torch.compile(fn, dynamic=False, options=_STATIC_DECODE_COMBO_OPTIONS)
     return torch.compile(fn, mode="reduce-overhead", dynamic=False)
+
+
+def _mtp_compile_configuration():
+    mode = os.environ.get("COMFY_MTP_COMPILE_MODE", "default")
+    options = tuple(sorted(_STATIC_DECODE_COMBO_OPTIONS.items())) if STATIC_KV_COMBO_KERNELS else ()
+    return mode, options
 
 
 def _dequant_qt_chunked(weight, dtype, step=65535):
@@ -1327,7 +1335,8 @@ class BaseGenerate:
                    and os.environ.get("COMFY_MTP_CAPTURE", "0") not in {"0", "false", "no"})
         if static_kv:
             runner = getattr(self, "_mtp_cap_runner", None)
-            rkey = (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype)
+            rkey = (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype,
+                    _mtp_compile_configuration())
             if capture and runner is not None and runner["key"] == rkey and p + max_length <= runner["max_len"]:
                 if os.environ.get("COMFY_MTP_STATS", "0") not in {"0", "false", "no"}:
                     print("[MTP-CAP] runner reused")
@@ -1480,7 +1489,8 @@ class BaseGenerate:
             # (check_memory_pool) fail under the full ComfyUI runtime allocator,
             # which holds cross-item allocations the tree does not know about
             torch._inductor.config.triton.cudagraph_trees = False
-            runner = {"key": (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype),
+            runner = {"key": (gamma, temperature, top_k, top_p, min_p, do_sample, execution_dtype,
+                              _mtp_compile_configuration()),
                       "past": past, "statics": statics, "max_len": statics[0].slots if statics else 0,
                       "cycle": _cycle, "compiled": None, "warm": False, "frozen": frozen}
             for kv in statics:
@@ -1513,8 +1523,14 @@ class BaseGenerate:
             # reduce-overhead stays available for standalone benchmarking.
             _mode = os.environ.get("COMFY_MTP_COMPILE_MODE", "default")
             if stats:
-                print(f"[MTP-CAP] compile mode={_mode} stream={torch.cuda.current_stream(device)}")
-            runner["compiled"] = torch.compile(runner["cycle"], mode=_mode if _mode != "none" else None, dynamic=False)
+                print(f"[MTP-CAP] compile config={_mtp_compile_configuration()} "
+                      f"stream={torch.cuda.current_stream(device)}")
+            if _mode == "base":
+                runner["compiled"] = _compile_static_decode(runner["cycle"])
+            else:
+                runner["compiled"] = torch.compile(
+                    runner["cycle"], mode=_mode if _mode != "none" else None, dynamic=False
+                )
             runner["warm"] = True
             p_upper = p + gamma + 1
             cycles = 1
