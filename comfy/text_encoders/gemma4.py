@@ -39,13 +39,13 @@ class StaticLayerKV:
     def __init__(self, past, window, max_len, expand_gqa_2kv=False):
         k, v, self.cum_len = past
         b, h, prefill_len, d = k.shape
-        if expand_gqa_2kv and (h != 2 or not STATIC_KV_FP32_CACHE):
-            raise RuntimeError("expanded E4B GQA requires two KV heads and an FP32 cache")
+        if expand_gqa_2kv and h != 2:
+            raise RuntimeError("expanded E4B GQA requires exactly two KV heads")
         self.expand_gqa_2kv = expand_gqa_2kv
         self.window = window
         self.slots = window if window is not None else max_len
         fmin = torch.finfo(k.dtype).min
-        cache_dtype = torch.float32 if expand_gqa_2kv or (STATIC_KV_FP32_CACHE and STATIC_KV_GQA_BROADCAST and h == 1) else k.dtype
+        cache_dtype = torch.float32 if STATIC_KV_FP32_CACHE and STATIC_KV_GQA_BROADCAST and h == 1 else k.dtype
         cache_heads = 8 if expand_gqa_2kv else h
         self.k = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
         self.v = torch.zeros_like(self.k)
@@ -257,12 +257,12 @@ def _static_gqa_broadcast_attention(q, k, v, mask):
 
 
 def _static_gqa_2kv_attention(q, k, v, mask):
-    """Exact E4B math-SDPA sequence over persistently expanded FP32 KV."""
+    """Exact E4B math-SDPA over persistently expanded BF16 KV."""
     if q.shape[1] != 8 or k.shape[1] != 8 or v.shape[1] != 8:
         raise RuntimeError("expanded E4B GQA requires eight materialized attention heads")
-    scores = torch.matmul(q.float(), k.transpose(-2, -1))
-    probs = torch.softmax(scores + mask.float(), dim=-1)
-    out = torch.matmul(probs, v).to(q.dtype)
+    out = torch.ops.aten._scaled_dot_product_attention_math.default(
+        q, k, v, mask, 0.0, False, None, scale=1.0, enable_gqa=False
+    )[0]
     return out.transpose(1, 2).reshape(q.shape[0], -1, q.shape[1] * q.shape[-1])
 
 class Gemma4Attention(nn.Module):
@@ -279,8 +279,6 @@ class Gemma4Attention(nn.Module):
         self._static_gqa_2kv = STATIC_KV_GQA_2KV and _is_exact_e4b_config(config)
         if STATIC_KV_GQA_2KV and not self._static_gqa_2kv:
             raise RuntimeError("static two-KV GQA is restricted to the exact Gemma4 E4B configuration")
-        if self._static_gqa_2kv and not STATIC_KV_FP32_CACHE:
-            raise RuntimeError("static two-KV GQA requires COMFY_STATIC_KV_FP32_CACHE=1")
 
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
