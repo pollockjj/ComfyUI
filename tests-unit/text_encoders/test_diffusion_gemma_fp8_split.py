@@ -223,40 +223,6 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         unpin.assert_called_once_with(module._v)
 
-    def test_aimdo_execution_lease_retains_within_budget_and_releases(self):
-        page = 32 * 1024 * 1024
-        vbar = types.SimpleNamespace(base_addr=4096, loaded_size=lambda: 4 * page)
-        modules = []
-        for page_offset, page_count in ((0, 1), (1, 2), (3, 1)):
-            module = torch.nn.Linear(1, 1, bias=False)
-            module._v = (vbar, vbar.base_addr + page_offset * page, page_count * page)
-            module._v_signature = (ctypes.c_uint32 * 1)(7)
-            modules.append(module)
-        root_module = types.SimpleNamespace(modules=lambda: modules)
-
-        with (
-            mock.patch("comfy.memory_management.aimdo_enabled", True),
-            mock.patch(
-                "comfy_aimdo.model_vbar.vbar_fault",
-                side_effect=lambda allocation: getattr(
-                    next(module for module in modules if module._v == allocation), "_v_signature"
-                ),
-            ) as fault,
-            mock.patch("comfy_aimdo.model_vbar.vbar_unpin") as unpin,
-        ):
-            lease = comfy.model_management.acquire_dynamic_vram_execution_lease(root_module, page)
-            self.assertTrue(lease.retain(modules[0]))
-            self.assertTrue(lease.retain(modules[0]))
-            self.assertTrue(lease.retain(modules[1]))
-            self.assertFalse(lease.retain(modules[2]))
-            self.assertEqual(lease.retained_bytes, 3 * page)
-            lease.release()
-            lease.release()
-
-        self.assertEqual(fault.call_count, 2)
-        self.assertEqual(unpin.call_count, 2)
-        self.assertTrue(all(not hasattr(module, "_dynamic_vram_execution_lease") for module in modules))
-
     def test_kitchen_graph_replays_then_retires_on_invalid_lease(self):
         static_canvas = torch.empty((1, 4), dtype=torch.long)
         static_logits = torch.empty((1, 4, 8), dtype=torch.bfloat16)

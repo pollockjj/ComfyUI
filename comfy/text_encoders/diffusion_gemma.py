@@ -99,7 +99,6 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
 
 
 _INT8_SELF_CONDITIONING_CHUNK = 65504  # Largest 32-row multiple below CUDA's 65,535 grid-y limit.
-_INT8_DYNAMIC_VRAM_STREAMING_RESERVE = 1536 * 1024 * 1024
 
 
 def _native_mxfp8_embedding(module):
@@ -1798,20 +1797,6 @@ class DiffusionGenerate:
             and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
         )
 
-    def _acquire_int8_dynamic_vram_lease(self, device):
-        if (
-            device.type != "cuda"
-            or not _native_int8_embedding(self.model.decoder.embed_tokens)
-            or not all(
-                layer.experts._grouped_int8_convrot_compatible
-                for layer in self.model.decoder.layers
-            )
-        ):
-            return None
-        return comfy.model_management.acquire_dynamic_vram_execution_lease(
-            self.model.decoder, _INT8_DYNAMIC_VRAM_STREAMING_RESERVE
-        )
-
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
 
@@ -1901,7 +1886,6 @@ class DiffusionGenerate:
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
             graph_execution = None
             graph_capture_attempted = False
-            residency_lease = self._acquire_int8_dynamic_vram_lease(device)
             try:
                 if use_decoder_graph:
                     try:
@@ -2019,8 +2003,6 @@ class DiffusionGenerate:
             finally:
                 if graph_execution is not None:
                     graph_execution.close()
-                if residency_lease is not None:
-                    residency_lease.release()
 
             del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()

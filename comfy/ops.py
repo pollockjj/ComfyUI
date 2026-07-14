@@ -326,10 +326,6 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
 
         weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
 
-        execution_lease = getattr(s, "_dynamic_vram_execution_lease", None)
-        if execution_lease is not None:
-            execution_lease.retain(s)
-
         if not prefetched:
             if getattr(s, "_prefetch")["signature"] is not None:
                 offload_device = device
