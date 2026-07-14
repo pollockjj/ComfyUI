@@ -56,7 +56,11 @@ class StaticLayerKV:
         self.v = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
         self.mask = torch.full((1, 1, 1, self.slots), fmin, dtype=k.dtype, device=k.device)
         n = min(prefill_len, self.slots)
-        self.k[:, :, :n] = self._cache_value(k[:, :, -n:])
+        initial_k = self._cache_value(k[:, :, -n:])
+        if self._k_t is not None:
+            self._k_t[:, :, :, :n] = initial_k.transpose(-2, -1)
+        else:
+            self.k[:, :, :n] = initial_k
         self.v[:, :, :n] = self._cache_value(v[:, :, -n:])
         self.mask[..., :n] = 0.0
         self.idx = torch.tensor([n % self.slots], device=k.device)
@@ -78,7 +82,10 @@ class StaticLayerKV:
         xk = self._cache_value(xk)
         xv = self._cache_value(xv)
         if n == 1:
-            self.k.index_copy_(2, self.idx, xk)
+            if self._k_t is not None:
+                self._k_t.index_copy_(3, self.idx, xk.transpose(-2, -1))
+            else:
+                self.k.index_copy_(2, self.idx, xk)
             self.v.index_copy_(2, self.idx, xv)
             self.mask.index_fill_(3, self.idx, 0.0)
             self.idx.add_(1).remainder_(self.slots)
@@ -105,7 +112,10 @@ class StaticLayerKV:
         self.save_k.copy_(self.k.index_select(2, idxs))
         self.save_v.copy_(self.v.index_select(2, idxs))
         self.save_m.copy_(self.mask.index_select(3, idxs))
-        self.k.index_copy_(2, idxs, xk)
+        if self._k_t is not None:
+            self._k_t.index_copy_(3, idxs, xk.transpose(-2, -1))
+        else:
+            self.k.index_copy_(2, idxs, xk)
         self.v.index_copy_(2, idxs, xv)
         self.mask.index_fill_(3, idxs, 0.0)
         fmin = torch.finfo(self.mask.dtype).min
@@ -123,7 +133,11 @@ class StaticLayerKV:
             return
         n = self._save_n
         tail = self.widx[n - r:]
-        self.k[:, :, tail] = self.save_k[:, :, n - r:]
+        restore_k = self.save_k[:, :, n - r:]
+        if self._k_t is not None:
+            self._k_t.index_copy_(3, tail, restore_k.transpose(-2, -1))
+        else:
+            self.k[:, :, tail] = restore_k
         self.v[:, :, tail] = self.save_v[:, :, n - r:]
         self.mask[..., tail] = self.save_m[..., n - r:]
         self.idx.add_(-r).remainder_(self.slots)
@@ -138,7 +152,11 @@ class StaticLayerKV:
         cur_k = self.k.index_select(2, self.widx)
         cur_v = self.v.index_select(2, self.widx)
         cur_m = self.mask.index_select(3, self.widx)
-        self.k[:, :, self.widx] = torch.where(keep.view(1, 1, n, 1), cur_k, self.save_k)
+        next_k = torch.where(keep.view(1, 1, n, 1), cur_k, self.save_k)
+        if self._k_t is not None:
+            self._k_t.index_copy_(3, self.widx, next_k.transpose(-2, -1))
+        else:
+            self.k[:, :, self.widx] = next_k
         self.v[:, :, self.widx] = torch.where(keep.view(1, 1, n, 1), cur_v, self.save_v)
         self.mask[..., self.widx] = torch.where(keep.view(1, 1, 1, n), cur_m, self.save_m)
         self.idx.add_(-n).add_(acc + 1).remainder_(self.slots)
@@ -151,7 +169,11 @@ class StaticLayerKV:
         n = min(k.shape[2], self.slots)
         self.k.zero_()
         self.v.zero_()
-        self.k[:, :, :n] = self._cache_value(k[:, :, -n:])
+        reset_k = self._cache_value(k[:, :, -n:])
+        if self._k_t is not None:
+            self._k_t[:, :, :, :n] = reset_k.transpose(-2, -1)
+        else:
+            self.k[:, :, :n] = reset_k
         self.v[:, :, :n] = self._cache_value(v[:, :, -n:])
         self.mask.fill_(torch.finfo(self.mask.dtype).min)
         self.mask[..., :n] = 0.0
@@ -273,7 +295,7 @@ def _static_gqa_2kv_attention(q, k, v, mask):
     q3 = (q * 1.0).reshape(batch * heads, query_len, head_dim)
     k_t = k.transpose(-2, -1).reshape(batch * heads, head_dim, key_len)
     scores = torch.bmm(q3, k_t).view(batch, heads, query_len, key_len)
-    probs = torch._safe_softmax(scores + mask, dim=-1)
+    probs = torch.ops.aten._safe_softmax.default(scores + mask, -1, None)
     out = torch.bmm(
         probs.reshape(batch * heads, query_len, key_len),
         v.reshape(batch * heads, key_len, head_dim),
