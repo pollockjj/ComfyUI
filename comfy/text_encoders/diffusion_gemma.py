@@ -99,6 +99,8 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
 
 
 _INT8_SELF_CONDITIONING_CHUNK = 65504  # Largest 32-row multiple below CUDA's 65,535 grid-y limit.
+_INT8_SM86_RESIDENT_EXPERT_LAYERS = 1
+_INT8_SM86_MIN_DEVICE_MEMORY = 24_000_000_000
 
 
 def _native_mxfp8_embedding(module):
@@ -1818,6 +1820,32 @@ class DiffusionGenerate:
             and _native_mxfp8_embedding(self.model.decoder.embed_tokens)
         )
 
+    def _acquire_sm86_int8_expert_residency(self, input):
+        device = input.device
+        layers = self.model.decoder.layers
+        if (
+            device.type != "cuda"
+            or torch.cuda.get_device_capability(device) != (8, 6)
+            or torch.cuda.get_device_properties(device).total_memory < _INT8_SM86_MIN_DEVICE_MEMORY
+            or len(layers) < _INT8_SM86_RESIDENT_EXPERT_LAYERS
+            or not _native_int8_embedding(self.model.decoder.embed_tokens)
+            or not all(
+                layer.experts._grouped_int8_convrot_compatible
+                for layer in layers[:_INT8_SM86_RESIDENT_EXPERT_LAYERS]
+            )
+        ):
+            return None
+
+        stack = contextlib.ExitStack()
+        try:
+            for layer in layers[:_INT8_SM86_RESIDENT_EXPERT_LAYERS]:
+                stack.enter_context(layer.experts.gate_up_proj.bank_resident(input))
+                stack.enter_context(layer.experts.down_proj.bank_resident(input))
+        except BaseException:
+            stack.close()
+            raise
+        return stack
+
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return [() for _ in range(self.model.config.num_hidden_layers)]
 
@@ -1907,6 +1935,7 @@ class DiffusionGenerate:
             stopping = _StableAndConfidentStopping(stability_threshold, confidence_threshold)
             graph_execution = None
             graph_capture_attempted = False
+            expert_residency = self._acquire_sm86_int8_expert_residency(embeds)
             try:
                 if use_decoder_graph:
                     try:
@@ -2024,6 +2053,8 @@ class DiffusionGenerate:
             finally:
                 if graph_execution is not None:
                     graph_execution.close()
+                if expert_residency is not None:
+                    expert_residency.close()
 
             del self_conditioning_logits
             canvas_ids = argmax_canvas[0].tolist()
