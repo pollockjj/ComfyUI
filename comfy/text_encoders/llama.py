@@ -678,18 +678,37 @@ class MLP(nn.Module):
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
 
-def _fuse_mlp_gate_up_projections(root):
+def _fuse_mlp_gate_up_projections(root, frozen):
+    frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
     for module in root.modules():
         if not isinstance(module, MLP) or module._gate_up_weight is not None:
             continue
         gate_weight = module.gate_proj.weight
         up_weight = module.up_proj.weight
+        projections = (module.gate_proj, module.up_proj)
+        if (gate_weight.ndim != 2 or gate_weight.shape != up_weight.shape
+                or gate_weight.dtype != torch.bfloat16 or up_weight.dtype != torch.bfloat16
+                or not gate_weight.is_cuda or not up_weight.is_cuda
+                or any(projection.bias is not None or projection.comfy_cast_weights
+                       or len(getattr(projection, "weight_function", ()))
+                       or len(getattr(projection, "bias_function", ()))
+                       or getattr(projection, "_int8_dequant_weight_cache", None) is not None
+                       for projection in projections)
+                or any(getattr(frozen_weights.get(id(projection)), "is_cuda", False)
+                       for projection in projections)):
+            raise RuntimeError("static fused MLP requires plain resident BF16 gate/up weights")
         gate_rows = gate_weight.shape[0]
         packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
-        torch._dynamo.mark_static_address(packed)
+        torch._dynamo.mark_static_address(packed, guard=True)
         module._gate_up_weight = packed
         module.gate_proj._parameters["weight"] = torch.nn.Parameter(packed[:gate_rows], requires_grad=False)
         module.up_proj._parameters["weight"] = torch.nn.Parameter(packed[gate_rows:], requires_grad=False)
+        storage = packed.untyped_storage().data_ptr()
+        if (not module.gate_proj.weight.is_contiguous() or not module.up_proj.weight.is_contiguous()
+                or module.gate_proj.weight.untyped_storage().data_ptr() != storage
+                or module.up_proj.weight.untyped_storage().data_ptr() != storage):
+            raise RuntimeError("static fused MLP weight aliases were not preserved")
+        del gate_weight, up_weight, packed
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -1138,7 +1157,7 @@ class BaseGenerate:
                     # the finally-restore only fires if the runner was never built
                     runner["frozen"] = _freeze_resident_weights(self.model, embeds.reshape(-1)[:1])
                     if STATIC_KV_FUSED_MLP:
-                        _fuse_mlp_gate_up_projections(self.model)
+                        _fuse_mlp_gate_up_projections(self.model, runner["frozen"])
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
                 static_past = runner["caches"]
 
