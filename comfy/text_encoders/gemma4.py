@@ -15,6 +15,7 @@ from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _ma
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_GQA_BROADCAST = os.environ.get("COMFY_STATIC_KV_GQA_BROADCAST", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FP32_CACHE = os.environ.get("COMFY_STATIC_KV_FP32_CACHE", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_FUSED_QKV = os.environ.get("COMFY_STATIC_KV_FUSED_QKV", "0").lower() not in {"0", "false", "no", "off"}
 
 if STATIC_KV_GQA_BROADCAST:
     # The direct static-GQA path accumulates BF16 inputs in FP32.  "high" keeps
@@ -232,10 +233,13 @@ class Gemma4Attention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_dim = head_dim
         self.inner_size = self.num_heads * head_dim
+        kv_size = self.num_kv_heads * head_dim
+        self._qkv_splits = (self.inner_size, kv_size, kv_size)
+        self._qkv_weight = None
 
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.k_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.v_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = None
@@ -256,7 +260,11 @@ class Gemma4Attention(nn.Module):
     ):
         batch_size, seq_length, _ = hidden_states.shape
 
-        xq = self.q_proj(hidden_states)
+        fused_qkv = self._qkv_weight is not None and isinstance(past_key_value, StaticLayerKV) and shared_kv is None
+        if fused_qkv:
+            xq, xk, xv = torch.nn.functional.linear(hidden_states, self._qkv_weight).split(self._qkv_splits, dim=-1)
+        else:
+            xq = self.q_proj(hidden_states)
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         if self.q_norm is not None:
             xq = self.q_norm(xq)
@@ -272,8 +280,11 @@ class Gemma4Attention(nn.Module):
             present_key_value = None
             shareable_kv = None
         elif isinstance(past_key_value, StaticLayerKV):
-            xk = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
-            xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            if not fused_qkv:
+                xk = self.k_proj(hidden_states)
+                xv = self.v_proj(hidden_states)
+            xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            xv = xv.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
             if self.k_norm is not None:
                 xk = self.k_norm(xk)
             xv = rms_norm(xv)
@@ -345,6 +356,111 @@ class Gemma4Attention(nn.Module):
         output = optimized_attention_for_device(xq.device, mask=attention_mask is not None, small_input=True)(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, scale=1.0, **gqa_kwargs)
 
         return self.o_proj(output), present_key_value, shareable_kv
+
+
+def _fuse_static_e4b_qkv_projections(model, frozen):
+    config = model.config
+    signature = (
+        config.transformer_type,
+        config.hidden_size,
+        config.num_hidden_layers,
+        config.num_attention_heads,
+        config.num_key_value_heads,
+        config.head_dim,
+        config.global_head_dim,
+        tuple(config.sliding_attention),
+        config.num_kv_shared_layers,
+        config.qkv_bias,
+    )
+    expected = (
+        "gemma4", 2560, 42, 8, 2, 256, 512,
+        (512, 512, 512, 512, 512, False), 18, False,
+    )
+    if type(config) is not Gemma4Config or signature != expected or len(model.layers) != 42:
+        raise RuntimeError("static fused QKV is restricted to the exact Gemma4 E4B configuration")
+
+    first_shared = config.num_hidden_layers - config.num_kv_shared_layers
+    source_attentions = [layer.self_attn for layer in model.layers[:first_shared]]
+    packed_states = [attention._qkv_weight is not None for attention in source_attentions]
+    if all(packed_states):
+        return
+    if any(packed_states):
+        raise RuntimeError("static fused E4B QKV source layers are only partially packed")
+
+    frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
+    candidates = []
+
+    for index, attention in enumerate(source_attentions):
+        projections = (attention.q_proj, attention.k_proj, attention.v_proj)
+        weights = tuple(projection.weight for projection in projections)
+        expected_shapes = tuple((rows, attention.hidden_size) for rows in attention._qkv_splits)
+        invalid_projection = any(
+            not isinstance(projection, torch.nn.Linear)
+            or projection.bias is not None
+            or getattr(projection, "comfy_cast_weights", False)
+            or len(getattr(projection, "weight_function", ()))
+            or len(getattr(projection, "bias_function", ()))
+            or getattr(projection, "_int8_dequant_weight_cache", None) is not None
+            or bool(getattr(projection, "_forward_pre_hooks", None))
+            or bool(getattr(projection, "_forward_hooks", None))
+            or bool(getattr(projection, "_backward_hooks", None))
+            for projection in projections
+        )
+        invalid_weight = (
+            tuple(tuple(weight.shape) for weight in weights) != expected_shapes
+            or any(
+                weight.ndim != 2
+                or weight.dtype != torch.bfloat16
+                or not weight.is_cuda
+                or not weight.is_contiguous()
+                for weight in weights
+            )
+            or len({weight.device for weight in weights}) != 1
+            or any(
+                getattr(frozen_weights.get(id(projection)), "is_cuda", False)
+                for projection in projections
+            )
+        )
+        if invalid_projection or invalid_weight:
+            raise RuntimeError(
+                f"static fused E4B QKV requires plain resident BF16 projections at layer {index}"
+            )
+        candidates.append(attention)
+
+    del projections, weights
+
+    for attention in candidates:
+        q_weight = attention.q_proj.weight
+        k_weight = attention.k_proj.weight
+        v_weight = attention.v_proj.weight
+        q_rows, k_rows, v_rows = attention._qkv_splits
+        packed = torch.cat((q_weight, k_weight, v_weight), dim=0).contiguous()
+        torch._dynamo.mark_static_address(packed, guard=True)
+
+        q_param = torch.nn.Parameter(packed[:q_rows], requires_grad=False)
+        k_param = torch.nn.Parameter(packed[q_rows:q_rows + k_rows], requires_grad=False)
+        v_param = torch.nn.Parameter(
+            packed[q_rows + k_rows:q_rows + k_rows + v_rows],
+            requires_grad=False,
+        )
+        aliases = (q_param, k_param, v_param)
+        storage = packed.untyped_storage().data_ptr()
+        expected_offsets = (0, q_weight.numel(), q_weight.numel() + k_weight.numel())
+        if (
+            any(
+                not alias.is_contiguous()
+                or alias.untyped_storage().data_ptr() != storage
+                for alias in aliases
+            )
+            or tuple(alias.storage_offset() for alias in aliases) != expected_offsets
+        ):
+            raise RuntimeError("static fused E4B QKV weight aliases were not preserved")
+
+        attention.q_proj._parameters["weight"] = q_param
+        attention.k_proj._parameters["weight"] = k_param
+        attention.v_proj._parameters["weight"] = v_param
+        attention._qkv_weight = packed
+        del q_weight, k_weight, v_weight, q_param, k_param, v_param, aliases, packed
 
 
 class TransformerBlockGemma4(nn.Module):
@@ -678,6 +794,10 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         self.dtype = dtype
         self.multi_modal_projector = Gemma4MultiModalProjector(config, dtype=dtype, device=device, ops=operations)
         self.vision_model = Gemma4VisionEncoder(config.vision_config, dtype=dtype, device=device, ops=operations)
+
+    def _prepare_static_decode_weights(self, frozen):
+        if STATIC_KV_FUSED_QKV:
+            _fuse_static_e4b_qkv_projections(self.model, frozen)
 
     def _load_mtp_drafter(self, device, dtype):
         if not MTP_PATH:

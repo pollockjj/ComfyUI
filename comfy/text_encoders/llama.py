@@ -1156,6 +1156,9 @@ class BaseGenerate:
                     # frozen weights stay installed for the life of the runner;
                     # the finally-restore only fires if the runner was never built
                     runner["frozen"] = _freeze_resident_weights(self.model, embeds.reshape(-1)[:1])
+                    prepare_static_weights = getattr(self, "_prepare_static_decode_weights", None)
+                    if prepare_static_weights is not None:
+                        prepare_static_weights(runner["frozen"])
                     if STATIC_KV_FUSED_MLP:
                         _fuse_mlp_gate_up_projections(self.model, runner["frozen"])
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
