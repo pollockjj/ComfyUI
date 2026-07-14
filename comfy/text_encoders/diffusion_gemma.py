@@ -1159,9 +1159,14 @@ class DiffusionGemmaExperts(nn.Module):
         E = self.num_experts
         K = top_k_index.shape[-1]
 
-        order, expert_indptr, pair_order = comfy.quant_ops.ck.prepare_int8_moe_routes(
-            top_k_index, E
-        )
+        flat_experts = top_k_index.reshape(-1)
+        order = torch.argsort(flat_experts)
+        sorted_experts = flat_experts[order]
+        positions = torch.arange(N * K, device=flat_experts.device)
+        counts = torch.zeros(E, dtype=torch.int32, device=flat_experts.device)
+        counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
+        expert_indptr = torch.zeros(E + 1, dtype=torch.int32, device=flat_experts.device)
+        torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
         x = hidden_states[order // K]
 
         with contextlib.ExitStack() as stack:
@@ -1197,6 +1202,8 @@ class DiffusionGemmaExperts(nn.Module):
                 out_dtype=hidden_states.dtype,
             )
 
+        pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
+        pair_order[order] = positions
         y = y[pair_order]
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
