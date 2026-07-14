@@ -609,9 +609,9 @@ class MLP(nn.Module):
 
     def forward(self, x):
         if self._decode_gate_up_weight is not None:
-            gate, up = torch.nn.functional.linear(
-                x, self._decode_gate_up_weight
-            ).chunk(2, dim=-1)
+            gate, up = torch.mv(
+                self._decode_gate_up_weight, x.reshape(-1)
+            ).reshape(*x.shape[:-1], -1).chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
