@@ -1356,13 +1356,13 @@ class BaseGenerate:
             # bf16 models expose the Parameter directly; quantized convrot models have
             # the chunk-dequant cache warmed by the eager prefill logits call
             mod = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
-            lw = getattr(mod, "_logits_dequant_cache", None)
-            logits_w = lw[1] if lw is not None else mod.weight
             cap = getattr(self.model.config, "final_logit_softcapping", None)
             for t in drafter.w.values():
                 torch._dynamo.mark_static_address(t)
             # frozen weights stay installed for the life of the runner (Phase-A pattern)
             frozen = _freeze_resident_weights(self.model, h_last.reshape(-1)[:1])
+            lw = getattr(mod, "_logits_dequant_cache", None)
+            logits_w = lw[1] if lw is not None else mod.weight
 
             def _pick_batch(lg):
                 # sampler over the top-k slice only: with top_k active this is exactly
