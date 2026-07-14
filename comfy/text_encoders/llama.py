@@ -1399,13 +1399,11 @@ class BaseGenerate:
                 out.append(t)
                 pbar.update(1)
                 if t in stop_tokens or len(out) >= max_length:
-                    if stats:
-                        print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
-                              f"tokens/forward={len(out) / (cycles + 1):.3f}")
+                    print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
+                          f"drafted={cycles * gamma} tokens/forward={len(out) / (cycles + 1):.3f}")
                     return out
-        if stats:
-            print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
-                  f"tokens/forward={len(out) / (cycles + 1):.3f}")
+        print(f"[MTP] gamma={gamma} cycles={cycles} accepted={accepted} "
+              f"drafted={cycles * gamma} tokens/forward={len(out) / (cycles + 1):.3f}")
         return out
 
     def _generate_speculative_captured(self, drafter, max_length, stop_tokens, execution_dtype,
@@ -1547,9 +1545,9 @@ class BaseGenerate:
                         out.append(t)
                         pbar.update(1)
                         if t in stop_tokens or len(out) >= max_length:
-                            if stats:
-                                print(f"[MTP-CAP] gamma={gamma} cycles={cycles} accepted={accepted} "
-                                      f"tokens/forward={len(out) / (cycles + 1):.3f}")
+                            print(f"[MTP-CAP] gamma={gamma} cycles={cycles} accepted={accepted} "
+                                  f"drafted={cycles * gamma} "
+                                  f"tokens/forward={len(out) / (cycles + 1):.3f}")
                             return out
                 records.clear()
             cycles += 1
