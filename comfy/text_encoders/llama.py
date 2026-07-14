@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -1078,6 +1080,8 @@ class BaseGenerate:
         current_input_ids = initial_input_ids
         graph_enabled = bool(
             getattr(self.model.config, "static_decode_graph", False)
+            and os.environ.get("COMFY_QWEN_DECODE_GRAPH", "1").lower()
+            not in {"0", "false", "no", "off"}
             and device.type == "cuda"
             and execution_dtype == torch.bfloat16
             and embeds.shape[0] == 1
