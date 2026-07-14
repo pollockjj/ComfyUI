@@ -14,33 +14,6 @@ STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").l
 STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_COMBO_KERNELS = os.environ.get("COMFY_STATIC_KV_COMBO_KERNELS", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_MLP = os.environ.get("COMFY_STATIC_KV_FUSED_MLP", "0").lower() not in {"0", "false", "no", "off"}
-STATIC_KV_SMALL_M_LINEAR = os.environ.get("COMFY_STATIC_KV_SMALL_M_LINEAR", "0").lower() not in {"0", "false", "no", "off"}
-
-_E4B_SMALL_M_LINEAR_SHAPES = frozenset({
-    (3072, 2560), (6144, 2560), (2048, 2560), (4096, 2560),
-    (2560, 2048), (2560, 4096), (20480, 2560), (256, 2560),
-    (2560, 256), (262144, 2560),
-})
-if STATIC_KV_SMALL_M_LINEAR:
-    import comfy_kitchen as _comfy_kitchen
-    if not hasattr(_comfy_kitchen, "bf16_small_m_linear"):
-        raise RuntimeError("COMFY_STATIC_KV_SMALL_M_LINEAR requires comfy-kitchen bf16_small_m_linear")
-else:
-    _comfy_kitchen = None
-
-
-def _bf16_small_m_linear(x, weight):
-    if (
-        STATIC_KV_SMALL_M_LINEAR
-        and x.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
-        and x.is_cuda
-        and weight.is_cuda
-        and x.numel() == 3 * x.shape[-1]
-        and (weight.shape[0], weight.shape[1]) in _E4B_SMALL_M_LINEAR_SHAPES
-    ):
-        return _comfy_kitchen.bf16_small_m_linear(x, weight)
-    return torch.nn.functional.linear(x, weight)
 
 _STATIC_DECODE_COMBO_OPTIONS = {
     "triton.cudagraphs": True,
@@ -708,7 +681,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         if self._gate_up_weight is not None:
-            gate, up = _bf16_small_m_linear(x, self._gate_up_weight).chunk(2, dim=-1)
+            gate, up = torch.nn.functional.linear(x, self._gate_up_weight).chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
@@ -1499,7 +1472,7 @@ class BaseGenerate:
                 e = self.model.embed_tokens(batch).to(execution_dtype)
                 vx, _, _ = self.model.forward(None, embeds=e, attention_mask=None,
                                               past_key_values=past, position_ids=vpos, input_ids=batch)
-                logits = _bf16_small_m_linear(vx, logits_w)
+                logits = torch.nn.functional.linear(vx, logits_w)
                 if cap:
                     logits = cap * torch.tanh(logits / cap)
                 picked = _pick_batch(logits[0].float())
