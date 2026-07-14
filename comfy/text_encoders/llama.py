@@ -1061,9 +1061,8 @@ class BaseGenerate:
                                 hidden[:, -1:], model.embed_tokens.weight, None
                             )[:, -1]
 
-                        torch._inductor.config.triton.cudagraph_trees = False
                         runner["compiled_step"] = torch.compile(
-                            _decode_step, mode="reduce-overhead", dynamic=False
+                            _decode_step, mode="default", dynamic=False
                         )
                     compiled_step = runner["compiled_step"]
 
