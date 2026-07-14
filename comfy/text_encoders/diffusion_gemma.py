@@ -1154,37 +1154,36 @@ class DiffusionGemmaExperts(nn.Module):
         torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
         x = hidden_states[order // K]
 
-        def resident_weight(bank):
-            weight, bias = bank._resident_bank
-            if (
-                not isinstance(weight, QuantizedTensor)
-                or weight._layout_cls != "TensorWiseINT8Layout"
-                or bias is not None
-            ):
-                raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
-            return weight
+        with contextlib.ExitStack() as stack:
+            modules = (self.gate_up_proj, self.down_proj)
+            banks = [stack.enter_context(module.bank_resident(hidden_states)) for module in modules]
+            weights = []
+            for bank in banks:
+                weight, bias = bank._resident_bank
+                if (
+                    not isinstance(weight, QuantizedTensor)
+                    or weight._layout_cls != "TensorWiseINT8Layout"
+                    or bias is not None
+                ):
+                    raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
+                weights.append(weight)
 
-        with self.gate_up_proj.bank_resident(hidden_states) as bank:
-            gate_up_weight = resident_weight(bank)
             gate_up = comfy.quant_ops.grouped_int8_convrot_linear_packed(
                 x,
                 expert_indptr,
-                gate_up_weight._qdata,
-                gate_up_weight._params.scale,
-                gate_up_weight._params.convrot_groupsize,
+                weights[0]._qdata,
+                weights[0]._params.scale,
+                weights[0]._params.convrot_groupsize,
                 out_dtype=hidden_states.dtype,
             )
-        gate, up = gate_up.chunk(2, dim=-1)
-        intermediate = _gelu_tanh(gate) * up
-
-        with self.down_proj.bank_resident(hidden_states) as bank:
-            down_weight = resident_weight(bank)
+            gate, up = gate_up.chunk(2, dim=-1)
+            intermediate = _gelu_tanh(gate) * up
             y = comfy.quant_ops.grouped_int8_convrot_linear_packed(
                 intermediate,
                 expert_indptr,
-                down_weight._qdata,
-                down_weight._params.scale,
-                down_weight._params.convrot_groupsize,
+                weights[1]._qdata,
+                weights[1]._params.scale,
+                weights[1]._params.convrot_groupsize,
                 out_dtype=hidden_states.dtype,
             )
 

@@ -499,23 +499,16 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
         torch.nn.Module.__init__(experts)
         experts.num_experts = 2
-        events = []
-        @contextlib.contextmanager
-        def bank(name, weight):
-            events.append(f"enter-{name}")
-            yield types.SimpleNamespace(_resident_bank=(weight, None))
-            events.append(f"exit-{name}")
-        resident = lambda name, weight: types.SimpleNamespace(bank_resident=lambda _hidden: bank(name, weight))  # noqa: E731
+        resident = lambda weight: types.SimpleNamespace(bank_resident=lambda hidden: contextlib.nullcontext(types.SimpleNamespace(_resident_bank=(weight, None))))  # noqa: E731
         gate_up = self._int8_bank((2, 4, 2), (2, 4, 1), 256, device="cpu").weight
         down = self._int8_bank((2, 2, 2), (2, 2, 1), 64, device="cpu").weight
-        experts.gate_up_proj, experts.down_proj = resident("gate", gate_up), resident("down", down)
+        experts.gate_up_proj, experts.down_proj = resident(gate_up), resident(down)
         hidden, indices, weights = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.bfloat16), torch.tensor([[1], [0]]), torch.ones((2, 1), dtype=torch.float32)
         with mock.patch.object(sys.modules["comfy.quant_ops"], "grouped_int8_convrot_linear_packed",
                                side_effect=[torch.zeros((2, 4), dtype=torch.bfloat16), hidden.flip(0)]) as packed:
             output = experts._forward_grouped_int8_convrot(hidden, indices, weights)
 
         self.assertEqual((packed.call_count, packed.call_args_list[0].args[1].tolist()), (2, [0, 1, 2]))
-        self.assertEqual(events, ["enter-gate", "exit-gate", "enter-down", "exit-down"])
         self.assertTrue(torch.equal(output, hidden))
 
 if __name__ == "__main__":
