@@ -14,6 +14,7 @@ from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _ma
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_GQA_BROADCAST = os.environ.get("COMFY_STATIC_KV_GQA_BROADCAST", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_GQA_2KV = os.environ.get("COMFY_STATIC_KV_GQA_2KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FP32_CACHE = os.environ.get("COMFY_STATIC_KV_FP32_CACHE", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_QKV = os.environ.get("COMFY_STATIC_KV_FUSED_QKV", "0").lower() not in {"0", "false", "no", "off"}
 
@@ -35,30 +36,39 @@ class StaticLayerKV:
     tuple's third field and is only read outside the captured region.
     """
 
-    def __init__(self, past, window, max_len):
+    def __init__(self, past, window, max_len, expand_gqa_2kv=False):
         k, v, self.cum_len = past
         b, h, prefill_len, d = k.shape
+        if expand_gqa_2kv and (h != 2 or not STATIC_KV_FP32_CACHE):
+            raise RuntimeError("expanded E4B GQA requires two KV heads and an FP32 cache")
+        self.expand_gqa_2kv = expand_gqa_2kv
         self.window = window
         self.slots = window if window is not None else max_len
         fmin = torch.finfo(k.dtype).min
-        cache_dtype = torch.float32 if STATIC_KV_FP32_CACHE and STATIC_KV_GQA_BROADCAST and h == 1 else k.dtype
-        self.k = torch.zeros(b, h, self.slots, d, dtype=cache_dtype, device=k.device)
+        cache_dtype = torch.float32 if expand_gqa_2kv or (STATIC_KV_FP32_CACHE and STATIC_KV_GQA_BROADCAST and h == 1) else k.dtype
+        cache_heads = 8 if expand_gqa_2kv else h
+        self.k = torch.zeros(b, cache_heads, self.slots, d, dtype=cache_dtype, device=k.device)
         self.v = torch.zeros_like(self.k)
         self.mask = torch.full((1, 1, 1, self.slots), fmin, dtype=k.dtype, device=k.device)
         n = min(prefill_len, self.slots)
-        self.k[:, :, :n] = k[:, :, -n:]
-        self.v[:, :, :n] = v[:, :, -n:]
+        self.k[:, :, :n] = self._cache_value(k[:, :, -n:])
+        self.v[:, :, :n] = self._cache_value(v[:, :, -n:])
         self.mask[..., :n] = 0.0
         self.idx = torch.tensor([n % self.slots], device=k.device)
         for t in (self.k, self.v, self.mask, self.idx):
             torch._dynamo.mark_static_address(t)
 
+    def _cache_value(self, value):
+        if self.expand_gqa_2kv:
+            value = value.repeat_interleave(4, dim=1)
+        return value.to(self.k.dtype)
+
     def append(self, xk, xv):
         # single-token in-place write; graph-safe (static addresses, tensor index,
         # no python-side state — cum_len advances in the generate loop)
         n = xk.shape[2]
-        xk = xk.to(self.k.dtype)
-        xv = xv.to(self.v.dtype)
+        xk = self._cache_value(xk)
+        xv = self._cache_value(xv)
         if n == 1:
             self.k.index_copy_(2, self.idx, xk)
             self.v.index_copy_(2, self.idx, xv)
@@ -133,8 +143,8 @@ class StaticLayerKV:
         n = min(k.shape[2], self.slots)
         self.k.zero_()
         self.v.zero_()
-        self.k[:, :, :n] = k[:, :, -n:]
-        self.v[:, :, :n] = v[:, :, -n:]
+        self.k[:, :, :n] = self._cache_value(k[:, :, -n:])
+        self.v[:, :, :n] = self._cache_value(v[:, :, -n:])
         self.mask.fill_(torch.finfo(self.mask.dtype).min)
         self.mask[..., :n] = 0.0
         self.idx.fill_(n % self.slots)
@@ -208,6 +218,26 @@ class Gemma4_31B_Config(Gemma4Config):
     vision_config = GEMMA4_VISION_31B_CONFIG
 
 
+def _is_exact_e4b_config(config):
+    signature = (
+        config.transformer_type,
+        config.hidden_size,
+        config.num_hidden_layers,
+        config.num_attention_heads,
+        config.num_key_value_heads,
+        config.head_dim,
+        config.global_head_dim,
+        tuple(config.sliding_attention),
+        config.num_kv_shared_layers,
+        config.qkv_bias,
+    )
+    expected = (
+        "gemma4", 2560, 42, 8, 2, 256, 512,
+        (512, 512, 512, 512, 512, False), 18, False,
+    )
+    return type(config) is Gemma4Config and signature == expected
+
+
 # unfused RoPE as addcmul_ RoPE diverges from reference code
 def _apply_rotary_pos_emb(x, freqs_cis):
     cos, sin = freqs_cis[0], freqs_cis[1]
@@ -225,6 +255,16 @@ def _static_gqa_broadcast_attention(q, k, v, mask):
     out = torch.matmul(probs, v.float()).to(q.dtype)
     return out.transpose(1, 2).reshape(q.shape[0], -1, q.shape[1] * q.shape[-1])
 
+
+def _static_gqa_2kv_attention(q, k, v, mask):
+    """Exact E4B math-SDPA sequence over persistently expanded FP32 KV."""
+    if q.shape[1] != 8 or k.shape[1] != 8 or v.shape[1] != 8:
+        raise RuntimeError("expanded E4B GQA requires eight materialized attention heads")
+    scores = torch.matmul(q.float(), k.transpose(-2, -1))
+    probs = torch.softmax(scores + mask.float(), dim=-1)
+    out = torch.matmul(probs, v).to(q.dtype)
+    return out.transpose(1, 2).reshape(q.shape[0], -1, q.shape[1] * q.shape[-1])
+
 class Gemma4Attention(nn.Module):
     def __init__(self, config, head_dim, device=None, dtype=None, ops=None):
         super().__init__()
@@ -236,6 +276,11 @@ class Gemma4Attention(nn.Module):
         kv_size = self.num_kv_heads * head_dim
         self._qkv_splits = (self.inner_size, kv_size, kv_size)
         self._qkv_weight = None
+        self._static_gqa_2kv = STATIC_KV_GQA_2KV and _is_exact_e4b_config(config)
+        if STATIC_KV_GQA_2KV and not self._static_gqa_2kv:
+            raise RuntimeError("static two-KV GQA is restricted to the exact Gemma4 E4B configuration")
+        if self._static_gqa_2kv and not STATIC_KV_FP32_CACHE:
+            raise RuntimeError("static two-KV GQA requires COMFY_STATIC_KV_FP32_CACHE=1")
 
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
@@ -339,6 +384,9 @@ class Gemma4Attention(nn.Module):
         # expand heads when sliding mask is present
         # has to be done within SDPA itself to match the reference code, pre-scaling expansion causes numerical differences
         if static_mask is not None:
+            if self._static_gqa_2kv:
+                output = _static_gqa_2kv_attention(xq, xk, xv, static_mask)
+                return self.o_proj(output), present_key_value, shareable_kv
             if STATIC_KV_GQA_BROADCAST and self.num_kv_heads == 1 and self.num_heads != 1:
                 output = _static_gqa_broadcast_attention(xq, xk, xv, static_mask)
                 return self.o_proj(output), present_key_value, shareable_kv
@@ -360,23 +408,7 @@ class Gemma4Attention(nn.Module):
 
 def _fuse_static_e4b_qkv_projections(model, frozen):
     config = model.config
-    signature = (
-        config.transformer_type,
-        config.hidden_size,
-        config.num_hidden_layers,
-        config.num_attention_heads,
-        config.num_key_value_heads,
-        config.head_dim,
-        config.global_head_dim,
-        tuple(config.sliding_attention),
-        config.num_kv_shared_layers,
-        config.qkv_bias,
-    )
-    expected = (
-        "gemma4", 2560, 42, 8, 2, 256, 512,
-        (512, 512, 512, 512, 512, False), 18, False,
-    )
-    if type(config) is not Gemma4Config or signature != expected or len(model.layers) != 42:
+    if not _is_exact_e4b_config(config) or len(model.layers) != 42:
         raise RuntimeError("static fused QKV is restricted to the exact Gemma4 E4B configuration")
 
     first_shared = config.num_hidden_layers - config.num_kv_shared_layers
@@ -825,12 +857,13 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         """Post-prefill: rebuild each layer's dynamic (k, v, cum_len) tuple as a
         fixed-shape StaticLayerKV so the decode step can be graph-captured."""
         out = []
+        expand_gqa_2kv = STATIC_KV_GQA_2KV and _is_exact_e4b_config(self.model.config)
         for layer, past in zip(self.model.layers, past_key_values):
             if past is None or len(past) == 0:
                 out.append(past if past is not None else ())
                 continue
             window = layer.sliding_attention if getattr(layer, "sliding_attention", False) else None
-            out.append(StaticLayerKV(past, window, max_cache_len))
+            out.append(StaticLayerKV(past, window, max_cache_len, expand_gqa_2kv=expand_gqa_2kv))
         return out
 
     def preprocess_embed(self, embed, device):
