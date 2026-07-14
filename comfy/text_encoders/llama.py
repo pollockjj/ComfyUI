@@ -1558,8 +1558,20 @@ class BaseGenerate:
         if temperature != 1.0:
             logits = logits / temperature
         if top_k > 0:
-            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-            logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+            logits, top_indices = torch.topk(logits, min(top_k, logits.shape[-1]))
+            if min_p > 0.0:
+                probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
+                top_probs, _ = probs_before_filter.max(dim=-1, keepdim=True)
+                indices_to_remove = probs_before_filter < min_p * top_probs
+                logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+            if top_p < 1.0:
+                cumulative_probs = torch.cumsum(torch.nn.functional.softmax(logits, dim=-1), dim=-1)
+                indices_to_remove = cumulative_probs > top_p
+                indices_to_remove[..., 0] = False
+                logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            return top_indices.gather(1, next_token)
         if min_p > 0.0:
             probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
             top_probs, _ = probs_before_filter.max(dim=-1, keepdim=True)
