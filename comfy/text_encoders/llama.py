@@ -12,6 +12,17 @@ import comfy.utils
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_COMBO_KERNELS = os.environ.get("COMFY_STATIC_KV_COMBO_KERNELS", "0").lower() not in {"0", "false", "no", "off"}
+
+
+def _compile_static_decode(fn):
+    if STATIC_KV_COMBO_KERNELS:
+        return torch.compile(fn, dynamic=False, options={
+            "triton.cudagraphs": True,
+            "combo_kernels": True,
+            "benchmark_combo_kernel": True,
+        })
+    return torch.compile(fn, mode="reduce-overhead", dynamic=False)
 
 
 def _dequant_qt_chunked(weight, dtype, step=65535):
@@ -1117,12 +1128,12 @@ class BaseGenerate:
                         tok = self._sample_in_graph(logits, temperature, top_k, top_p, min_p, do_sample)
                         e2 = self.model.embed_tokens(tok).to(execution_dtype)
                         return tok, e2
-                    runner["compiled_fused"] = torch.compile(_decode_step_fused, mode="reduce-overhead", dynamic=False)
+                    runner["compiled_fused"] = _compile_static_decode(_decode_step_fused)
 
                     def _decode_step(e, ids, pos):
                         x, _, _ = self.model.forward(None, embeds=e, attention_mask=None, past_key_values=static_past, input_ids=ids, position_ids=pos)
                         return self.logits(x)[:, -1]
-                    runner["compiled_step"] = torch.compile(_decode_step, mode="reduce-overhead", dynamic=False)
+                    runner["compiled_step"] = _compile_static_decode(_decode_step)
 
                 if STATIC_KV_FUSED_SAMPLER and batched_sync:
                     torch.cuda.manual_seed(generator.initial_seed() if generator is not None else 0)
