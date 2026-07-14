@@ -1784,7 +1784,13 @@ class DiffusionGenerate:
         return (
             device.type == "cuda"
             and execution_dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(device) == (12, 0)
+            and (
+                torch.cuda.get_device_capability(device) == (12, 0)
+                or (
+                    torch.cuda.get_device_capability(device) == (8, 6)
+                    and _native_int8_embedding(self.model.decoder.embed_tokens)
+                )
+            )
         )
 
     def _use_conditioned_decoder_graph(self, device, execution_dtype):
