@@ -1069,7 +1069,7 @@ class BaseGenerate:
                                                   static_kv=static_kv, prompt_len=prompt_len,
                                                   max_cache_len=max_cache_len)
         device_tokens = []
-        SYNC_EVERY = 8
+        SYNC_EVERY = max_length if not stop_tokens else 8
         current_input_ids = initial_input_ids
         cur_bucket = 0
         for step in tqdm(range(max_length), desc="Generating tokens"):
