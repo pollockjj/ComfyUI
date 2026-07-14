@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Optional, Any, Tuple
 import math
 from tqdm import tqdm
-import comfy_kitchen as ck
 import comfy.utils
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
@@ -451,7 +450,7 @@ class RMSNorm(nn.Module):
 
 
 
-def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_dims=None, device=None, interleaved_mrope=False, ck_rms_rope=False):
+def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_dims=None, device=None, interleaved_mrope=False):
     if not isinstance(theta, list):
         theta = [theta]
 
@@ -491,20 +490,7 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
                 cos = cos.unsqueeze(1)
                 sin = sin.unsqueeze(1)
         sin_split = sin.shape[-1] // 2
-        sin_half = sin[..., :sin_split]
-        negative_sin_half = -sin[..., sin_split:]
-        rope = (cos, sin_half, negative_sin_half)
-        if ck_rms_rope:
-            cos_half = cos[..., :sin_split]
-            ck_freqs = torch.stack(
-                (
-                    torch.stack((cos_half, negative_sin_half), dim=-1),
-                    torch.stack((sin_half, cos_half), dim=-1),
-                ),
-                dim=-2,
-            )
-            rope = (*rope, ck_freqs)
-        out.append(rope)
+        out.append((cos, sin[..., : sin_split], -sin[..., sin_split :]))
 
     if len(out) == 1:
         return out[0]
@@ -545,7 +531,6 @@ class Attention(nn.Module):
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
-        self._decode_ck_rms_rope = False
 
         self.q_norm = None
         self.k_norm = None
@@ -574,22 +559,12 @@ class Attention(nn.Module):
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
         xv = xv.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        if self._decode_ck_rms_rope:
-            xq, xk = ck.rms_rope_split_half(
-                xq,
-                xk,
-                freqs_cis[3],
-                self.q_norm.weight,
-                self.k_norm.weight,
-                self.q_norm.eps,
-            )
-        else:
-            if self.q_norm is not None:
-                xq = self.q_norm(xq)
-            if self.k_norm is not None:
-                xk = self.k_norm(xk)
+        if self.q_norm is not None:
+            xq = self.q_norm(xq)
+        if self.k_norm is not None:
+            xk = self.k_norm(xk)
 
-            xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
         present_key_value = None
         if past_key_value is not None:
@@ -690,33 +665,6 @@ def _fuse_resident_decode_mlps(root, frozen):
         _restore_resident_decode_weights(frozen)
         raise
     return fused
-
-
-def _enable_decode_ck_rms_rope(root):
-    enabled = []
-    try:
-        for module in root.modules():
-            if not isinstance(module, Attention):
-                continue
-            norms = (module.q_norm, module.k_norm)
-            if any(
-                norm is None
-                or norm.add
-                or norm.weight.dtype != torch.bfloat16
-                or not norm.weight.is_cuda
-                for norm in norms
-            ):
-                raise RuntimeError(
-                    "CK decode RMS RoPE requires resident BF16 Q/K norms without additive scale"
-                )
-            module._decode_ck_rms_rope = True
-            enabled.append(module)
-        root._decode_ck_rms_rope = True
-    except Exception:
-        for module in enabled:
-            module._decode_ck_rms_rope = False
-        raise
-    return enabled
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -830,7 +778,6 @@ class Llama2_(nn.Module):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
-        self._decode_ck_rms_rope = False
 
         if self.config.transformer_type == "gemma2" or self.config.transformer_type == "gemma3":
             transformer = TransformerBlockGemma2
@@ -862,7 +809,6 @@ class Llama2_(nn.Module):
                                     self.config.rope_scale,
                                     self.config.rope_dims,
                                     interleaved_mrope=getattr(self.config, "interleaved_mrope", False),
-                                    ck_rms_rope=self._decode_ck_rms_rope,
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
@@ -1058,7 +1004,6 @@ class BaseGenerate:
         current_input_ids = initial_input_ids
         frozen_weights = []
         fused_mlps = []
-        ck_rms_rope_modules = []
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
@@ -1070,7 +1015,6 @@ class BaseGenerate:
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
                     fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights)
-                    ck_rms_rope_modules = _enable_decode_ck_rms_rope(self.model)
                 logits = self.logits(x)[:, -1]
                 next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
                 token_id = next_token[0].item()
@@ -1088,9 +1032,6 @@ class BaseGenerate:
 
             return generated_token_ids
         finally:
-            self.model._decode_ck_rms_rope = False
-            for module in ck_rms_rope_modules:
-                module._decode_ck_rms_rope = False
             for module in fused_mlps:
                 module._decode_gate_up_weight = None
             _restore_resident_decode_weights(frozen_weights)
