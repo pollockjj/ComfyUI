@@ -13,6 +13,7 @@ STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false",
 STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_COMBO_KERNELS = os.environ.get("COMFY_STATIC_KV_COMBO_KERNELS", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_FUSED_MLP = os.environ.get("COMFY_STATIC_KV_FUSED_MLP", "0").lower() not in {"0", "false", "no", "off"}
 
 
 def _compile_static_decode(fn):
@@ -668,9 +669,27 @@ class MLP(nn.Module):
             self.activation = torch.nn.functional.silu
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
+        self._gate_up_weight = None
 
     def forward(self, x):
+        if self._gate_up_weight is not None:
+            gate, up = torch.nn.functional.linear(x, self._gate_up_weight).chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
+
+
+def _fuse_mlp_gate_up_projections(root):
+    for module in root.modules():
+        if not isinstance(module, MLP) or module._gate_up_weight is not None:
+            continue
+        gate_weight = module.gate_proj.weight
+        up_weight = module.up_proj.weight
+        gate_rows = gate_weight.shape[0]
+        packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
+        torch._dynamo.mark_static_address(packed)
+        module._gate_up_weight = packed
+        module.gate_proj._parameters["weight"] = torch.nn.Parameter(packed[:gate_rows], requires_grad=False)
+        module.up_proj._parameters["weight"] = torch.nn.Parameter(packed[gate_rows:], requires_grad=False)
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -1118,6 +1137,8 @@ class BaseGenerate:
                     # frozen weights stay installed for the life of the runner;
                     # the finally-restore only fires if the runner was never built
                     runner["frozen"] = _freeze_resident_weights(self.model, embeds.reshape(-1)[:1])
+                    if STATIC_KV_FUSED_MLP:
+                        _fuse_mlp_gate_up_projections(self.model)
                 static_pos = torch.tensor([[prompt_len + 1]], device=device)
                 static_past = runner["caches"]
 
