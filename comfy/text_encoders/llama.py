@@ -905,29 +905,72 @@ class BaseGenerate:
 
         # Generation loop
         current_input_ids = initial_input_ids
-        for step in tqdm(range(max_length), desc="Generating tokens"):
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
-            logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
-            generated_token_ids.append(token_id)
+        defer_token_sync = (
+            device.type == "cuda"
+            and repetition_penalty == 1.0
+            and (presence_penalty is None or presence_penalty == 0.0)
+        )
+        token_ids_host = None
+        token_ready = None
+        pending_token_step = None
+        decode_position_ids = None
+        if defer_token_sync:
+            token_ids_host = torch.empty(max_length, dtype=torch.int64, device="cpu", pin_memory=True)
+            token_ready = torch.cuda.Event()
+            if next_pos is not None:
+                decode_position_ids = torch.empty((1, 1), dtype=position_ids.dtype, device=device)
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
-                next_pos += 1
-            pbar.update(1)
+        try:
+            for step in tqdm(range(max_length), desc="Generating tokens"):
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
 
-            if token_id in stop_tokens:
-                break
+                if pending_token_step is not None:
+                    token_ready.synchronize()
+                    token_id = int(token_ids_host[pending_token_step])
+                    generated_token_ids.append(token_id)
+                    pending_token_step = None
+                    if token_id in stop_tokens:
+                        break
 
-        return generated_token_ids
+                logits = self.logits(x)[:, -1]
+                token_history = initial_tokens if defer_token_sync else initial_tokens + generated_token_ids
+                next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+
+                if defer_token_sync:
+                    token_ids_host[step : step + 1].copy_(next_token.reshape(-1), non_blocking=True)
+                    token_ready.record()
+                    pending_token_step = step
+                else:
+                    token_id = next_token[0].item()
+                    generated_token_ids.append(token_id)
+
+                embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+                current_input_ids = next_token if initial_input_ids is not None else None
+                if next_pos is not None:  # advance MRoPE position for the next (decode) step
+                    if decode_position_ids is None:
+                        position_ids = torch.tensor([[next_pos]], device=device)
+                    else:
+                        decode_position_ids.fill_(next_pos)
+                        position_ids = decode_position_ids
+                    next_pos += 1
+                pbar.update(1)
+
+                if not defer_token_sync and token_id in stop_tokens:
+                    break
+
+            if pending_token_step is not None:
+                token_ready.synchronize()
+                generated_token_ids.append(int(token_ids_host[pending_token_step]))
+                pending_token_step = None
+            return generated_token_ids
+        finally:
+            if pending_token_step is not None:
+                token_ready.synchronize()
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
