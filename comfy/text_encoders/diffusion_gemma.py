@@ -1167,7 +1167,7 @@ class DiffusionGemmaExperts(nn.Module):
         counts.scatter_add_(0, sorted_experts, torch.ones(N * K, dtype=torch.int32, device=flat_experts.device))
         expert_indptr = torch.zeros(E + 1, dtype=torch.int32, device=flat_experts.device)
         torch.cumsum(counts, dim=0, dtype=torch.int32, out=expert_indptr[1:])
-        route_tokens = order // K
+        x = hidden_states[order // K]
 
         with contextlib.ExitStack() as stack:
             modules = (self.gate_up_proj, self.down_proj)
@@ -1183,15 +1183,12 @@ class DiffusionGemmaExperts(nn.Module):
                     raise RuntimeError("grouped DiffusionGemma INT8 ConvRot requires unbiased resident banks")
                 weights.append(weight)
 
-            hidden_qdata, hidden_scales = comfy.quant_ops.ck.quantize_int8_rowwise_convrot64(
-                hidden_states.contiguous(), weights[0]._params.convrot_groupsize
-            )
-            gate_up = comfy.quant_ops.ck.grouped_int8_convrot_linear_packed_prequantized(
-                hidden_qdata[route_tokens],
-                hidden_scales[route_tokens],
+            gate_up = comfy.quant_ops.grouped_int8_convrot_linear_packed(
+                x,
                 expert_indptr,
                 weights[0]._qdata,
                 weights[0]._params.scale,
+                weights[0]._params.convrot_groupsize,
                 out_dtype=hidden_states.dtype,
             )
             gate, up = gate_up.chunk(2, dim=-1)
