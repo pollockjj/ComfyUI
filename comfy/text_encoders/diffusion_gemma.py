@@ -693,13 +693,21 @@ class DiffusionGemmaExperts(nn.Module):
             and self._supports_native_fused_mxfp8(hidden_states)
         )
 
+    def _supports_deferred_expert_scale(self, hidden_states):
+        return (
+            self._bank_mode == "fused_int8_convrot"
+            and self._grouped_int8_convrot_compatible
+        ) or self._supports_native_fused_mxfp8_scaled(hidden_states)
+
     def forward(self, hidden_states, top_k_index, top_k_weights, expert_scale=None):
         if self._bank_mode is None:
             raise RuntimeError("DiffusionGemma expert banks were not configured after loading")
         if self._bank_mode == "fused_int8_convrot":
             if not self._grouped_int8_convrot_compatible:
                 raise RuntimeError("DiffusionGemma INT8 ConvRot does not support patched expert banks")
-            return self._forward_grouped_int8_convrot(hidden_states, top_k_index, top_k_weights)
+            return self._forward_grouped_int8_convrot(
+                hidden_states, top_k_index, top_k_weights, expert_scale=expert_scale
+            )
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused NVFP4 does not support patched expert banks")
@@ -1154,7 +1162,9 @@ class DiffusionGemmaExperts(nn.Module):
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
-    def _forward_grouped_int8_convrot(self, hidden_states, top_k_index, top_k_weights):
+    def _forward_grouped_int8_convrot(
+        self, hidden_states, top_k_index, top_k_weights, expert_scale=None
+    ):
         N, H = hidden_states.shape
         E = self.num_experts
         K = top_k_index.shape[-1]
@@ -1205,6 +1215,8 @@ class DiffusionGemmaExperts(nn.Module):
         pair_order = torch.empty(N * K, dtype=torch.long, device=flat_experts.device)
         pair_order[order] = positions
         y = y[pair_order]
+        if expert_scale is not None:
+            top_k_weights = top_k_weights * expert_scale[top_k_index]
         y = y * top_k_weights.reshape(-1, 1)
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
@@ -1323,7 +1335,7 @@ class DiffusionGemmaBlock(nn.Module):
         hidden_states_1 = self.post_feedforward_layernorm_1(h)
 
         flat = residual.reshape(-1, residual.shape[-1])
-        defer_expert_scale = self.experts._supports_native_fused_mxfp8_scaled(flat)
+        defer_expert_scale = self.experts._supports_deferred_expert_scale(flat)
         top_k_weights, top_k_index = self.router(flat, apply_expert_scale=not defer_expert_scale)
         expert_scale = (
             comfy.ops.cast_to_input(self.router.per_expert_scale, flat, copy=False)
