@@ -13,6 +13,12 @@ from comfy.rmsnorm import rms_norm
 from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _make_scaled_embedding
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
+STATIC_KV_GQA_BROADCAST = os.environ.get("COMFY_STATIC_KV_GQA_BROADCAST", "0").lower() not in {"0", "false", "no", "off"}
+
+if STATIC_KV_GQA_BROADCAST:
+    # The direct static-GQA path accumulates BF16 inputs in FP32.  "high" keeps
+    # that path on tensor cores without changing the BF16 input precision.
+    torch.set_float32_matmul_precision("high")
 
 
 class StaticLayerKV:
@@ -206,6 +212,14 @@ def _apply_rotary_pos_emb(x, freqs_cis):
     out[..., half:] += x[..., :half] * sin[..., half:]
     return out
 
+
+def _static_gqa_broadcast_attention(q, k, v, mask):
+    """Static Q-head to single-KV-head attention without materializing KV heads."""
+    scores = torch.matmul(q.float(), k.float().transpose(-2, -1))
+    probs = torch.softmax(scores + mask.float(), dim=-1)
+    out = torch.matmul(probs, v.float()).to(q.dtype)
+    return out.transpose(1, 2).reshape(q.shape[0], -1, q.shape[1] * q.shape[-1])
+
 class Gemma4Attention(nn.Module):
     def __init__(self, config, head_dim, device=None, dtype=None, ops=None):
         super().__init__()
@@ -310,6 +324,9 @@ class Gemma4Attention(nn.Module):
         # expand heads when sliding mask is present
         # has to be done within SDPA itself to match the reference code, pre-scaling expansion causes numerical differences
         if static_mask is not None:
+            if STATIC_KV_GQA_BROADCAST and self.num_kv_heads == 1 and self.num_heads != 1:
+                output = _static_gqa_broadcast_attention(xq, xk, xv, static_mask)
+                return self.o_proj(output), present_key_value, shareable_kv
             gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
             output = optimized_attention_for_device(xq.device, mask=True, small_input=True)(xq, xk, xv, self.num_heads, mask=static_mask, skip_reshape=True, scale=1.0, **gqa_kwargs)
             return self.o_proj(output), present_key_value, shareable_kv
