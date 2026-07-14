@@ -1327,7 +1327,7 @@ class BaseGenerate:
                    for ly in self.model.layers]
         x, _, past = self.model.forward(None, embeds=embeds, attention_mask=None,
                                         past_key_values=past_key_values, input_ids=initial_input_ids)
-        h_last = x[:, -1:]
+        h_last = x[:, -1:].clone(memory_format=torch.contiguous_format)
         last_tok = pick(self.logits(x)[:, -1])
         p = embeds.shape[1]
         statics = []
