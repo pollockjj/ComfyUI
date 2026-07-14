@@ -61,6 +61,14 @@ def _gelu_tanh(x):
     return torch.nn.functional.gelu(x, approximate="tanh")
 
 
+def _split_half_rope_matrix(cos, sin):
+    half = cos.shape[-1] // 2
+    return torch.stack(
+        (cos[..., :half], -sin[..., :half], sin[..., half:], cos[..., half:]),
+        dim=-1,
+    ).reshape(*cos.shape[:-1], half, 2, 2)
+
+
 def _shared_mxfp8_input(x, modules):
     """Quantize a shared dense input once when every projection can consume MXFP8."""
     if x.requires_grad or x.ndim < 2 or x.dtype not in (torch.float16, torch.bfloat16):
@@ -233,6 +241,17 @@ class DiffusionGemmaAttention(nn.Module):
         self.q_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
         self.k_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
 
+    def _uses_native_int8_rope(self):
+        module = getattr(self, "qkv_proj", None)
+        weight = getattr(module, "weight", None)
+        params = getattr(weight, "_params", None)
+        return (
+            self.fused_qkv
+            and getattr(module, "quant_format", None) == "int8_tensorwise"
+            and getattr(params, "convrot", False) is True
+            and getattr(params, "convrot_groupsize", None) == 256
+        )
+
     def _project_fused_qkv(self, hidden_states):
         module = self.qkv_proj
         weight = getattr(module, "weight", None)
@@ -305,7 +324,13 @@ class DiffusionGemmaAttention(nn.Module):
 
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xq = self.q_norm(xq)
-        xq = _apply_rotary_pos_emb(xq, freqs_cis)
+        native_rope = freqs_cis if isinstance(freqs_cis, torch.Tensor) else None
+        if native_rope is None:
+            xq = _apply_rotary_pos_emb(xq, freqs_cis)
+        elif self._uses_native_int8_rope():
+            xq = comfy.quant_ops.ck.apply_rope_split_half1(xq, native_rope)
+        else:
+            raise RuntimeError("native DiffusionGemma RoPE requires fused INT8 ConvRot QKV")
 
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
         xv = xv.view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
@@ -313,7 +338,10 @@ class DiffusionGemmaAttention(nn.Module):
         xv = rms_norm(xv)
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
-        xk = _apply_rotary_pos_emb(xk, freqs_cis)
+        if native_rope is None:
+            xk = _apply_rotary_pos_emb(xk, freqs_cis)
+        else:
+            xk = comfy.quant_ops.ck.apply_rope_split_half1(xk, native_rope)
 
         present_key_value = None
         if past_key_value is not None:
@@ -1365,16 +1393,25 @@ class DiffusionGemmaDecoder(nn.Module):
         sliding_inv = 1.0 / (config.rope_theta[1] ** (torch.arange(0, config.head_dim, 2).float() / config.head_dim))
         self.register_buffer("_sliding_inv_freq", sliding_inv, persistent=False)
 
-    def _freqs_from_inv(self, inv_freq, position_ids, device, dtype):
+    def _freqs_from_inv(self, inv_freq, position_ids, device, dtype, native_rope):
         inv_exp = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(device)
         pos_exp = position_ids[:, None, :].float()
         freqs = (inv_exp @ pos_exp).transpose(1, 2)
         emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos().unsqueeze(1).to(dtype), emb.sin().unsqueeze(1).to(dtype)
+        cos = emb.cos().unsqueeze(1).to(dtype)
+        sin = emb.sin().unsqueeze(1).to(dtype)
+        if native_rope:
+            return _split_half_rope_matrix(cos, sin)
+        return cos, sin
 
     def compute_freqs_cis(self, position_ids, device, dtype=None):
-        global_freqs = self._freqs_from_inv(self._global_inv_freq, position_ids, device, dtype)
-        sliding_freqs = self._freqs_from_inv(self._sliding_inv_freq, position_ids, device, dtype)
+        native_rope = all(layer.self_attn._uses_native_int8_rope() for layer in self.layers)
+        global_freqs = self._freqs_from_inv(
+            self._global_inv_freq, position_ids, device, dtype, native_rope
+        )
+        sliding_freqs = self._freqs_from_inv(
+            self._sliding_inv_freq, position_ids, device, dtype, native_rope
+        )
         return [global_freqs, sliding_freqs]
 
 
