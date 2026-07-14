@@ -782,6 +782,7 @@ class Gemma4Transformer(nn.Module):
 
 
 MTP_PATH = os.environ.get("COMFY_MTP", "")
+MTP_FUSED_DRAFTER_MLP = os.environ.get("COMFY_MTP_FUSED_DRAFTER_MLP", "0").lower() not in {"0", "false", "no", "off"}
 
 
 class Gemma4MTPDrafter:
@@ -800,6 +801,27 @@ class Gemma4MTPDrafter:
         self.base = base
         self.dtype = dtype
         self.w = {k: v.to(device=device, dtype=dtype) for k, v in comfy.utils.load_torch_file(path, safe_load=True).items()}
+        self._packed_mlp_gate_up = None
+        if MTP_FUSED_DRAFTER_MLP:
+            packed_mlp_gate_up = []
+            expected_shape = (2048, 256)
+            for il in range(4):
+                p = f"mtp.layers.{il}.mlp."
+                gate = self.w[p + "gate_proj.weight"]
+                up = self.w[p + "up_proj.weight"]
+                if (
+                    tuple(gate.shape) != expected_shape
+                    or tuple(up.shape) != expected_shape
+                    or gate.dtype != torch.bfloat16
+                    or up.dtype != torch.bfloat16
+                ):
+                    raise RuntimeError(
+                        f"fused E4B MTP MLP requires BF16 {expected_shape} gate/up weights at layer {il}"
+                    )
+                packed = torch.cat((gate, up), dim=0).contiguous()
+                torch._dynamo.mark_static_address(packed, guard=True)
+                packed_mlp_gate_up.append(packed)
+            self._packed_mlp_gate_up = tuple(packed_mlp_gate_up)
         cfg = base.model.config
         first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers
         self.src_global = self.src_sliding = None
@@ -855,8 +877,11 @@ class Gemma4MTPDrafter:
             o = self._rms(o, w[p + "post_attention_layernorm.weight"])
             attn_out = inp + o
             xn = self._rms(attn_out, w[p + "pre_feedforward_layernorm.weight"])
-            gate = torch.nn.functional.linear(xn, w[p + "mlp.gate_proj.weight"])
-            up = torch.nn.functional.linear(xn, w[p + "mlp.up_proj.weight"])
+            if self._packed_mlp_gate_up is None:
+                gate = torch.nn.functional.linear(xn, w[p + "mlp.gate_proj.weight"])
+                up = torch.nn.functional.linear(xn, w[p + "mlp.up_proj.weight"])
+            else:
+                gate, up = torch.nn.functional.linear(xn, self._packed_mlp_gate_up[il]).chunk(2, dim=-1)
             ff = torch.nn.functional.linear(torch.nn.functional.gelu(gate, approximate="tanh") * up, w[p + "mlp.down_proj.weight"])
             ff = self._rms(ff, w[p + "post_feedforward_layernorm.weight"])
             cur = (attn_out + ff) * w[p + "layer_scalar"]
