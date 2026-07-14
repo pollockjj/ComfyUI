@@ -804,11 +804,14 @@ class Llama2_(nn.Module):
             x = self.embed_tokens(x, out_dtype=dtype)
 
         seq_len = x.shape[1]
-        past_len = 0
-        if past_key_values is not None and len(past_key_values) > 0:
-            past_len = self.get_past_len(past_key_values)
+
+        def _past_len():
+            if past_key_values is not None and len(past_key_values) > 0:
+                return self.get_past_len(past_key_values)
+            return 0
 
         if position_ids is None:
+            past_len = _past_len()
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
 
         freqs_cis = self.compute_freqs_cis(position_ids, x.device)
@@ -819,6 +822,7 @@ class Llama2_(nn.Module):
             mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(x.dtype).min / 4)
 
         if seq_len > 1:
+            past_len = _past_len()
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
             if mask is not None:
                 mask += causal_mask
