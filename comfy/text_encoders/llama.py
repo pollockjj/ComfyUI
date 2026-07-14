@@ -605,9 +605,66 @@ class MLP(nn.Module):
             self.activation = torch.nn.functional.silu
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
+        self._decode_gate_up_weight = None
 
     def forward(self, x):
+        if self._decode_gate_up_weight is not None:
+            gate, up = torch.nn.functional.linear(
+                x, self._decode_gate_up_weight
+            ).chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
+
+
+def _fuse_resident_decode_mlps(root, frozen):
+    frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
+    fused = []
+    try:
+        for module in root.modules():
+            if not isinstance(module, MLP):
+                continue
+            gate_weight = module.gate_proj.weight
+            up_weight = module.up_proj.weight
+            projections = (module.gate_proj, module.up_proj)
+            if (
+                gate_weight.ndim != 2
+                or gate_weight.shape != up_weight.shape
+                or gate_weight.dtype != torch.bfloat16
+                or up_weight.dtype != torch.bfloat16
+                or not gate_weight.is_cuda
+                or not up_weight.is_cuda
+                or any(
+                    projection.bias is not None
+                    or projection.comfy_cast_weights
+                    or len(getattr(projection, "weight_function", ()))
+                    or len(getattr(projection, "bias_function", ()))
+                    for projection in projections
+                )
+                or any(
+                    getattr(frozen_weights.get(id(projection)), "is_cuda", False)
+                    for projection in projections
+                )
+            ):
+                raise RuntimeError(
+                    "fused decode MLP requires plain resident BF16 gate/up weights"
+                )
+
+            gate_rows = gate_weight.shape[0]
+            packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
+            module._decode_gate_up_weight = packed
+            module.gate_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[:gate_rows], requires_grad=False
+            )
+            module.up_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[gate_rows:], requires_grad=False
+            )
+            fused.append(module)
+    except Exception:
+        for module in fused:
+            module._decode_gate_up_weight = None
+        _restore_resident_decode_weights(frozen)
+        raise
+    return fused
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -946,6 +1003,7 @@ class BaseGenerate:
         # Generation loop
         current_input_ids = initial_input_ids
         frozen_weights = []
+        fused_mlps = []
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
@@ -956,6 +1014,7 @@ class BaseGenerate:
                 x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
                 if step == 0:
                     frozen_weights = _freeze_resident_decode_weights(self.model, x[:, -1:])
+                    fused_mlps = _fuse_resident_decode_mlps(self.model, frozen_weights)
                 logits = self.logits(x)[:, -1]
                 next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
                 token_id = next_token[0].item()
@@ -973,6 +1032,8 @@ class BaseGenerate:
 
             return generated_token_ids
         finally:
+            for module in fused_mlps:
+                module._decode_gate_up_weight = None
             _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
