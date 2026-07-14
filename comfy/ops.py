@@ -1439,9 +1439,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             @contextlib.contextmanager
             def bank_resident(self, input):
-                """Cast the whole bank once; expert_linear inside reuses the cast.
-                Not re-entrant — do not nest calls on the same instance.
-                """
+                """Cast the whole bank once; nested contexts reuse the outer cast."""
+                if self._resident_bank is not None:
+                    yield self
+                    return
                 weight, bias, offload_stream = cast_bias_weight(self, input, offloadable=True)
                 self._resident_bank = (weight, bias)
                 try:
