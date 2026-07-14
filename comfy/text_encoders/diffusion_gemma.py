@@ -240,28 +240,43 @@ class DiffusionGemmaAttention(nn.Module):
         params = getattr(weight, "_params", None)
         scale = getattr(params, "scale", None)
         expected_shape = (sum(self.qkv_splits), self.hidden_size)
-        expected_scale_shape = (expected_shape[0], (expected_shape[1] + 31) // 32)
+        quant_format = getattr(module, "quant_format", None)
+        mxfp8 = (
+            quant_format == "mxfp8"
+            and getattr(module, "layout_type", None) == "TensorCoreMXFP8Layout"
+            and getattr(weight, "_layout_cls", None) == "TensorCoreMXFP8Layout"
+            and isinstance(qdata, torch.Tensor)
+            and qdata.dtype == torch.float8_e4m3fn
+            and isinstance(scale, torch.Tensor)
+            and scale.dtype == torch.float8_e8m0fnu
+            and tuple(scale.shape) == (expected_shape[0], (expected_shape[1] + 31) // 32)
+        )
+        int8_convrot = (
+            quant_format == "int8_tensorwise"
+            and getattr(module, "layout_type", None) == "TensorWiseINT8Layout"
+            and getattr(weight, "_layout_cls", None) == "TensorWiseINT8Layout"
+            and isinstance(qdata, torch.Tensor)
+            and qdata.dtype == torch.int8
+            and isinstance(scale, torch.Tensor)
+            and scale.dtype == torch.float32
+            and tuple(scale.shape) == (expected_shape[0], 1)
+            and getattr(params, "convrot", False) is True
+            and getattr(params, "convrot_groupsize", None) == 256
+        )
         # Validate storage only; the linear module owns DynamicVRAM device placement
         # and patch application.
         if (
-            getattr(module, "quant_format", None) != "mxfp8"
-            or getattr(module, "layout_type", None) != "TensorCoreMXFP8Layout"
+            not (mxfp8 or int8_convrot)
             or not isinstance(weight, QuantizedTensor)
-            or getattr(weight, "_layout_cls", None) != "TensorCoreMXFP8Layout"
-            or not isinstance(qdata, torch.Tensor)
-            or qdata.dtype != torch.float8_e4m3fn
             or tuple(qdata.shape) != expected_shape
             or tuple(getattr(params, "orig_shape", ())) != expected_shape
-            or not isinstance(scale, torch.Tensor)
-            or scale.dtype != torch.float8_e8m0fnu
-            or tuple(scale.shape) != expected_scale_shape
             or getattr(module, "bias", None) is not None
             or getattr(module, "_full_precision_mm", False)
             or getattr(module, "comfy_force_cast_weights", False)
         ):
             raise RuntimeError(
-                f"DiffusionGemma fused QKV requires an MXFP8 "
-                f"TensorCoreMXFP8Layout weight with shape {expected_shape}"
+                f"DiffusionGemma fused QKV requires a native MXFP8 or INT8 ConvRot "
+                f"weight with shape {expected_shape}"
             )
 
         projections = torch.split(module(hidden_states), self.qkv_splits, dim=-1)
@@ -2100,6 +2115,7 @@ class DiffusionGemmaClipModel(Gemma4Model):
 
 
 _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT = "diffusiongemma_mxfp8_qkv_fused.v1"
+_DIFFUSION_GEMMA_INT8_QKV_CONTRACT = "diffusiongemma_int8_convrot_qkv_fused.v1"
 _DIFFUSION_GEMMA_QKV_LAYER_COUNT = 30
 
 
@@ -2119,6 +2135,7 @@ def _detect_diffusion_gemma_fused_qkv(sd):
     if missing:
         raise ValueError(f"DiffusionGemma fused QKV requires all 30 layer markers; missing layers: {missing}")
 
+    fused_format = None
     for layer, key in enumerate(marker_keys):
         marker = sd[key]
         if not isinstance(marker, torch.Tensor) or marker.device.type != "cpu" or marker.dtype != torch.uint8 or marker.ndim != 1:
@@ -2130,14 +2147,31 @@ def _detect_diffusion_gemma_fused_qkv(sd):
         if not isinstance(config, dict):
             raise ValueError(f"Invalid DiffusionGemma fused QKV contract for layer {layer}: expected object")
 
+        marker_format = config.get("format")
+        if marker_format not in ("mxfp8", "int8_tensorwise"):
+            raise ValueError(f"Invalid DiffusionGemma fused QKV format for layer {layer}: {marker_format}")
+        if fused_format is None:
+            fused_format = marker_format
+        elif marker_format != fused_format:
+            raise ValueError(
+                f"DiffusionGemma fused QKV cannot mix {fused_format} and {marker_format} markers"
+            )
+
         global_layer = layer % 6 == 5
         expected = {
-            "format": "mxfp8",
-            "full_precision_matrix_mult": False,
-            "artifact_contract": _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT,
+            "format": marker_format,
+            "artifact_contract": (
+                _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT
+                if marker_format == "mxfp8"
+                else _DIFFUSION_GEMMA_INT8_QKV_CONTRACT
+            ),
             "projection_order": ["q_proj", "k_proj"] if global_layer else ["q_proj", "k_proj", "v_proj"],
             "projection_splits": [8192, 1024] if global_layer else [4096, 2048, 2048],
         }
+        if marker_format == "mxfp8":
+            expected["full_precision_matrix_mult"] = False
+        else:
+            expected.update({"convrot": True, "convrot_groupsize": 256})
         mismatches = {
             name: (config.get(name), value)
             for name, value in expected.items()
