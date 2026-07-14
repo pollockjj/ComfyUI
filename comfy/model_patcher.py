@@ -1872,10 +1872,9 @@ class ModelPatcherDynamic(ModelPatcher):
                     if module_mem > 16 * 1024:
                         force_load, v_weight_size = setup_param(self, m, n, "weight")
                         force_load_bias, v_weight_bias = setup_param(self, m, n, "bias")
-                        resizing_lora = force_load or force_load_bias
-                        force_load = force_preload or resizing_lora
+                        force_load = force_preload or force_load or force_load_bias
                         v_weight_size += v_weight_bias
-                        if resizing_lora:
+                        if force_load:
                             logging.info(f"Module {n} has resizing Lora - force loading")
                     else:
                         force_load=True
