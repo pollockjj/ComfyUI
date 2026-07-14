@@ -692,13 +692,13 @@ class TransformerBlock(nn.Module):
             optimized_attention=optimized_attention,
             past_key_value=past_key_value,
         )
-        x = residual + x
+        x = torch.add(residual, x, out=x)
 
         # MLP
         residual = x
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
-        x = residual + x
+        x = torch.add(residual, x, out=x)
 
         return x, present_key_value
 
