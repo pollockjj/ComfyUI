@@ -98,6 +98,9 @@ def _linear_from_shared_input(module, quantized_input, original_shape):
     return output
 
 
+_INT8_SELF_CONDITIONING_CHUNK = 65504  # Largest 32-row multiple below CUDA's 65,535 grid-y limit.
+
+
 def _native_mxfp8_embedding(module):
     return (
         getattr(module, "quant_format", None) == "mxfp8"
@@ -131,8 +134,20 @@ def _int8_self_conditioning(probabilities, weight):
 
     qdata = weight._qdata
     flat = probabilities.reshape(-1, probabilities.shape[-1])
-    output = comfy.quant_ops.ck.int8_convrot_weighted_embedding(
-        qdata, params.scale, flat, params.convrot_groupsize)
+    output = torch.zeros((flat.shape[0], qdata.shape[1]), device=qdata.device, dtype=torch.float32)
+    for start in range(0, qdata.shape[0], _INT8_SELF_CONDITIONING_CHUNK):
+        end = min(start + _INT8_SELF_CONDITIONING_CHUNK, qdata.shape[0])
+        chunk_params = type(params)(
+            scale=params.scale[start:end],
+            convrot=True,
+            convrot_groupsize=params.convrot_groupsize,
+            orig_dtype=params.orig_dtype,
+            orig_shape=(end - start, qdata.shape[1]),
+        )
+        chunk = QuantizedTensor(qdata[start:end], weight._layout_cls, chunk_params).dequantize()
+        partial = torch.mm(flat[:, start:end], chunk, out_dtype=torch.float32)
+        output.add_(partial)
+        del chunk, partial
     return output.reshape(*probabilities.shape[:-1], qdata.shape[1])
 
 
