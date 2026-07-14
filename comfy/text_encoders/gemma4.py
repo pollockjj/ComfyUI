@@ -10,7 +10,7 @@ from comfy import sd1_clip
 import comfy.model_management
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
-from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _bf16_small_m_linear, _bf16_small_m_module, _make_scaled_embedding
+from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _bf16_small_m_linear, _make_scaled_embedding
 
 STATIC_KV = os.environ.get("COMFY_STATIC_KV", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_GQA_BROADCAST = os.environ.get("COMFY_STATIC_KV_GQA_BROADCAST", "0").lower() not in {"0", "false", "no", "off"}
@@ -349,7 +349,7 @@ class Gemma4Attention(nn.Module):
         if fused_qkv:
             xq, xk, xv = _bf16_small_m_linear(hidden_states, self._qkv_weight).split(self._qkv_splits, dim=-1)
         else:
-            xq = _bf16_small_m_module(hidden_states, self.q_proj)
+            xq = _bf16_small_m_linear(hidden_states, self.q_proj.weight)
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         if self.q_norm is not None:
             xq = self.q_norm(xq)
@@ -426,7 +426,7 @@ class Gemma4Attention(nn.Module):
         if static_mask is not None:
             if self._static_gqa_2kv:
                 output = _static_gqa_2kv_attention(xq, xk, xv, static_mask)
-                return _bf16_small_m_module(output, self.o_proj), present_key_value, shareable_kv
+                return _bf16_small_m_linear(output, self.o_proj.weight), present_key_value, shareable_kv
             if STATIC_KV_GQA_BROADCAST and self.num_kv_heads == 1 and self.num_heads != 1:
                 output = _static_gqa_broadcast_attention(xq, xk, xv, static_mask)
                 return self.o_proj(output), present_key_value, shareable_kv
@@ -443,7 +443,7 @@ class Gemma4Attention(nn.Module):
         gqa_kwargs = {} if expand_kv else ({"enable_gqa": True} if self.num_heads != self.num_kv_heads else {})
         output = optimized_attention_for_device(xq.device, mask=attention_mask is not None, small_input=True)(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, scale=1.0, **gqa_kwargs)
 
-        return _bf16_small_m_module(output, self.o_proj), present_key_value, shareable_kv
+        return _bf16_small_m_linear(output, self.o_proj.weight), present_key_value, shareable_kv
 
 
 def _fuse_static_e4b_qkv_projections(model, frozen):
@@ -617,10 +617,10 @@ class TransformerBlockGemma4(nn.Module):
 
         if self.hidden_size_per_layer_input and per_layer_input is not None:
             residual = x
-            x = _bf16_small_m_module(x, self.per_layer_input_gate)
+            x = _bf16_small_m_linear(x, self.per_layer_input_gate.weight)
             x = torch.nn.functional.gelu(x, approximate="tanh")
             x = x * per_layer_input
-            x = _bf16_small_m_module(x, self.per_layer_projection)
+            x = _bf16_small_m_linear(x, self.per_layer_projection.weight)
             x = self.post_per_layer_input_norm(x)
             x = residual + x
 
