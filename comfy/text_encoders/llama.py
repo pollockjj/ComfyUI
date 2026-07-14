@@ -14,12 +14,6 @@ STATIC_KV_FUSED_SAMPLER = os.environ.get("COMFY_STATIC_KV_FUSED_SAMPLER", "0").l
 STATIC_KV_KEEP_INT8 = os.environ.get("COMFY_STATIC_KV_KEEP_INT8", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_COMBO_KERNELS = os.environ.get("COMFY_STATIC_KV_COMBO_KERNELS", "0").lower() not in {"0", "false", "no", "off"}
 STATIC_KV_FUSED_MLP = os.environ.get("COMFY_STATIC_KV_FUSED_MLP", "0").lower() not in {"0", "false", "no", "off"}
-STATIC_KV_TUNED_GATE_UP = os.environ.get("COMFY_STATIC_KV_TUNED_GATE_UP", "0").lower() not in {"0", "false", "no", "off"}
-
-if STATIC_KV_TUNED_GATE_UP:
-    import comfy_kitchen
-    if not hasattr(comfy_kitchen, "bf16_tuned_gate_up_linear"):
-        raise RuntimeError("tuned E4B BF16 gate/up requires a compatible comfy-kitchen")
 
 _STATIC_DECODE_COMBO_OPTIONS = {
     "triton.cudagraphs": True,
@@ -684,20 +678,10 @@ class MLP(nn.Module):
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
         self._gate_up_weight = None
-        self._tuned_e4b_gate_up = (STATIC_KV_TUNED_GATE_UP
-                                   and type(config).__module__ == "comfy.text_encoders.gemma4"
-                                   and type(config).__name__ == "Gemma4Config"
-                                   and config.hidden_size == 2560 and config.intermediate_size == 10240
-                                   and config.num_hidden_layers == 42 and config.num_attention_heads == 8
-                                   and config.num_key_value_heads == 2 and intermediate_size == 10240)
 
     def forward(self, x):
         if self._gate_up_weight is not None:
-            if self._tuned_e4b_gate_up and x.numel() == 3 * 2560 and x.shape[-1] == 2560:
-                projected = comfy_kitchen.bf16_tuned_gate_up_linear(x, self._gate_up_weight)
-            else:
-                projected = torch.nn.functional.linear(x, self._gate_up_weight)
-            gate, up = projected.chunk(2, dim=-1)
+            gate, up = torch.nn.functional.linear(x, self._gate_up_weight).chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
