@@ -5,6 +5,7 @@ from typing import Optional, Any, Tuple
 import math
 from tqdm import tqdm
 import comfy.utils
+import comfy.quant_ops
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
@@ -13,6 +14,159 @@ import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+
+
+def _restore_resident_decode_weights(frozen):
+    for module, weight, bias, comfy_cast_weights in frozen:
+        module._parameters["weight"] = weight
+        if "bias" in module._parameters:
+            module._parameters["bias"] = bias
+        module.comfy_cast_weights = comfy_cast_weights
+
+
+def _freeze_resident_decode_weights(root, ref_input):
+    """Resolve patched weights once for an execution-scoped decode graph."""
+    frozen = []
+    try:
+        for module in root.modules():
+            if not getattr(module, "comfy_cast_weights", False):
+                continue
+            if getattr(module, "weight", None) is None:
+                continue
+            if len(getattr(module, "weight_function", ())) or len(
+                getattr(module, "bias_function", ())
+            ):
+                continue
+            weight, bias = comfy.ops.cast_bias_weight(
+                module, input=ref_input, offloadable=False
+            )
+            frozen.append(
+                (
+                    module,
+                    module._parameters.get("weight"),
+                    module._parameters.get("bias"),
+                    module.comfy_cast_weights,
+                )
+            )
+            module._parameters["weight"] = torch.nn.Parameter(
+                weight.contiguous(), requires_grad=False
+            )
+            if bias is not None:
+                module._parameters["bias"] = torch.nn.Parameter(
+                    bias.contiguous(), requires_grad=False
+                )
+            module.comfy_cast_weights = False
+    except BaseException:
+        _restore_resident_decode_weights(frozen)
+        raise
+    return frozen
+
+
+class _StaticDecodeKV:
+    """Fixed storage with llama.cpp-style 256-token active extents."""
+
+    def __init__(self, past):
+        self.key, self.value, valid = past
+        self.index = torch.tensor([valid], dtype=torch.long, device=self.key.device)
+        self.mask = torch.full(
+            (1, 1, 1, self.key.shape[2]),
+            torch.finfo(self.key.dtype).min,
+            dtype=self.key.dtype,
+            device=self.key.device,
+        )
+        self.mask[..., :valid] = 0.0
+        self.bucket = 0
+
+    def append(self, key, value):
+        self.key.index_copy_(2, self.index, key)
+        self.value.index_copy_(2, self.index, value)
+        self.mask.index_fill_(3, self.index, 0.0)
+        self.index.add_(key.shape[2])
+
+
+class _DecodeGraphExecution:
+    """Execution-scoped whole-decode CUDA graph with update at KV boundaries."""
+
+    def __init__(self, owner, embeds, position_ids, past_key_values):
+        self.owner = owner
+        self.stream = torch.cuda.Stream(device=embeds.device)
+        self.static_embeds = torch.empty_like(embeds)
+        self.static_position_ids = torch.empty_like(position_ids)
+        self.past_key_values = past_key_values
+        self.graph = None
+        self.output = None
+        self.bucket = None
+        self.captures = 0
+        self.updates = 0
+        self.reinstantiations = 0
+        self.replays = 0
+
+    def stage(self, embeds, position_ids):
+        current_stream = torch.cuda.current_stream(embeds.device)
+        self.stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.stream):
+            self.static_embeds.copy_(embeds)
+            self.static_position_ids.copy_(position_ids)
+
+    def _evaluate(self):
+        hidden, _, _ = self.owner.model.forward(
+            None,
+            embeds=self.static_embeds,
+            attention_mask=None,
+            past_key_values=self.past_key_values,
+            input_ids=None,
+            position_ids=self.static_position_ids,
+        )
+        return self.owner.logits(hidden)[:, -1]
+
+    def capture_or_update(self, bucket):
+        with torch.cuda.stream(self.stream):
+            comfy.quant_ops.ck.begin_cuda_graph_capture(self.stream)
+            try:
+                output = self._evaluate()
+            except BaseException:
+                comfy.quant_ops.ck.abort_cuda_graph_capture(self.stream)
+                raise
+            if self.graph is None:
+                self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
+                    self.stream,
+                    output,
+                    self.static_embeds,
+                    self.static_position_ids,
+                    self.past_key_values,
+                )
+            else:
+                reinstantiated = self.graph.update_from_capture(
+                    self.stream,
+                    output,
+                    self.static_embeds,
+                    self.static_position_ids,
+                    self.past_key_values,
+                )
+                self.updates += 1
+                self.reinstantiations += int(reinstantiated)
+            self.output = output
+        self.bucket = bucket
+        self.captures += 1
+
+    def replay(self):
+        self.graph.replay(self.stream)
+        torch.cuda.current_stream(self.static_embeds.device).wait_stream(self.stream)
+        self.replays += 1
+        return self.output
+
+    def close(self):
+        if self.graph is not None:
+            self.graph.reset()
+            self.graph = None
+        if self.stream is not None:
+            self.stream.synchronize()
+        self.output = None
+        self.owner = None
+        self.past_key_values = None
+        self.static_embeds = None
+        self.static_position_ids = None
+        self.stream = None
 
 @dataclass
 class Llama2Config:
@@ -263,6 +417,7 @@ class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     lm_head: bool = False  # 4B ties word embeddings
+    static_decode_graph: bool = True
 
 @dataclass
 class Ovis25_2BConfig:
@@ -527,7 +682,15 @@ class Attention(nn.Module):
         xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
         present_key_value = None
-        if past_key_value is not None:
+        static_mask = None
+        if isinstance(past_key_value, _StaticDecodeKV):
+            past_key_value.append(xk, xv)
+            bucket = min(past_key_value.bucket, past_key_value.key.shape[2])
+            xk = past_key_value.key[:, :, :bucket]
+            xv = past_key_value.value[:, :, :bucket]
+            static_mask = past_key_value.mask[..., :bucket]
+            present_key_value = past_key_value
+        elif past_key_value is not None:
             index = 0
             num_tokens = xk.shape[2]
             if len(past_key_value) > 0:
@@ -550,6 +713,8 @@ class Attention(nn.Module):
                 xv = xv[:, :, -sliding_window:]
                 attention_mask = attention_mask[..., -sliding_window:] if attention_mask is not None else None
 
+        if static_mask is not None:
+            attention_mask = static_mask
         gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
         output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
         return self.o_proj(output), present_key_value
@@ -743,7 +908,12 @@ class Llama2_(nn.Module):
             else:
                 mask = causal_mask
 
-        optimized_attention = optimized_attention_for_device(x.device, mask=mask is not None, small_input=True)
+        static_kv = past_key_values is not None and any(
+            isinstance(cache, _StaticDecodeKV) for cache in past_key_values
+        )
+        optimized_attention = optimized_attention_for_device(
+            x.device, mask=mask is not None or static_kv, small_input=True
+        )
 
         intermediate = None
         all_intermediate = None
@@ -904,30 +1074,121 @@ class BaseGenerate:
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
         # Generation loop
+        prompt_length = embeds.shape[1]
         current_input_ids = initial_input_ids
-        for step in tqdm(range(max_length), desc="Generating tokens"):
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
-            logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
-            generated_token_ids.append(token_id)
+        graph_enabled = bool(
+            getattr(self.model.config, "static_decode_graph", False)
+            and device.type == "cuda"
+            and execution_dtype == torch.bfloat16
+            and embeds.shape[0] == 1
+            and next_pos is not None
+            and torch.cuda.memory.get_allocator_backend() == "cudaMallocAsync"
+            and callable(
+                getattr(comfy.quant_ops.ck, "begin_cuda_graph_capture", None)
+            )
+            and callable(getattr(comfy.quant_ops.ck, "end_cuda_graph_capture", None))
+        )
+        frozen_weights = []
+        graph_execution = None
+        active_bucket = None
+        stable_calls = 0
+        try:
+            for step in tqdm(range(max_length), desc="Generating tokens"):
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
-                next_pos += 1
-            pbar.update(1)
+                if graph_enabled and step == 1:
+                    past_key_values = [
+                        _StaticDecodeKV(cache) for cache in past_key_values
+                    ]
+                    graph_execution = _DecodeGraphExecution(
+                        self, embeds, position_ids, past_key_values
+                    )
 
-            if token_id in stop_tokens:
-                break
+                if graph_execution is None:
+                    x, _, past_key_values = self.model.forward(
+                        None,
+                        embeds=embeds,
+                        attention_mask=None,
+                        past_key_values=past_key_values,
+                        input_ids=current_input_ids,
+                        position_ids=position_ids,
+                        **extra,
+                    )
+                    if graph_enabled and step == 0:
+                        frozen_weights = _freeze_resident_decode_weights(
+                            self.model, x[:, -1:]
+                        )
+                    logits = self.logits(x)[:, -1]
+                else:
+                    next_valid = prompt_length + step
+                    bucket = min(
+                        ((next_valid + 255) // 256) * 256, max_cache_len
+                    )
+                    if bucket != active_bucket:
+                        active_bucket = bucket
+                        stable_calls = 0
+                        for cache in past_key_values:
+                            cache.bucket = bucket
 
-        return generated_token_ids
+                    if stable_calls < 2:
+                        x, _, past_key_values = self.model.forward(
+                            None,
+                            embeds=embeds,
+                            attention_mask=None,
+                            past_key_values=past_key_values,
+                            input_ids=current_input_ids,
+                            position_ids=position_ids,
+                        )
+                        logits = self.logits(x)[:, -1]
+                        stable_calls += 1
+                    else:
+                        graph_execution.stage(embeds, position_ids)
+                        if graph_execution.bucket != bucket:
+                            graph_execution.capture_or_update(bucket)
+                        logits = graph_execution.replay()
+
+                next_token = self.sample_token(
+                    logits,
+                    temperature,
+                    top_k,
+                    top_p,
+                    min_p,
+                    repetition_penalty,
+                    initial_tokens + generated_token_ids,
+                    generator,
+                    do_sample=do_sample,
+                    presence_penalty=presence_penalty,
+                )
+                token_id = next_token[0].item()
+                generated_token_ids.append(token_id)
+
+                embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+                current_input_ids = next_token if initial_input_ids is not None else None
+                if next_pos is not None:  # advance MRoPE position for the next (decode) step
+                    if graph_execution is None:
+                        position_ids = torch.tensor([[next_pos]], device=device)
+                    else:
+                        position_ids.fill_(next_pos)
+                    next_pos += 1
+                pbar.update(1)
+
+                if token_id in stop_tokens:
+                    break
+            return generated_token_ids
+        finally:
+            if graph_execution is not None:
+                self._last_decode_graph_stats = {
+                    "captures": graph_execution.captures,
+                    "updates": graph_execution.updates,
+                    "reinstantiations": graph_execution.reinstantiations,
+                    "replays": graph_execution.replays,
+                }
+                graph_execution.close()
+            _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
