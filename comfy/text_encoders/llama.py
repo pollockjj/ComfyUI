@@ -565,9 +565,52 @@ class MLP(nn.Module):
             self.activation = torch.nn.functional.silu
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
+        self._decode_gate_up_weight = None
 
     def forward(self, x):
+        if self._decode_gate_up_weight is not None:
+            gate, up = torch.nn.functional.linear(x, self._decode_gate_up_weight).chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
+
+
+def _pack_decode_mlp_weights(root, ref_input):
+    packed_mlps = []
+    try:
+        for module in root.modules():
+            if not isinstance(module, MLP):
+                continue
+
+            projections = (module.gate_proj, module.up_proj)
+            if any(
+                projection.bias is not None
+                or len(getattr(projection, "weight_function", ()))
+                or len(getattr(projection, "bias_function", ()))
+                for projection in projections
+            ):
+                raise RuntimeError("packed decode MLP requires plain gate/up projections")
+
+            gate_weight, _ = comfy.ops.cast_bias_weight(module.gate_proj, input=ref_input)
+            gate_weight = gate_weight.clone(memory_format=torch.contiguous_format)
+            up_weight, _ = comfy.ops.cast_bias_weight(module.up_proj, input=ref_input)
+            if (
+                gate_weight.ndim != 2
+                or gate_weight.shape != up_weight.shape
+                or gate_weight.dtype != torch.bfloat16
+                or up_weight.dtype != torch.bfloat16
+                or not gate_weight.is_cuda
+                or not up_weight.is_cuda
+            ):
+                raise RuntimeError("packed decode MLP requires equal resident BF16 gate/up weights")
+
+            module._decode_gate_up_weight = torch.cat((gate_weight, up_weight), dim=0).contiguous()
+            packed_mlps.append(module)
+    except Exception:
+        for module in packed_mlps:
+            module._decode_gate_up_weight = None
+        raise
+    return packed_mlps
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -905,29 +948,36 @@ class BaseGenerate:
 
         # Generation loop
         current_input_ids = initial_input_ids
-        for step in tqdm(range(max_length), desc="Generating tokens"):
-            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
-            extra = {}
-            if step == 0 and deepstack_embeds is not None:
-                extra["deepstack_embeds"] = deepstack_embeds
-                extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
-            logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
-            generated_token_ids.append(token_id)
+        packed_mlps = []
+        try:
+            for step in tqdm(range(max_length), desc="Generating tokens"):
+                # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+                extra = {}
+                if step == 0 and deepstack_embeds is not None:
+                    extra["deepstack_embeds"] = deepstack_embeds
+                    extra["visual_pos_masks"] = visual_pos_masks
+                x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+                if step == 0:
+                    packed_mlps = _pack_decode_mlp_weights(self.model, x[:, -1:])
+                logits = self.logits(x)[:, -1]
+                next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                token_id = next_token[0].item()
+                generated_token_ids.append(token_id)
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
-                next_pos += 1
-            pbar.update(1)
+                embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+                current_input_ids = next_token if initial_input_ids is not None else None
+                if next_pos is not None:  # advance MRoPE position for the next (decode) step
+                    position_ids = torch.tensor([[next_pos]], device=device)
+                    next_pos += 1
+                pbar.update(1)
 
-            if token_id in stop_tokens:
-                break
+                if token_id in stop_tokens:
+                    break
 
-        return generated_token_ids
+            return generated_token_ids
+        finally:
+            for module in packed_mlps:
+                module._decode_gate_up_weight = None
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
