@@ -65,191 +65,150 @@ def _freeze_resident_decode_weights(root, ref_input):
 
 
 class _StaticDecodeKV:
-    """Fixed storage with an exact active view for graph-compatible decode."""
+    """Execution-owned BSHD cache with device-resident active-length metadata."""
 
     def __init__(self, past):
-        self.key, self.value, valid = past
+        key, value, valid = past
+        self.key = torch.empty(
+            (key.shape[0], key.shape[2], key.shape[1], key.shape[3]),
+            dtype=key.dtype,
+            device=key.device,
+        )
+        self.value = torch.empty_like(self.key)
+        self.key[:, :valid].copy_(key[:, :, :valid].transpose(1, 2))
+        self.value[:, :valid].copy_(value[:, :, :valid].transpose(1, 2))
         self.valid = valid
         self.index = torch.tensor([valid], dtype=torch.long, device=self.key.device)
+        self.cu_seqlens_q = torch.tensor(
+            [0, 1], dtype=torch.int32, device=self.key.device
+        )
+        self.cu_seqlens_k = torch.tensor(
+            [0, valid], dtype=torch.int32, device=self.key.device
+        )
+        self.attention_output = None
+        self.graph_mode = False
 
     def append(self, key, value):
-        self.key.index_copy_(2, self.index, key)
-        self.value.index_copy_(2, self.index, value)
+        self.key.index_copy_(1, self.index, key.transpose(1, 2))
+        self.value.index_copy_(1, self.index, value.transpose(1, 2))
         self.index.add_(key.shape[2])
-        self.valid += key.shape[2]
+        self.cu_seqlens_k[1].add_(key.shape[2])
+        if not self.graph_mode:
+            self.valid += key.shape[2]
 
     def active(self):
-        return self.key[:, :, : self.valid], self.value[:, :, : self.valid]
+        return (
+            self.key[:, : self.valid].transpose(1, 2),
+            self.value[:, : self.valid].transpose(1, 2),
+        )
+
+    def prepare_attention(self, num_query_heads):
+        self.attention_output = torch.empty(
+            (self.key.shape[0], num_query_heads, self.key.shape[-1]),
+            dtype=self.key.dtype,
+            device=self.key.device,
+        )
+
+    def enable_graph(self, num_query_heads):
+        if self.attention_output is None:
+            self.prepare_attention(num_query_heads)
+        self.graph_mode = True
+
+    def flash_attention(self, query):
+        batch, num_heads, query_length, head_dim = query.shape
+        if query_length != 1 or self.attention_output is None:
+            raise RuntimeError("static decode attention requires one prepared query")
+        query = query.transpose(1, 2).reshape(-1, num_heads, head_dim)
+        key = self.key.reshape(-1, self.key.shape[2], head_dim)
+        value = self.value.reshape_as(key)
+        torch.ops.aten._flash_attention_forward_no_dropout_inplace.default(
+            self.attention_output,
+            query,
+            key,
+            value,
+            self.cu_seqlens_q,
+            self.cu_seqlens_k,
+            1,
+            self.key.shape[1],
+            0.0,
+            False,
+            False,
+        )
+        return self.attention_output.view(batch, 1, num_heads * head_dim)
 
 
-class _CapturedDecodePhase:
-    """One shape-stable decode phase captured on the ordinary CUDA stream."""
+class _DecodeGraphExecution:
+    """Execution-scoped whole decode graph with exact variable-length FA."""
 
-    def __init__(self, stream, function, inputs):
-        self.stream = stream
-        self.function = function
-        self.inputs = tuple(torch.empty_like(value) for value in inputs)
+    def __init__(self, owner, embeds, past_key_values, decode_freqs_cis, start_index):
+        self.owner = owner
+        self.stream = torch.cuda.Stream(device=embeds.device)
+        self.static_embeds = torch.empty_like(embeds)
+        self.past_key_values = past_key_values
+        self.decode_freqs_cis = decode_freqs_cis
+        self.freq_index = torch.tensor(
+            [start_index], dtype=torch.long, device=embeds.device
+        )
+        for layer, cache in zip(owner.model.layers, past_key_values):
+            cache.enable_graph(layer.self_attn.num_heads)
         self.graph = None
         self.output = None
+        self.captures = 0
+        self.replays = 0
 
-    def __call__(self, *inputs):
-        if len(inputs) != len(self.inputs):
-            raise ValueError("decode graph phase input count changed")
+    def _evaluate(self):
+        freqs_cis = tuple(
+            freq.index_select(-2, self.freq_index) for freq in self.decode_freqs_cis
+        )
+        hidden, _, _ = self.owner.model.forward(
+            None,
+            embeds=self.static_embeds,
+            attention_mask=None,
+            past_key_values=self.past_key_values,
+            input_ids=None,
+            position_ids=None,
+            freqs_cis=freqs_cis,
+        )
+        logits = self.owner.logits(hidden)[:, -1]
+        self.freq_index.add_(1)
+        return logits
+
+    def replay(self, embeds):
+        current_stream = torch.cuda.current_stream(embeds.device)
+        self.stream.wait_stream(current_stream)
         with torch.cuda.stream(self.stream):
-            for target, source in zip(self.inputs, inputs):
-                target.copy_(source)
-
+            self.static_embeds.copy_(embeds)
             if self.graph is None:
                 comfy.quant_ops.ck.begin_cuda_graph_capture(self.stream)
                 try:
-                    self.output = self.function(*self.inputs)
+                    self.output = self._evaluate()
                 except BaseException:
                     comfy.quant_ops.ck.abort_cuda_graph_capture(self.stream)
                     raise
                 self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
-                    self.stream, self.output, self.inputs
+                    self.stream,
+                    self.output,
+                    self.static_embeds,
+                    self.past_key_values,
+                    self.decode_freqs_cis,
                 )
+                self.captures += 1
             self.graph.replay(self.stream)
+        current_stream.wait_stream(self.stream)
+        self.replays += 1
         return self.output
 
     def close(self):
+        self.stream.synchronize()
         if self.graph is not None:
             self.graph.reset()
             self.graph = None
         self.output = None
-        self.inputs = None
-        self.function = None
-        self.stream = None
-
-
-class _DecodeGraphExecution:
-    """llama-style split graph around exact active-length PyTorch attention."""
-
-    def __init__(self, owner, embeds, position_ids, past_key_values):
-        self.owner = owner
-        self.stream = torch.cuda.Stream(device=embeds.device)
-        self.past_key_values = past_key_values
-        self.pre_phases = [None] * len(owner.model.layers)
-        self.post_phases = [None] * len(owner.model.layers)
-        self.final_phase = None
-        self.captures = 0
-        self.replays = 0
-
-    @staticmethod
-    def _project(layer, hidden_states, cos, sin, negative_sin):
-        hidden_states = layer.input_layernorm(hidden_states)
-        attention = layer.self_attn
-        batch_size, seq_length, _ = hidden_states.shape
-
-        query = attention.q_proj(hidden_states)
-        key = attention.k_proj(hidden_states)
-        value = attention.v_proj(hidden_states)
-
-        query = query.view(
-            batch_size, seq_length, attention.num_heads, attention.head_dim
-        ).transpose(1, 2)
-        key = key.view(
-            batch_size, seq_length, attention.num_kv_heads, attention.head_dim
-        ).transpose(1, 2)
-        value = value.view(
-            batch_size, seq_length, attention.num_kv_heads, attention.head_dim
-        ).transpose(1, 2)
-
-        if attention.q_norm is not None:
-            query = attention.q_norm(query)
-        if attention.k_norm is not None:
-            key = attention.k_norm(key)
-        query, key = apply_rope(query, key, (cos, sin, negative_sin))
-        return query, key, value
-
-    @staticmethod
-    def _finish(layer, residual, attention_output):
-        hidden_states = residual + layer.self_attn.o_proj(attention_output)
-        residual = hidden_states
-        hidden_states = layer.post_attention_layernorm(hidden_states)
-        hidden_states = layer.mlp(hidden_states)
-        return residual + hidden_states
-
-    def replay(self, embeds, position_ids):
-        model = self.owner.model
-        current_stream = torch.cuda.current_stream(embeds.device)
-        self.stream.wait_stream(current_stream)
-        with torch.cuda.stream(self.stream):
-            freqs_cis = model.compute_freqs_cis(position_ids, embeds.device)
-            optimized_attention = optimized_attention_for_device(
-                embeds.device, mask=False, small_input=True
-            )
-            hidden_states = embeds
-
-            for index, layer in enumerate(model.layers):
-                pre_phase = self.pre_phases[index]
-                if pre_phase is None:
-                    pre_phase = _CapturedDecodePhase(
-                        self.stream,
-                        lambda hidden, cos, sin, negative_sin, layer=layer: self._project(
-                            layer, hidden, cos, sin, negative_sin
-                        ),
-                        (hidden_states, *freqs_cis),
-                    )
-                    self.pre_phases[index] = pre_phase
-                    self.captures += 1
-                query, key, value = pre_phase(hidden_states, *freqs_cis)
-
-                cache = self.past_key_values[index]
-                cache.append(key, value)
-                active_key, active_value = cache.active()
-                gqa_kwargs = (
-                    {"enable_gqa": True}
-                    if layer.self_attn.num_heads != layer.self_attn.num_kv_heads
-                    else {}
-                )
-                attention_output = optimized_attention(
-                    query,
-                    active_key,
-                    active_value,
-                    layer.self_attn.num_heads,
-                    mask=None,
-                    skip_reshape=True,
-                    **gqa_kwargs,
-                )
-
-                post_phase = self.post_phases[index]
-                if post_phase is None:
-                    post_phase = _CapturedDecodePhase(
-                        self.stream,
-                        lambda residual, output, layer=layer: self._finish(
-                            layer, residual, output
-                        ),
-                        (hidden_states, attention_output),
-                    )
-                    self.post_phases[index] = post_phase
-                    self.captures += 1
-                hidden_states = post_phase(hidden_states, attention_output)
-
-            if self.final_phase is None:
-                self.final_phase = _CapturedDecodePhase(
-                    self.stream,
-                    lambda hidden: self.owner.logits(model.norm(hidden))[:, -1],
-                    (hidden_states,),
-                )
-                self.captures += 1
-            logits = self.final_phase(hidden_states)
-        current_stream.wait_stream(self.stream)
-        self.replays += 1
-        return logits
-
-    def close(self):
-        for phase in self.pre_phases + self.post_phases:
-            if phase is not None:
-                phase.close()
-        if self.final_phase is not None:
-            self.final_phase.close()
-        self.stream.synchronize()
         self.owner = None
+        self.static_embeds = None
         self.past_key_values = None
-        self.pre_phases = None
-        self.post_phases = None
-        self.final_phase = None
+        self.decode_freqs_cis = None
+        self.freq_index = None
         self.stream = None
 
 @dataclass
@@ -768,6 +727,9 @@ class Attention(nn.Module):
         present_key_value = None
         if isinstance(past_key_value, _StaticDecodeKV):
             past_key_value.append(xk, xv)
+            if past_key_value.attention_output is not None:
+                output = past_key_value.flash_attention(xq)
+                return self.o_proj(output), past_key_value
             xk, xv = past_key_value.active()
             present_key_value = past_key_value
         elif past_key_value is not None:
@@ -808,9 +770,67 @@ class MLP(nn.Module):
             self.activation = torch.nn.functional.silu
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
+        self._decode_gate_up_weight = None
 
     def forward(self, x):
+        if self._decode_gate_up_weight is not None:
+            gate, up = torch.nn.functional.linear(
+                x, self._decode_gate_up_weight
+            ).chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
+
+
+def _fuse_resident_decode_mlps(root, frozen):
+    frozen_weights = {id(module): weight for module, weight, _, _ in frozen}
+    fused = []
+    try:
+        for module in root.modules():
+            if not isinstance(module, MLP):
+                continue
+            projections = (module.gate_proj, module.up_proj)
+            gate_weight = module.gate_proj.weight
+            up_weight = module.up_proj.weight
+            if (
+                gate_weight.ndim != 2
+                or gate_weight.shape != up_weight.shape
+                or gate_weight.dtype != torch.bfloat16
+                or up_weight.dtype != torch.bfloat16
+                or not gate_weight.is_cuda
+                or not up_weight.is_cuda
+                or any(
+                    projection.bias is not None
+                    or projection.comfy_cast_weights
+                    or len(getattr(projection, "weight_function", ()))
+                    or len(getattr(projection, "bias_function", ()))
+                    for projection in projections
+                )
+                or any(
+                    getattr(frozen_weights.get(id(projection)), "is_cuda", False)
+                    for projection in projections
+                )
+            ):
+                raise RuntimeError(
+                    "fused decode MLP requires plain resident BF16 gate/up weights"
+                )
+
+            gate_rows = gate_weight.shape[0]
+            packed = torch.cat((gate_weight, up_weight), dim=0).contiguous()
+            module._decode_gate_up_weight = packed
+            module.gate_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[:gate_rows], requires_grad=False
+            )
+            module.up_proj._parameters["weight"] = torch.nn.Parameter(
+                packed[gate_rows:], requires_grad=False
+            )
+            fused.append(module)
+    except BaseException:
+        for module in fused:
+            module._decode_gate_up_weight = None
+        _restore_resident_decode_weights(frozen)
+        raise
+    return fused
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: Llama2Config, index, device=None, dtype=None, ops: Any = None):
@@ -838,13 +858,13 @@ class TransformerBlock(nn.Module):
             optimized_attention=optimized_attention,
             past_key_value=past_key_value,
         )
-        x = residual + x
+        x = torch.add(residual, x, out=x)
 
         # MLP
         residual = x
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
-        x = residual + x
+        x = torch.add(residual, x, out=x)
 
         return x, present_key_value
 
@@ -958,7 +978,8 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None,
+                freqs_cis=None):
         if embeds is not None:
             x = embeds
         else:
@@ -971,11 +992,13 @@ class Llama2_(nn.Module):
                 return self.get_past_len(past_key_values)
             return 0
 
-        if position_ids is None:
-            past_len = _past_len()
-            position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
-
-        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
+        if freqs_cis is None:
+            if position_ids is None:
+                past_len = _past_len()
+                position_ids = torch.arange(
+                    past_len, past_len + seq_len, device=x.device
+                ).unsqueeze(0)
+            freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
@@ -1154,6 +1177,12 @@ class BaseGenerate:
 
         # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
+        decode_freqs_cis = None
+        if next_pos is not None:
+            decode_positions = torch.arange(
+                next_pos, next_pos + max_length, device=device
+            ).unsqueeze(0)
+            decode_freqs_cis = self.model.compute_freqs_cis(decode_positions, device)
 
         # Generation loop
         current_input_ids = initial_input_ids
@@ -1170,10 +1199,13 @@ class BaseGenerate:
                 getattr(comfy.quant_ops.ck, "begin_cuda_graph_capture", None)
             )
             and callable(getattr(comfy.quant_ops.ck, "end_cuda_graph_capture", None))
+            and hasattr(
+                torch.ops.aten, "_flash_attention_forward_no_dropout_inplace"
+            )
         )
         frozen_weights = []
+        fused_mlps = []
         graph_execution = None
-        stable_calls = 0
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
                 # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
@@ -1186,11 +1218,24 @@ class BaseGenerate:
                     past_key_values = [
                         _StaticDecodeKV(cache) for cache in past_key_values
                     ]
+                    for layer, cache in zip(self.model.layers, past_key_values):
+                        cache.prepare_attention(layer.self_attn.num_heads)
+                if graph_enabled and step == 3:
                     graph_execution = _DecodeGraphExecution(
-                        self, embeds, position_ids, past_key_values
+                        self,
+                        embeds,
+                        past_key_values,
+                        decode_freqs_cis,
+                        start_index=step - 1,
                     )
 
                 if graph_execution is None:
+                    step_freqs_cis = None
+                    if step > 0 and decode_freqs_cis is not None:
+                        step_freqs_cis = tuple(
+                            freq[..., step - 1 : step, :]
+                            for freq in decode_freqs_cis
+                        )
                     x, _, past_key_values = self.model.forward(
                         None,
                         embeds=embeds,
@@ -1198,27 +1243,19 @@ class BaseGenerate:
                         past_key_values=past_key_values,
                         input_ids=current_input_ids,
                         position_ids=position_ids,
+                        freqs_cis=step_freqs_cis,
                         **extra,
                     )
                     if graph_enabled and step == 0:
                         frozen_weights = _freeze_resident_decode_weights(
                             self.model, x[:, -1:]
                         )
+                        fused_mlps = _fuse_resident_decode_mlps(
+                            self.model, frozen_weights
+                        )
                     logits = self.logits(x)[:, -1]
                 else:
-                    if stable_calls < 2:
-                        x, _, past_key_values = self.model.forward(
-                            None,
-                            embeds=embeds,
-                            attention_mask=None,
-                            past_key_values=past_key_values,
-                            input_ids=current_input_ids,
-                            position_ids=position_ids,
-                        )
-                        logits = self.logits(x)[:, -1]
-                        stable_calls += 1
-                    else:
-                        logits = graph_execution.replay(embeds, position_ids)
+                    logits = graph_execution.replay(embeds)
 
                 next_token = self.sample_token(
                     logits,
@@ -1255,6 +1292,8 @@ class BaseGenerate:
                     "replays": graph_execution.replays,
                 }
                 graph_execution.close()
+            for module in fused_mlps:
+                module._decode_gate_up_weight = None
             _restore_resident_decode_weights(frozen_weights)
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
@@ -1287,12 +1326,11 @@ class BaseGenerate:
                 logits[indices_to_remove] = torch.finfo(logits.dtype).min
 
             if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 0] = False
-                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
-                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+                cumulative_probs = torch.cumsum(
+                    torch.nn.functional.softmax(logits, dim=-1), dim=-1
+                )
+                indices_to_remove = cumulative_probs > top_p
+                indices_to_remove[..., 0] = False
                 logits[indices_to_remove] = torch.finfo(logits.dtype).min
 
             probs = torch.nn.functional.softmax(logits, dim=-1)
