@@ -2,6 +2,7 @@ import contextlib
 import contextvars
 import json
 import math
+import os
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -30,6 +31,21 @@ from comfy.text_encoders.gemma4 import (
 _REQUEST_W4_ACTIVATION_DTYPE = contextvars.ContextVar(
     "diffusion_gemma_request_w4_activation_dtype", default=None,
 )
+_REQUEST_W4A8_LAYERS = contextvars.ContextVar(
+    "diffusion_gemma_request_w4a8_layers", default=frozenset(),
+)
+
+
+def _parse_w4a8_layers(value):
+    if not value:
+        return frozenset()
+    try:
+        layers = frozenset(int(item) for item in value.split(","))
+    except ValueError as exc:
+        raise ValueError(f"invalid COMFY_DG_THINKING_W4A8_LAYERS: {value}") from exc
+    if any(layer < 0 or layer >= 30 for layer in layers):
+        raise ValueError(f"COMFY_DG_THINKING_W4A8_LAYERS must contain indices from 0 through 29: {value}")
+    return layers
 
 @dataclass
 class DiffusionGemmaConfig:
@@ -367,8 +383,9 @@ class DiffusionGemmaAttention(nn.Module):
 
 
 class DiffusionGemmaRouter(nn.Module):
-    def __init__(self, config, device=None, dtype=None, ops=None):
+    def __init__(self, config, layer_index=None, device=None, dtype=None, ops=None):
         super().__init__()
+        self.layer_index = layer_index
         self.top_k = config.top_k_experts
         self.scalar_root_size = config.hidden_size ** -0.5
         self.proj = ops.Linear(config.hidden_size, config.num_experts, bias=False, device=device, dtype=dtype)
@@ -791,6 +808,8 @@ class DiffusionGemmaExperts(nn.Module):
             linear_dtype = _REQUEST_W4_ACTIVATION_DTYPE.get()
             if linear_dtype is None:
                 linear_dtype = "int4" if self._bank_mode == "fused_w4a4_convrot" else "int8"
+            elif linear_dtype == "int4" and self.layer_index in _REQUEST_W4A8_LAYERS.get():
+                linear_dtype = "int8"
             return self._forward_grouped_w4_convrot(
                 hidden_states, top_k_index, top_k_weights, linear_dtype,
             )
@@ -1451,7 +1470,7 @@ class DiffusionGemmaBlock(nn.Module):
                                                  has_v_proj=is_sliding, device=device, dtype=dtype, ops=ops)
         self.mlp = DiffusionGemmaMLP(config, device=device, dtype=dtype, ops=ops)
         self.router = DiffusionGemmaRouter(config, device=device, dtype=dtype, ops=ops)
-        self.experts = DiffusionGemmaExperts(config, device=device, dtype=dtype, ops=ops)
+        self.experts = DiffusionGemmaExperts(config, layer_index=index, device=device, dtype=dtype, ops=ops)
 
         norm_kwargs = dict(eps=config.rms_norm_eps, device=device, dtype=dtype)
         self.input_layernorm = RMSNorm(config.hidden_size, **norm_kwargs)
@@ -2272,10 +2291,13 @@ class DiffusionGemmaClipModel(Gemma4Model):
         for k in ("do_sample", "temperature", "top_k", "top_p", "min_p", "repetition_penalty", "presence_penalty"):
             kwargs.pop(k, None)
         linear_dtype = None if thinking is None else ("int4" if thinking else "int8")
+        w4a8_layers = _parse_w4a8_layers(os.environ.get("COMFY_DG_THINKING_W4A8_LAYERS")) if thinking else frozenset()
         request_token = _REQUEST_W4_ACTIVATION_DTYPE.set(linear_dtype)
+        layer_token = _REQUEST_W4A8_LAYERS.set(w4a8_layers)
         try:
             return self.transformer.generate(embeds=embeds, mm_spans=mm_spans if mm_spans else None, **kwargs)
         finally:
+            _REQUEST_W4A8_LAYERS.reset(layer_token)
             _REQUEST_W4_ACTIVATION_DTYPE.reset(request_token)
 
 

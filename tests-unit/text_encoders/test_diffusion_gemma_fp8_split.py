@@ -31,6 +31,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaClipModel,
     DiffusionGemmaMLP,
     _REQUEST_W4_ACTIVATION_DTYPE,
+    _REQUEST_W4A8_LAYERS,
     _ConditionedDecoderGraph,
     _ConditionedDecoderGraphExecution,
     _int8_self_conditioning,
@@ -570,12 +571,14 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
     def test_thinking_selection_is_request_scoped(self):
         model = DiffusionGemmaClipModel.__new__(DiffusionGemmaClipModel)
         model.execution_device = torch.device("cpu")
-        seen, model.transformer = [], types.SimpleNamespace(generate=lambda **kwargs: seen.append(_REQUEST_W4_ACTIVATION_DTYPE.get()))
+        seen, model.transformer = [], types.SimpleNamespace(generate=lambda **kwargs: seen.append((_REQUEST_W4_ACTIVATION_DTYPE.get(), _REQUEST_W4A8_LAYERS.get())))
         with mock.patch("comfy.text_encoders.diffusion_gemma.sd1_clip.SDClipModel.process_tokens", return_value=(torch.zeros(1), None, None, [])):
-            model.generate(_Gemma4TokenBatch({"gemma4": [[(1, 1.0)]]}, thinking=True), generation_mode="diffusion")
+            with mock.patch.dict(os.environ, {"COMFY_DG_THINKING_W4A8_LAYERS": "1,7"}):
+                model.generate(_Gemma4TokenBatch({"gemma4": [[(1, 1.0)]]}, thinking=True), generation_mode="diffusion")
             model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=False)
-        self.assertEqual(seen, ["int4", "int8"])
+        self.assertEqual(seen, [("int4", frozenset({1, 7})), ("int8", frozenset())])
         self.assertIsNone(_REQUEST_W4_ACTIVATION_DTYPE.get())
+        self.assertEqual(_REQUEST_W4A8_LAYERS.get(), frozenset())
 
 if __name__ == "__main__":
     unittest.main()
