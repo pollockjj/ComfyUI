@@ -40,6 +40,7 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     diffusion_gemma_detect,
     diffusion_gemma_te,
 )
+from comfy.text_encoders.gemma4 import _Gemma4TokenBatch  # noqa: E402
 
 
 class TestDiffusionGemmaFp8Split(unittest.TestCase):
@@ -571,7 +572,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         model.execution_device = torch.device("cpu")
         seen, model.transformer = [], types.SimpleNamespace(generate=lambda **kwargs: seen.append(_REQUEST_W4_ACTIVATION_DTYPE.get()))
         with mock.patch("comfy.text_encoders.diffusion_gemma.sd1_clip.SDClipModel.process_tokens", return_value=(torch.zeros(1), None, None, [])):
-            model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=True)
+            model.generate(_Gemma4TokenBatch({"gemma4": [[(1, 1.0)]]}, thinking=True), generation_mode="diffusion")
             model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=False)
         self.assertEqual(seen, ["int4", "int8"])
         self.assertIsNone(_REQUEST_W4_ACTIVATION_DTYPE.get())

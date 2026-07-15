@@ -2262,6 +2262,8 @@ class DiffusionGemmaClipModel(Gemma4Model):
         )
         if generation_mode != "diffusion" and not any(key in kwargs for key in diffusion_keys):
             raise ValueError("DiffusionGemma requires diffusion sampling mode in the Generate Text node")
+        if thinking is None:
+            thinking = getattr(tokens, "thinking", None)
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]

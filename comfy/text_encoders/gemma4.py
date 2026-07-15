@@ -1218,10 +1218,20 @@ class Gemma4SDTokenizer(Gemma4_Tokenizer, sd1_clip.SDTokenizer):
         return text
 
 
+class _Gemma4TokenBatch(dict):
+    def __init__(self, *args, thinking=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.thinking = thinking
+
+
 class Gemma4Tokenizer(sd1_clip.SD1Tokenizer):
     tokenizer_class = Gemma4SDTokenizer
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="gemma4", tokenizer=self.tokenizer_class)
+
+    def tokenize_with_weights(self, text, return_word_ids=False, thinking=False, **kwargs):
+        tokens = super().tokenize_with_weights(text, return_word_ids, thinking=thinking, **kwargs)
+        return _Gemma4TokenBatch(tokens, thinking=thinking)
 
 
 # Model wrappers
