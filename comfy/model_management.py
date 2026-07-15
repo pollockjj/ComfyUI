@@ -1651,8 +1651,12 @@ class _DynamicVRAMExecutionTransaction:
                 "signature": None,
                 "pages": pages,
             }
-            self.allocation_records[allocation_key] = allocation_record
-            self.release_order.append(allocation_record)
+            try:
+                self.allocation_records[allocation_key] = allocation_record
+                self.release_order.append(allocation_record)
+            except BaseException:
+                self.allocation_records.pop(allocation_key, None)
+                raise
             try:
                 signature = comfy_aimdo.model_vbar.vbar_fault(allocation)
             except BaseException:
