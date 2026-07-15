@@ -1203,6 +1203,11 @@ class BaseGenerate:
                 torch.ops.aten, "_flash_attention_forward_no_dropout_inplace"
             )
         )
+        capture_enabled = bool(
+            graph_enabled
+            and os.environ.get("COMFY_QWEN_DECODE_CAPTURE", "1").lower()
+            not in {"0", "false", "no", "off"}
+        )
         frozen_weights = []
         fused_mlps = []
         graph_execution = None
@@ -1220,7 +1225,7 @@ class BaseGenerate:
                     ]
                     for layer, cache in zip(self.model.layers, past_key_values):
                         cache.prepare_attention(layer.self_attn.num_heads)
-                if graph_enabled and step == 3:
+                if capture_enabled and step == 3:
                     graph_execution = _DecodeGraphExecution(
                         self,
                         embeds,
