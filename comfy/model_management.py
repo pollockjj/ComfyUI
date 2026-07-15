@@ -1366,6 +1366,7 @@ _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR = "_dynamic_vram_execution_transaction"
 _DYNAMIC_VRAM_PAGE_SIZE = 32 * 1024 * 1024
 _DYNAMIC_VRAM_EXECUTION_GENERATION = 0
 _DYNAMIC_VRAM_EXECUTION_GENERATION_LOCK = threading.Lock()
+_DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK = threading.RLock()
 
 
 def _dynamic_vram_tensor_fingerprint(tensor):
@@ -1415,6 +1416,14 @@ class _DynamicVRAMExecutionLeaseHandle:
     def capture_safe(self):
         return self._transaction.capture_safe
 
+    @property
+    def failure_reason(self):
+        return self._transaction.failure_reason
+
+    @property
+    def fallback_allowed(self):
+        return self._transaction.failure_reason in {"fault_none", "prefetch"}
+
     def seal(self):
         return self._transaction.seal()
 
@@ -1439,58 +1448,78 @@ class _DynamicVRAMExecutionLeaseHandle:
 
 
 class _DynamicVRAMExecutionTransaction:
-    def __init__(self, root_module, state_token, modules):
+    def __init__(self, root_module, state_token, state_source, state_attr, modules):
         self.root_module = root_module
         self.state_token = state_token
+        self.state_source = state_source
+        self.state_attr = state_attr
         self.modules = tuple(modules)
         self.module_records = {}
         self.allocation_records = {}
         self.release_order = []
         self.generation = _next_dynamic_vram_execution_generation()
         self.capture_safe = True
+        self.failure_reason = None
         self.sealed = False
         self.active = True
         self.references = 1
         self.lock = threading.RLock()
 
     @classmethod
-    def acquire(cls, root_module, state_token):
-        existing = getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None)
-        if existing is not None:
-            if not existing.active:
-                raise RuntimeError("DynamicVRAM execution transaction is inactive")
-            if existing.root_module is not root_module or existing.state_token != state_token:
-                raise RuntimeError("Overlapping DynamicVRAM execution transaction")
-            with existing.lock:
-                existing.references += 1
-            return _DynamicVRAMExecutionLeaseHandle(existing)
+    def acquire(cls, root_module, state_token, state_source=None, state_attr=None):
+        with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+            existing = getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None)
+            if existing is not None:
+                with existing.lock:
+                    if not existing.active:
+                        raise RuntimeError("DynamicVRAM execution transaction is inactive")
+                    if (
+                        existing.root_module is not root_module
+                        or existing.state_token != state_token
+                        or existing.state_source is not state_source
+                        or existing.state_attr != state_attr
+                    ):
+                        raise RuntimeError("Overlapping DynamicVRAM execution transaction")
+                    existing.references += 1
+                return _DynamicVRAMExecutionLeaseHandle(existing)
 
-        modules = tuple(
-            module for module in root_module.modules()
-            if getattr(module, "_v", None) is not None
-        )
-        if not modules:
-            return None
-        for module in modules:
-            lease = getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None)
-            if lease is not None:
-                raise RuntimeError("DynamicVRAM module already belongs to an execution transaction")
-
-        transaction = cls(root_module, state_token, modules)
-        attached = []
-        try:
-            setattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, transaction)
+            modules = tuple(
+                module for module in root_module.modules()
+                if getattr(module, "_v", None) is not None
+            )
+            if not modules:
+                return None
+            if any(hasattr(module, "_prefetch") for module in modules):
+                transaction = cls(
+                    root_module, state_token, state_source, state_attr, modules
+                )
+                transaction.capture_safe = False
+                transaction.failure_reason = "prefetch"
+                transaction.sealed = True
+                transaction.active = False
+                return _DynamicVRAMExecutionLeaseHandle(transaction)
             for module in modules:
-                setattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, transaction)
-                attached.append(module)
-        except BaseException:
-            for module in reversed(attached):
-                if getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None) is transaction:
-                    delattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR)
-            if getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None) is transaction:
-                delattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
-            raise
-        return _DynamicVRAMExecutionLeaseHandle(transaction)
+                lease = getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None)
+                if lease is not None:
+                    raise RuntimeError("DynamicVRAM module already belongs to an execution transaction")
+
+            transaction = cls(
+                root_module, state_token, state_source, state_attr, modules
+            )
+            attached = []
+            try:
+                setattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, transaction)
+                for module in modules:
+                    setattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, transaction)
+                    attached.append(module)
+            except BaseException:
+                for module in reversed(attached):
+                    if getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None) is transaction:
+                        delattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR)
+                if getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None) is transaction:
+                    delattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
+                raise
+            return _DynamicVRAMExecutionLeaseHandle(transaction)
 
     @staticmethod
     def _allocation_key(allocation):
@@ -1520,19 +1549,60 @@ class _DynamicVRAMExecutionTransaction:
             for page in record["pages"]
         )
 
-    def retained_signature(self, module):
+    def _mark_unsafe(self, reason):
+        self.capture_safe = False
+        if (
+            self.failure_reason is None
+            or self.failure_reason in {"fault_none", "prefetch"}
+            and reason not in {"fault_none", "prefetch"}
+        ):
+            self.failure_reason = reason
+
+    def fault_or_reuse_signature(self, module, resolution_key):
         with self.lock:
             if not self.active or self.sealed and not self.capture_safe:
                 return None
             record = self.module_records.get(id(module))
-            if record is None:
+            if record is not None:
+                self._validate_module_record(module, record, full=False)
+                if record["resolution_key"] != resolution_key:
+                    self._mark_unsafe("resolution_mismatch")
+                return record["signature"]
+
+            allocation = getattr(module, "_v", None)
+            if allocation is None:
+                self._mark_unsafe("allocation_missing")
                 return None
-            self._validate_module_record(module, record, full=False)
-            return record["signature"]
+            allocation_key = self._allocation_key(allocation)
+            allocation_record = self.allocation_records.get(allocation_key)
+            if allocation_record is not None:
+                return allocation_record["signature"]
+
+            signature = comfy_aimdo.model_vbar.vbar_fault(allocation)
+            if signature is None:
+                self._mark_unsafe("fault_none")
+                return None
+            try:
+                pages = self._allocation_pages(allocation)
+            except BaseException:
+                comfy_aimdo.model_vbar.vbar_unpin(allocation)
+                raise
+            allocation_record = {
+                "allocation": allocation,
+                "signature": signature,
+                "pages": pages,
+            }
+            self.allocation_records[allocation_key] = allocation_record
+            self.release_order.append(allocation_record)
+            return signature
 
     def note_fault_none(self):
         with self.lock:
-            self.capture_safe = False
+            self._mark_unsafe("fault_none")
+
+    def note_prefetch(self):
+        with self.lock:
+            self._mark_unsafe("prefetch")
 
     def adopt_resolved(self, module, signature, weight, bias, resolution_key):
         with self.lock:
@@ -1541,14 +1611,14 @@ class _DynamicVRAMExecutionTransaction:
             if getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None) is not self:
                 raise RuntimeError("DynamicVRAM execution transaction does not own module")
             if signature is None:
-                self.capture_safe = False
+                self._mark_unsafe("fault_none")
                 return False
             allocation = getattr(module, "_v", None)
             if allocation is None:
-                self.capture_safe = False
+                self._mark_unsafe("allocation_missing")
                 return False
             if getattr(module, "_prefetch", None) is not None:
-                self.capture_safe = False
+                self._mark_unsafe("prefetch")
             if (
                 getattr(module, "_v_signature", None) is None
                 or not comfy_aimdo.model_vbar.vbar_signature_compare(
@@ -1557,20 +1627,14 @@ class _DynamicVRAMExecutionTransaction:
             ):
                 raise RuntimeError("DynamicVRAM execution signature changed during adoption")
             if weight is None or getattr(module, "_v_weight", None) is None:
-                self.capture_safe = False
+                self._mark_unsafe("resident_weight_missing")
                 return False
 
             allocation_key = self._allocation_key(allocation)
             allocation_record = self.allocation_records.get(allocation_key)
             if allocation_record is None:
-                allocation_record = {
-                    "allocation": allocation,
-                    "signature": signature,
-                    "pages": self._allocation_pages(allocation),
-                }
-                self.allocation_records[allocation_key] = allocation_record
-                self.release_order.append(allocation_record)
-            elif not comfy_aimdo.model_vbar.vbar_signature_compare(
+                raise RuntimeError("DynamicVRAM fault was not adopted before resolution")
+            if not comfy_aimdo.model_vbar.vbar_signature_compare(
                 signature, allocation_record["signature"]
             ):
                 raise RuntimeError("Shared DynamicVRAM allocation signature changed")
@@ -1598,15 +1662,20 @@ class _DynamicVRAMExecutionTransaction:
                 self._validate_module_record(module, prior, full=True)
                 if prior["allocation_key"] != allocation_key:
                     raise RuntimeError("DynamicVRAM execution allocation changed")
+                if prior["resolution_key"] != resolution_key:
+                    self._mark_unsafe("resolution_mismatch")
             self.module_records[id(module)] = record
             return True
 
     def owns_pin(self, module):
         with self.lock:
-            record = self.module_records.get(id(module))
-            if not self.active or record is None:
+            if not self.active:
                 return False
-            return record["allocation_key"] in self.allocation_records
+            allocation = getattr(module, "_v", None)
+            return (
+                allocation is not None
+                and self._allocation_key(allocation) in self.allocation_records
+            )
 
     def _validate_module_record(self, module, record, full):
         allocation = getattr(module, "_v", None)
@@ -1654,35 +1723,55 @@ class _DynamicVRAMExecutionTransaction:
         if getattr(self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None) is self:
             delattr(self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
 
+    def _state_valid(self, state_token):
+        if state_token != self.state_token:
+            return False
+        if self.state_source is None:
+            return True
+        return getattr(self.state_source, self.state_attr, None) == self.state_token
+
     def _release_pins(self):
-        self._synchronize_allocations()
+        first_error = None
+        try:
+            self._synchronize_allocations()
+        except BaseException as error:
+            first_error = error
         for record in reversed(self.release_order):
-            comfy_aimdo.model_vbar.vbar_unpin(record["allocation"])
+            try:
+                comfy_aimdo.model_vbar.vbar_unpin(record["allocation"])
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
         self.release_order = []
         self.allocation_records = {}
         self.module_records = {}
+        if first_error is not None:
+            raise first_error
 
     def seal(self):
-        with self.lock:
-            if not self.active:
-                return False
-            if self.sealed:
+        with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+            with self.lock:
+                if not self.active:
+                    return False
+                if self.sealed:
+                    return self.capture_safe
+                self.sealed = True
+                if not self._state_valid(self.state_token):
+                    self._mark_unsafe("state_token_changed")
+                if self.capture_safe and len(self.module_records) != len(self.modules):
+                    self._mark_unsafe("incomplete_coverage")
+                if self.capture_safe:
+                    for module in self.modules:
+                        record = self.module_records.get(id(module))
+                        if record is None:
+                            self._mark_unsafe("incomplete_coverage")
+                            break
+                        self._validate_module_record(module, record, full=True)
+                if not self.capture_safe:
+                    self._release_pins()
+                    self._detach()
+                    self.active = False
                 return self.capture_safe
-            self.sealed = True
-            if len(self.module_records) != len(self.modules):
-                self.capture_safe = False
-            if self.capture_safe:
-                for module in self.modules:
-                    record = self.module_records.get(id(module))
-                    if record is None:
-                        self.capture_safe = False
-                        break
-                    self._validate_module_record(module, record, full=True)
-            if not self.capture_safe:
-                self._release_pins()
-                self._detach()
-                self.active = False
-            return self.capture_safe
 
     def valid(self, state_token, full=False):
         with self.lock:
@@ -1690,7 +1779,7 @@ class _DynamicVRAMExecutionTransaction:
                 not self.active
                 or not self.sealed
                 or not self.capture_safe
-                or state_token != self.state_token
+                or not self._state_valid(state_token)
                 or getattr(self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None)
                 is not self
             ):
@@ -1703,35 +1792,49 @@ class _DynamicVRAMExecutionTransaction:
             return True
 
     def release_reference(self):
-        with self.lock:
-            if self.references <= 0:
-                return
-            self.references -= 1
-            if self.references > 0:
-                return
-            if self.active:
-                self._release_pins()
-                self._detach()
-                self.active = False
-            self.modules = ()
-            self.root_module = None
+        with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+            with self.lock:
+                if self.references <= 0:
+                    return
+                self.references -= 1
+                if self.references > 0:
+                    return
+                if self.active:
+                    self._release_pins()
+                    self._detach()
+                    self.active = False
+                self.modules = ()
+                self.root_module = None
+                self.state_source = None
 
 
-def acquire_dynamic_vram_execution_lease(root_module, state_token):
+def acquire_dynamic_vram_execution_lease(
+    root_module, state_token, state_source=None, state_attr=None
+):
     if not comfy.memory_management.aimdo_enabled:
         return None
-    return _DynamicVRAMExecutionTransaction.acquire(root_module, state_token)
+    return _DynamicVRAMExecutionTransaction.acquire(
+        root_module, state_token, state_source=state_source, state_attr=state_attr
+    )
 
 
 def assert_no_dynamic_vram_execution_lease(root_module, action):
     if root_module is None:
         return
-    for module in root_module.modules():
-        transaction = getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None)
-        if transaction is not None and transaction.active:
+    with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+        root_transaction = getattr(
+            root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None
+        )
+        if root_transaction is not None and root_transaction.active:
             raise RuntimeError(
                 f"Cannot perform {action} while a DynamicVRAM execution lease is active"
             )
+        for module in root_module.modules():
+            transaction = getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None)
+            if transaction is not None and transaction.active:
+                raise RuntimeError(
+                    f"Cannot perform {action} while a DynamicVRAM execution lease is active"
+                )
 
 def reset_cast_buffers():
     for loaded_model in current_loaded_models:

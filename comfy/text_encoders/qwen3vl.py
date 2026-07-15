@@ -133,9 +133,17 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
         tokens_only = [[t[0] for t in b] for b in tokens]
         embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
         position_ids, visual_pos_masks, deepstack = self.transformer.build_image_inputs(embeds, embeds_info)
-        state_token = getattr(self, "_weight_patches_uuid", None)
+        state_source = getattr(self, "_weight_patches_owner", None)
+        state_token = (
+            state_source.current_weight_patches_uuid
+            if state_source is not None
+            else getattr(self, "_weight_patches_uuid", None)
+        )
         lease = comfy.model_management.acquire_dynamic_vram_execution_lease(
-            self.transformer.model, state_token
+            self.transformer.model,
+            state_token,
+            state_source=state_source,
+            state_attr="current_weight_patches_uuid" if state_source is not None else None,
         )
         try:
             return self.transformer.generate(
@@ -168,7 +176,11 @@ class Qwen3VLTEModel(sd1_clip.SD1ClipModel):
     def generate(self, tokens, **kwargs):
         clip_model = getattr(self, self.clip)
         clip_model._weight_patches_uuid = self.current_weight_patches_uuid
-        return super().generate(tokens, **kwargs)
+        clip_model._weight_patches_owner = self
+        try:
+            return super().generate(tokens, **kwargs)
+        finally:
+            delattr(clip_model, "_weight_patches_owner")
 
 
 class Qwen3VLSDTokenizer(sd1_clip.SDTokenizer):

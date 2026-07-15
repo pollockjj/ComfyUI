@@ -923,11 +923,17 @@ class BaseGenerate:
                 position_ids = torch.tensor([[next_pos]], device=device)
                 next_pos += 1
             if step == 0 and _dynamic_vram_lease is not None:
-                if _dynamic_vram_lease.seal() and not _dynamic_vram_lease.valid(
+                lease_sealed = _dynamic_vram_lease.seal()
+                if lease_sealed and not _dynamic_vram_lease.valid(
                     _dynamic_vram_state_token, full=True
                 ):
                     raise RuntimeError(
                         "DynamicVRAM execution lease changed after prefill"
+                    )
+                if not lease_sealed and not _dynamic_vram_lease.fallback_allowed:
+                    raise RuntimeError(
+                        "DynamicVRAM execution lease could not cover generation: "
+                        f"{_dynamic_vram_lease.failure_reason}"
                     )
             pbar.update(1)
 

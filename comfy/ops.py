@@ -88,7 +88,15 @@ def materialize_meta_param(s, param_keys):
 
 
 # FIXME: add n=1 cache hit fast path
-def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking):
+def cast_modules_with_vbar(
+    comfy_modules,
+    dtype,
+    device,
+    bias_dtype,
+    non_blocking,
+    compute_dtype=None,
+    want_requant=False,
+):
     offload_stream = None
     cast_buffer = None
     cast_buffer_offset = 0
@@ -129,27 +137,24 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         execution_transaction = getattr(
             s, comfy.model_management._DYNAMIC_VRAM_EXECUTION_ATTR, None
         )
-        retained_signature = (
-            execution_transaction.retained_signature(s)
-            if execution_transaction is not None
-            else None
+        if execution_transaction is not None and dtype is None:
+            execution_transaction.note_prefetch()
+            execution_transaction = None
+        resolution_key = (
+            dtype, device, bias_dtype, compute_dtype, bool(want_requant)
         )
-        if retained_signature is not None:
-            s._prefetch = {
-                "signature": retained_signature,
-                "resident": True,
-                "execution_transaction": execution_transaction,
-            }
-            continue
-
-        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
-        if execution_transaction is not None and signature is None:
-            execution_transaction.note_fault_none()
+        if execution_transaction is None:
+            signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        else:
+            signature = execution_transaction.fault_or_reuse_signature(
+                s, resolution_key
+            )
         resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
         prefetch = {
             "signature": signature,
             "resident": resident,
             "execution_transaction": execution_transaction,
+            "resolution_key": resolution_key,
         }
 
         if resident:
@@ -340,10 +345,58 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         offload_device = None
         execution_transaction = None
         if not prefetched:
-            offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
-            comfy.model_management.sync_stream(device, offload_stream)
+            try:
+                offload_stream = cast_modules_with_vbar(
+                    [s],
+                    dtype,
+                    device,
+                    bias_dtype,
+                    non_blocking,
+                    compute_dtype=compute_dtype,
+                    want_requant=want_requant,
+                )
+                comfy.model_management.sync_stream(device, offload_stream)
+            except BaseException:
+                if hasattr(s, "_prefetch"):
+                    failed_prefetch = getattr(s, "_prefetch")
+                    for param_key in ("weight", "bias"):
+                        lowvram_fn = getattr(
+                            s, param_key + "_lowvram_function", None
+                        )
+                        if lowvram_fn is not None:
+                            lowvram_fn.clear_prepared()
+                    delattr(s, "_prefetch")
+                    failed_transaction = failed_prefetch.get(
+                        "execution_transaction"
+                    )
+                    if (
+                        failed_transaction is None
+                        and failed_prefetch["signature"] is not None
+                    ):
+                        comfy_aimdo.model_vbar.vbar_unpin(s._v)
+                raise
 
-        weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
+        try:
+            weight, bias = resolve_cast_module_with_vbar(
+                s, dtype, device, bias_dtype, compute_dtype, want_requant
+            )
+        except BaseException:
+            if not prefetched and hasattr(s, "_prefetch"):
+                failed_prefetch = getattr(s, "_prefetch")
+                for param_key in ("weight", "bias"):
+                    lowvram_fn = getattr(
+                        s, param_key + "_lowvram_function", None
+                    )
+                    if lowvram_fn is not None:
+                        lowvram_fn.clear_prepared()
+                delattr(s, "_prefetch")
+                failed_transaction = failed_prefetch.get("execution_transaction")
+                if (
+                    failed_transaction is None
+                    and failed_prefetch["signature"] is not None
+                ):
+                    comfy_aimdo.model_vbar.vbar_unpin(s._v)
+            raise
 
         if not prefetched:
             prefetch = getattr(s, "_prefetch")
@@ -357,11 +410,8 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
                     lowvram_fn.clear_prepared()
             delattr(s, "_prefetch")
             if execution_transaction is not None:
-                resolution_key = (
-                    dtype, device, bias_dtype, compute_dtype, bool(want_requant)
-                )
                 execution_transaction.adopt_resolved(
-                    s, signature, weight, bias, resolution_key
+                    s, signature, weight, bias, prefetch["resolution_key"]
                 )
         lease_token = (
             execution_transaction
