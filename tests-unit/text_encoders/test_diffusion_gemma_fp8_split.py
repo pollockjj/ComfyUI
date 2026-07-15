@@ -28,7 +28,9 @@ from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaAttention,
     DiffusionGemmaConfig,
     DiffusionGemmaExperts,
+    DiffusionGemmaClipModel,
     DiffusionGemmaMLP,
+    _REQUEST_W4_ACTIVATION_DTYPE,
     _ConditionedDecoderGraph,
     _ConditionedDecoderGraphExecution,
     _int8_self_conditioning,
@@ -563,6 +565,17 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         self.assertEqual(experts._bank_mode, "fused_w4a8_convrot")
         self.assertTrue(experts._grouped_w4a8_convrot_compatible)
+
+    def test_thinking_selection_is_request_scoped(self):
+        model = DiffusionGemmaClipModel.__new__(DiffusionGemmaClipModel)
+        model.execution_device = torch.device("cpu")
+        seen = []
+        model.transformer = types.SimpleNamespace(generate=lambda **kwargs: seen.append(_REQUEST_W4_ACTIVATION_DTYPE.get()))
+        with mock.patch("comfy.text_encoders.diffusion_gemma.sd1_clip.SDClipModel.process_tokens", return_value=(torch.zeros(1), None, None, [])):
+            model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=True)
+            model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=False)
+        self.assertEqual(seen, ["int4", "int8"])
+        self.assertIsNone(_REQUEST_W4_ACTIVATION_DTYPE.get())
 
 if __name__ == "__main__":
     unittest.main()

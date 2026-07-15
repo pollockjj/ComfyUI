@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import json
 import math
 import torch
@@ -24,6 +25,10 @@ from comfy.text_encoders.gemma4 import (
     Gemma4Model,
     ClippedLinear,
     _apply_rotary_pos_emb,
+)
+
+_REQUEST_W4_ACTIVATION_DTYPE = contextvars.ContextVar(
+    "diffusion_gemma_request_w4_activation_dtype", default=None,
 )
 
 @dataclass
@@ -780,14 +785,15 @@ class DiffusionGemmaExperts(nn.Module):
             if not self._grouped_int8_convrot_compatible:
                 raise RuntimeError("DiffusionGemma INT8 ConvRot does not support patched expert banks")
             return self._forward_grouped_int8_convrot(hidden_states, top_k_index, top_k_weights)
-        if self._bank_mode == "fused_w4a4_convrot":
-            if not self._grouped_w4a4_convrot_compatible:
-                raise RuntimeError("DiffusionGemma W4A4 ConvRot does not support patched expert banks")
-            return self._forward_grouped_w4a4_convrot(hidden_states, top_k_index, top_k_weights)
-        if self._bank_mode == "fused_w4a8_convrot":
-            if not self._grouped_w4a8_convrot_compatible:
-                raise RuntimeError("DiffusionGemma W4A8 ConvRot does not support patched expert banks")
-            return self._forward_grouped_w4a8_convrot(hidden_states, top_k_index, top_k_weights)
+        if self._bank_mode in ("fused_w4a4_convrot", "fused_w4a8_convrot"):
+            if not (self._grouped_w4a4_convrot_compatible or self._grouped_w4a8_convrot_compatible):
+                raise RuntimeError("DiffusionGemma grouped W4 ConvRot does not support patched expert banks")
+            linear_dtype = _REQUEST_W4_ACTIVATION_DTYPE.get()
+            if linear_dtype is None:
+                linear_dtype = "int4" if self._bank_mode == "fused_w4a4_convrot" else "int8"
+            return self._forward_grouped_w4_convrot(
+                hidden_states, top_k_index, top_k_weights, linear_dtype,
+            )
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused NVFP4 does not support patched expert banks")
@@ -1307,6 +1313,8 @@ class DiffusionGemmaExperts(nn.Module):
         )
 
     def _forward_grouped_w4_convrot(self, hidden_states, top_k_index, top_k_weights, linear_dtype):
+        if linear_dtype not in ("int4", "int8"):
+            raise ValueError(f"unsupported DiffusionGemma W4 activation dtype: {linear_dtype}")
         N, H = hidden_states.shape
         E = self.num_experts
         K = top_k_index.shape[-1]
@@ -1330,7 +1338,7 @@ class DiffusionGemmaExperts(nn.Module):
                 if (
                     not isinstance(weight, QuantizedTensor)
                     or weight._layout_cls != "TensorCoreConvRotW4A4Layout"
-                    or weight._params.linear_dtype != linear_dtype
+                    or weight._params.linear_dtype not in ("int4", "int8")
                     or bias is not None
                 ):
                     raise RuntimeError(f"grouped DiffusionGemma W4A{linear_dtype[-1]} ConvRot requires unbiased resident banks")
@@ -2243,7 +2251,7 @@ class DiffusionGemmaClipModel(Gemma4Model):
                                       model_class=self.model_class, enable_attention_masks=attention_mask,
                                       return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, generation_mode=None, **kwargs):
+    def generate(self, tokens, generation_mode=None, thinking=None, **kwargs):
         diffusion_keys = (
             "max_denoising_steps",
             "entropy_bound",
@@ -2261,7 +2269,12 @@ class DiffusionGemmaClipModel(Gemma4Model):
         mm_spans = [(e["index"], e["index"] + e["size"]) for e in embeds_info if e.get("type") == "image"]
         for k in ("do_sample", "temperature", "top_k", "top_p", "min_p", "repetition_penalty", "presence_penalty"):
             kwargs.pop(k, None)
-        return self.transformer.generate(embeds=embeds, mm_spans=mm_spans if mm_spans else None, **kwargs)
+        linear_dtype = None if thinking is None else ("int4" if thinking else "int8")
+        request_token = _REQUEST_W4_ACTIVATION_DTYPE.set(linear_dtype)
+        try:
+            return self.transformer.generate(embeds=embeds, mm_spans=mm_spans if mm_spans else None, **kwargs)
+        finally:
+            _REQUEST_W4_ACTIVATION_DTYPE.reset(request_token)
 
 
 _DIFFUSION_GEMMA_MXFP8_QKV_CONTRACT = "diffusiongemma_mxfp8_qkv_fused.v1"

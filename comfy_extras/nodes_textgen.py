@@ -74,6 +74,7 @@ class TextGenerate(io.ComfyNode):
                 t_max=sampling_mode.get("t_max", 0.8),
                 stability_threshold=sampling_mode.get("stability_threshold", 1),
                 confidence_threshold=sampling_mode.get("confidence_threshold", 0.005),
+                thinking=thinking,
             )
         else:
             generated_ids = clip.generate(
