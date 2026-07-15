@@ -69,6 +69,8 @@ class _StaticDecodeKV:
 
     def __init__(self, past):
         self.key, self.value, valid = past
+        self.key[:, :, valid:].zero_()
+        self.value[:, :, valid:].zero_()
         self.index = torch.tensor([valid], dtype=torch.long, device=self.key.device)
         self.mask = torch.full(
             (1, 1, 1, self.key.shape[2]),
