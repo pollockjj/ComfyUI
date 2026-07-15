@@ -70,7 +70,7 @@ def dynamic_vram_mutation_guard(action):
         @functools.wraps(function)
         def guarded(owner, *args, **kwargs):
             if interpreter_is_finalizing():
-                return function(owner, *args, **kwargs)
+                return None
             root_module = owner.model
             if not isinstance(root_module, module_type):
                 root_module = root_module.model
