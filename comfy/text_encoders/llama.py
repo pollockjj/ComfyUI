@@ -86,9 +86,21 @@ class _StaticDecodeKV:
             [0, valid], dtype=torch.int32, device=self.key.device
         )
         self.attention_output = None
+        self.expanded_key = None
+        self.expanded_value = None
+        self.group_size = None
         self.graph_mode = False
 
     def append(self, key, value):
+        if self.expanded_key is not None and self.valid < 128:
+            expanded_key = key.transpose(1, 2).repeat_interleave(
+                self.group_size, dim=2
+            )
+            expanded_value = value.transpose(1, 2).repeat_interleave(
+                self.group_size, dim=2
+            )
+            self.expanded_key.index_copy_(1, self.index, expanded_key)
+            self.expanded_value.index_copy_(1, self.index, expanded_value)
         self.key.index_copy_(1, self.index, key.transpose(1, 2))
         self.value.index_copy_(1, self.index, value.transpose(1, 2))
         self.index.add_(key.shape[2])
@@ -103,11 +115,28 @@ class _StaticDecodeKV:
         )
 
     def prepare_attention(self, num_query_heads):
+        num_kv_heads = self.key.shape[2]
+        if num_query_heads % num_kv_heads:
+            raise RuntimeError("static decode attention requires integral GQA groups")
+        self.group_size = num_query_heads // num_kv_heads
         self.attention_output = torch.empty(
             (self.key.shape[0], num_query_heads, self.key.shape[-1]),
             dtype=self.key.dtype,
             device=self.key.device,
         )
+        if self.valid < 128:
+            self.expanded_key = torch.empty(
+                (self.key.shape[0], 128, num_query_heads, self.key.shape[-1]),
+                dtype=self.key.dtype,
+                device=self.key.device,
+            )
+            self.expanded_value = torch.empty_like(self.expanded_key)
+            self.expanded_key[:, : self.valid].copy_(
+                self.key[:, : self.valid].repeat_interleave(self.group_size, dim=2)
+            )
+            self.expanded_value[:, : self.valid].copy_(
+                self.value[:, : self.valid].repeat_interleave(self.group_size, dim=2)
+            )
 
     def enable_graph(self, num_query_heads):
         if self.attention_output is None:
@@ -119,8 +148,18 @@ class _StaticDecodeKV:
         if query_length != 1 or self.attention_output is None:
             raise RuntimeError("static decode attention requires one prepared query")
         query = query.transpose(1, 2).reshape(-1, num_heads, head_dim)
-        key = self.key.reshape(-1, self.key.shape[2], head_dim)
-        value = self.value.reshape_as(key)
+        if (
+            not self.graph_mode
+            and self.expanded_key is not None
+            and self.valid <= 128
+        ):
+            key = self.expanded_key
+            value = self.expanded_value
+        else:
+            key = self.key
+            value = self.value
+        key = key.reshape(-1, key.shape[2], head_dim)
+        value = value.reshape_as(key)
         torch.ops.aten._flash_attention_forward_no_dropout_inplace.default(
             self.attention_output,
             query,
@@ -129,7 +168,7 @@ class _StaticDecodeKV:
             self.cu_seqlens_q,
             self.cu_seqlens_k,
             1,
-            self.key.shape[1],
+            key.shape[0] // batch,
             0.0,
             False,
             False,
@@ -1231,7 +1270,12 @@ class BaseGenerate:
                     if flash_enabled:
                         for layer, cache in zip(self.model.layers, past_key_values):
                             cache.prepare_attention(layer.self_attn.num_heads)
-                if capture_enabled and step == 3:
+                if (
+                    capture_enabled
+                    and graph_execution is None
+                    and step >= 3
+                    and past_key_values[0].valid >= 128
+                ):
                     graph_execution = _DecodeGraphExecution(
                         self,
                         embeds,
