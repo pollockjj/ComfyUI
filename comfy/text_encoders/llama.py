@@ -65,112 +65,180 @@ def _freeze_resident_decode_weights(root, ref_input):
 
 
 class _StaticDecodeKV:
-    """Fixed storage with llama.cpp-style 256-token active extents."""
+    """Fixed storage with an exact active view for graph-compatible decode."""
 
     def __init__(self, past):
         self.key, self.value, valid = past
-        self.key[:, :, valid:].zero_()
-        self.value[:, :, valid:].zero_()
+        self.valid = valid
         self.index = torch.tensor([valid], dtype=torch.long, device=self.key.device)
-        self.mask = torch.full(
-            (1, 1, 1, self.key.shape[2]),
-            torch.finfo(self.key.dtype).min,
-            dtype=self.key.dtype,
-            device=self.key.device,
-        )
-        self.mask[..., :valid] = 0.0
-        self.bucket = 0
 
     def append(self, key, value):
         self.key.index_copy_(2, self.index, key)
         self.value.index_copy_(2, self.index, value)
-        self.mask.index_fill_(3, self.index, 0.0)
         self.index.add_(key.shape[2])
+        self.valid += key.shape[2]
+
+    def active(self):
+        return self.key[:, :, : self.valid], self.value[:, :, : self.valid]
 
 
-class _DecodeGraphExecution:
-    """Execution-scoped whole-decode CUDA graph with update at KV boundaries."""
+class _CapturedDecodePhase:
+    """One shape-stable decode phase captured on the ordinary CUDA stream."""
 
-    def __init__(self, owner, embeds, position_ids, past_key_values):
-        self.owner = owner
-        self.stream = torch.cuda.Stream(device=embeds.device)
-        self.static_embeds = torch.empty_like(embeds)
-        self.static_position_ids = torch.empty_like(position_ids)
-        self.past_key_values = past_key_values
+    def __init__(self, function, inputs):
+        self.function = function
+        self.inputs = tuple(torch.empty_like(value) for value in inputs)
         self.graph = None
         self.output = None
-        self.bucket = None
-        self.captures = 0
-        self.updates = 0
-        self.reinstantiations = 0
-        self.replays = 0
 
-    def stage(self, embeds, position_ids):
-        current_stream = torch.cuda.current_stream(embeds.device)
-        self.stream.wait_stream(current_stream)
-        with torch.cuda.stream(self.stream):
-            self.static_embeds.copy_(embeds)
-            self.static_position_ids.copy_(position_ids)
+    def __call__(self, *inputs):
+        if len(inputs) != len(self.inputs):
+            raise ValueError("decode graph phase input count changed")
+        for target, source in zip(self.inputs, inputs):
+            target.copy_(source)
 
-    def _evaluate(self):
-        hidden, _, _ = self.owner.model.forward(
-            None,
-            embeds=self.static_embeds,
-            attention_mask=None,
-            past_key_values=self.past_key_values,
-            input_ids=None,
-            position_ids=self.static_position_ids,
-        )
-        return self.owner.logits(hidden)[:, -1]
-
-    def capture_or_update(self, bucket):
-        with torch.cuda.stream(self.stream):
-            comfy.quant_ops.ck.begin_cuda_graph_capture(self.stream)
+        stream = torch.cuda.current_stream(self.inputs[0].device)
+        if self.graph is None:
+            comfy.quant_ops.ck.begin_cuda_graph_capture(stream)
             try:
-                output = self._evaluate()
+                self.output = self.function(*self.inputs)
             except BaseException:
-                comfy.quant_ops.ck.abort_cuda_graph_capture(self.stream)
+                comfy.quant_ops.ck.abort_cuda_graph_capture(stream)
                 raise
-            if self.graph is None:
-                self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
-                    self.stream,
-                    output,
-                    self.static_embeds,
-                    self.static_position_ids,
-                    self.past_key_values,
-                )
-            else:
-                reinstantiated = self.graph.update_from_capture(
-                    self.stream,
-                    output,
-                    self.static_embeds,
-                    self.static_position_ids,
-                    self.past_key_values,
-                )
-                self.updates += 1
-                self.reinstantiations += int(reinstantiated)
-            self.output = output
-        self.bucket = bucket
-        self.captures += 1
-
-    def replay(self):
-        self.graph.replay(self.stream)
-        torch.cuda.current_stream(self.static_embeds.device).wait_stream(self.stream)
-        self.replays += 1
+            self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
+                stream, self.output, self.inputs
+            )
+        self.graph.replay(stream)
         return self.output
 
     def close(self):
         if self.graph is not None:
             self.graph.reset()
             self.graph = None
-        if self.stream is not None:
-            self.stream.synchronize()
         self.output = None
+        self.inputs = None
+        self.function = None
+
+
+class _DecodeGraphExecution:
+    """llama-style split graph around exact active-length PyTorch attention."""
+
+    def __init__(self, owner, embeds, position_ids, past_key_values):
+        self.owner = owner
+        self.past_key_values = past_key_values
+        self.pre_phases = [None] * len(owner.model.layers)
+        self.post_phases = [None] * len(owner.model.layers)
+        self.final_phase = None
+        self.captures = 0
+        self.replays = 0
+
+    @staticmethod
+    def _project(layer, hidden_states, cos, sin, negative_sin):
+        hidden_states = layer.input_layernorm(hidden_states)
+        attention = layer.self_attn
+        batch_size, seq_length, _ = hidden_states.shape
+
+        query = attention.q_proj(hidden_states)
+        key = attention.k_proj(hidden_states)
+        value = attention.v_proj(hidden_states)
+
+        query = query.view(
+            batch_size, seq_length, attention.num_heads, attention.head_dim
+        ).transpose(1, 2)
+        key = key.view(
+            batch_size, seq_length, attention.num_kv_heads, attention.head_dim
+        ).transpose(1, 2)
+        value = value.view(
+            batch_size, seq_length, attention.num_kv_heads, attention.head_dim
+        ).transpose(1, 2)
+
+        if attention.q_norm is not None:
+            query = attention.q_norm(query)
+        if attention.k_norm is not None:
+            key = attention.k_norm(key)
+        query, key = apply_rope(query, key, (cos, sin, negative_sin))
+        return query, key, value
+
+    @staticmethod
+    def _finish(layer, residual, attention_output):
+        hidden_states = residual + layer.self_attn.o_proj(attention_output)
+        residual = hidden_states
+        hidden_states = layer.post_attention_layernorm(hidden_states)
+        hidden_states = layer.mlp(hidden_states)
+        return residual + hidden_states
+
+    def replay(self, embeds, position_ids):
+        model = self.owner.model
+        freqs_cis = model.compute_freqs_cis(position_ids, embeds.device)
+        optimized_attention = optimized_attention_for_device(
+            embeds.device, mask=False, small_input=True
+        )
+        hidden_states = embeds
+
+        for index, layer in enumerate(model.layers):
+            pre_phase = self.pre_phases[index]
+            if pre_phase is None:
+                pre_phase = _CapturedDecodePhase(
+                    lambda hidden, cos, sin, negative_sin, layer=layer: self._project(
+                        layer, hidden, cos, sin, negative_sin
+                    ),
+                    (hidden_states, *freqs_cis),
+                )
+                self.pre_phases[index] = pre_phase
+                self.captures += 1
+            query, key, value = pre_phase(hidden_states, *freqs_cis)
+
+            cache = self.past_key_values[index]
+            cache.append(key, value)
+            active_key, active_value = cache.active()
+            gqa_kwargs = (
+                {"enable_gqa": True}
+                if layer.self_attn.num_heads != layer.self_attn.num_kv_heads
+                else {}
+            )
+            attention_output = optimized_attention(
+                query,
+                active_key,
+                active_value,
+                layer.self_attn.num_heads,
+                mask=None,
+                skip_reshape=True,
+                **gqa_kwargs,
+            )
+
+            post_phase = self.post_phases[index]
+            if post_phase is None:
+                post_phase = _CapturedDecodePhase(
+                    lambda residual, output, layer=layer: self._finish(
+                        layer, residual, output
+                    ),
+                    (hidden_states, attention_output),
+                )
+                self.post_phases[index] = post_phase
+                self.captures += 1
+            hidden_states = post_phase(hidden_states, attention_output)
+
+        if self.final_phase is None:
+            self.final_phase = _CapturedDecodePhase(
+                lambda hidden: self.owner.logits(model.norm(hidden))[:, -1],
+                (hidden_states,),
+            )
+            self.captures += 1
+        logits = self.final_phase(hidden_states)
+        self.replays += 1
+        return logits
+
+    def close(self):
+        for phase in self.pre_phases + self.post_phases:
+            if phase is not None:
+                phase.close()
+        if self.final_phase is not None:
+            self.final_phase.close()
         self.owner = None
         self.past_key_values = None
-        self.static_embeds = None
-        self.static_position_ids = None
-        self.stream = None
+        self.pre_phases = None
+        self.post_phases = None
+        self.final_phase = None
 
 @dataclass
 class Llama2Config:
@@ -686,13 +754,9 @@ class Attention(nn.Module):
         xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
         present_key_value = None
-        static_mask = None
         if isinstance(past_key_value, _StaticDecodeKV):
             past_key_value.append(xk, xv)
-            bucket = min(past_key_value.bucket, past_key_value.key.shape[2])
-            xk = past_key_value.key[:, :, :bucket]
-            xv = past_key_value.value[:, :, :bucket]
-            static_mask = past_key_value.mask[..., :bucket]
+            xk, xv = past_key_value.active()
             present_key_value = past_key_value
         elif past_key_value is not None:
             index = 0
@@ -717,8 +781,6 @@ class Attention(nn.Module):
                 xv = xv[:, :, -sliding_window:]
                 attention_mask = attention_mask[..., -sliding_window:] if attention_mask is not None else None
 
-        if static_mask is not None:
-            attention_mask = static_mask
         gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
         output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
         return self.o_proj(output), present_key_value
@@ -1082,7 +1144,6 @@ class BaseGenerate:
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
         # Generation loop
-        prompt_length = embeds.shape[1]
         current_input_ids = initial_input_ids
         graph_enabled = bool(
             getattr(self.model.config, "static_decode_graph", False)
@@ -1100,7 +1161,6 @@ class BaseGenerate:
         )
         frozen_weights = []
         graph_execution = None
-        active_bucket = None
         stable_calls = 0
         try:
             for step in tqdm(range(max_length), desc="Generating tokens"):
@@ -1134,16 +1194,6 @@ class BaseGenerate:
                         )
                     logits = self.logits(x)[:, -1]
                 else:
-                    next_valid = prompt_length + step
-                    bucket = min(
-                        ((next_valid + 255) // 256) * 256, max_cache_len
-                    )
-                    if bucket != active_bucket:
-                        active_bucket = bucket
-                        stable_calls = 0
-                        for cache in past_key_values:
-                            cache.bucket = bucket
-
                     if stable_calls < 2:
                         x, _, past_key_values = self.model.forward(
                             None,
@@ -1156,10 +1206,7 @@ class BaseGenerate:
                         logits = self.logits(x)[:, -1]
                         stable_calls += 1
                     else:
-                        graph_execution.stage(embeds, position_ids)
-                        if graph_execution.bucket != bucket:
-                            graph_execution.capture_or_update(bucket)
-                        logits = graph_execution.replay()
+                        logits = graph_execution.replay(embeds, position_ids)
 
                 next_token = self.sample_token(
                     logits,
@@ -1193,8 +1240,6 @@ class BaseGenerate:
             if graph_execution is not None:
                 self._last_decode_graph_stats = {
                     "captures": graph_execution.captures,
-                    "updates": graph_execution.updates,
-                    "reinstantiations": graph_execution.reinstantiations,
                     "replays": graph_execution.replays,
                 }
                 graph_execution.close()
