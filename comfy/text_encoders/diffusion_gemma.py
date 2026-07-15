@@ -34,6 +34,7 @@ _REQUEST_W4_ACTIVATION_DTYPE = contextvars.ContextVar(
 _REQUEST_W4A8_LAYERS = contextvars.ContextVar(
     "diffusion_gemma_request_w4a8_layers", default=frozenset(),
 )
+_DEFAULT_THINKING_W4A8_LAYERS = frozenset({18})
 
 
 def _parse_w4a8_layers(value):
@@ -2291,7 +2292,10 @@ class DiffusionGemmaClipModel(Gemma4Model):
         for k in ("do_sample", "temperature", "top_k", "top_p", "min_p", "repetition_penalty", "presence_penalty"):
             kwargs.pop(k, None)
         linear_dtype = None if thinking is None else ("int4" if thinking else "int8")
-        w4a8_layers = _parse_w4a8_layers(os.environ.get("COMFY_DG_THINKING_W4A8_LAYERS")) if thinking else frozenset()
+        w4a8_layers = frozenset()
+        if thinking:
+            configured_layers = os.environ.get("COMFY_DG_THINKING_W4A8_LAYERS")
+            w4a8_layers = _DEFAULT_THINKING_W4A8_LAYERS if configured_layers is None else _parse_w4a8_layers(configured_layers)
         request_token = _REQUEST_W4_ACTIVATION_DTYPE.set(linear_dtype)
         layer_token = _REQUEST_W4A8_LAYERS.set(w4a8_layers)
         try:

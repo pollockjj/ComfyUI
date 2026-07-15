@@ -582,7 +582,9 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             with mock.patch.dict(os.environ, {"COMFY_DG_THINKING_W4A8_LAYERS": "1,7"}):
                 model.generate(_Gemma4TokenBatch({"gemma4": [[(1, 1.0)]]}, thinking=True), generation_mode="diffusion")
             model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=False)
-        self.assertEqual(seen, [("int4", frozenset({1, 7})), ("int8", frozenset())])
+            with mock.patch.dict(os.environ, {}, clear=True):
+                model.generate(_Gemma4TokenBatch({"gemma4": [[(1, 1.0)]]}, thinking=True), generation_mode="diffusion")
+        self.assertEqual(seen, [("int4", frozenset({1, 7})), ("int8", frozenset()), ("int4", frozenset({18}))])
         self.assertIsNone(_REQUEST_W4_ACTIVATION_DTYPE.get())
         self.assertEqual(_REQUEST_W4A8_LAYERS.get(), frozenset())
 
