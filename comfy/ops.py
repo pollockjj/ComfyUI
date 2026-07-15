@@ -179,7 +179,7 @@ def cast_modules_with_vbar(
                 s, resolution_key
             )
         resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
-        prefetch = {
+        prefetch_state = {
             "signature": signature,
             "resident": resident,
             "execution_transaction": execution_transaction,
@@ -187,7 +187,7 @@ def cast_modules_with_vbar(
         }
 
         if resident:
-            s._prefetch = prefetch
+            s._prefetch = prefetch_state
             continue
 
         materialize_meta_param(s, ["weight", "bias"])
@@ -254,11 +254,11 @@ def cast_modules_with_vbar(
                 handle_pin(lowvram_source, pin, lowvram_source, lowvram_dest, subset="patches", size=lowvram_size)
 
 
-        prefetch["xfer_dest"] = xfer_dest
-        prefetch["cast_dest"] = cast_dest
-        prefetch["cast_geometry"] = cast_geometry
-        prefetch["needs_cast"] = needs_cast
-        s._prefetch = prefetch
+        prefetch_state["xfer_dest"] = xfer_dest
+        prefetch_state["cast_dest"] = cast_dest
+        prefetch_state["cast_geometry"] = cast_geometry
+        prefetch_state["needs_cast"] = needs_cast
+        s._prefetch = prefetch_state
 
     return offload_stream
 

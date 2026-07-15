@@ -62,13 +62,16 @@ def dynamic_vram_execution_mutation(root_modules, action):
 
 
 def dynamic_vram_mutation_guard(action):
+    module_type = torch.nn.Module
+    mutation_scope = dynamic_vram_execution_mutation
+
     def decorate(function):
         @functools.wraps(function)
         def guarded(owner, *args, **kwargs):
             root_module = owner.model
-            if not isinstance(root_module, torch.nn.Module):
+            if not isinstance(root_module, module_type):
                 root_module = root_module.model
-            with dynamic_vram_execution_mutation((root_module,), action):
+            with mutation_scope((root_module,), action):
                 return function(owner, *args, **kwargs)
         return guarded
     return decorate
@@ -1496,10 +1499,8 @@ class _DynamicVRAMExecutionLeaseHandle:
     def release(self):
         if self._released:
             return
-        try:
-            self._transaction.release_reference()
-        finally:
-            self._released = True
+        self._transaction.release_reference()
+        self._released = True
 
     def __enter__(self):
         return self
@@ -1792,15 +1793,22 @@ class _DynamicVRAMExecutionTransaction:
             torch.cuda.synchronize(device)
 
     def _detach(self):
-        for module in self.modules:
-            if module.__dict__.get(_DYNAMIC_VRAM_EXECUTION_ATTR) is self:
-                module.__dict__.pop(_DYNAMIC_VRAM_EXECUTION_ATTR)
-        if (
-            self.root_module is not None
-            and self.root_module.__dict__.get(_DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
-            is self
-        ):
-            self.root_module.__dict__.pop(_DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
+        first_error = None
+        owners = tuple(
+            (module, _DYNAMIC_VRAM_EXECUTION_ATTR) for module in self.modules
+        )
+        if self.root_module is not None:
+            owners += ((self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR),)
+        for owner, attribute in owners:
+            try:
+                namespace = object.__getattribute__(owner, "__dict__")
+                if namespace.get(attribute) is self:
+                    namespace.pop(attribute)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     def _state_valid(self, state_token):
         if state_token != self.state_token:
@@ -1830,6 +1838,7 @@ class _DynamicVRAMExecutionTransaction:
     def _teardown(self):
         self.active = False
         first_error = None
+        detach_error = None
         try:
             self._release_pins()
         except BaseException as error:
@@ -1837,11 +1846,13 @@ class _DynamicVRAMExecutionTransaction:
         try:
             self._detach()
         except BaseException as error:
+            detach_error = error
             if first_error is None:
                 first_error = error
         _DYNAMIC_VRAM_ACTIVE_TRANSACTIONS.discard(self)
-        self.modules = ()
-        self.root_module = None
+        if detach_error is None:
+            self.modules = ()
+            self.root_module = None
         self.state_source = None
         if first_error is not None:
             raise first_error
@@ -1891,6 +1902,8 @@ class _DynamicVRAMExecutionTransaction:
         with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
             with self.lock:
                 if self.references <= 0:
+                    if self.modules or self.root_module is not None:
+                        self._teardown()
                     return
                 self.references -= 1
                 if self.references > 0:
