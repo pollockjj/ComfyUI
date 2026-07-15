@@ -569,8 +569,7 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
     def test_thinking_selection_is_request_scoped(self):
         model = DiffusionGemmaClipModel.__new__(DiffusionGemmaClipModel)
         model.execution_device = torch.device("cpu")
-        seen = []
-        model.transformer = types.SimpleNamespace(generate=lambda **kwargs: seen.append(_REQUEST_W4_ACTIVATION_DTYPE.get()))
+        seen, model.transformer = [], types.SimpleNamespace(generate=lambda **kwargs: seen.append(_REQUEST_W4_ACTIVATION_DTYPE.get()))
         with mock.patch("comfy.text_encoders.diffusion_gemma.sd1_clip.SDClipModel.process_tokens", return_value=(torch.zeros(1), None, None, [])):
             model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=True)
             model.generate([[(1, 1.0)]], generation_mode="diffusion", thinking=False)
