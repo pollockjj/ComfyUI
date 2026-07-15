@@ -17,7 +17,12 @@ if not torch.cuda.is_available():
 
 import comfy.model_management  # noqa: E402
 from comfy.ops import mixed_precision_ops  # noqa: E402
-from comfy.quant_ops import QuantizedTensor, TensorCoreMXFP8Layout, TensorWiseINT8Layout  # noqa: E402
+from comfy.quant_ops import (  # noqa: E402
+    QuantizedTensor,
+    TensorCoreConvRotW4A4Layout,
+    TensorCoreMXFP8Layout,
+    TensorWiseINT8Layout,
+)
 from comfy.text_encoders.diffusion_gemma import (  # noqa: E402
     DiffusionGenerate,
     DiffusionGemmaAttention,
@@ -425,6 +430,30 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
             bias_lowvram_function=None,
         )
 
+    @staticmethod
+    def _w4a4_bank(qdata_shape, scale_shape, orig_shape, group_size, device="meta"):
+        params = TensorCoreConvRotW4A4Layout.Params(
+            scale=torch.empty(scale_shape, dtype=torch.float32, device=device),
+            convrot_groupsize=group_size,
+            orig_dtype=torch.bfloat16,
+            orig_shape=orig_shape,
+            linear_dtype="int4",
+        )
+        return types.SimpleNamespace(
+            quant_format="convrot_w4a4",
+            weight=QuantizedTensor(
+                torch.empty(qdata_shape, dtype=torch.int8, device=device),
+                "TensorCoreConvRotW4A4Layout",
+                params,
+            ),
+            bias=None,
+            _full_precision_mm=False,
+            weight_function=[],
+            bias_function=[],
+            weight_lowvram_function=None,
+            bias_lowvram_function=None,
+        )
+
     def test_mxfp8_expert_bank_contract(self):
         experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
         torch.nn.Module.__init__(experts)
@@ -510,6 +539,21 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         self.assertEqual((packed.call_count, packed.call_args_list[0].args[1].tolist()), (2, [0, 1, 2]))
         self.assertTrue(torch.equal(output, hidden))
+
+    def test_w4a4_convrot_expert_bank_contract(self):
+        experts = DiffusionGemmaExperts.__new__(DiffusionGemmaExperts)
+        torch.nn.Module.__init__(experts)
+        experts.unfused = False
+        experts._bank_mode = None
+        experts._banks = (
+            self._w4a4_bank((128, 1408, 1408), (128, 1408), (128, 1408, 2816), 256),
+            self._w4a4_bank((128, 2816, 352), (128, 2816), (128, 2816, 704), 64),
+        )
+
+        experts._configure_loaded_banks(experts, None)
+
+        self.assertEqual(experts._bank_mode, "fused_w4a4_convrot")
+        self.assertTrue(experts._grouped_w4a4_convrot_compatible)
 
 if __name__ == "__main__":
     unittest.main()
