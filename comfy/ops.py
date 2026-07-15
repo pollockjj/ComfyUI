@@ -88,6 +88,34 @@ def materialize_meta_param(s, param_keys):
 
 
 # FIXME: add n=1 cache hit fast path
+def _vbar_resolution_key(
+    module, dtype, device, bias_dtype, compute_dtype, want_requant
+):
+    weight_dtype = dtype
+    if weight_dtype is None:
+        weight_dtype = getattr(module, "weight_comfy_model_dtype", None)
+        if weight_dtype is None:
+            weight_dtype = getattr(module.weight, "_model_dtype", module.weight.dtype)
+
+    if module.bias is None:
+        effective_bias_dtype = None
+    else:
+        effective_bias_dtype = bias_dtype
+        if effective_bias_dtype is None:
+            effective_bias_dtype = getattr(module, "bias_comfy_model_dtype", None)
+        if effective_bias_dtype is None:
+            effective_bias_dtype = getattr(
+                module.bias, "_model_dtype", module.bias.dtype
+            )
+    return (
+        weight_dtype,
+        device,
+        effective_bias_dtype,
+        compute_dtype,
+        bool(want_requant),
+    )
+
+
 def cast_modules_with_vbar(
     comfy_modules,
     dtype,
@@ -96,6 +124,7 @@ def cast_modules_with_vbar(
     non_blocking,
     compute_dtype=None,
     want_requant=False,
+    prefetch=False,
 ):
     offload_stream = None
     cast_buffer = None
@@ -137,11 +166,11 @@ def cast_modules_with_vbar(
         execution_transaction = getattr(
             s, comfy.model_management._DYNAMIC_VRAM_EXECUTION_ATTR, None
         )
-        if execution_transaction is not None and dtype is None:
+        if execution_transaction is not None and prefetch:
             execution_transaction.note_prefetch()
             execution_transaction = None
-        resolution_key = (
-            dtype, device, bias_dtype, compute_dtype, bool(want_requant)
+        resolution_key = _vbar_resolution_key(
+            s, dtype, device, bias_dtype, compute_dtype, want_requant
         )
         if execution_transaction is None:
             signature = comfy_aimdo.model_vbar.vbar_fault(s._v)

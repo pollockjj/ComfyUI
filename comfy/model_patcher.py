@@ -379,6 +379,7 @@ class ModelPatcher:
     def get_clone_model_override(self):
         return self.model, (self.backup, self.backup_buffers, self.object_patches_backup, self.pinned)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model clone")
     def clone(self, disable_dynamic=False, model_override=None, force_deepcopy=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "model clone"
@@ -719,6 +720,7 @@ class ModelPatcher:
             else:
                 return comfy.utils.get_attr(self.model, name)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model patch move")
     def model_patches_to(self, device):
         to = self.model_options["transformer_options"]
         if "patches" in to:
@@ -789,6 +791,7 @@ class ModelPatcher:
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model patch update")
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             p = set()
@@ -836,6 +839,7 @@ class ModelPatcher:
                 p[k] = [(weight, convert_func)]
         return p
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model state export")
     def model_state_dict(self, filter_prefix=None):
         with self.use_ejected():
             sd = self.model.state_dict()
@@ -846,6 +850,7 @@ class ModelPatcher:
                         sd.pop(k)
             return sd
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model weight patch")
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False, return_weight=False, force_cast=False):
         weight, set_func, convert_func = get_key_weight(self.model, key)
         if key not in self.patches and not force_cast:
@@ -929,6 +934,7 @@ class ModelPatcher:
                 loading.append(sort_criteria + (module_mem, n, m, params))
         return loading
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model load")
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
         with self.use_ejected():
             self.unpatch_hooks()
@@ -1060,6 +1066,7 @@ class ModelPatcher:
 
             self.apply_hooks(self.forced_hooks, force_apply=True)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model patch")
     def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "model patch"
@@ -1080,6 +1087,7 @@ class ModelPatcher:
         self.inject_model()
         return self.model
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model unpatch")
     def unpatch_model(self, device_to=None, unpatch_weights=True):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "model unpatch"
@@ -1124,6 +1132,7 @@ class ModelPatcher:
 
         self.object_patches_backup.clear()
 
+    @comfy.model_management.dynamic_vram_mutation_guard("partial model unload")
     def partially_unload(self, device_to, memory_to_free=0, force_patch_weights=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "partial model unload"
@@ -1212,6 +1221,7 @@ class ModelPatcher:
             logging.info("Unloaded partially: {:.2f} MB freed, {:.2f} MB remains loaded, {:.2f} MB buffer reserved, lowvram patches: {}".format(memory_freed / (1024 * 1024), self.model.model_loaded_weight_memory / (1024 * 1024), offload_buffer / (1024 * 1024), self.model.lowvram_patch_counter))
             return memory_freed
 
+    @comfy.model_management.dynamic_vram_mutation_guard("partial model load")
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "partial model load"
@@ -1254,6 +1264,7 @@ class ModelPatcher:
     def partially_unload_ram(self, ram_to_unload):
         return 0
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model detach")
     def detach(self, unpatch_all=True):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "model detach"
@@ -1273,6 +1284,7 @@ class ModelPatcher:
         logging.warning("The ModelPatcher.calculate_weight function is deprecated, please use: comfy.lora.calculate_weight instead")
         return comfy.lora.calculate_weight(patches, weight, key, intermediate_dtype=intermediate_dtype)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model cleanup")
     def cleanup(self):
         self.model_patches_call_function(function_name="cleanup")
         self.clean_hooks()
@@ -1381,6 +1393,7 @@ class ModelPatcher:
     def use_ejected(self, skip_and_inject_on_exit_only=False):
         return AutoPatcherEjector(self, skip_and_inject_on_exit_only=skip_and_inject_on_exit_only)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model injection")
     def inject_model(self):
         if self.is_injected or self.skip_injection:
             return
@@ -1392,6 +1405,7 @@ class ModelPatcher:
             for callback in self.get_all_callbacks(CallbacksMP.ON_INJECT_MODEL):
                 callback(self)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model ejection")
     def eject_model(self):
         if not self.is_injected:
             return
@@ -1499,6 +1513,7 @@ class ModelPatcher:
             callback(self, hooks, target_dict, model_options, registered)
         return registered
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model hook patch update")
     def add_hook_patches(self, hook: comfy.hooks.WeightHook, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             # NOTE: this mirrors behavior of add_patches func
@@ -1554,6 +1569,7 @@ class ModelPatcher:
             callback(self, hooks)
         return comfy.hooks.create_transformer_options_from_hooks(self, hooks, transformer_options)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model hook patch")
     def patch_hooks(self, hooks: comfy.hooks.HookGroup):
         with self.use_ejected():
             if hooks is not None:
@@ -1590,6 +1606,7 @@ class ModelPatcher:
                 self.unpatch_hooks()
             self.current_hooks = hooks
 
+    @comfy.model_management.dynamic_vram_mutation_guard("cached model hook patch")
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
         if key not in self.hook_backup:
             weight: torch.Tensor = comfy.utils.get_attr(self.model, key)
@@ -1605,6 +1622,7 @@ class ModelPatcher:
         self.cached_hook_patches.clear()
         self.patch_hooks(None)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model hook weight patch")
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
         if key not in combined_patches:
             return
@@ -1644,6 +1662,7 @@ class ModelPatcher:
         del out_weight
         del weight
 
+    @comfy.model_management.dynamic_vram_mutation_guard("model hook unpatch")
     def unpatch_hooks(self, whitelist_keys_set: set[str]=None) -> None:
         with self.use_ejected():
             if len(self.hook_backup) == 0:
@@ -1783,6 +1802,7 @@ class ModelPatcherDynamic(ModelPatcher):
         #use all ModelPatcherDynamic this is ignored and its all done dynamically.
         return super().memory_required(input_shape=input_shape) * 1.3 + (1024 ** 3)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM backup restore")
     def restore_loaded_backups(self):
         restored = self.model.model_loaded_weight_memory
         for key in list(self.backup.keys()):
@@ -1794,6 +1814,7 @@ class ModelPatcherDynamic(ModelPatcher):
         return restored
 
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM model load")
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False, dirty=False):
 
         #Force patching doesn't make sense in Dynamic loading, as you dont know what does and
@@ -1948,6 +1969,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
             self.apply_hooks(self.forced_hooks, force_apply=True)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM partial model unload")
     def partially_unload(self, device_to, memory_to_free=0, force_patch_weights=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "DynamicVRAM partial model unload"
@@ -1969,6 +1991,7 @@ class ModelPatcherDynamic(ModelPatcher):
     def pinned_memory_size(self):
         return (self.model.dynamic_pins[self.load_device]["weights"][3][0])
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM host-pin unregister")
     def unregister_inactive_pins(self, ram_to_unload, subsets=[ "weights", "patches" ]):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "DynamicVRAM host-pin unregister"
@@ -1997,6 +2020,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     return freed
         return freed
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM RAM unload")
     def partially_unload_ram(self, ram_to_unload, subsets=[ "weights", "patches" ]):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "DynamicVRAM RAM unload"
@@ -2030,6 +2054,7 @@ class ModelPatcherDynamic(ModelPatcher):
         assert not load_weights
         return super().patch_model(load_weights=load_weights, force_patch_weights=force_patch_weights)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM model unpatch")
     def unpatch_model(self, device_to=None, unpatch_weights=True):
         super().unpatch_model(device_to=None, unpatch_weights=False)
 
@@ -2039,6 +2064,7 @@ class ModelPatcherDynamic(ModelPatcher):
             for m in self.model.modules():
                 move_weight_functions(m, device_to)
 
+    @comfy.model_management.dynamic_vram_mutation_guard("DynamicVRAM partial model load")
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
         comfy.model_management.assert_no_dynamic_vram_execution_lease(
             self.model, "DynamicVRAM partial model load"

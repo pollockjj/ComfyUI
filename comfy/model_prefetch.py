@@ -59,7 +59,9 @@ def prefetch_queue_pop(queue, device, module):
                 if lowvram_fn is not None:
                     registerable_size += lowvram_fn.memory_required()
 
-        offload_stream = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True)
+        offload_stream = comfy.ops.cast_modules_with_vbar(
+            comfy_modules, None, device, None, True, prefetch=True
+        )
         if not comfy.model_management.args.fast_disk:
             comfy.model_management.ensure_pin_registerable(registerable_size)
         comfy.model_management.sync_stream(device, offload_stream)

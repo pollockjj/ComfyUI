@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import psutil
+import functools
 import logging
 from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
@@ -39,6 +40,61 @@ import comfy_aimdo.vram_buffer
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy.model_patcher import ModelPatcher
+
+
+_DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK = threading.RLock()
+_DYNAMIC_VRAM_MUTATION_DEPTH = 0
+_DYNAMIC_VRAM_ACTIVE_TRANSACTIONS = set()
+
+
+@contextmanager
+def dynamic_vram_execution_mutation(root_modules, action):
+    global _DYNAMIC_VRAM_MUTATION_DEPTH
+    with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+        root_modules = tuple(root_modules)
+        for root_module in root_modules:
+            assert_no_dynamic_vram_execution_lease(root_module, action)
+        _DYNAMIC_VRAM_MUTATION_DEPTH += 1
+        try:
+            yield
+        finally:
+            _DYNAMIC_VRAM_MUTATION_DEPTH -= 1
+
+
+def dynamic_vram_mutation_guard(action):
+    def decorate(function):
+        @functools.wraps(function)
+        def guarded(owner, *args, **kwargs):
+            root_module = owner.model
+            if not isinstance(root_module, torch.nn.Module):
+                root_module = root_module.model
+            with dynamic_vram_execution_mutation((root_module,), action):
+                return function(owner, *args, **kwargs)
+        return guarded
+    return decorate
+
+
+def dynamic_vram_all_models_mutation_guard(action):
+    def decorate(function):
+        @functools.wraps(function)
+        def guarded(*args, **kwargs):
+            with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+                if any(
+                    transaction.active
+                    for transaction in _DYNAMIC_VRAM_ACTIVE_TRANSACTIONS
+                ):
+                    raise RuntimeError(
+                        f"Cannot perform {action} while a DynamicVRAM execution lease is active"
+                    )
+                roots = (
+                    model.model
+                    for loaded_model in current_loaded_models
+                    if (model := loaded_model.model) is not None
+                )
+                with dynamic_vram_execution_mutation(roots, action):
+                    return function(*args, **kwargs)
+        return guarded
+    return decorate
 
 
 class VRAMState(Enum):
@@ -733,6 +789,7 @@ class LoadedModel:
         else:
             return self.model_memory()
 
+    @dynamic_vram_mutation_guard("model load")
     def model_load(self, lowvram_model_memory=0, force_patch_weights=False):
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
@@ -756,6 +813,7 @@ class LoadedModel:
             return True
         return False
 
+    @dynamic_vram_mutation_guard("model unload")
     def model_unload(self, memory_to_free=None, unpatch_weights=True):
         assert_no_dynamic_vram_execution_lease(self.model.model, "model unload")
         if memory_to_free is not None:
@@ -769,6 +827,7 @@ class LoadedModel:
         self.real_model = None
         return True
 
+    @dynamic_vram_mutation_guard("model load")
     def model_use_more_vram(self, extra_memory, force_patch_weights=False):
         return self.model.partially_load(self.device, extra_memory, force_patch_weights=force_patch_weights)
 
@@ -907,9 +966,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             if loaded_model.model.is_clone(current_loaded_models[i].model):
                 to_unload = [i] + to_unload
         for i in to_unload:
-            model_to_unload = current_loaded_models.pop(i)
-            model_to_unload.model.detach(unpatch_all=False)
-            model_to_unload.model_finalizer.detach()
+            model_to_unload = current_loaded_models[i]
+            model_patcher = model_to_unload.model
+            with dynamic_vram_execution_mutation(
+                (model_patcher.model,), "clone replacement"
+            ):
+                model_patcher.detach(unpatch_all=False)
+                model_to_unload.model_finalizer.detach()
+                current_loaded_models.pop(i)
 
     total_memory_required = {}
     total_pins_required = {}
@@ -1366,7 +1430,6 @@ _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR = "_dynamic_vram_execution_transaction"
 _DYNAMIC_VRAM_PAGE_SIZE = 32 * 1024 * 1024
 _DYNAMIC_VRAM_EXECUTION_GENERATION = 0
 _DYNAMIC_VRAM_EXECUTION_GENERATION_LOCK = threading.Lock()
-_DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK = threading.RLock()
 
 
 def _dynamic_vram_tensor_fingerprint(tensor):
@@ -1433,8 +1496,10 @@ class _DynamicVRAMExecutionLeaseHandle:
     def release(self):
         if self._released:
             return
-        self._released = True
-        self._transaction.release_reference()
+        try:
+            self._transaction.release_reference()
+        finally:
+            self._released = True
 
     def __enter__(self):
         return self
@@ -1468,6 +1533,10 @@ class _DynamicVRAMExecutionTransaction:
     @classmethod
     def acquire(cls, root_module, state_token, state_source=None, state_attr=None):
         with _DYNAMIC_VRAM_EXECUTION_ACQUIRE_LOCK:
+            if _DYNAMIC_VRAM_MUTATION_DEPTH:
+                raise RuntimeError(
+                    "Cannot acquire a DynamicVRAM execution lease during model mutation"
+                )
             existing = getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None)
             if existing is not None:
                 with existing.lock:
@@ -1512,12 +1581,10 @@ class _DynamicVRAMExecutionTransaction:
                 for module in modules:
                     setattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, transaction)
                     attached.append(module)
+                _DYNAMIC_VRAM_ACTIVE_TRANSACTIONS.add(transaction)
             except BaseException:
-                for module in reversed(attached):
-                    if getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None) is transaction:
-                        delattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR)
-                if getattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None) is transaction:
-                    delattr(root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
+                transaction.active = False
+                transaction._detach()
                 raise
             return _DynamicVRAMExecutionLeaseHandle(transaction)
 
@@ -1578,22 +1645,26 @@ class _DynamicVRAMExecutionTransaction:
             if allocation_record is not None:
                 return allocation_record["signature"]
 
-            signature = comfy_aimdo.model_vbar.vbar_fault(allocation)
-            if signature is None:
-                self._mark_unsafe("fault_none")
-                return None
-            try:
-                pages = self._allocation_pages(allocation)
-            except BaseException:
-                comfy_aimdo.model_vbar.vbar_unpin(allocation)
-                raise
+            pages = self._allocation_pages(allocation)
             allocation_record = {
                 "allocation": allocation,
-                "signature": signature,
+                "signature": None,
                 "pages": pages,
             }
             self.allocation_records[allocation_key] = allocation_record
             self.release_order.append(allocation_record)
+            try:
+                signature = comfy_aimdo.model_vbar.vbar_fault(allocation)
+            except BaseException:
+                self.release_order.pop()
+                self.allocation_records.pop(allocation_key)
+                raise
+            if signature is None:
+                self.release_order.pop()
+                self.allocation_records.pop(allocation_key)
+                self._mark_unsafe("fault_none")
+                return None
+            allocation_record["signature"] = signature
             return signature
 
     def note_fault_none(self):
@@ -1718,10 +1789,14 @@ class _DynamicVRAMExecutionTransaction:
 
     def _detach(self):
         for module in self.modules:
-            if getattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR, None) is self:
-                delattr(module, _DYNAMIC_VRAM_EXECUTION_ATTR)
-        if getattr(self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR, None) is self:
-            delattr(self.root_module, _DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
+            if module.__dict__.get(_DYNAMIC_VRAM_EXECUTION_ATTR) is self:
+                module.__dict__.pop(_DYNAMIC_VRAM_EXECUTION_ATTR)
+        if (
+            self.root_module is not None
+            and self.root_module.__dict__.get(_DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
+            is self
+        ):
+            self.root_module.__dict__.pop(_DYNAMIC_VRAM_EXECUTION_ROOT_ATTR)
 
     def _state_valid(self, state_token):
         if state_token != self.state_token:
@@ -1736,15 +1811,34 @@ class _DynamicVRAMExecutionTransaction:
             self._synchronize_allocations()
         except BaseException as error:
             first_error = error
-        for record in reversed(self.release_order):
+        while self.release_order:
+            record = self.release_order.pop()
             try:
                 comfy_aimdo.model_vbar.vbar_unpin(record["allocation"])
             except BaseException as error:
                 if first_error is None:
                     first_error = error
-        self.release_order = []
-        self.allocation_records = {}
-        self.module_records = {}
+        self.allocation_records.clear()
+        self.module_records.clear()
+        if first_error is not None:
+            raise first_error
+
+    def _teardown(self):
+        self.active = False
+        first_error = None
+        try:
+            self._release_pins()
+        except BaseException as error:
+            first_error = error
+        try:
+            self._detach()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        _DYNAMIC_VRAM_ACTIVE_TRANSACTIONS.discard(self)
+        self.modules = ()
+        self.root_module = None
+        self.state_source = None
         if first_error is not None:
             raise first_error
 
@@ -1768,9 +1862,7 @@ class _DynamicVRAMExecutionTransaction:
                             break
                         self._validate_module_record(module, record, full=True)
                 if not self.capture_safe:
-                    self._release_pins()
-                    self._detach()
-                    self.active = False
+                    self._teardown()
                 return self.capture_safe
 
     def valid(self, state_token, full=False):
@@ -1799,13 +1891,7 @@ class _DynamicVRAMExecutionTransaction:
                 self.references -= 1
                 if self.references > 0:
                     return
-                if self.active:
-                    self._release_pins()
-                    self._detach()
-                    self.active = False
-                self.modules = ()
-                self.root_module = None
-                self.state_source = None
+                self._teardown()
 
 
 def acquire_dynamic_vram_execution_lease(
@@ -1836,11 +1922,8 @@ def assert_no_dynamic_vram_execution_lease(root_module, action):
                     f"Cannot perform {action} while a DynamicVRAM execution lease is active"
                 )
 
+@dynamic_vram_all_models_mutation_guard("cast-buffer reset")
 def reset_cast_buffers():
-    for loaded_model in current_loaded_models:
-        model = loaded_model.model
-        if model is not None:
-            assert_no_dynamic_vram_execution_lease(model.model, "cast-buffer reset")
     global LARGEST_CASTED_WEIGHT
     global LARGEST_AIMDO_CASTED_WEIGHT
 
