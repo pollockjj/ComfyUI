@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import Qwen2Tokenizer
 
 from comfy import sd1_clip
+import comfy.model_management
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
 from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig
@@ -132,15 +133,42 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
         tokens_only = [[t[0] for t in b] for b in tokens]
         embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
         position_ids, visual_pos_masks, deepstack = self.transformer.build_image_inputs(embeds, embeds_info)
-        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
-                                         presence_penalty=presence_penalty, position_ids=position_ids,
-                                         visual_pos_masks=visual_pos_masks, deepstack_embeds=deepstack)
+        state_token = getattr(self, "_weight_patches_uuid", None)
+        lease = comfy.model_management.acquire_dynamic_vram_execution_lease(
+            self.transformer.model, state_token
+        )
+        try:
+            return self.transformer.generate(
+                embeds,
+                do_sample,
+                max_length,
+                temperature,
+                top_k,
+                top_p,
+                min_p,
+                repetition_penalty,
+                seed,
+                presence_penalty=presence_penalty,
+                position_ids=position_ids,
+                visual_pos_masks=visual_pos_masks,
+                deepstack_embeds=deepstack,
+                _dynamic_vram_lease=lease,
+                _dynamic_vram_state_token=state_token,
+            )
+        finally:
+            if lease is not None:
+                lease.release()
 
 
 class Qwen3VLTEModel(sd1_clip.SD1ClipModel):
     def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen3vl_8b"):
         clip_model = lambda **kw: Qwen3VLClipModel(**kw, model_type=model_type)
         super().__init__(device=device, dtype=dtype, name=model_type, clip_model=clip_model, model_options=model_options)
+
+    def generate(self, tokens, **kwargs):
+        clip_model = getattr(self, self.clip)
+        clip_model._weight_patches_uuid = self.current_weight_patches_uuid
+        return super().generate(tokens, **kwargs)
 
 
 class Qwen3VLSDTokenizer(sd1_clip.SDTokenizer):

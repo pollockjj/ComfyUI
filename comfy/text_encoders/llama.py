@@ -876,7 +876,7 @@ class BaseGenerate:
                                     torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype), 0))
         return past_key_values
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None):
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, _dynamic_vram_lease=None, _dynamic_vram_state_token=None):
         device = embeds.device
 
         if stop_tokens is None:
@@ -922,6 +922,13 @@ class BaseGenerate:
             if next_pos is not None:  # advance MRoPE position for the next (decode) step
                 position_ids = torch.tensor([[next_pos]], device=device)
                 next_pos += 1
+            if step == 0 and _dynamic_vram_lease is not None:
+                if _dynamic_vram_lease.seal() and not _dynamic_vram_lease.valid(
+                    _dynamic_vram_state_token, full=True
+                ):
+                    raise RuntimeError(
+                        "DynamicVRAM execution lease changed after prefill"
+                    )
             pbar.update(1)
 
             if token_id in stop_tokens:

@@ -126,11 +126,30 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         return buffer
 
     for s in comfy_modules:
+        execution_transaction = getattr(
+            s, comfy.model_management._DYNAMIC_VRAM_EXECUTION_ATTR, None
+        )
+        retained_signature = (
+            execution_transaction.retained_signature(s)
+            if execution_transaction is not None
+            else None
+        )
+        if retained_signature is not None:
+            s._prefetch = {
+                "signature": retained_signature,
+                "resident": True,
+                "execution_transaction": execution_transaction,
+            }
+            continue
+
         signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        if execution_transaction is not None and signature is None:
+            execution_transaction.note_fault_none()
         resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
         prefetch = {
             "signature": signature,
             "resident": resident,
+            "execution_transaction": execution_transaction,
         }
 
         if resident:
@@ -319,6 +338,7 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         prefetched = hasattr(s, "_prefetch")
         offload_stream = None
         offload_device = None
+        execution_transaction = None
         if not prefetched:
             offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
             comfy.model_management.sync_stream(device, offload_stream)
@@ -326,14 +346,33 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         weight, bias = resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant)
 
         if not prefetched:
-            if getattr(s, "_prefetch")["signature"] is not None:
+            prefetch = getattr(s, "_prefetch")
+            signature = prefetch["signature"]
+            execution_transaction = prefetch.get("execution_transaction")
+            if signature is not None:
                 offload_device = device
             for param_key in ("weight", "bias"):
                 lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
                 if lowvram_fn is not None:
                     lowvram_fn.clear_prepared()
             delattr(s, "_prefetch")
-        return format_return((weight, bias, (offload_stream, offload_device, None)), offloadable)
+            if execution_transaction is not None:
+                resolution_key = (
+                    dtype, device, bias_dtype, compute_dtype, bool(want_requant)
+                )
+                execution_transaction.adopt_resolved(
+                    s, signature, weight, bias, resolution_key
+                )
+        lease_token = (
+            execution_transaction
+            if execution_transaction is not None
+            and execution_transaction.owns_pin(s)
+            else None
+        )
+        return format_return(
+            (weight, bias, (offload_stream, offload_device, lease_token)),
+            offloadable,
+        )
 
 
     if offloadable and (device != s.weight.device or
@@ -391,7 +430,15 @@ def uncast_bias_weight(s, weight, bias, offload_stream):
     device=None
     #FIXME: This is really bad RTTI
     if weight_a is not None and not isinstance(weight_a, torch.Tensor):
-        comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        execution_transaction = getattr(
+            s, comfy.model_management._DYNAMIC_VRAM_EXECUTION_ATTR, None
+        )
+        if (
+            execution_transaction is None
+            or bias_a is not execution_transaction
+            or not execution_transaction.owns_pin(s)
+        ):
+            comfy_aimdo.model_vbar.vbar_unpin(s._v)
         device = weight_a
     if os is None:
         return
