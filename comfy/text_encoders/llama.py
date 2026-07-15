@@ -1378,12 +1378,15 @@ class BaseGenerate:
             vx, _, vpast = self.model.forward(None, embeds=self.model.embed_tokens(batch).to(execution_dtype),
                                               attention_mask=None, past_key_values=past,
                                               position_ids=vpos, input_ids=batch)
-            vpicked = [int(pick(self.logits(vx[:, i:i + 1])[:, -1]).item()) for i in range(gamma + 1)]
-            acc = gamma
+            vpicked = []
+            acc = 0
             for i in range(gamma):
-                if int(drafts[i].item()) != vpicked[i]:
-                    acc = i
+                vpicked.append(int(pick(self.logits(vx[:, i:i + 1])[:, -1]).item()))
+                if int(drafts[i].item()) != vpicked[-1]:
                     break
+                acc += 1
+            if acc == gamma:
+                vpicked.append(int(pick(self.logits(vx[:, gamma:gamma + 1])[:, -1]).item()))
             accepted += acc
             if statics:
                 for kv in statics:
@@ -1475,6 +1478,8 @@ class BaseGenerate:
                 logits = torch.nn.functional.linear(vx, logits_w)
                 if cap:
                     logits = cap * torch.tanh(logits / cap)
+                if do_sample:
+                    return drafts_t, logits[0].float(), vx
                 picked = _pick_batch(logits[0].float())
                 acc = (drafts_t[0] == picked[:gamma]).long().cumprod(0).sum()
                 for kv in statics:
@@ -1496,6 +1501,30 @@ class BaseGenerate:
                     runner["max_len"] = kv.slots
             self._mtp_cap_runner = runner
 
+        def _finish_sampled_cycle(drafts_t, logits, vx, pos_t):
+            picked = []
+            acc = 0
+            for i in range(gamma):
+                token = self.sample_token(logits[i:i + 1].clone(), temperature, top_k,
+                                          top_p, min_p, 1.0, [], generator,
+                                          do_sample=True, presence_penalty=0.0)
+                picked.append(token.view(-1))
+                if int(token.item()) != int(drafts_t[0, i].item()):
+                    break
+                acc += 1
+            if acc == gamma:
+                token = self.sample_token(logits[gamma:gamma + 1].clone(), temperature,
+                                          top_k, top_p, min_p, 1.0, [], generator,
+                                          do_sample=True, presence_penalty=0.0)
+                picked.append(token.view(-1))
+            acc_t = torch.tensor(acc, device=device, dtype=torch.long)
+            for kv in statics:
+                kv.commit(acc_t)
+            picked_t = torch.cat(picked)
+            new_tok = picked_t[-1:].view(1, 1)
+            new_h = vx[:, acc:acc + 1]
+            return drafts_t, picked_t, acc_t, new_tok, new_h, pos_t + acc + 1
+
         out = [int(last_tok.item())]
         pbar.update(1)
         if out[-1] in stop_tokens:
@@ -1513,7 +1542,14 @@ class BaseGenerate:
             nb0 = -(-(p + gamma + 1) // 512) * 512
             for kv in statics:
                 kv.bucket = nb0
-            dts, pk, acc, last_tok, h_last, pos_t = [t.clone() for t in runner["cycle"](last_tok, h_last, pos_t)]
+            cycle_out = runner["cycle"](last_tok, h_last, pos_t)
+            if do_sample:
+                dts, pk, acc, last_tok, h_last, pos_t = [
+                    t.clone() for t in _finish_sampled_cycle(*cycle_out, pos_t)
+                ]
+            else:
+                dts, pk, acc, last_tok, h_last, pos_t = [t.clone() for t in cycle_out]
+            del cycle_out
             records.append((dts, pk, acc))
             # default compile mode: cudagraph capture of the partitioned cycle aborts
             # (CUDA invalid argument) under the ComfyUI server's greenlet execution,
@@ -1557,7 +1593,12 @@ class BaseGenerate:
             if stats and cycles % 16 == 0:
                 torch.cuda.synchronize()
                 _t0 = _time.time()
-            dts, pk, acc, nt, nh, np_ = compiled(last_tok, h_last, pos_t)
+            cycle_out = compiled(last_tok, h_last, pos_t)
+            if do_sample:
+                dts, pk, acc, nt, nh, np_ = _finish_sampled_cycle(*cycle_out, pos_t)
+            else:
+                dts, pk, acc, nt, nh, np_ = cycle_out
+            del cycle_out
             if stats and cycles % 16 == 0:
                 torch.cuda.synchronize()
                 print(f"[MTP-CAP] cycle {cycles}: {(_time.time() - _t0) * 1000:.1f} ms")
