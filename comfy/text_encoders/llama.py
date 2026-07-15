@@ -195,43 +195,47 @@ class _StaticDecodeKV:
                 active_value,
                 enable_gqa=num_heads != active_key.shape[1],
             ).squeeze(2)
-            native_key = self.key.reshape(-1, self.key.shape[2], head_dim)
-            native_value = self.value.reshape_as(native_key)
-            expanded_key = self.key[:, : self.valid].repeat_interleave(
-                self.group_size, dim=2
-            )
-            expanded_value = self.value[:, : self.valid].repeat_interleave(
-                self.group_size, dim=2
-            )
-            expanded_key = expanded_key.reshape(-1, num_heads, head_dim)
-            expanded_value = expanded_value.reshape_as(expanded_key)
-            variants = {"current": self.attention_output}
-            for name, variant_key, variant_value, max_k in (
-                ("native_active", native_key, native_value, self.valid),
-                (
-                    "expanded_active",
-                    expanded_key,
-                    expanded_value,
-                    self.valid,
-                ),
-            ):
-                output = torch.empty_like(self.attention_output)
-                self._run_flash(
-                    output,
-                    query,
-                    variant_key,
-                    variant_value,
-                    max_k,
+            current_mismatches = torch.count_nonzero(
+                self.attention_output != reference
+            ).item()
+            if current_mismatches:
+                native_key = self.key.reshape(-1, self.key.shape[2], head_dim)
+                native_value = self.value.reshape_as(native_key)
+                expanded_key = self.key[:, : self.valid].repeat_interleave(
+                    self.group_size, dim=2
                 )
-                variants[name] = output
-            mismatches = ", ".join(
-                f"{name}={torch.count_nonzero(output != reference).item()}"
-                for name, output in variants.items()
-            )
-            raise RuntimeError(
-                "Qwen FlashAttention real-model validation: "
-                f"active={self.valid}, capacity={self.key.shape[1]}, {mismatches}"
-            )
+                expanded_value = self.value[:, : self.valid].repeat_interleave(
+                    self.group_size, dim=2
+                )
+                expanded_key = expanded_key.reshape(-1, num_heads, head_dim)
+                expanded_value = expanded_value.reshape_as(expanded_key)
+                variants = {"current": self.attention_output}
+                for name, variant_key, variant_value, max_k in (
+                    ("native_active", native_key, native_value, self.valid),
+                    (
+                        "expanded_active",
+                        expanded_key,
+                        expanded_value,
+                        self.valid,
+                    ),
+                ):
+                    output = torch.empty_like(self.attention_output)
+                    self._run_flash(
+                        output,
+                        query,
+                        variant_key,
+                        variant_value,
+                        max_k,
+                    )
+                    variants[name] = output
+                mismatches = ", ".join(
+                    f"{name}={torch.count_nonzero(output != reference).item()}"
+                    for name, output in variants.items()
+                )
+                raise RuntimeError(
+                    "Qwen FlashAttention real-model validation: "
+                    f"active={self.valid}, capacity={self.key.shape[1]}, {mismatches}"
+                )
         return self.attention_output.view(batch, 1, num_heads * head_dim)
 
 
