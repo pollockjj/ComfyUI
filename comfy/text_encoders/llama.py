@@ -85,7 +85,8 @@ class _StaticDecodeKV:
 class _CapturedDecodePhase:
     """One shape-stable decode phase captured on the ordinary CUDA stream."""
 
-    def __init__(self, function, inputs):
+    def __init__(self, stream, function, inputs):
+        self.stream = stream
         self.function = function
         self.inputs = tuple(torch.empty_like(value) for value in inputs)
         self.graph = None
@@ -94,21 +95,21 @@ class _CapturedDecodePhase:
     def __call__(self, *inputs):
         if len(inputs) != len(self.inputs):
             raise ValueError("decode graph phase input count changed")
-        for target, source in zip(self.inputs, inputs):
-            target.copy_(source)
+        with torch.cuda.stream(self.stream):
+            for target, source in zip(self.inputs, inputs):
+                target.copy_(source)
 
-        stream = torch.cuda.current_stream(self.inputs[0].device)
-        if self.graph is None:
-            comfy.quant_ops.ck.begin_cuda_graph_capture(stream)
-            try:
-                self.output = self.function(*self.inputs)
-            except BaseException:
-                comfy.quant_ops.ck.abort_cuda_graph_capture(stream)
-                raise
-            self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
-                stream, self.output, self.inputs
-            )
-        self.graph.replay(stream)
+            if self.graph is None:
+                comfy.quant_ops.ck.begin_cuda_graph_capture(self.stream)
+                try:
+                    self.output = self.function(*self.inputs)
+                except BaseException:
+                    comfy.quant_ops.ck.abort_cuda_graph_capture(self.stream)
+                    raise
+                self.graph = comfy.quant_ops.ck.end_cuda_graph_capture(
+                    self.stream, self.output, self.inputs
+                )
+            self.graph.replay(self.stream)
         return self.output
 
     def close(self):
@@ -118,6 +119,7 @@ class _CapturedDecodePhase:
         self.output = None
         self.inputs = None
         self.function = None
+        self.stream = None
 
 
 class _DecodeGraphExecution:
@@ -125,6 +127,7 @@ class _DecodeGraphExecution:
 
     def __init__(self, owner, embeds, position_ids, past_key_values):
         self.owner = owner
+        self.stream = torch.cuda.Stream(device=embeds.device)
         self.past_key_values = past_key_values
         self.pre_phases = [None] * len(owner.model.layers)
         self.post_phases = [None] * len(owner.model.layers)
@@ -169,62 +172,69 @@ class _DecodeGraphExecution:
 
     def replay(self, embeds, position_ids):
         model = self.owner.model
-        freqs_cis = model.compute_freqs_cis(position_ids, embeds.device)
-        optimized_attention = optimized_attention_for_device(
-            embeds.device, mask=False, small_input=True
-        )
-        hidden_states = embeds
+        current_stream = torch.cuda.current_stream(embeds.device)
+        self.stream.wait_stream(current_stream)
+        with torch.cuda.stream(self.stream):
+            freqs_cis = model.compute_freqs_cis(position_ids, embeds.device)
+            optimized_attention = optimized_attention_for_device(
+                embeds.device, mask=False, small_input=True
+            )
+            hidden_states = embeds
 
-        for index, layer in enumerate(model.layers):
-            pre_phase = self.pre_phases[index]
-            if pre_phase is None:
-                pre_phase = _CapturedDecodePhase(
-                    lambda hidden, cos, sin, negative_sin, layer=layer: self._project(
-                        layer, hidden, cos, sin, negative_sin
-                    ),
-                    (hidden_states, *freqs_cis),
+            for index, layer in enumerate(model.layers):
+                pre_phase = self.pre_phases[index]
+                if pre_phase is None:
+                    pre_phase = _CapturedDecodePhase(
+                        self.stream,
+                        lambda hidden, cos, sin, negative_sin, layer=layer: self._project(
+                            layer, hidden, cos, sin, negative_sin
+                        ),
+                        (hidden_states, *freqs_cis),
+                    )
+                    self.pre_phases[index] = pre_phase
+                    self.captures += 1
+                query, key, value = pre_phase(hidden_states, *freqs_cis)
+
+                cache = self.past_key_values[index]
+                cache.append(key, value)
+                active_key, active_value = cache.active()
+                gqa_kwargs = (
+                    {"enable_gqa": True}
+                    if layer.self_attn.num_heads != layer.self_attn.num_kv_heads
+                    else {}
                 )
-                self.pre_phases[index] = pre_phase
-                self.captures += 1
-            query, key, value = pre_phase(hidden_states, *freqs_cis)
-
-            cache = self.past_key_values[index]
-            cache.append(key, value)
-            active_key, active_value = cache.active()
-            gqa_kwargs = (
-                {"enable_gqa": True}
-                if layer.self_attn.num_heads != layer.self_attn.num_kv_heads
-                else {}
-            )
-            attention_output = optimized_attention(
-                query,
-                active_key,
-                active_value,
-                layer.self_attn.num_heads,
-                mask=None,
-                skip_reshape=True,
-                **gqa_kwargs,
-            )
-
-            post_phase = self.post_phases[index]
-            if post_phase is None:
-                post_phase = _CapturedDecodePhase(
-                    lambda residual, output, layer=layer: self._finish(
-                        layer, residual, output
-                    ),
-                    (hidden_states, attention_output),
+                attention_output = optimized_attention(
+                    query,
+                    active_key,
+                    active_value,
+                    layer.self_attn.num_heads,
+                    mask=None,
+                    skip_reshape=True,
+                    **gqa_kwargs,
                 )
-                self.post_phases[index] = post_phase
-                self.captures += 1
-            hidden_states = post_phase(hidden_states, attention_output)
 
-        if self.final_phase is None:
-            self.final_phase = _CapturedDecodePhase(
-                lambda hidden: self.owner.logits(model.norm(hidden))[:, -1],
-                (hidden_states,),
-            )
-            self.captures += 1
-        logits = self.final_phase(hidden_states)
+                post_phase = self.post_phases[index]
+                if post_phase is None:
+                    post_phase = _CapturedDecodePhase(
+                        self.stream,
+                        lambda residual, output, layer=layer: self._finish(
+                            layer, residual, output
+                        ),
+                        (hidden_states, attention_output),
+                    )
+                    self.post_phases[index] = post_phase
+                    self.captures += 1
+                hidden_states = post_phase(hidden_states, attention_output)
+
+            if self.final_phase is None:
+                self.final_phase = _CapturedDecodePhase(
+                    self.stream,
+                    lambda hidden: self.owner.logits(model.norm(hidden))[:, -1],
+                    (hidden_states,),
+                )
+                self.captures += 1
+            logits = self.final_phase(hidden_states)
+        current_stream.wait_stream(self.stream)
         self.replays += 1
         return logits
 
@@ -234,11 +244,13 @@ class _DecodeGraphExecution:
                 phase.close()
         if self.final_phase is not None:
             self.final_phase.close()
+        self.stream.synchronize()
         self.owner = None
         self.past_key_values = None
         self.pre_phases = None
         self.post_phases = None
         self.final_phase = None
+        self.stream = None
 
 @dataclass
 class Llama2Config:
