@@ -460,6 +460,7 @@ class DiffusionGemmaExperts(nn.Module):
         self._grouped_mxfp8_compatible = False
         self._grouped_int8_convrot_compatible = False
         self._grouped_w4a4_convrot_compatible = False
+        self._grouped_w4a8_convrot_compatible = False
         E = config.num_experts
         H = config.hidden_size
         I = config.moe_intermediate_size
@@ -488,6 +489,13 @@ class DiffusionGemmaExperts(nn.Module):
             and isinstance(bank.weight, QuantizedTensor)
             and bank.weight._layout_cls == "TensorCoreConvRotW4A4Layout"
             and getattr(getattr(bank.weight, "_params", None), "linear_dtype", None) == "int4"
+            for bank, quant_format in zip(self._banks, formats)
+        )
+        w4a8_convrot = tuple(
+            quant_format == "convrot_w4a4"
+            and isinstance(bank.weight, QuantizedTensor)
+            and bank.weight._layout_cls == "TensorCoreConvRotW4A4Layout"
+            and getattr(getattr(bank.weight, "_params", None), "linear_dtype", None) == "int8"
             for bank, quant_format in zip(self._banks, formats)
         )
         if self.unfused:
@@ -610,6 +618,29 @@ class DiffusionGemmaExperts(nn.Module):
                 ):
                     raise ValueError("DiffusionGemma W4A4 ConvRot expert bank contract mismatch")
             self._bank_mode = "fused_w4a4_convrot"
+        elif any(w4a8_convrot):
+            if not all(w4a8_convrot):
+                raise ValueError("DiffusionGemma W4A8 ConvRot requires both expert banks")
+            expected = (
+                ((128, 1408, 1408), (128, 1408), (128, 1408, 2816), 256),
+                ((128, 2816, 352), (128, 2816), (128, 2816, 704), 64),
+            )
+            for bank, (qdata_shape, scale_shape, orig_shape, group_size) in zip(self._banks, expected):
+                weight = bank.weight
+                params = getattr(weight, "_params", None)
+                if (
+                    bank.bias is not None
+                    or weight._qdata.dtype != torch.int8
+                    or tuple(weight._qdata.shape) != qdata_shape
+                    or not weight._qdata.is_contiguous()
+                    or params.scale.dtype != torch.float32
+                    or tuple(params.scale.shape) != scale_shape
+                    or not params.scale.is_contiguous()
+                    or params.convrot_groupsize != group_size
+                    or tuple(params.orig_shape) != orig_shape
+                ):
+                    raise ValueError("DiffusionGemma W4A8 ConvRot expert bank contract mismatch")
+            self._bank_mode = "fused_w4a8_convrot"
         elif any(quant_format is not None for quant_format in formats):
             self._bank_mode = "quantized"
         else:
@@ -655,6 +686,15 @@ class DiffusionGemmaExperts(nn.Module):
             for bank in self._banks
         )
         self._grouped_w4a4_convrot_compatible = self._bank_mode == "fused_w4a4_convrot" and all(
+            isinstance(bank.weight, QuantizedTensor)
+            and bank._full_precision_mm is False
+            and not bank.weight_function
+            and not bank.bias_function
+            and bank.weight_lowvram_function is None
+            and bank.bias_lowvram_function is None
+            for bank in self._banks
+        )
+        self._grouped_w4a8_convrot_compatible = self._bank_mode == "fused_w4a8_convrot" and all(
             isinstance(bank.weight, QuantizedTensor)
             and bank._full_precision_mm is False
             and not bank.weight_function
@@ -744,6 +784,10 @@ class DiffusionGemmaExperts(nn.Module):
             if not self._grouped_w4a4_convrot_compatible:
                 raise RuntimeError("DiffusionGemma W4A4 ConvRot does not support patched expert banks")
             return self._forward_grouped_w4a4_convrot(hidden_states, top_k_index, top_k_weights)
+        if self._bank_mode == "fused_w4a8_convrot":
+            if not self._grouped_w4a8_convrot_compatible:
+                raise RuntimeError("DiffusionGemma W4A8 ConvRot does not support patched expert banks")
+            return self._forward_grouped_w4a8_convrot(hidden_states, top_k_index, top_k_weights)
         if self._bank_mode == "fused_nvfp4":
             if not self._fused_banks_compatible:
                 raise RuntimeError("DiffusionGemma fused NVFP4 does not support patched expert banks")
@@ -1253,6 +1297,16 @@ class DiffusionGemmaExperts(nn.Module):
         return y.view(N, K, H).sum(dim=1).to(hidden_states.dtype)
 
     def _forward_grouped_w4a4_convrot(self, hidden_states, top_k_index, top_k_weights):
+        return self._forward_grouped_w4_convrot(
+            hidden_states, top_k_index, top_k_weights, "int4",
+        )
+
+    def _forward_grouped_w4a8_convrot(self, hidden_states, top_k_index, top_k_weights):
+        return self._forward_grouped_w4_convrot(
+            hidden_states, top_k_index, top_k_weights, "int8",
+        )
+
+    def _forward_grouped_w4_convrot(self, hidden_states, top_k_index, top_k_weights, linear_dtype):
         N, H = hidden_states.shape
         E = self.num_experts
         K = top_k_index.shape[-1]
@@ -1276,19 +1330,24 @@ class DiffusionGemmaExperts(nn.Module):
                 if (
                     not isinstance(weight, QuantizedTensor)
                     or weight._layout_cls != "TensorCoreConvRotW4A4Layout"
-                    or weight._params.linear_dtype != "int4"
+                    or weight._params.linear_dtype != linear_dtype
                     or bias is not None
                 ):
-                    raise RuntimeError("grouped DiffusionGemma W4A4 ConvRot requires unbiased resident banks")
+                    raise RuntimeError(f"grouped DiffusionGemma W4A{linear_dtype[-1]} ConvRot requires unbiased resident banks")
                 weights.append(weight)
 
-            gate_up = comfy.quant_ops.grouped_convrot_w4a4_linear_packed(
+            grouped_linear = (
+                comfy.quant_ops.grouped_convrot_w4a4_linear_packed
+                if linear_dtype == "int4"
+                else comfy.quant_ops.grouped_convrot_w4a8_linear_packed
+            )
+            gate_up = grouped_linear(
                 x, expert_indptr, weights[0]._qdata, weights[0]._params.scale,
                 weights[0]._params.convrot_groupsize, out_dtype=hidden_states.dtype,
             )
             gate, up = gate_up.chunk(2, dim=-1)
             intermediate = _gelu_tanh(gate) * up
-            y = comfy.quant_ops.grouped_convrot_w4a4_linear_packed(
+            y = grouped_linear(
                 intermediate, expert_indptr, weights[1]._qdata, weights[1]._params.scale,
                 weights[1]._params.convrot_groupsize, out_dtype=hidden_states.dtype,
             )

@@ -431,13 +431,13 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         )
 
     @staticmethod
-    def _w4a4_bank(qdata_shape, scale_shape, orig_shape, group_size, device="meta"):
+    def _w4a4_bank(qdata_shape, scale_shape, orig_shape, group_size, device="meta", linear_dtype="int4"):
         params = TensorCoreConvRotW4A4Layout.Params(
             scale=torch.empty(scale_shape, dtype=torch.float32, device=device),
             convrot_groupsize=group_size,
             orig_dtype=torch.bfloat16,
             orig_shape=orig_shape,
-            linear_dtype="int4",
+            linear_dtype=linear_dtype,
         )
         return types.SimpleNamespace(
             quant_format="convrot_w4a4",
@@ -554,6 +554,15 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
 
         self.assertEqual(experts._bank_mode, "fused_w4a4_convrot")
         self.assertTrue(experts._grouped_w4a4_convrot_compatible)
+
+        experts._banks = (
+            self._w4a4_bank((128, 1408, 1408), (128, 1408), (128, 1408, 2816), 256, linear_dtype="int8"),
+            self._w4a4_bank((128, 2816, 352), (128, 2816), (128, 2816, 704), 64, linear_dtype="int8"),
+        )
+        experts._configure_loaded_banks(experts, None)
+
+        self.assertEqual(experts._bank_mode, "fused_w4a8_convrot")
+        self.assertTrue(experts._grouped_w4a8_convrot_compatible)
 
 if __name__ == "__main__":
     unittest.main()
