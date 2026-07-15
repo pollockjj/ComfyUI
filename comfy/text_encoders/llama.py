@@ -143,8 +143,7 @@ class _StaticDecodeKV:
             self.prepare_attention(num_query_heads)
         self.graph_mode = True
 
-    def _run_flash(self, output, query, key, value, max_k, num_splits=None):
-        kwargs = {} if num_splits is None else {"num_splits": num_splits}
+    def _run_flash(self, output, query, key, value, max_k):
         torch.ops.aten._flash_attention_forward_no_dropout_inplace.default(
             output,
             query,
@@ -157,7 +156,6 @@ class _StaticDecodeKV:
             0.0,
             False,
             False,
-            **kwargs,
         )
 
     def flash_attention(self, query):
@@ -208,22 +206,13 @@ class _StaticDecodeKV:
             expanded_key = expanded_key.reshape(-1, num_heads, head_dim)
             expanded_value = expanded_value.reshape_as(expanded_key)
             variants = {"current": self.attention_output}
-            for name, variant_key, variant_value, max_k, num_splits in (
-                ("native_active", native_key, native_value, self.valid, None),
-                ("native_split1", native_key, native_value, self.valid, 1),
+            for name, variant_key, variant_value, max_k in (
+                ("native_active", native_key, native_value, self.valid),
                 (
                     "expanded_active",
                     expanded_key,
                     expanded_value,
                     self.valid,
-                    None,
-                ),
-                (
-                    "expanded_split1",
-                    expanded_key,
-                    expanded_value,
-                    self.valid,
-                    1,
                 ),
             ):
                 output = torch.empty_like(self.attention_output)
@@ -233,7 +222,6 @@ class _StaticDecodeKV:
                     variant_key,
                     variant_value,
                     max_k,
-                    num_splits=num_splits,
                 )
                 variants[name] = output
             mismatches = ", ".join(
