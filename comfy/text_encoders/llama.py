@@ -143,10 +143,28 @@ class _StaticDecodeKV:
             self.prepare_attention(num_query_heads)
         self.graph_mode = True
 
+    def _run_flash(self, output, query, key, value, max_k, num_splits=None):
+        kwargs = {} if num_splits is None else {"num_splits": num_splits}
+        torch.ops.aten._flash_attention_forward_no_dropout_inplace.default(
+            output,
+            query,
+            key,
+            value,
+            self.cu_seqlens_q,
+            self.cu_seqlens_k,
+            1,
+            max_k,
+            0.0,
+            False,
+            False,
+            **kwargs,
+        )
+
     def flash_attention(self, query):
         batch, num_heads, query_length, head_dim = query.shape
         if query_length != 1 or self.attention_output is None:
             raise RuntimeError("static decode attention requires one prepared query")
+        query_bhsd = query
         query = query.transpose(1, 2).reshape(-1, num_heads, head_dim)
         if (
             not self.graph_mode
@@ -160,19 +178,72 @@ class _StaticDecodeKV:
             value = self.value
         key = key.reshape(-1, key.shape[2], head_dim)
         value = value.reshape_as(key)
-        torch.ops.aten._flash_attention_forward_no_dropout_inplace.default(
+        self._run_flash(
             self.attention_output,
             query,
             key,
             value,
-            self.cu_seqlens_q,
-            self.cu_seqlens_k,
-            1,
             key.shape[0] // batch,
-            0.0,
-            False,
-            False,
         )
+        if (
+            not self.graph_mode
+            and os.environ.get("COMFY_QWEN_FLASH_VALIDATE", "0").lower()
+            in {"1", "true", "yes", "on"}
+        ):
+            active_key, active_value = self.active()
+            reference = torch.nn.functional.scaled_dot_product_attention(
+                query_bhsd,
+                active_key,
+                active_value,
+                enable_gqa=num_heads != active_key.shape[1],
+            ).squeeze(2)
+            native_key = self.key.reshape(-1, self.key.shape[2], head_dim)
+            native_value = self.value.reshape_as(native_key)
+            expanded_key = self.key[:, : self.valid].repeat_interleave(
+                self.group_size, dim=2
+            )
+            expanded_value = self.value[:, : self.valid].repeat_interleave(
+                self.group_size, dim=2
+            )
+            expanded_key = expanded_key.reshape(-1, num_heads, head_dim)
+            expanded_value = expanded_value.reshape_as(expanded_key)
+            variants = {"current": self.attention_output}
+            for name, variant_key, variant_value, max_k, num_splits in (
+                ("native_active", native_key, native_value, self.valid, None),
+                ("native_split1", native_key, native_value, self.valid, 1),
+                (
+                    "expanded_active",
+                    expanded_key,
+                    expanded_value,
+                    self.valid,
+                    None,
+                ),
+                (
+                    "expanded_split1",
+                    expanded_key,
+                    expanded_value,
+                    self.valid,
+                    1,
+                ),
+            ):
+                output = torch.empty_like(self.attention_output)
+                self._run_flash(
+                    output,
+                    query,
+                    variant_key,
+                    variant_value,
+                    max_k,
+                    num_splits=num_splits,
+                )
+                variants[name] = output
+            mismatches = ", ".join(
+                f"{name}={torch.count_nonzero(output != reference).item()}"
+                for name, output in variants.items()
+            )
+            raise RuntimeError(
+                "Qwen FlashAttention real-model validation: "
+                f"active={self.valid}, capacity={self.key.shape[1]}, {mismatches}"
+            )
         return self.attention_output.view(batch, 1, num_heads * head_dim)
 
 
