@@ -1203,8 +1203,13 @@ class BaseGenerate:
                 torch.ops.aten, "_flash_attention_forward_no_dropout_inplace"
             )
         )
-        capture_enabled = bool(
+        flash_enabled = bool(
             graph_enabled
+            and os.environ.get("COMFY_QWEN_DECODE_FLASH", "1").lower()
+            not in {"0", "false", "no", "off"}
+        )
+        capture_enabled = bool(
+            flash_enabled
             and os.environ.get("COMFY_QWEN_DECODE_CAPTURE", "1").lower()
             not in {"0", "false", "no", "off"}
         )
@@ -1223,8 +1228,9 @@ class BaseGenerate:
                     past_key_values = [
                         _StaticDecodeKV(cache) for cache in past_key_values
                     ]
-                    for layer, cache in zip(self.model.layers, past_key_values):
-                        cache.prepare_attention(layer.self_attn.num_heads)
+                    if flash_enabled:
+                        for layer, cache in zip(self.model.layers, past_key_values):
+                            cache.prepare_attention(layer.self_attn.num_heads)
                 if capture_enabled and step == 3:
                     graph_execution = _DecodeGraphExecution(
                         self,
