@@ -64,10 +64,13 @@ def dynamic_vram_execution_mutation(root_modules, action):
 def dynamic_vram_mutation_guard(action):
     module_type = torch.nn.Module
     mutation_scope = dynamic_vram_execution_mutation
+    interpreter_is_finalizing = sys.is_finalizing
 
     def decorate(function):
         @functools.wraps(function)
         def guarded(owner, *args, **kwargs):
+            if interpreter_is_finalizing():
+                return function(owner, *args, **kwargs)
             root_module = owner.model
             if not isinstance(root_module, module_type):
                 root_module = root_module.model
