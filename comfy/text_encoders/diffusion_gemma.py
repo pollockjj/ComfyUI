@@ -383,9 +383,8 @@ class DiffusionGemmaAttention(nn.Module):
 
 
 class DiffusionGemmaRouter(nn.Module):
-    def __init__(self, config, layer_index=None, device=None, dtype=None, ops=None):
+    def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
-        self.layer_index = layer_index
         self.top_k = config.top_k_experts
         self.scalar_root_size = config.hidden_size ** -0.5
         self.proj = ops.Linear(config.hidden_size, config.num_experts, bias=False, device=device, dtype=dtype)
@@ -470,8 +469,9 @@ class DiffusionGemmaExperts(nn.Module):
     fused_nvfp4_format = comfy.quant_ops.NVFP4_FUSED_MOE_FORMAT
     fused_mxfp8_format = comfy.quant_ops.MXFP8_FUSED_MOE_FORMAT
 
-    def __init__(self, config, device=None, dtype=None, ops=None):
+    def __init__(self, config, layer_index=None, device=None, dtype=None, ops=None):
         super().__init__()
+        self.layer_index = layer_index
         self.num_experts = config.num_experts
         self.unfused = config.unfused_experts
         self._weight_patches_uuid = None

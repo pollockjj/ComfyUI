@@ -568,6 +568,12 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertEqual(experts._bank_mode, "fused_w4a8_convrot")
         self.assertTrue(experts._grouped_w4a8_convrot_compatible)
 
+    def test_experts_retain_decoder_layer_index(self):
+        config = types.SimpleNamespace(num_experts=2, unfused_experts=False, hidden_size=4, moe_intermediate_size=2)
+        ops = types.SimpleNamespace(MoEExperts=lambda **kwargs: torch.nn.Linear(1, 1, bias=False))
+        experts = DiffusionGemmaExperts(config, layer_index=7, ops=ops)
+        self.assertEqual(experts.layer_index, 7)
+
     def test_thinking_selection_is_request_scoped(self):
         model = DiffusionGemmaClipModel.__new__(DiffusionGemmaClipModel)
         model.execution_device = torch.device("cpu")
