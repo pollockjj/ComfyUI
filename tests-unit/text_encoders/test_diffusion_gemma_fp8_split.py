@@ -119,8 +119,8 @@ class TestDiffusionGemmaFp8Split(unittest.TestCase):
         self.assertTrue(torch.equal(output, probabilities.float() @ dequantized.float()))
 
     def test_quantized_diffusion_gemma_enables_native_compute(self):
-        self.assertTrue(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).supports_native_quantized_compute)
-        self.assertFalse(diffusion_gemma_te().supports_native_quantized_compute)
+        self.assertFalse(diffusion_gemma_te(llama_quantization_metadata={"mixed_ops": True}).full_precision_mm)
+        self.assertTrue(diffusion_gemma_te().full_precision_mm)
 
     def test_dense_mxfp8_projections_share_one_activation_quantization(self):
         modules = tuple(self._mxfp8_bank((32, 32), (128, 4), device="cpu") for _ in range(3))

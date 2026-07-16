@@ -2262,7 +2262,7 @@ class DiffusionGemmaClipModel(Gemma4Model):
         if model_options.get("custom_operations") is None:
             model_options = model_options.copy()
             quant_config = model_options.get("quantization_metadata") or {}
-            model_options["custom_operations"] = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=False)
+            model_options["custom_operations"] = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=model_options.get("full_precision_mm", True))
         self.dtypes = set()
         self.dtypes.add(dtype)
         sd1_clip.SDClipModel.__init__(self, device=device, layer=layer, layer_idx=layer_idx,
@@ -2394,7 +2394,7 @@ def diffusion_gemma_te(dtype_llama=None, llama_quantization_metadata=None, unfus
         config_overrides = {"unfused_experts": unfused_experts, "fused_qkv": fused_qkv}
 
     class DiffusionGemmaTEModel_(sd1_clip.SD1ClipModel):
-        supports_native_quantized_compute = llama_quantization_metadata is not None
+        full_precision_mm = llama_quantization_metadata is None
 
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if llama_quantization_metadata is not None:

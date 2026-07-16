@@ -513,7 +513,7 @@ class LensGptOssClipModel(nn.Module):
         operations = model_options.get("custom_operations")
         if operations is None:
             quant_config = model_options.get("quantization_metadata") or {}
-            operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=True)
+            operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=model_options.get("full_precision_mm", True))
         self.operations = operations
 
         cfg_overrides = model_options.get("gpt_oss_config", {})
